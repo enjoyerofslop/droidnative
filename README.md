@@ -46,6 +46,9 @@ profile can still be packed as an *experimental build*: most likely it does not 
 
 ## Testing and reporting
 
+Help with packing and playing, and reports of how a game runs on your device, go to the [DroidPlay & droidnative Discord](https://discord.gg/4wNHX3uqSU): #help
+for a problem, #compatibility for a game. Its rules are this README's: no games, keys, firmware or packed APKs.
+
 Testers and contributors are welcome. Useful reports name the device and its GPU (Settings, or `adb shell getprop ro.product.model`), Android version, the game,
 its title ID and version, how it was packed (DroidPlay, the command line, game app or launcher), and attach the log: `adb logcat -s nxnative`, or `log.txt` in the
 app's folder (`Android/data/<package>/files/`). A screenshot and the first `[RED]` lines help most. Never attach game files or keys. How changes get in, and how

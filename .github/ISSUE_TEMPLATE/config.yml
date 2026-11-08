@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Questions and help (Discord)
+    url: https://discord.gg/4wNHX3uqSU
+    about: "The DroidPlay & droidnative Discord: #help when packing or playing goes wrong, #compatibility for how a game runs on your device. No games, keys, firmware or packed APKs."
   - name: DroidPlay, a Mac app that packs and installs games for Android
     url: https://github.com/enjoyerofslop/droidplay
     about: Builds droidnative games from your library and installs them on an Android device over adb, or makes game apps. Problems with the app itself go there.
