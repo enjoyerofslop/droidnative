@@ -28,8 +28,8 @@ median GPU time per frame. Animal Crossing runs at 30 fps on the Switch too.
 | **Pokémon Brilliant Diamond 1.3.0**, language menu (a fresh save) | 60 · 16.7 / 19.2–19.4 | 60 · 16.6–16.7 / 18.5–18.8 | **Crashes** at 2.6 s |
 | Pokémon Brilliant Diamond, Eterna City (a save) | 60 · 16.6 / 18.1–18.2 · GPU 8.1 | 58.9–59.7 · 16.6–16.8 / 18.8–19.7 · GPU 10.7 | **Crashes** at 2.6 s |
 | **Animal Crossing: New Horizons 3.0.3**, the new game's airport (a fresh save) | 30 · 33.3 / 34.7–35.4 · GPU 5.3 | 30 · 33.3 / 35.7–35.8 · GPU 7.1 | 30 · 33.4 / 36.5–36.7 · GPU 15.8 |
-| Animal Crossing, outside the player's house (a save) | 30 · 33.3–33.4 / 35.7–35.8 · GPU 9.4–9.7 | 29.9 · 33.3–33.4 / 38.0–38.1 · GPU 15.5–15.9 | 30 · 33.3–33.4 / 36.5–36.6 · GPU 10.4–10.5 |
-| **Super Smash Bros. Ultimate 13.0.5**, boot | **Crashes** at about 2.5 s with the stock shared font | **Crashes** | **Crashes** |
+| Animal Crossing, outside the player's house (a save) | 30 · 33.3–33.4 / 35.7–35.8 · GPU 9.4–9.7 | 29.9 · 33.3–33.4 / 38.0–38.1 · GPU 15.5–15.9 | Not measured: the game stops at its first save (see below) |
+| **Super Smash Bros. Ultimate 13.0.5**, boot | **Crashes** 2–4 s in with the stock shared font | **Crashes** | **Crashes** |
 | Smash, the opening movie (with a fuller shared font) | 60 · 12.0 / 33.9 | 59.9 · 13.1–13.4 / 34.7–35.1 | 59.7 · 13.5–13.9 / 35.5–36.0 |
 | Smash, a battle (a fuller shared font; stage and CPU fighter vary) | 39.7–59.3 fps | 16.8–29.7 fps, frames up to 215 ms | 13.4–19.3 fps, frames up to 368 ms |
 
@@ -63,6 +63,11 @@ In the order they block play:
   Pad 3.
 - **GPU time is at the clock the driver chose.** The Pad 3 shows longer GPU times than the Odin 2 in light scenes although its GPU is faster: it keeps its
   clocks low when the work is light. Compare the GPU column within one device, not across devices.
+- **The Retroid Pocket 5 can't run a route whose game saves early.** The benchmark keeps each run's save in the app's external files, and on the Retroid
+  Pocket 5 that storage cannot swap two folders atomically (`renameat2` with `RENAME_EXCHANGE` fails with `EINVAL`), which the host's save commit needs:
+  `[RED] save commit: atomic swap failed errno=22`. Animal Crossing saves as soon as the island loads, so it stopped with its "an error occurred" screen,
+  which it drew at 30 fps, and the first published version of this page counted that as the island. A player's saves are in the app's internal storage,
+  which can swap, so play is not affected; only this route on this device is. Brilliant Diamond crashes there earlier, and Smash's saves did not fail.
 - **Smash's battles are a range, not a baseline.** The route picks Random stage and a random CPU fighter (D-pad moves on the stage grid did not land on the
   same stage from run to run), so the load differs per run.
 - **Animal Crossing's island has a pinned clock.** `DM_FIXED_TIME` fixes the island at 3 PM on the day after the save, so the light and Isabelle's announcement
