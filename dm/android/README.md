@@ -152,6 +152,32 @@ saves. Nothing goes into the host library, so the nxnative app is left as it was
   fast run); before asynchronous submissions three of them failed: they expect the GPU to be
   still busy right after a submit.
 
+## Benchmarks
+
+`scripts/bench_android.py` runs games on one or more devices over adb, the same way on each, so devices and builds compare. Each run uses the same save, the same scripted input and the same measuring window:
+
+```
+python3 scripts/bench_android.py <NSP folder> [<NSP folder> ...] [-s <serial> ...] [--route <name>] [--warmup] [--runs N] [--install]
+```
+
+- **Routes:** a game's routes are in `dm/games/<id>/bench_android.tsv`. Each route gives the `DM_KEYS` steps, a save folder or none, the measuring window, a log pattern that marks the game ready, and a description.
+- **Each run:**
+  - waits for the device to cool down
+  - writes `env.txt`: `DM_SAVE` points at a fresh copy of the route's save in the app's external files, so the device's own saves aren't touched, and per-frame timing goes through `DM_NVN_TSV`
+  - starts the game from the launcher
+  - takes screenshots at the window's start and end
+  - puts `env.txt` back as it was
+- **Keeping devices awake:** every 45 s each device gets `KEYCODE_WAKEUP`, and the lock screen is dismissed before each start. A PIN or pattern lock can't be dismissed over adb, so set test devices to None or Swipe.
+- **Results:** per device, game and route:
+  - time to the first frame and to the ready pattern
+  - frames per second, frame time p50 / p95 / p99, and the share of frames over 17.5 and 34 ms
+  - GPU time per frame, memory (PSS) and temperatures
+  - how the game ended
+
+  They go in `results.md` and `results.json`, beside each run's log, timing file and screenshots.
+- **Warm-up:** `--warmup` adds a first run, reported apart. The first launch after an install builds the driver's pipelines: Brilliant Diamond's first frame took 33 s there on a OnePlus Pad 3, against 10 s warm on an Odin 2.
+- **Installs:** install before a run, never during one, because an install stops the app.
+
 ## What the GPU backend needs from this device
 
 The front end logs the Vulkan device's capabilities at start. The Adreno 619's driver (Vulkan 1.1.128) has no BC texture compression (every packaged

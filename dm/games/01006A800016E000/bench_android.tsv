@@ -1,0 +1,3 @@
+# Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description
+# ready: the opening movie's decoder is configured (logged by the host)
+boot	-	-	30	30	\[movie\] Configure	a fresh save: the boot, then the opening movie (pre-rendered, decoded on the CPU); no input. With Android's stock shared font (Roboto) the game crashes about 3 s in; DM_SHARED_FONT at a fuller TTF gets past it

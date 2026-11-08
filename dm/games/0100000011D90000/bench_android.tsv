@@ -1,0 +1,3 @@
+# Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description
+# ready: the last file the boot opens before the language menu (DM_FS=1 logs it)
+boot	-	-	25	30	resources\.assets	a fresh save: the Unity boot, then the language menu idling; no input
