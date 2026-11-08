@@ -1756,8 +1756,8 @@ uint64_t mtl_present_slept_ns(uint64_t *end_ns) {
     if (end_ns) *end_ns = on ? g_psleep_end : 0;
     return on ? g_psleep_ns : 0;
 }
+static uint64_t g_pace_per; static int g_pace_due;   // the period of the present mtl_present_pace sleeps after (both on the replay thread)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
-    static uint64_t next, slept;   // slept: when the last present's pacing sleep ended, where the next frame's work starts (hint_frame)
     pthread_mutex_lock(&g_bk);
     vtex *v = vt_get(t); flush();
     dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents));
@@ -1776,12 +1776,19 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
         pthread_mutex_unlock(&g_frame_mu);
     }
     pthread_mutex_unlock(&g_bk);
-    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC), per = period_s > 0 ? (uint64_t)(period_s * 1e9) : 16666667ull;
-    hint_frame(now, slept);
-    if (next > now && next - now < 1000000000ull) { mach_wait_until(next); g_psleep_end = clock_gettime_nsec_np(CLOCK_MONOTONIC); g_psleep_ns = g_psleep_end - now; } else { next = now; g_psleep_ns = 0; }
-    next += per; slept = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    g_pace_per = period_s > 0 ? (uint64_t)(period_s * 1e9) : 16666667ull; g_pace_due = 1;
     void front_android_present(const tex_t *t, const int crop[4]); front_android_present(t, crop);
     return atomic_fetch_add(&g_presents, 1) + 1;
+}
+// The present's sleep to its vsync grid, after the replay has let g_sub_mu go (nvn_obj.h)
+void mtl_present_pace(void) {
+    static uint64_t next, slept;   // slept: when the last present's pacing sleep ended, where the next frame's work starts (hint_frame)
+    if (!g_pace_due) return;
+    g_pace_due = 0;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    hint_frame(now, slept);
+    if (next > now && next - now < 1000000000ull) { mach_wait_until(next); g_psleep_end = clock_gettime_nsec_np(CLOCK_MONOTONIC); g_psleep_ns = g_psleep_end - now; } else { next = now; g_psleep_ns = 0; }
+    next += g_pace_per; slept = clock_gettime_nsec_np(CLOCK_MONOTONIC);
 }
 void mtl_present_wait(uint64_t ticket) { (void)ticket; }
 void mtl_present_flush(void) {}

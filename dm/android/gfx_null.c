@@ -98,14 +98,19 @@ void mtl_finish(void) {}
 void mtl_drain(void) {}
 
 // ---- Presents: paced to the window's period, so the game's frame loop runs at its own rate ----
+static uint64_t g_pace_per; static int g_pace_due;   // the period of the present mtl_present_pace sleeps after (both on the replay thread)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
-    (void)t; (void)crop;
-    static uint64_t next;
-    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC), per = period_s > 0 ? (uint64_t)(period_s * 1e9) : 16666667ull;
-    if (next > now && next - now < 1000000000ull) mach_wait_until(next); else next = now;
-    next += per;
+    g_pace_per = period_s > 0 ? (uint64_t)(period_s * 1e9) : 16666667ull; g_pace_due = 1;
     void front_android_present(const tex_t *t, const int crop[4]); front_android_present(t, crop);
     return atomic_fetch_add(&g_presents, 1) + 1;
+}
+void mtl_present_pace(void) {   // out of g_sub_mu (nvn_obj.h)
+    static uint64_t next;
+    if (!g_pace_due) return;
+    g_pace_due = 0;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    if (next > now && next - now < 1000000000ull) mach_wait_until(next); else next = now;
+    next += g_pace_per;
 }
 void mtl_present_wait(uint64_t ticket) { (void)ticket; }
 void mtl_present_flush(void) {}

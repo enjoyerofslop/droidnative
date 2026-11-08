@@ -381,6 +381,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_present_rescue` (`thirty`: the link's mode and range at 30 fps in a window, in fixed-rate and variable-refresh fullscreen, and back).
 - **Not checked:** variable-refresh fullscreen at 30 fps, external fixed-rate screens, other games at a 30 fps target, and the power cost of 60 callbacks a second instead of 30.
 
+### Android's present sleep held the submission lock
+
+- **Symptom:** on Android, a game's first screen stays up for minutes while it animates at a steady 60 fps. Super Mario Odyssey's Joy-Con screen stayed about 170 s, on every launch. With `DM_FS=1` the game opens and reads its files in the first 1.7 s, then opens nothing for 172.8 s. A guest thread dump (a file named `threads_now` beside `DM_DUMP_DIR`) shows its loader thread runnable, waiting on no guest object, parked in host code, with 1.1 s of CPU in 24 s; its call site is `nvnProgramSetShaders`. The log's `NVN submit+present` is about 16 ms, nearly the whole frame.
+- **Cause:** the queue scheduler's replay thread holds `g_sub_mu` around `mtl_present` (`nvn_queue.inc`), and `nvnProgramSetShaders`, `nvnProgramFinalize`, `nvnQueueFinalize` and the submits take the same lock. `nvn_obj.h` asks `mtl_present` to return at once, which Metal's does. The Android replays (`gfx_vk.c`, `gfx_null.c`) slept inside it until their next vsync slot. The lock was free for only a moment each frame, so a game thread got it about once a frame, and a game that sets up thousands of programs at boot waited that many frames.
+- **Fix:** `mtl_present` notes the present's period and returns. The replay thread then calls `mtl_present_pace` after it lets the lock go and before it publishes the present. The Android replays take the same sleep there, and `hint_frame` with it. `nvn_queue.inc` holds a weak empty `mtl_present_pace` for Metal, which enqueues its presents instead.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (1.4.1) on an Ayn Odin 2 (Adreno 740, Android 13): the sound archives that follow the program setup opened at 3.7 s instead of 174.5 s, and the Start menu showed after about 14 s. Pacing was unchanged: 60 vsyncs a second, frame time p50 16.66 ms. `NVN submit+present` p50 went from 16.03 to 1.80 ms, since the sleep is no longer inside it.
+- **Not checked:** other games on Android, and play past the Start menu.
+
 ## CPU cost and pacing
 
 ### Arena buffer ownership on allocation
