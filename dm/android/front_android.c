@@ -198,9 +198,11 @@ static void start_host(void) {
         // Shaders the game compiles at run time with its own GLSLC are saved there (hle_glslc.c: only new ones, and only a game that calls glslcCompile writes any); the packing
         // script pulls the new ones on its next build or install and translates them (build_android_from_nsp.py pull_captures). env.txt can point it elsewhere
         snprintf(buf, sizeof buf, "%s/glslc_capture", g_game); setenv("DM_GLSLC_CAPTURE", buf, 0);
-        // Shared fonts (hle_sdk16.c): the button icons from the packing script's nintendo_ext.ttf; the standard font is the system's Roboto
+        // Shared fonts (hle_sdk16.c): the packing script's nintendo_ext.ttf (the button icons) and standard.ttf (a hinted TrueType font). The system's Roboto only stands
+        // in for a game packed without a standard.ttf: it has no TrueType hinting, and Super Smash Bros. Ultimate crashes at boot on an unhinted font
         snprintf(buf, sizeof buf, "%s/font", g_game); if (exists(buf)) setenv("DM_FONT_DIR", buf, 0);
-        if (exists("/system/fonts/Roboto-Regular.ttf")) setenv("DM_SHARED_FONT", "/system/fonts/Roboto-Regular.ttf", 0);
+        snprintf(buf, sizeof buf, "%s/font/standard.ttf", g_game);
+        if (!exists(buf) && exists("/system/fonts/Roboto-Regular.ttf")) setenv("DM_SHARED_FONT", "/system/fonts/Roboto-Regular.ttf", 0);
         g_argv[0] = "dmhost"; g_argv[1] = strdup(code); g_argc = 2;
         atomic_store(&g_state, ST_GAME); LOG("game in %s", code);
     } else {

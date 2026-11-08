@@ -59,6 +59,7 @@ No `pad_layout` key (the iPhone pad starts in the 3D layout).
 
 General host changes first needed here; each applies to every game:
 
+- **Resolved (Android): a crash at boot on Android's shared font** (`main+0x7caa0`; Roboto has no TrueType hinting): [Android: the standard shared font must be hinted](../../../docs/reference/services.md#android-the-standard-shared-font-must-be-hinted).
 - **Elapsed time between two snapshots read as unknown** (the Spirit Board, reported by MacNativeGames): [Hooks whose return type did not match the SDK](../../../docs/reference/services.md#hooks-whose-return-type-did-not-match-the-sdk).
 - **The complete owned DLC list:** [Owned add-on content lists beyond 64 entries](../../../docs/reference/services.md#owned-add-on-content-lists-beyond-64-entries).
 - **Movie crackle:** [Vorbis output lengths at a window change](../../../docs/reference/movies.md#vorbis-output-lengths-at-a-window-change). Of about 7,300 packets in the first movie, some 420 were affected; `DM_AUDIO_DUMP` had 124 and 287 silent 512-sample blocks in the two opening movies before the fix and none after.

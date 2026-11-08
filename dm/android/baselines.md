@@ -29,8 +29,8 @@ median GPU time per frame. Animal Crossing runs at 30 fps on the Switch too.
 | Pokémon Brilliant Diamond, Eterna City (a save) | 60 · 16.6 / 18.1–18.2 · GPU 8.1 | 58.9–59.7 · 16.6–16.8 / 18.8–19.7 · GPU 10.7 | **Crashes** at 2.6 s |
 | **Animal Crossing: New Horizons 3.0.3**, the new game's airport (a fresh save) | 30 · 33.3 / 34.7–35.4 · GPU 5.3 | 30 · 33.3 / 35.7–35.8 · GPU 7.1 | 30 · 33.4 / 36.5–36.7 · GPU 15.8 |
 | Animal Crossing, outside the player's house (a save) | 30 · 33.3–33.4 / 35.7–35.8 · GPU 9.4–9.7 | 29.9 · 33.3–33.4 / 38.0–38.1 · GPU 15.5–15.9 | Not measured: the game stops at its first save (see below) |
-| **Super Smash Bros. Ultimate 13.0.5**, boot | **Crashes** 2–4 s in with the stock shared font | **Crashes** | **Crashes** |
-| Smash, the opening movie (with a fuller shared font) | 60 · 12.0 / 33.9 | 59.9 · 13.1–13.4 / 34.7–35.1 | 59.7 · 13.5–13.9 / 35.5–36.0 |
+| **Super Smash Bros. Ultimate 13.0.5**, boot with Android's Roboto as the shared font (fixed: problem 3) | **Crashes** 2–4 s in | **Crashes** | **Crashes** |
+| Smash, the opening movie (with a hinted shared font, now packed with the game) | 60 · 12.0 / 33.9 | 59.9 · 13.1–13.4 / 34.7–35.1 | 59.7 · 13.5–13.9 / 35.5–36.0 |
 | Smash, a battle (a fuller shared font; stage and CPU fighter vary) | 39.7–59.3 fps | 16.8–29.7 fps, frames up to 215 ms | 13.4–19.3 fps, frames up to 368 ms |
 
 Time from launch to the first frame, warm: about 1.3 s (Odyssey), 3.2–4.3 s (Brilliant Diamond, a Unity game), 1.5 s (Animal Crossing), 2.0–3.0 s (Smash). The
@@ -47,9 +47,10 @@ In the order they block play:
    VP9 (Smash) take the software decoder and were not affected.
 2. **Brilliant Diamond crashes on the Retroid Pocket 5** in the Adreno 650 driver's shader compiler (`libllvm-qgl.so`, `addr=0x48`), while it builds its first
    pipelines. The newer drivers of the other two take the same SPIR-V. Which shader it is is not known yet: nothing logs each pipeline as it is built.
-3. **Smash crashes at boot with Android's stock shared font.** On Android the standard shared font is the system's Roboto (`front_android.c`); Smash crashes
-   right after loading it (`main+0x7caa0`, `addr=0x38`). With the Mac's Arial Unicode as `DM_SHARED_FONT` it runs, and the iPhone build ships that font
-   (`dm/ios/tools/build_ipa.sh`); the Android packer should give each game a fuller `standard.ttf` the same way.
+3. **Fixed: Smash crashed at boot with Android's stock shared font.** The standard shared font was the device's Roboto, which has no TrueType hinting,
+   and Smash's font engine needs a hinted font (`main+0x7caa0`, `addr=0x38`). The packer now copies a hinted TrueType font into each game's
+   `font/standard.ttf` (Arial Unicode on a Mac, as the iPhone build does), and Smash boots on all three devices: [Android: the standard shared font must
+   be hinted](../../docs/reference/services.md#android-the-standard-shared-font-must-be-hinted).
 4. **Smash and Super Mario Odyssey crash now and then at boot.** Smash at `main+0x385201c` (`addr=0x50`), even with the font, on all three devices (about one
    launch in six). Odyssey only on the Odin 2, three times in about 20 launches, all in its first seconds of loading: twice in its loader thread as the mode-select
    layout loads (`main+0x95d414` with `addr=0`, once `svcBreak`), once at `main+0x954fb8`; never in 18 launches on the other two.
@@ -96,5 +97,5 @@ Smash's battle and Odyssey's routes start from a fresh save.
 python3 scripts/bench_android.py <NSP folder> [<NSP folder> ...] -s <serial> [-s <serial> ...] --route <name> --warmup --runs 2
 ```
 
-The routes are in each game's `dm/games/<id>/bench_android.tsv` ([dm/android/README.md, Benchmarks](README.md#benchmarks)). Smash's routes need
-`DM_SHARED_FONT` at a fuller TTF on the device until the packer ships one.
+The routes are in each game's `dm/games/<id>/bench_android.tsv` ([dm/android/README.md, Benchmarks](README.md#benchmarks)). Smash needs its packed
+`font/standard.ttf` (problem 3); a game packed before that change needs packing again.

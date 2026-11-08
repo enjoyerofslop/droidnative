@@ -40,6 +40,12 @@ PKG = 'org.nxnative.android'
 KEYSTORE = Path.home() / '.android' / 'nxnative-debug.jks'
 # The letters of the button-icon font (make_ext_font.py): macOS's Arial Rounded Bold is its default; elsewhere a bold sans-serif of the system
 LETTER_FONTS = ['/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf', r'C:\Windows\Fonts\arialbd.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf']
+# The standard shared font (hle_sdk16.c: every font type but the Nintendo extension), copied into <id>_build/font/standard.ttf: STD_FONT names one, else the first of these.
+# It must be a hinted TrueType font. Android's own Roboto has no TrueType hinting, and Super Smash Bros. Ultimate crashed at boot on it (main+0x7caa0); Roboto with empty
+# cvt / fpgm / prep tables crashed too, while Arial stripped of everything but its hinting booted. The iPhone build copies Arial Unicode the same way (build_ipa.sh)
+STANDARD_FONTS = ['/System/Library/Fonts/Supplemental/Arial Unicode.ttf', '/System/Library/Fonts/Supplemental/Arial.ttf', r'C:\Windows\Fonts\arialuni.ttf',
+                  r'C:\Windows\Fonts\arial.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/TTF/DejaVuSans.ttf',
+                  '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', '/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf']
 REMOTE = f'/sdcard/Android/data/{PKG}/files'
 BUILD_TOOLS, PLATFORM = '36.0.0', 'android-35'   # build_apk.py's defaults
 # Games played on an Android phone (their notes say how): the desktop app shows the others as not tested there
@@ -138,7 +144,28 @@ def button_font(work, logs, env):   # the Nintendo extension shared font's stand
     if not bi._importable('fontTools'): raise BuildError(f'the current Python ({sys.executable}) is missing fontTools (pip install fonttools)')
     font.mkdir(parents=True, exist_ok=True)
     bi.run([sys.executable, REPO / 'dm/tools/make_ext_font.py', ttf, letters], logs / 'make_ext_font.log', env=env)
+    standard_font(font)
     return font
+
+
+def hinted(path):   # a TrueType font with hinting programs (STANDARD_FONTS)
+    try:
+        from fontTools.ttLib import TTFont
+        f = TTFont(path, lazy=True); return 'glyf' in f and 'fpgm' in f and 'prep' in f
+    except Exception: return False
+
+
+def standard_font(font):   # <font>/standard.ttf: a hinted TrueType font; without one the device falls back to its own Roboto, on which some games crash
+    dst = font / 'standard.ttf'
+    named = os.environ.get('STD_FONT')
+    cands = [named] if named else [f for f in STANDARD_FONTS if Path(f).is_file()]
+    src = next((f for f in cands if hinted(f)), None)
+    if not src:
+        dst.unlink(missing_ok=True)
+        say(f'[RED] no hinted TrueType font for the standard shared font ({"STD_FONT=" + named + " is not one" if named else "none of " + ", ".join(STANDARD_FONTS)}): '
+            "the game uses the device's Roboto, on which Super Smash Bros. Ultimate crashes at boot. Set STD_FONT to a hinted .ttf")
+        return
+    if not dst.is_file() or dst.stat().st_size != Path(src).stat().st_size: shutil.copyfile(src, dst)
 
 
 def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=()):

@@ -828,6 +828,19 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `pl::RequestSharedFontLoad` is hooked (an SDK 20 call that reaches a service).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
 
+### Android: the standard shared font must be hinted
+
+- **Symptom:** on Android, Super Smash Bros. Ultimate crashes about 2–4 s into its boot, right after the shared fonts load: `CRASH sig=11 addr=0x38 pc=main+0x7caa0`, on every launch and device (an Ayn Odin 2, a OnePlus Pad 3, a Retroid Pocket 5).
+- **Cause:** the standard shared font (every type but the Nintendo extension) was the device's `/system/fonts/Roboto-Regular.ttf` (`front_android.c`). That Roboto is a variable font with no TrueType hinting: no `cvt`, `fpgm` or `prep`, and no instructions in its glyphs. Smash's font engine needs a hinted font. Tested on the Odin 2 with `DM_SHARED_FONT`:
+  - the Mac's Arial Unicode and plain Arial boot
+  - Arial stripped down to Roboto's tables crashes, and booted again once only `cvt`, `fpgm` and `prep` were put back
+  - a static instance of Roboto, Roboto with a `gasp` or `DSIG` table, Roboto with only format-4 `cmap`s, and Roboto with empty `cvt` / `fpgm` / `prep` tables all crash
+
+  So it is the hinting, not the variable tables, the coverage or the `cmap`.
+- **Fix:** `build_android_from_nsp.py` copies a hinted TrueType font into the game's `font/standard.ttf`, beside `nintendo_ext.ttf`, so it reaches the device with the launcher install and inside a game app. The font is `STD_FONT`, or the first hinted one of `STANDARD_FONTS`: Arial Unicode or Arial on a Mac, Arial on Windows, DejaVu Sans or Liberation Sans on Linux. The iPhone build copies Arial Unicode the same way (`dm/ios/tools/build_ipa.sh`). With no hinted font the packer says so in red and the game keeps Roboto. On the device, `front_android.c` points `DM_SHARED_FONT` at Roboto only when the game has no `standard.ttf`.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5). With the packed Arial Unicode it boots to its opening movie at about 60 fps on all three devices (6 of 6 launches).
+- **Not checked:** DejaVu Sans and Liberation Sans in a game (both are hinted, but they were not on the test machine), and other games that use the shared font on Android.
+
 ### Multi-program applications: `oe::ExecuteProgram`
 
 - **Symptom:** `[RED] oe::ExecuteProgram(<n>, <k> bytes of parameters: …)`; before this entry, a crash right after that line (`sig=4` on a trap, or the next function running). A program started on its own quits at boot: it expects the launch parameter its launcher passes.
