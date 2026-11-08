@@ -1781,6 +1781,8 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     if (next > now && next - now < 1000000000ull) { mach_wait_until(next); g_psleep_end = clock_gettime_nsec_np(CLOCK_MONOTONIC); g_psleep_ns = g_psleep_end - now; } else { next = now; g_psleep_ns = 0; }
     next += per; slept = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     void front_android_present(const tex_t *t, const int crop[4]); front_android_present(t, crop);
+    // DM_HITCH_DUMP (hle_thread.c) times stalls from this; only nvn_mtl.m's present set it, so on Android the dump never fired
+    extern _Atomic uint64_t dm_present_ns; atomic_store(&dm_present_ns, now_ns());
     return atomic_fetch_add(&g_presents, 1) + 1;
 }
 void mtl_present_wait(uint64_t ticket) { (void)ticket; }
