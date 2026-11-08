@@ -33,7 +33,7 @@ maintainer's choice: Android work belongs here, not there. Everything below the 
 |---|---|---|
 | Pokémon Brilliant Diamond 1.3.0 | Ayn Odin 2, OnePlus Pad 3 | Playable: 60 fps in Eterna City's overworld. **Crashes at launch on a Retroid Pocket 5** (Adreno 650: its driver's shader compiler) |
 | Animal Crossing: New Horizons 3.0.3 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5 | Runs at 30 fps (as on the Switch) in the new game's airport on all three, and outside the player's house on the Odin 2 and Pad 3; not played through |
-| Super Mario Odyssey 1.4.1 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5 | The Start menu at 60 fps, the opening cutscene at 60 (38 on the Retroid Pocket 5). **Crashes when play starts**, at the first hint video (the host's AVC decoder) |
+| Super Mario Odyssey 1.4.1 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5 | The Start menu at 60 fps, the opening cutscene at 60 (38 on the Retroid Pocket 5), and play in the Cap Kingdom at 60 on the Odin 2, past the hint video that used to crash it (the host's AVC decoder, fixed) |
 | Super Smash Bros. Ultimate 13.0.5 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5 | **Crashes at boot with Android's stock shared font**; with a fuller one, battles at 40–59 fps on the Odin 2, 13–30 fps on the other two (pipelines built during play) |
 | The Legend of Zelda: Breath of the Wild 1.9.0 | Ayn Odin 2 | Runs with a correct picture at about 20 fps (CPU-bound in the Vulkan replay) † |
 | Super Mario Bros. Wonder 1.2.1 | POCO X5 5G (Adreno 619) | Playable: about 30 fps at render scale 0.8 † |

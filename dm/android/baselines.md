@@ -24,7 +24,7 @@ median GPU time per frame. Animal Crossing runs at 30 fps on the Switch too.
 |---|---|---|---|
 | **Super Mario Odyssey 1.4.1**, Start menu (a fresh save) | 60 · 16.7 / 17.6–18.7 | 60 · 16.6 / 18.0 | 60 · 16.6 / 17.5–17.9 |
 | Super Mario Odyssey, the opening cutscene (Start pressed on a fresh save) | 59.9 · 16.7 / 18.4 · GPU 5.5 (one run crashed at boot) | 59.9 · 16.7 / 18.9 · GPU 9.3 | **38** · 25.9 / 30.6–31.5 · GPU 12.9 |
-| Super Mario Odyssey, play (Cascade Kingdom) | **Crashes** at the first hint video | not run (same code path) | not run |
+| Super Mario Odyssey, play (the Cap Kingdom, at the Look Around hint) | 60 · 16.7 / 18.5 · GPU 4.5 (one run, 15 s; it crashed at the hint video before the fix in problem 1) | not run | not run |
 | **Pokémon Brilliant Diamond 1.3.0**, language menu (a fresh save) | 60 · 16.7 / 19.2–19.4 | 60 · 16.6–16.7 / 18.5–18.8 | **Crashes** at 2.6 s |
 | Pokémon Brilliant Diamond, Eterna City (a save) | 60 · 16.6 / 18.1–18.2 · GPU 8.1 | 58.9–59.7 · 16.6–16.8 / 18.8–19.7 · GPU 10.7 | **Crashes** at 2.6 s |
 | **Animal Crossing: New Horizons 3.0.3**, the new game's airport (a fresh save) | 30 · 33.3 / 34.7–35.4 · GPU 5.3 | 30 · 33.3 / 35.7–35.8 · GPU 7.1 | 30 · 33.4 / 36.5–36.7 · GPU 15.8 |
@@ -40,9 +40,11 @@ first launch after an install is slower while the driver builds its pipelines: B
 
 In the order they block play:
 
-1. **Super Mario Odyssey crashes when a hint video plays.** The host's AVC decoder (`media_android.c` `on_image`) copies a picture's colour planes without
-   checking `AImage_getPlaneData`, and reads a null plane (`CRASH sig=11 addr=0` in `libdmhost`), right after `MovieData/PlayGuideMovieRStick.mp4` opens, as
-   play starts in the Cascade Kingdom. Games whose movies are VP9 (Smash) take the software decoder and are not affected.
+1. **Fixed: Super Mario Odyssey crashed when a hint video played.** The Snapdragon 8 Gen 2's H.264 decoder gave the host's image reader UBWC-compressed
+   NV12, whose colour planes the CPU cannot map, and `media_android.c` read through the null plane (`CRASH sig=11 addr=0`) as play started in the Cap
+   Kingdom. The decoder now asks for flexible YUV, which gets linear NV12, and a picture without readable planes is dropped rather than read: [Android:
+   H.264 pictures in a buffer the CPU cannot read](../../docs/reference/movies.md#android-h264-pictures-in-a-buffer-the-cpu-cannot-read). Games whose movies are
+   VP9 (Smash) take the software decoder and were not affected.
 2. **Brilliant Diamond crashes on the Retroid Pocket 5** in the Adreno 650 driver's shader compiler (`libllvm-qgl.so`, `addr=0x48`), while it builds its first
    pipelines. The newer drivers of the other two take the same SPIR-V. Which shader it is is not known yet: nothing logs each pipeline as it is built.
 3. **Smash crashes at boot with Android's stock shared font.** On Android the standard shared font is the system's Roboto (`front_android.c`); Smash crashes
@@ -56,6 +58,8 @@ In the order they block play:
    battle made 682 to 943 pipelines in 11 to 12 s on it (1,147 in 3.1 s on the Odin 2, 368 in 12.5 s on the Retroid Pocket 5), which is where its battle
    frames of 100 to 370 ms come from.
 6. **The Retroid Pocket 5 cannot hold 60 fps in Odyssey's opening cutscene** (38 fps, GPU 12.9 ms a frame).
+7. **The Pad 3's H.264 decoder takes no input** in `dm/android/tests/t_media` (`[RED] movie: the AVC decoder took no input for 2 s`), before and
+   after the fix in problem 1. Not yet tried in a game: an H.264 movie there may show black.
 
 ## Reading the numbers
 

@@ -73,6 +73,7 @@ General host and tool changes first needed here; each applies to every game:
 
 - **Resolved: NSZ decompression rejected `--keys`** when packing v0: [NSZ decompression rejects `--keys`](../../../docs/reference/packing.md#nsz-decompression-rejects---keys).
 - **Resolved (Android): the Joy-Con screen stayed about 170 s** at every launch, while the game set up its shader programs one per frame: [Android's present sleep held the submission lock](../../../docs/reference/frame-rate.md#androids-present-sleep-held-the-submission-lock).
+- **Resolved (Android): the first hint video crashed the host** as play started (`MovieData/PlayGuideMovieRStick.mp4`, H.264 480×272): [Android: H.264 pictures in a buffer the CPU cannot read](../../../docs/reference/movies.md#android-h264-pictures-in-a-buffer-the-cpu-cannot-read).
 
 - **Largest point size at `c0 + 0x610`**: [04, section 3](../../../docs/agents/04-graphics.md#3-find-the-binding-layout-by-census) and [Graphics `c0 + 0x610`: the largest point size](../../../docs/reference/shaders.md#graphics-c0--0x610-the-largest-point-size).
 - **Vertex fetches past a stream's bound size** (a copy padded with zeros): [Vertex fetches past a stream's bound size](../../../docs/reference/rendering.md#vertex-fetches-past-a-streams-bound-size).

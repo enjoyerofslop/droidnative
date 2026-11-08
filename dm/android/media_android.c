@@ -75,10 +75,16 @@ static void on_image(void *ctx, AImageReader *rd) {
         int32_t w = 0, h = 0; int64_t ts = 0; AImageCropRect cr;
         AImage_getWidth(img, &w); AImage_getHeight(img, &h); AImage_getTimestamp(img, &ts);
         if (AImage_getCropRect(img, &cr) == AMEDIA_OK && cr.right > cr.left && cr.bottom > cr.top) { w = cr.right - cr.left; h = cr.bottom - cr.top; } else cr.left = cr.top = 0;
-        uint8_t *yp, *up, *vp; int yl, ul, vl, ys, us, vs, ups, vps;
+        uint8_t *yp = NULL, *up = NULL, *vp = NULL; int yl = 0, ul = 0, vl = 0, ys = 0, us = 0, vs = 0, ups = 0, vps = 0;
         AImage_getPlaneData(img, 0, &yp, &yl); AImage_getPlaneData(img, 1, &up, &ul); AImage_getPlaneData(img, 2, &vp, &vl);
         AImage_getPlaneRowStride(img, 0, &ys); AImage_getPlaneRowStride(img, 1, &us); AImage_getPlaneRowStride(img, 2, &vs);
         AImage_getPlanePixelStride(img, 1, &ups); AImage_getPlanePixelStride(img, 2, &vps);
+        // A buffer the CPU cannot read whole (UBWC-compressed NV12: open_codec's colour format) gives its chroma planes as success with no data and stride 0;
+        // that picture is dropped, not read through a null pointer (Super Mario Odyssey's hint videos crashed the host here on an Odin 2)
+        if (!yp || !up || !vp || ys <= 0 || us <= 0 || vs <= 0 || ups <= 0 || vps <= 0) {
+            if (!a->red++) LOG("[RED] movie: an AVC picture without readable planes (Y %p, U %p, V %p, strides %d %d %d): dropped", (void *)yp, (void *)up, (void *)vp, ys, us, vs);
+            AImage_delete(img); img = NULL; continue;
+        }
         w &= ~1; h &= ~1;
         uint8_t *buf = w > 0 && h > 0 ? malloc((size_t)w * h * 3 / 2) : NULL;
         if (buf) {
@@ -110,6 +116,9 @@ static int open_codec(mavc *a) {
     AMediaFormat *f = AMediaFormat_new();
     AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, "video/avc");
     AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, 1920); AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, 1080);   // the stream's own size comes from its SPS
+    // Flexible YUV (COLOR_FormatYUV420Flexible): without it the Snapdragon 8 Gen 2's decoder (an Odin 2) gives the reader UBWC-compressed NV12 (gralloc 0x7fa30c06),
+    // whose chroma the CPU cannot map; with it, the same decoder gives linear NV12 (0x7fa30c04), as the older decoders gave unasked
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7F420888);
     AMediaFormat_setBuffer(f, "csd-0", c0, (size_t)a->nsps + 4); AMediaFormat_setBuffer(f, "csd-1", c1, (size_t)a->npps + 4);
     media_status_t st = AMediaCodec_configure(a->mc, f, a->win, NULL, 0); AMediaFormat_delete(f);
     if (st == AMEDIA_OK) st = AMediaCodec_start(a->mc);
