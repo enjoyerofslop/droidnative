@@ -15,6 +15,7 @@
 #include "nvn_obj.h"
 #include <android/bitmap.h>
 #include <android/log.h>
+#include <android/window.h>   // AWINDOW_FLAG_KEEP_SCREEN_ON
 #include <android_native_app_glue.h>
 #include <jni.h>
 #include <stdatomic.h>
@@ -612,6 +613,9 @@ void android_main(struct android_app *app) {
     env_file(g_ext, "env.txt", 1); env_file(g_game, "launcher.txt", 0);
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &g_env, NULL);
     app->onAppCmd = on_cmd; app->onInputEvent = on_input;
+    // The screen stays on while the game's window is up, as the launcher's does: Android counts only its own input events as activity, so a cutscene, a game
+    // played with a controller the system does not see, or a run driven by DM_KEYS (input the host feeds the game itself) let it turn off at the screen timeout
+    ANativeActivity_setWindowFlags(app->activity, AWINDOW_FLAG_KEEP_SCREEN_ON, 0);
     for (;;) {
         int events; struct android_poll_source *src;
         int game = atomic_load(&g_state) == ST_GAME || atomic_load(&g_state) == ST_DEMO;
