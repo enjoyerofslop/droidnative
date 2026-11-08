@@ -31,8 +31,10 @@ maintainer's choice: Android work belongs here, not there. Everything below the 
 
 | Game | Device | State |
 |---|---|---|
-| Pokémon Brilliant Diamond 1.3.0 | Ayn Odin 2 (Adreno 740) | Playable: 60 fps in the overworld, past the introduction and name entry |
-| Animal Crossing: New Horizons 3.0.3 | Ayn Odin 2 | Reaches the title screen at 30 fps (its RomFS from the game app's OBB) |
+| Pokémon Brilliant Diamond 1.3.0 | Ayn Odin 2, OnePlus Pad 3 | Playable: 60 fps in Eterna City's overworld. **Crashes at launch on a Retroid Pocket 5** (Adreno 650: its driver's shader compiler) |
+| Animal Crossing: New Horizons 3.0.3 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5 | Runs at 30 fps (as on the Switch) outside the player's house and in the new game's airport; not played through |
+| Super Mario Odyssey 1.4.1 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5 | The Start menu at 60 fps, the opening cutscene at 60 (38 on the Retroid Pocket 5). **Crashes when play starts**, at the first hint video (the host's AVC decoder) |
+| Super Smash Bros. Ultimate 13.0.5 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5 | **Crashes at boot with Android's stock shared font**; with a fuller one, battles at 40–59 fps on the Odin 2, 13–30 fps on the other two (pipelines built during play) |
 | The Legend of Zelda: Breath of the Wild 1.9.0 | Ayn Odin 2 | Runs with a correct picture at about 20 fps (CPU-bound in the Vulkan replay) † |
 | Super Mario Bros. Wonder 1.2.1 | POCO X5 5G (Adreno 619) | Playable: about 30 fps at render scale 0.8 † |
 | Super Mario 3D World + Bowser's Fury 1.2.2 | POCO X5 5G | Bowser's Fury runs with correct colours; one launch stopped at a black loading screen † |
@@ -40,6 +42,9 @@ maintainer's choice: Android work belongs here, not there. Everything below the 
 | **Mario Kart World 1.8.0 (Switch 2)** | Ayn Odin 2 | **Boots and draws:** the world map at about 55 fps, the attract drive at about 3.4 fps. Open: sparse textures (the terrain is untextured), virtual memory pools, constant-buffer copies in the replay, no mesh shaders on the device |
 
 † Tested before droidnative merged nxnative's `main` (2026-11-08); not run since.
+
+The first four rows are from the [Android baselines](dm/android/baselines.md) of 2026-11-08: the same scripted runs on each device, with frame times, the devices'
+drivers, and the known problems in the order they block play.
 
 Every other game in the [games table](dm/games/README.md#games) has a profile and can be packed the same way, but has not been run on Android. A game without a
 profile can still be packed as an *experimental build*: most likely it does not boot, but it is the starting point for porting it.

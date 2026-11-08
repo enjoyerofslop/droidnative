@@ -1,3 +1,4 @@
-# Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description
-# ready: the last file the boot opens before the language menu (DM_FS=1 logs it)
-boot	-	-	25	30	resources\.assets	a fresh save: the Unity boot, then the language menu idling; no input
+# Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description [<TAB> KEY=VALUE;KEY=VALUE]
+# ready (boot): the shared UI assets load for the language menu; (eterna): the Eterna City area loads (DM_FS=1 logs both)
+boot	-	-	25	30	shareduiassets	a fresh save: the Unity boot, then the language menu idling; no input
+eterna	16:A*4/3	saves/eterna	30	30	Environments/fields/area003	a save in Eterna City (MegaMarble's 1.3.0 100% save, GameBanana mod 634809): A through the title and Continue, then the player standing in the city's overworld by the Pokémon Center, people walking and cloud shadows passing

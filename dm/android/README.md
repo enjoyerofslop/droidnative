@@ -160,13 +160,23 @@ saves. Nothing goes into the host library, so the nxnative app is left as it was
 python3 scripts/bench_android.py <NSP folder> [<NSP folder> ...] [-s <serial> ...] [--route <name>] [--warmup] [--runs N] [--install]
 ```
 
-- **Routes:** a game's routes are in `dm/games/<id>/bench_android.tsv`. Each route gives the `DM_KEYS` steps, a save folder or none, the measuring window, a log pattern that marks the game ready, and a description.
+- **Routes:** a game's routes are in `dm/games/<id>/bench_android.tsv`, one per line:
+  - the `DM_KEYS` steps
+  - a save folder or none
+  - the measuring window
+  - a log pattern that marks the game ready
+  - a description
+  - optionally, switches the route needs (`DM_FIXED_TIME` for a scene that follows the clock, `DM_SHARED_FONT`, `DM_KBD`)
+
+  The first routes are Super Mario Odyssey's Start menu and opening cutscene, Brilliant Diamond's language menu and Eterna City, Animal Crossing's airport and island, and Smash's opening movie and a battle. Results are in [baselines.md](baselines.md).
 - **Each run:**
-  - waits for the device to cool down
-  - writes `env.txt`: `DM_SAVE` points at a fresh copy of the route's save in the app's external files, so the device's own saves aren't touched, and per-frame timing goes through `DM_NVN_TSV`
-  - starts the game from the launcher
-  - takes screenshots at the window's start and end
-  - puts `env.txt` back as it was
+  1. waits for the device to cool down
+  2. copies the route's save into a folder of the run's own under the app's external files (`files/bench_runs/`), with `DM_SAVE` pointing there, so the device's own saves aren't touched
+  3. writes `env.txt` (per-frame timing goes through `DM_NVN_TSV`)
+  4. starts the game from the launcher
+  5. takes screenshots at the window's start and end
+  6. puts `env.txt` back as it was
+- **Making a save:** `--keep-save <folder>` copies the save a run ended with back to the computer, for a route that starts from it. `--shot-every N` adds a screenshot every N seconds, for working a route out.
 - **Keeping devices awake:** every 45 s each device gets `KEYCODE_WAKEUP`, and the lock screen is dismissed before each start. A PIN or pattern lock can't be dismissed over adb, so set test devices to None or Swipe.
 - **Results:** per device, game and route:
   - time to the first frame and to the ready pattern

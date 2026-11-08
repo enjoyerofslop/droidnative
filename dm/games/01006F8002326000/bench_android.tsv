@@ -1,3 +1,4 @@
-# Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description
-# ready: the airport prologue's text opens as its scene starts (DM_FS=1 logs it)
+# Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description [<TAB> KEY=VALUE;KEY=VALUE]
+# ready (boot): the airport prologue's text opens as its scene starts; (island): Isabelle's morning announcement opens, about 14 s before the island (DM_FS=1 logs both)
 boot	-	-	35	30	Tutorials_Prologue1_Airport	a fresh save: the new game's 3D airport scene at Nook Inc.'s counter, its first line of dialogue waiting; no input
+island	30:A*16/4	saves/island_linked	100	30	SP_PublicAnnouncement	Anrei's 3.0.1 + DLC save (GBAtemp 39784), linked once to the host's user: A through the title and Isabelle's announcement, then the player standing outside their house on the island; the clock pinned to a day after the save (DM_FIXED_TIME), so the light and the announcement repeat	DM_FIXED_TIME=1794236400

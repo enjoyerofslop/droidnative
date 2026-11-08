@@ -6,16 +6,17 @@
 #   game to each device first (build_android_from_nsp.py --push-only). Games run in turn, each on every device in turn, each run --runs times (default 2),
 #   after a warm-up run with --warmup (run 0, reported apart: the first launch after an install builds the driver's pipelines). Install before a run, never during one.
 # A route is a line of the game's dm/games/<id>/bench_android.tsv (the first by default; without the file, `boot`: no input, no save, measured from 20 to 50 s):
-#   name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description
+#   name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description [<TAB> KEY=VALUE;KEY=VALUE]
 #   save: a save folder beside the NSP folder or in its parent (the game's folder); each run gets a fresh copy in the app's external files (DM_SAVE points there), so
 #   the device's own saves are not touched. ready: a regular expression on the host's log whose first match marks the game ready (its title, say); its time is reported.
+#   The last column, if there, is switches for env.txt this route needs (DM_FIXED_TIME for a game whose scene follows the clock, DM_KBD to answer a keyboard).
 # Each run: cool down (thermal status 0 and the battery at or under --cool-temp, up to --cool-max s), env.txt with DM_SAVE, DM_KEYS and per-frame timing (DM_NVN_TSV), the
 # game started from the launcher, screenshots at the window's start and end, and the game stopped. env.txt as it was is put back after the run.
 # Devices stay awake: every 45 s each one gets KEYCODE_WAKEUP (wakes a screen that went dark, does nothing to one that is on, and never turns it off, unlike POWER),
 # and the lock screen is dismissed before each start. A PIN or pattern lock cannot be dismissed over adb: set the test devices' screen lock to None or Swipe.
 # Out: <out>/<device>/<title ID>_<route>_r<N>/ (logcat.txt, log.txt, frames.tsv, the screenshots, result.json), and results.json and results.md for all runs.
 # Default <out>: bench/<date-time> in build_android_from_nsp.py's data folder (~/.local/share/nxnative/android on a Mac or Linux), beside its builds journal.
-import argparse, datetime, json, math, os, re, shutil, subprocess, sys, threading, time
+import argparse, datetime, json, math, os, re, shlex, shutil, subprocess, sys, threading, time
 from pathlib import Path
 from typing import Any
 
@@ -93,10 +94,10 @@ def routes(gid):
     if f.is_file():
         for line in f.read_text(encoding='utf-8').splitlines():
             if not line.strip() or line.startswith('#'): continue
-            c = line.split('\t') + ['-'] * 7
+            c = line.split('\t') + ['-'] * 8
             out.append({'name': c[0], 'keys': '' if c[1] == '-' else c[1], 'save': '' if c[2] == '-' else c[2], 'start': float(c[3]), 'length': float(c[4]),
-                        'ready': '' if c[5] == '-' else c[5], 'about': '' if c[6] == '-' else c[6]})
-    return out or [{'name': 'boot', 'keys': '', 'save': '', 'start': 20.0, 'length': 30.0, 'ready': '', 'about': 'no input, no save'}]
+                        'ready': '' if c[5] == '-' else c[5], 'about': '' if c[6] == '-' else c[6], 'env': [] if c[7] in ('-', '') else c[7].split(';')})
+    return out or [{'name': 'boot', 'keys': '', 'save': '', 'start': 20.0, 'length': 30.0, 'ready': '', 'about': 'no input, no save', 'env': []}]
 
 
 def game_of(folder):   # → (title ID, game record)
@@ -148,7 +149,7 @@ def log_facts(logcat, ready):
         if ready and out['ready_s'] is None and start is not None and t is not None and re.search(ready, line): out['ready_s'] = round(t - start, 2)
         if 'Fatal signal' in line and out['exit'] is None: out['exit'] = 'crash: ' + line.split('Fatal signal', 1)[1].strip()[:120]
         m = re.search(r'Process \d+ exited cleanly \((\d+)\)', line)
-        if m and out['exit'] is None: out['exit'] = 'exit ' + m.group(1) + (' (svcBreak: the game aborted)' if m.group(1) == '42' else '')
+        if m and m.group(1) != '0' and out['exit'] is None: out['exit'] = 'exit ' + m.group(1) + (' (svcBreak: the game aborted)' if m.group(1) == '42' else '')   # 0: the stop at the run's end
         if re.search(r'lowmemorykiller|lmkd.*Kill.*' + re.escape(GAME_PROC), line) and out['exit'] is None: out['exit'] = 'killed for memory'
     return out
 
@@ -159,17 +160,30 @@ def run_one(serial, folder, gid, route, n, out, args):
     waited = cool_down(serial, args.cool_temp, args.cool_max)
     st0, bt0 = thermal(serial)
     env_before = sh(serial, f'cat {EXT}/env.txt 2>/dev/null')
-    env = ['# written by scripts/bench_android.py for a benchmark run; put back as it was when the run ends', f'DM_SAVE={EXT}/bench/save/{gid}',
-           f'DM_NVN_TSV={TSV}', 'DM_NVN_TSV_CALLS=0', 'DM_FS=1'] + ([f'DM_KEYS={route["keys"]}'] if route['keys'] else []) + args.env   # DM_FS: file opens in the log, for ready patterns
-    sh(serial, f'rm -rf {EXT}/bench && mkdir -p {EXT}/bench/save')
+    # A folder of its own per run: what the game writes there is its own (drwxr-x---), which the shell can read but never delete, so a reused folder would hold the
+    # last run's save. The ones before are removed as far as the shell can; the rest goes with the app. bench_runs is made by mkdir under files/, so it is setgid
+    # ext_data_rw like files/, and only symbolic modes are given it below (a numeric one clears setgid, and a chmod cannot set it again on this storage)
+    run = f'{EXT}/bench_runs/{gid}_{int(time.time())}'
+    env = ['# written by scripts/bench_android.py for a benchmark run; put back as it was when the run ends', f'DM_SAVE={run}/save/{gid}',
+           f'DM_NVN_TSV={TSV}', 'DM_NVN_TSV_CALLS=0', 'DM_FS=1'] + ([f'DM_KEYS={route["keys"]}'] if route['keys'] else []) + route['env'] + args.env   # DM_FS: file opens in the log, for ready patterns
+    # bench_runs itself opened too (symbolically, keeping setgid), as build_android_from_nsp.py opens games/'s parent: the app is not in ext_data_rw on Android 16
+    # (the Pad 3), so a drwxrws--- bench_runs kept it out of the save folder inside (errno 13), where the Odin 2's let it in
+    sh(serial, f'rm -rf {EXT}/bench_runs/* 2>/dev/null; mkdir -p {run}/save; chmod a+rwx {EXT}/bench_runs')
     if route['save']:
         src = next((p for p in (Path(folder) / route['save'], Path(folder).parent / route['save']) if p.is_dir()), None)
         if not src: sys.exit(f'route {route["name"]}: no save folder {route["save"]} beside {folder}')
-        adb(serial, 'push', str(src), f'{EXT}/bench/save/', timeout=300); sh(serial, f'mv {EXT}/bench/save/{src.name} {EXT}/bench/save/{gid}')
+        # Folders made by the shell, files pushed one by one: a folder adb push makes lists empty on the Odin 2's storage (its files are there by path, but a directory
+        # read misses them, and the host copies the save by reading it)
+        dirs = sorted({os.path.relpath(r, src) for r, _, _ in os.walk(src)} - {'.'})
+        sh(serial, 'mkdir -p ' + ' '.join(shq(f'{run}/save/{gid}/{x}') for x in ['.'] + dirs))
+        for r, _, fs in os.walk(src):
+            for f in fs:
+                if f.startswith('.'): continue   # .DS_Store and the like
+                rel = os.path.relpath(os.path.join(r, f), src); adb(serial, 'push', os.path.join(r, f), f'{run}/save/{gid}/{rel}', timeout=300)
     # The save copy is made by adb's shell user, which the game cannot write to on an enforcing device (Android 16 on the OnePlus Pad 3): opened to all, as
-    # build_android_from_nsp.py opens games/. The timing file goes in files/ itself: what the game makes in a folder of the shell's has the app's own group, which
-    # the shell cannot read, and in files/ it has ext_data_rw (setgid there; a chmod does not set it on this storage)
-    sh(serial, f'chmod -R 777 {EXT}/bench; rm -f {TSV}')
+    # build_android_from_nsp.py opens games/, with a symbolic mode, which keeps the folders' setgid bit (a numeric 777 clears it): what the game makes there
+    # then has group ext_data_rw, which the shell reads (--keep-save), not the app's own. The timing file goes in files/ itself, setgid ext_data_rw as well
+    sh(serial, f'chmod -R a+rwX {run}; rm -f {TSV}')
     adb(serial, 'push', str(write_tmp(d / 'env.txt', '\n'.join(env) + '\n')), f'{EXT}/env.txt')
     adb(serial, 'logcat', '-c')
     with open(d / 'logcat.txt', 'wb') as lf:
@@ -178,6 +192,7 @@ def run_one(serial, folder, gid, route, n, out, args):
         t0 = time.time()
         sh(serial, f'am start -n {PKG}/.Launcher --es game {gid} --ez play true')
         shots = {route['start']: 'start', route['start'] + route['length']: 'end'}; died = None; pss = None
+        if args.shot_every: shots.update({float(t): f'{t:04d}s' for t in range(args.shot_every, int(route['start'] + route['length']), args.shot_every) if float(t) not in shots})
         end = route['start'] + route['length'] + 3
         while time.time() - t0 < end:
             time.sleep(1); el = time.time() - t0
@@ -189,6 +204,11 @@ def run_one(serial, folder, gid, route, n, out, args):
         st1, bt1 = thermal(serial)
         sh(serial, f'am force-stop {PKG}'); time.sleep(1); lc.terminate()
     (d / 'frames.tsv').write_bytes(adb_bytes(serial, 'exec-out', f'cat {TSV}'))
+    if args.keep_save:   # the save the run ended with, as a save folder for later routes (the game's last commit; its .work copy is left)
+        keep = Path(args.keep_save); tmp = keep.with_name(keep.name + '.pulling'); shutil.rmtree(tmp, ignore_errors=True); keep.parent.mkdir(parents=True, exist_ok=True)
+        adb(serial, 'pull', f'{run}/save/{gid}', str(tmp), timeout=600)
+        if tmp.is_dir() and any(tmp.iterdir()): shutil.rmtree(keep, ignore_errors=True); tmp.rename(keep); print(f'  save kept in {keep}', flush=True)
+        else: print(f'  no save to keep: the game made none on {serial}', flush=True)
     (d / 'log.txt').write_bytes(adb_bytes(serial, 'exec-out', f'cat {EXT}/log.txt'))
     if env_before.strip(): adb(serial, 'push', str(write_tmp(d / 'env_before.txt', env_before)), f'{EXT}/env.txt')
     else: sh(serial, f'rm -f {EXT}/env.txt')
@@ -203,6 +223,10 @@ def run_one(serial, folder, gid, route, n, out, args):
     if died and not res['exit']: res['exit'] = f'stopped at {died} s'
     (d / 'result.json').write_text(json.dumps(res, indent=1), encoding='utf-8')
     return res
+
+
+def shq(x):   # a path for the device's shell
+    return shlex.quote(x)
 
 
 def write_tmp(p, text):
@@ -234,6 +258,8 @@ def main():
     ap.add_argument('--runs', type=int, default=2); ap.add_argument('--install', action='store_true', help='build_android_from_nsp.py --push-only to each device first')
     ap.add_argument('-k', '--keys', default=str(Path.home() / '.switch/prod.keys'), help='prod.keys for --install (default ~/.switch/prod.keys)')
     ap.add_argument('--warmup', action='store_true', help='a warm-up run (run 0) before the measured ones, reported apart: the first launch after an install builds pipelines')
+    ap.add_argument('--shot-every', type=int, default=0, help='also a screenshot every this many seconds (for working out a route)')
+    ap.add_argument('--keep-save', help="after each run, copy the save it ended with to this folder (a run that plays into a game makes a route's save)")
     ap.add_argument('--out'); ap.add_argument('--env', action='append', default=[], help='KEY=VALUE for every run (repeatable)')
     ap.add_argument('--cool-temp', type=float, default=38.0, help='start a run once the battery is at or under this many °C (default 38)')
     ap.add_argument('--cool-max', type=int, default=300, help='wait at most this many seconds to cool down (default 300)')

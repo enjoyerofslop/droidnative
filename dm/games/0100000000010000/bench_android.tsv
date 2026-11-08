@@ -1,4 +1,5 @@
-# Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description
+# Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description [<TAB> KEY=VALUE;KEY=VALUE]
 # ready: the title's blank sound stream opens about when the Start menu shows (DM_FS=1 logs it)
 boot	-	-	25	30	DummyBlank\.dspadpcm	the Joy-Con screen, then the Start menu idling: no input, a fresh save
 opening	25:A	-	40	30	DummyBlank\.dspadpcm	A fresh save: A at 25 s on the Start menu begins the game, and the real-time opening cutscene plays (Bowser's airship)
+make_save	f1000:A,f8200:RLeft~6,f9200:LUp~4	-	175	15	DummyBlank\.dspadpcm	A fresh save into play (the profile's route): Start, the opening, then the Look Around hint answered on the ship; the game saves at about frame 9,900. Run with --keep-save. Blocked on Android for now: the host crashes at the first hint video (media_android.c)
