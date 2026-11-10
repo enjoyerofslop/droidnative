@@ -870,6 +870,7 @@ static int wb_apply(const wb_t *w, const uint8_t *s) {
     return 1;
 }
 static void post_apply(const post_op *o);   // with the submission code below
+static void gm_ip_done(const chunk *c, int i);   // gfx_vk_gmem_inplace.inc
 static void gm_chunk_done(chunk *c);   // gfx_vk_gmem.inc
 static void prof_collect(chunk *c);   // gfx_vk_draw.inc
 static void chunk_done(chunk *c) {
@@ -881,7 +882,7 @@ static void chunk_done(chunk *c) {
     rb_invalidate(c);   // before any write-back is read from the GPU's copies
     uint64_t wt0 = c->nwb ? clock_gettime_nsec_np(CLOCK_MONOTONIC) : 0, an = 0, ab = 0, ar = 0;
     for (int i = 0; i < c->nwb; i++) { const wb_t *w = &c->wb[i];
-        if (w->inpl) { dm_guest_write_prepare(w->dst, w->row_bytes); continue; }   // the GPU wrote guest memory itself: its pages count as written (and are writable) from now on
+        if (w->inpl) { gm_ip_done(c, i); continue; }   // the GPU wrote guest memory itself: its pages count as written (and are writable) from now on (gfx_vk_gmem_inplace.inc)
         const uint8_t *s = w->rb ? c->rb.p + (w->rb - 1) : (w->st >= SP_ST ? c->sb[w->st - SP_ST].p : w->st >= 0 ? c->stg[w->st].p : c->ar[-1 - w->st].p) + w->off;
         if (w->st < 0) { an++; ab += w->rows ? w->src_pitch * (w->rows - 1) + w->row_bytes : 0; ar += w->rb != 0; }
         if (w->lin && wb_revert_on()) rv_check(w, s);   // before it lands: guest memory still holds what the CPU wrote during the pass

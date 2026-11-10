@@ -59,6 +59,14 @@ static int gm_inplace_w(uint64_t addr, size_t n, int cs, VkBuffer *b, VkDeviceSi
     C->ip_wr = 1; g_ip_wbinds++; g_ip_wbytes += n;
     return 1;
 }
+// The completion thread, for chunk c's write-back i written in place: its pages prepared, once per range in the chunk. Preparing costs a walk of every tracked range
+// (nvn_dirty.c prep_write: thousands in Ocarina of Time, 98% of the completion thread on the Fold), and a buffer many draws write gets an entry for each
+static _Atomic uint64_t g_ip_prep, g_ip_prep_dup;
+static void gm_ip_done(const chunk *c, int i) {
+    const wb_t *w = &c->wb[i];
+    for (int k = 0; k < i; k++) if (c->wb[k].inpl && c->wb[k].dst == w->dst && c->wb[k].row_bytes >= w->row_bytes) { atomic_fetch_add(&g_ip_prep_dup, 1); return; }
+    dm_guest_write_prepare(w->dst, w->row_bytes); atomic_fetch_add(&g_ip_prep, 1);
+}
 // The replay is about to write guest memory [lo, hi) on the CPU (mem_view): a chunk still to run that reads those pages in place runs first
 static void gm_ip_write(uintptr_t lo, uintptr_t hi) {
     if (!g_ip_any || hi <= lo) return;
@@ -80,7 +88,9 @@ static void gm_ip_write(uintptr_t lo, uintptr_t hi) {
 static void gm_ip_stat(void) {
     if (!g_ip_binds && !g_ip_wbinds && !g_ip_span && !g_ip_unal) return;
     LOG("[vk] storage buffers bound in their placed pools: %llu read-only bindings (%llu MB read in place), %llu written ones (%llu MB), not in place %llu crossing two pieces, %llu at an offset not a multiple of %llu; "
-        "the replay's CPU writes over pages read in place: %llu waited for the chunk being recorded, %llu for one in flight, %llu after it had run, %llu over none (cumulative; gfx_vk_gmem_inplace.inc)",
+        "the replay's CPU writes over pages read in place: %llu waited for the chunk being recorded, %llu for one in flight, %llu after it had run, %llu over none; written ranges prepared %llu, "
+        "again in their chunk (skipped) %llu (cumulative; gfx_vk_gmem_inplace.inc)",
         (unsigned long long)g_ip_binds, (unsigned long long)(g_ip_bytes >> 20), (unsigned long long)g_ip_wbinds, (unsigned long long)(g_ip_wbytes >> 20), (unsigned long long)g_ip_span, (unsigned long long)g_ip_unal,
-        (unsigned long long)g_vk.props.limits.minStorageBufferOffsetAlignment, (unsigned long long)g_ip_wcur, (unsigned long long)g_ip_wfly, (unsigned long long)g_ip_wfree, (unsigned long long)g_ip_wnone);
+        (unsigned long long)g_vk.props.limits.minStorageBufferOffsetAlignment, (unsigned long long)g_ip_wcur, (unsigned long long)g_ip_wfly, (unsigned long long)g_ip_wfree, (unsigned long long)g_ip_wnone,
+        (unsigned long long)atomic_load(&g_ip_prep), (unsigned long long)atomic_load(&g_ip_prep_dup));
 }

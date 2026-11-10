@@ -113,6 +113,7 @@ static uint64_t gm_size_env(const char *name) {   // bytes, or whole K / M / G; 
     char *end; unsigned long long v = strtoull(s, &end, 0); int sh = *end == 'G' || *end == 'g' ? 30 : *end == 'M' || *end == 'm' ? 20 : *end == 'K' || *end == 'k' ? 10 : 0;
     return (uint64_t)v << sh;
 }
+static const char *gm_cap_str(void) { static char b[96]; snprintf(b, sizeof b, ", at most %.2f GiB placed (DM_VK_RAW_GMEM_MAX%s)", g_gm_cap / 1073741824.0, getenv("DM_VK_RAW_GMEM_MAX") ? "" : "; a quarter of the device's memory"); return b; }
 static void gm_device_made(void) {   // the device has the extensions: their entry points, the allocation limits and the memory type a pool's pages take
     g_gm_map2 = (PFN_vkMapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkMapMemory2KHR"); g_gm_unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkUnmapMemory2KHR");
     g_gm_bda = (PFN_vkGetBufferDeviceAddressKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetBufferDeviceAddressKHR");
@@ -132,14 +133,17 @@ static void gm_device_made(void) {   // the device has the extensions: their ent
     g_gm_mt = vkb_mem_type(mr.memoryTypeBits, hv | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); if (g_gm_mt == UINT32_MAX) g_gm_mt = vkb_mem_type(mr.memoryTypeBits, hv);
     if (g_gm_mode == 2) { long pgs = sysconf(_SC_PAGESIZE); g_gm_align = (VkDeviceSize)pgs; if (g_gm_piece > (256u << 20)) g_gm_piece = 256u << 20; }   // (the buffer's own memory types: gm_place1_ahb)
     else if (g_gm_mt == UINT32_MAX) { LOG("[RED] [vk] raw global memory: no host-visible, coherent and cached memory type for the pools (of the types %#x): off", mr.memoryTypeBits); return; }
+    // Unset, the cap is a quarter of the device's memory: placed memory is committed whole, and Ocarina of Time places about 2 GiB in Kokiri Forest (PSS 8.7 → 10.8 GB on a
+    // Fold with 10.8 GB). A pool past it stays anonymous and is copied as before, and raw accesses to it read 0 (red line 162), rather than the low-memory killer ending the game
     g_gm_cap = gm_size_env("DM_VK_RAW_GMEM_MAX");
+    if (!g_gm_cap) { long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE); if (pages > 0 && psz > 0) g_gm_cap = (uint64_t)pages * (uint64_t)psz / 4; }
     g_gm_on = 1;
     if (g_gm_mode == 2) LOG("[vk] raw global memory ready (%s): memory pools of a game that takes it become AHardwareBuffers mapped at their own addresses and imported with device addresses "
                             "(%s), pieces of up to %llu MiB%s", gm_env() == 1 ? "DM_VK_RAW_GMEM=1" : "a Switch 2 game's; DM_VK_RAW_GMEM=0 turns it off",
-                            g_gm_has_placed ? "DM_VK_RAW_GMEM_AHB=1" : "no VK_EXT_map_memory_placed", (unsigned long long)(g_gm_piece >> 20), g_gm_cap ? ", capped by DM_VK_RAW_GMEM_MAX" : "");
+                            g_gm_has_placed ? "DM_VK_RAW_GMEM_AHB=1" : "no VK_EXT_map_memory_placed", (unsigned long long)(g_gm_piece >> 20), g_gm_cap ? gm_cap_str() : "");
     else LOG("[vk] raw global memory ready (%s): memory pools of a game that takes it become placed Vulkan memory at their own addresses, memory type %u (flags %#x), pieces of up to %llu MiB, "
         "alignment %llu, unmap reserve %u%s", gm_env() == 1 ? "DM_VK_RAW_GMEM=1" : "a Switch 2 game's; DM_VK_RAW_GMEM=0 turns it off", g_gm_mt, g_vk.mp.memoryTypes[g_gm_mt].propertyFlags,
-        (unsigned long long)(g_gm_piece >> 20), (unsigned long long)g_gm_align, g_gm_mpq.memoryUnmapReserve, g_gm_cap ? ", capped by DM_VK_RAW_GMEM_MAX" : "");
+        (unsigned long long)(g_gm_piece >> 20), (unsigned long long)g_gm_align, g_gm_mpq.memoryUnmapReserve, g_gm_cap ? gm_cap_str() : "");
 }
 
 // ---- Placing a pool: when the game first takes a buffer address in it (mtl_pool_addressed), as the Mac lists only such pools ----
