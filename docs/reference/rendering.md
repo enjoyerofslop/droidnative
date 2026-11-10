@@ -1862,6 +1862,27 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   and kept reading the arena: 60.0 fps on `main` and with the change, two runs each (GPU 10.1–10.4 ms), and with `DM_VK_WB_READBACK=0`.
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) ([Android baselines](../../dm/android/baselines.md), problem 13).
 
+### Storage buffer write-backs landed a byte at a time
+
+- **Symptom:** Android only: the completion thread takes milliseconds a frame to land storage buffers' write-backs although it reads them through cached memory
+  (`landing every write-back took the completion thread … ms a frame` in the `[vk] arena write-backs` line, `100% read through the GPU's cached copy`); simpleperf
+  puts `vk-done`'s time in `chunk_thread` itself (`wb_apply` inlined) and in `memcmp` and `memcpy` through the PLT.
+- **Cause:** a storage buffer's write-back (and a storage texel buffer's) always carries a snapshot, but `wb_apply` took the snapshot path (only the span from the first
+  changed byte to the last prepared, the bytes compared a word at a time by `wb_row_diff`) only with `DM_VK_LINWB_SNAP=1`, the linear render targets' switch, which is
+  off by default. Otherwise it prepared every page of the buffer and walked it with a `memcmp` call per 8 bytes and a `memcpy` call per run of changed bytes: quick
+  when nothing changes or long runs do, slow when the changes are scattered bytes, such as floats whose high bytes stay. The span's ends were found a byte at a time.
+- **Fix:** a write-back with a snapshot takes the snapshot path whatever `DM_VK_LINWB_SNAP` says (which still decides whether a linear render target takes a snapshot);
+  the span's ends are found a word at a time (`wb_first_diff`, `wb_last_diff`), and the first and last rows are compared from them. The same bytes are written; pages
+  without a changed byte are no longer prepared, so they are not stamped and nothing kept from them is uploaded again. `DM_VK_WB_WORDS=0` (env.txt): the byte loop and
+  every page prepared, as before.
+- **Check:** Super Smash Bros. Ultimate's `battle` route on a Retroid Pocket 5 (Adreno 650, V@0746.0), which writes back 1.1 to 1.8 MB of storage buffers a frame. A
+  test build that landed every storage write-back both ways into scratch copies of the destination found no difference in 16,000 of them (3.6 GB), and the span's ends
+  equal to a byte scan's. Landing took 0.79 to 2.25 ms per MB on `main` (seven battles, median 1.44; 1.1 to 4.0 ms a frame) and 0.71 and 0.72 ms per MB with the fix
+  (two battles; 1.0 and 1.1 ms a frame), on the stages the route picked at random. A test build that turned it on and off every 600 presents, in two battles (each
+  on one stage): 0.39 to 0.70 ms per MB with it against 0.78 to 1.57 without (means 0.64 against 1.36 in one battle, 0.47 against 0.83 in the other). The frame rate
+  stayed within the stages' spread: 59.2 and 57.9 fps with the fix, 56.9 to 59.8 on `main`.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) ([Android baselines](../../dm/android/baselines.md)).
+
 ### Linear render targets written back to guest memory
 
 - **Symptom:** Android only: what a game reads on the CPU from textures it draws into is zeros or stale. Breath of the Wild: Link sinks into grass up to his knees while he stands still, and the grass presses in a pass dump carry the presser's world height (`c3[3].z` about 200–270 instead of below 1) with a flat slope.

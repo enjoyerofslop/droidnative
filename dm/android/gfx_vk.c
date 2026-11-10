@@ -314,11 +314,11 @@ static void fgpu_done(uint64_t f, uint64_t ns) {   // under g_cmu (completion th
     if (atomic_load(&g_fgpu[k].frame) != f + 1) return;
     atomic_fetch_add(&g_fgpu[k].ns, ns); atomic_fetch_sub(&g_fgpu[k].pending, 1);
 }
-static int lsnap_on(void), wb_revert_on(void), wb_absorb_on(void), up_range_on(void);   // the linear write-back switches (below, before chunk_done): read before the completion thread starts
+static int lsnap_on(void), wb_revert_on(void), wb_absorb_on(void), up_range_on(void), wb_words_on(void);   // the write-back switches (below, before chunk_done): read before the completion thread starts
 static int chunks_init(void) {
     static int ok = -1; if (ok >= 0) return ok;
     ok = 0; if (!vkb()) return 0;
-    fgpu_on(); stg_pool_on(); lsnap_on(); wb_revert_on(); wb_absorb_on(); up_range_on(); ds_recycle();   // read before the completion thread starts (sp_done reads g_sp_on, draw_chunk_reset the recycling switch)
+    fgpu_on(); stg_pool_on(); lsnap_on(); wb_revert_on(); wb_absorb_on(); up_range_on(); wb_words_on(); ds_recycle();   // read before the completion thread starts (sp_done reads g_sp_on, draw_chunk_reset the recycling switch)
     { const char *e = getenv("DM_VK_CHUNKS"); int n = e ? atoi(e) : 0; if (n > 0) g_nchunk = n < 2 ? 2 : n > NCHUNK_MAX ? NCHUNK_MAX : n;
       LOG("[vk] chunks in flight: up to %d%s", g_nchunk, g_nchunk != NCHUNK_DEF ? " (DM_VK_CHUNKS)" : ""); }
     if (g_vk.props.limits.timestampComputeAndGraphics) { VkQueryPoolCreateInfo qc = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * (uint32_t)g_nchunk};
@@ -647,7 +647,7 @@ static void mem_view(uint64_t rd, uint64_t rn, uint64_t wr, uint64_t wn) {
 // pass leaves at (or sets back to) the snapshot's value would then keep that write's value: such a pass takes no snapshot and is written back whole, as before. Two differences from
 // the hardware remain, races a game would have anyway: a byte the CPU wrote between vt_get's upload and the snapshot is still put back; one the CPU wrote and the GPU set to the
 // snapshot's value keeps the CPU's.
-// The narrowing holds for every write-back with a snapshot (storage buffers' too): only the span written is prepared
+// The narrowing holds for every write-back with a snapshot: a linear render target's with this switch, a storage buffer's by default (DM_VK_WB_WORDS, below wb_row_diff)
 static int lsnap_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_LINWB_SNAP"); v = e && !strcmp(e, "1"); if (v) LOG("[vk] DM_VK_LINWB_SNAP=1: linear render targets are written back as the bytes their pass changed (off by default: the grass flicker)"); } return v; }
 static uint64_t g_lsnap, g_lsnap_stale;   // passes' snapshots taken; not taken: a write to the target was pending (gfx_vk_draw.inc lsnap_take)
 static _Atomic uint64_t g_awb_n, g_awb_bytes, g_awb_rb, g_wb_ns;   // arena write-backs landed, their bytes, those read through the GPU's copy (gfx_vk_readback.inc); chunk_done's time landing every write-back
@@ -780,7 +780,7 @@ static void ab_note(const wb_t *w, const uint8_t *s, int clean) {   // the compl
     atomic_fetch_add(&g_ab_noted, 1); return;
 drop: free(e.edge[0]); free(e.edge[1]);
 }
-// A row's bytes the GPU changed against the snapshot (DM_VK_LINWB_SNAP; =0: wb_apply's byte loop, as before), compared a word at a time: a word all changed is stored whole, one
+// A row's bytes the GPU changed against the snapshot (DM_VK_LINWB_SNAP, DM_VK_WB_WORDS; both off: wb_apply's byte loop, as before), compared a word at a time: a word all changed is stored whole, one
 // partly changed byte by byte. Never a merge of the word over the bytes left alone ((d & same) | (g & ~same)): its store would put back the value read just before it, losing a CPU
 // write landing in between, the bytes the snapshot keeps. The byte loop made a memcpy call per run of changed bytes, a call and two word compares a texel when each texel keeps a
 // channel (512x512 RGBA8 on an M-series Mac: alpha kept 0.99 ms, 0.30 ms this way; B alone changed 0.97 against 0.14), on the completion thread before the chunk's fence. → bytes written
@@ -799,26 +799,46 @@ static size_t wb_row_diff(uint8_t *d, const uint8_t *g, const uint8_t *o, size_t
     for (; i < rb; i++) if (g[i] != o[i]) { d[i] = g[i]; n++; }
     return n;
 }
+// The first and the last byte that differ in a span known to hold one, found a word at a time (the span's ends in wb_apply: a byte at a time, a storage buffer of hundreds of
+// KB changed in its middle was walked to there from both ends)
+static size_t wb_first_diff(const uint8_t *g, const uint8_t *o, size_t n) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) { uint64_t a, b; memcpy(&a, g + i, 8); memcpy(&b, o + i, 8); if (a != b) return i + (size_t)__builtin_ctzll(a ^ b) / 8; }
+    for (; i < n; i++) if (g[i] != o[i]) return i;
+    return n;
+}
+static size_t wb_last_diff(const uint8_t *g, const uint8_t *o, size_t n) {
+    size_t i = n;
+    for (size_t t = n & 7; t; t--, i--) if (g[i - 1] != o[i - 1]) return i - 1;
+    for (; i >= 8; i -= 8) { uint64_t a, b; memcpy(&a, g + i - 8, 8); memcpy(&b, o + i - 8, 8); if (a != b) return i - 8 + (size_t)(63 - __builtin_clzll(a ^ b)) / 8; }
+    return 0;
+}
+// Storage buffers' write-backs (and storage texel buffers'), which always carry a snapshot, land as the bytes the GPU changed found a word at a time, and only the span from the
+// first of them to the last is prepared, as a linear render target's with DM_VK_LINWB_SNAP. They took the byte loop below whenever that switch was off (the default, kept for linear
+// render targets: the grass flicker): a memcmp call per 8 bytes and a memcpy call per run of changed bytes, after every page of the buffer was prepared, on the completion thread
+// before the chunk's NVN fence. Super Smash Bros. Ultimate's battles write back 1.1 to 2.1 MB of storage buffers a frame, which took a Retroid Pocket 5's completion thread 0.9 to
+// 5.7 ms a frame to land. The same bytes are written either way; only pages no changed byte is in are left unprepared (not stamped: nothing kept from them is uploaded again).
+// DM_VK_WB_WORDS=0 (env.txt): the byte loop and every page prepared, as before
+static int wb_words_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_WB_WORDS"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[vk] DM_VK_WB_WORDS=0: storage buffers' write-backs land a byte at a time, every page prepared"); } return v; }
 // → whether it wrote (and prepared) anything
 static int wb_apply(const wb_t *w, const uint8_t *s) {
-    size_t y0 = 0, y1 = w->rows;
-    if (!w->snap || !lsnap_on()) dm_guest_write_prepare(w->dst, w->dst_pitch * (w->rows ? w->rows - 1 : 0) + w->row_bytes);   // pages the dirty tracker protected become writable (and dirty) first
-    else {   // only the span from the first byte the GPU changed to the last is prepared and written (DM_VK_LINWB_SNAP); none: nothing at all
-        const size_t rb = w->row_bytes;
+    size_t y0 = 0, y1 = w->rows, i0 = 0, i1 = 0; const size_t rb = w->row_bytes;
+    int narrow = w->snap && (lsnap_on() || wb_words_on());
+    if (!narrow) dm_guest_write_prepare(w->dst, w->dst_pitch * (w->rows ? w->rows - 1 : 0) + rb);   // pages the dirty tracker protected become writable (and dirty) first
+    else {   // only the span from the first byte the GPU changed to the last is prepared and written; none: nothing at all
         while (y0 < w->rows && !memcmp(s + y0 * w->src_pitch, w->snap + y0 * rb, rb)) y0++;
         if (y0 == w->rows) return 0;
         y1 = w->rows - 1; while (y1 > y0 && !memcmp(s + y1 * w->src_pitch, w->snap + y1 * rb, rb)) y1--;
-        const uint8_t *g0 = s + y0 * w->src_pitch, *o0 = w->snap + y0 * rb, *g1 = s + y1 * w->src_pitch, *o1 = w->snap + y1 * rb;
-        size_t i0 = 0, i1 = rb - 1; while (g0[i0] == o0[i0]) i0++; while (g1[i1] == o1[i1]) i1--;
+        i0 = wb_first_diff(s + y0 * w->src_pitch, w->snap + y0 * rb, rb); i1 = wb_last_diff(s + y1 * w->src_pitch, w->snap + y1 * rb, rb);
         uint8_t *a = w->dst + y0 * w->dst_pitch + i0, *e = w->dst + y1 * w->dst_pitch + i1 + 1;
         dm_guest_write_prepare(a, (size_t)(e - a)); y1++;
     }
     uint64_t n = 0;
     for (size_t y = y0; y < y1; y++) {
         uint8_t *d = w->dst + y * w->dst_pitch; const uint8_t *g = s + y * w->src_pitch;
-        if (!w->snap) { memcpy(d, g, w->row_bytes); continue; }
-        const uint8_t *o = w->snap + y * w->row_bytes;   // only what the GPU changed
-        if (lsnap_on()) { n += wb_row_diff(d, g, o, w->row_bytes); continue; }
+        if (!w->snap) { memcpy(d, g, rb); continue; }
+        const uint8_t *o = w->snap + y * rb;   // only what the GPU changed
+        if (narrow) { size_t lo = y == y0 ? i0 : 0, hi = y + 1 == y1 ? i1 + 1 : rb; n += wb_row_diff(d + lo, g + lo, o + lo, hi - lo); continue; }   // the first and last rows from the span's ends
         for (size_t i = 0; i < w->row_bytes;) {
             if (i + 8 <= w->row_bytes && !memcmp(g + i, o + i, 8)) { i += 8; continue; }
             size_t e = i; while (e < w->row_bytes && g[e] != o[e]) e++;
