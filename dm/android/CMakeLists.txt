@@ -74,6 +74,7 @@ set(ANDROID_C
   ${CMAKE_CURRENT_SOURCE_DIR}/pac_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/coreaudio_aaudio.c
   ${CMAKE_CURRENT_SOURCE_DIR}/media_android.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/ue_dynres_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/av1_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/haptics_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/apple_stubs.c
