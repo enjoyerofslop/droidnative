@@ -26,6 +26,7 @@
 #include "nvn_fmt_mtl.h"
 #include "gfx_vk.h"
 #include "spv_readonly.h"
+#include "spv_alpha.h"
 #include "spv_limits.h"
 #include "spv_pool.h"
 #include "spv_wide.h"
@@ -240,6 +241,7 @@ typedef struct chunk {
     stg_t rb;   // its arena write-backs' GPU copies, read by the completion thread (gfx_vk_readback.inc): kept and grown, used the bytes copied in its last recording
     VkDescriptorPool *dp; int ndp, cdp, dp_cur; VkBufferView *bv; int nbv, cbv;
     VkDescriptorSet *dsc; int ndsc, cdsc, dsc_used;   // the depth-stencil copies' sets (gfx_vk_dscopy.inc dsc_set): made from its pools, handed out again once it completes
+    VkDescriptorSet *bcd; int nbcd, cbcd, bcd_used;   // the GPU BC decodes' sets (gfx_vk_bcdec.inc bcd_set), the same way
     uint64_t rq_ticket;   // its submission's ticket with the recorder on (gfx_vk_rec.inc rec_submit), 0 when submitted by the replay
     ds_list **dl; int ndl, cdl; ds_list **dt; int ndt, cdt; int nds;   // recycled descriptor sets (gfx_vk_draw.inc ds_get): the lists holding sets, those handed out from in this recording, the sets held
     struct { const char *a, *b; uint32_t n, m; char kind; } cr[CR_MAX]; int ncr;   // what it recorded, the last CR_MAX of ncr (crumb): named when the GPU hangs or is lost in it (gpu_slow)
@@ -314,11 +316,11 @@ static void fgpu_done(uint64_t f, uint64_t ns) {   // under g_cmu (completion th
     if (atomic_load(&g_fgpu[k].frame) != f + 1) return;
     atomic_fetch_add(&g_fgpu[k].ns, ns); atomic_fetch_sub(&g_fgpu[k].pending, 1);
 }
-static int lsnap_on(void), wb_revert_on(void), wb_absorb_on(void), up_range_on(void);   // the linear write-back switches (below, before chunk_done): read before the completion thread starts
+static int lsnap_on(void), wb_revert_on(void), wb_absorb_on(void), up_range_on(void), wb_words_on(void);   // the write-back switches (below, before chunk_done): read before the completion thread starts
 static int chunks_init(void) {
     static int ok = -1; if (ok >= 0) return ok;
     ok = 0; if (!vkb()) return 0;
-    fgpu_on(); stg_pool_on(); lsnap_on(); wb_revert_on(); wb_absorb_on(); up_range_on(); ds_recycle();   // read before the completion thread starts (sp_done reads g_sp_on, draw_chunk_reset the recycling switch)
+    fgpu_on(); stg_pool_on(); lsnap_on(); wb_revert_on(); wb_absorb_on(); up_range_on(); wb_words_on(); ds_recycle();   // read before the completion thread starts (sp_done reads g_sp_on, draw_chunk_reset the recycling switch)
     { const char *e = getenv("DM_VK_CHUNKS"); int n = e ? atoi(e) : 0; if (n > 0) g_nchunk = n < 2 ? 2 : n > NCHUNK_MAX ? NCHUNK_MAX : n;
       LOG("[vk] chunks in flight: up to %d%s", g_nchunk, g_nchunk != NCHUNK_DEF ? " (DM_VK_CHUNKS)" : ""); }
     if (g_vk.props.limits.timestampComputeAndGraphics) { VkQueryPoolCreateInfo qc = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * (uint32_t)g_nchunk};
@@ -647,7 +649,7 @@ static void mem_view(uint64_t rd, uint64_t rn, uint64_t wr, uint64_t wn) {
 // pass leaves at (or sets back to) the snapshot's value would then keep that write's value: such a pass takes no snapshot and is written back whole, as before. Two differences from
 // the hardware remain, races a game would have anyway: a byte the CPU wrote between vt_get's upload and the snapshot is still put back; one the CPU wrote and the GPU set to the
 // snapshot's value keeps the CPU's.
-// The narrowing holds for every write-back with a snapshot (storage buffers' too): only the span written is prepared
+// The narrowing holds for every write-back with a snapshot: a linear render target's with this switch, a storage buffer's by default (DM_VK_WB_WORDS, below wb_row_diff)
 static int lsnap_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_LINWB_SNAP"); v = e && !strcmp(e, "1"); if (v) LOG("[vk] DM_VK_LINWB_SNAP=1: linear render targets are written back as the bytes their pass changed (off by default: the grass flicker)"); } return v; }
 static uint64_t g_lsnap, g_lsnap_stale;   // passes' snapshots taken; not taken: a write to the target was pending (gfx_vk_draw.inc lsnap_take)
 static _Atomic uint64_t g_awb_n, g_awb_bytes, g_awb_rb, g_wb_ns;   // arena write-backs landed, their bytes, those read through the GPU's copy (gfx_vk_readback.inc); chunk_done's time landing every write-back
@@ -780,7 +782,7 @@ static void ab_note(const wb_t *w, const uint8_t *s, int clean) {   // the compl
     atomic_fetch_add(&g_ab_noted, 1); return;
 drop: free(e.edge[0]); free(e.edge[1]);
 }
-// A row's bytes the GPU changed against the snapshot (DM_VK_LINWB_SNAP; =0: wb_apply's byte loop, as before), compared a word at a time: a word all changed is stored whole, one
+// A row's bytes the GPU changed against the snapshot (DM_VK_LINWB_SNAP, DM_VK_WB_WORDS; both off: wb_apply's byte loop, as before), compared a word at a time: a word all changed is stored whole, one
 // partly changed byte by byte. Never a merge of the word over the bytes left alone ((d & same) | (g & ~same)): its store would put back the value read just before it, losing a CPU
 // write landing in between, the bytes the snapshot keeps. The byte loop made a memcpy call per run of changed bytes, a call and two word compares a texel when each texel keeps a
 // channel (512x512 RGBA8 on an M-series Mac: alpha kept 0.99 ms, 0.30 ms this way; B alone changed 0.97 against 0.14), on the completion thread before the chunk's fence. → bytes written
@@ -799,26 +801,46 @@ static size_t wb_row_diff(uint8_t *d, const uint8_t *g, const uint8_t *o, size_t
     for (; i < rb; i++) if (g[i] != o[i]) { d[i] = g[i]; n++; }
     return n;
 }
+// The first and the last byte that differ in a span known to hold one, found a word at a time (the span's ends in wb_apply: a byte at a time, a storage buffer of hundreds of
+// KB changed in its middle was walked to there from both ends)
+static size_t wb_first_diff(const uint8_t *g, const uint8_t *o, size_t n) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) { uint64_t a, b; memcpy(&a, g + i, 8); memcpy(&b, o + i, 8); if (a != b) return i + (size_t)__builtin_ctzll(a ^ b) / 8; }
+    for (; i < n; i++) if (g[i] != o[i]) return i;
+    return n;
+}
+static size_t wb_last_diff(const uint8_t *g, const uint8_t *o, size_t n) {
+    size_t i = n;
+    for (size_t t = n & 7; t; t--, i--) if (g[i - 1] != o[i - 1]) return i - 1;
+    for (; i >= 8; i -= 8) { uint64_t a, b; memcpy(&a, g + i - 8, 8); memcpy(&b, o + i - 8, 8); if (a != b) return i - 8 + (size_t)(63 - __builtin_clzll(a ^ b)) / 8; }
+    return 0;
+}
+// Storage buffers' write-backs (and storage texel buffers'), which always carry a snapshot, land as the bytes the GPU changed found a word at a time, and only the span from the
+// first of them to the last is prepared, as a linear render target's with DM_VK_LINWB_SNAP. They took the byte loop below whenever that switch was off (the default, kept for linear
+// render targets: the grass flicker): a memcmp call per 8 bytes and a memcpy call per run of changed bytes, after every page of the buffer was prepared, on the completion thread
+// before the chunk's NVN fence. Super Smash Bros. Ultimate's battles write back 1.1 to 2.1 MB of storage buffers a frame, which took a Retroid Pocket 5's completion thread 0.9 to
+// 5.7 ms a frame to land. The same bytes are written either way; only pages no changed byte is in are left unprepared (not stamped: nothing kept from them is uploaded again).
+// DM_VK_WB_WORDS=0 (env.txt): the byte loop and every page prepared, as before
+static int wb_words_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_WB_WORDS"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[vk] DM_VK_WB_WORDS=0: storage buffers' write-backs land a byte at a time, every page prepared"); } return v; }
 // → whether it wrote (and prepared) anything
 static int wb_apply(const wb_t *w, const uint8_t *s) {
-    size_t y0 = 0, y1 = w->rows;
-    if (!w->snap || !lsnap_on()) dm_guest_write_prepare(w->dst, w->dst_pitch * (w->rows ? w->rows - 1 : 0) + w->row_bytes);   // pages the dirty tracker protected become writable (and dirty) first
-    else {   // only the span from the first byte the GPU changed to the last is prepared and written (DM_VK_LINWB_SNAP); none: nothing at all
-        const size_t rb = w->row_bytes;
+    size_t y0 = 0, y1 = w->rows, i0 = 0, i1 = 0; const size_t rb = w->row_bytes;
+    int narrow = w->snap && (lsnap_on() || wb_words_on());
+    if (!narrow) dm_guest_write_prepare(w->dst, w->dst_pitch * (w->rows ? w->rows - 1 : 0) + rb);   // pages the dirty tracker protected become writable (and dirty) first
+    else {   // only the span from the first byte the GPU changed to the last is prepared and written; none: nothing at all
         while (y0 < w->rows && !memcmp(s + y0 * w->src_pitch, w->snap + y0 * rb, rb)) y0++;
         if (y0 == w->rows) return 0;
         y1 = w->rows - 1; while (y1 > y0 && !memcmp(s + y1 * w->src_pitch, w->snap + y1 * rb, rb)) y1--;
-        const uint8_t *g0 = s + y0 * w->src_pitch, *o0 = w->snap + y0 * rb, *g1 = s + y1 * w->src_pitch, *o1 = w->snap + y1 * rb;
-        size_t i0 = 0, i1 = rb - 1; while (g0[i0] == o0[i0]) i0++; while (g1[i1] == o1[i1]) i1--;
+        i0 = wb_first_diff(s + y0 * w->src_pitch, w->snap + y0 * rb, rb); i1 = wb_last_diff(s + y1 * w->src_pitch, w->snap + y1 * rb, rb);
         uint8_t *a = w->dst + y0 * w->dst_pitch + i0, *e = w->dst + y1 * w->dst_pitch + i1 + 1;
         dm_guest_write_prepare(a, (size_t)(e - a)); y1++;
     }
     uint64_t n = 0;
     for (size_t y = y0; y < y1; y++) {
         uint8_t *d = w->dst + y * w->dst_pitch; const uint8_t *g = s + y * w->src_pitch;
-        if (!w->snap) { memcpy(d, g, w->row_bytes); continue; }
-        const uint8_t *o = w->snap + y * w->row_bytes;   // only what the GPU changed
-        if (lsnap_on()) { n += wb_row_diff(d, g, o, w->row_bytes); continue; }
+        if (!w->snap) { memcpy(d, g, rb); continue; }
+        const uint8_t *o = w->snap + y * rb;   // only what the GPU changed
+        if (narrow) { size_t lo = y == y0 ? i0 : 0, hi = y + 1 == y1 ? i1 + 1 : rb; n += wb_row_diff(d + lo, g + lo, o + lo, hi - lo); continue; }   // the first and last rows from the span's ends
         for (size_t i = 0; i < w->row_bytes;) {
             if (i + 8 <= w->row_bytes && !memcmp(g + i, o + i, 8)) { i += 8; continue; }
             size_t e = i; while (e < w->row_bytes && g[e] != o[e]) e++;
@@ -1053,6 +1075,7 @@ typedef struct {
     int pkg; uint64_t stamp, seen; const void *span; uint8_t *edge[2]; uint32_t edge_n[2];
     uint64_t rt_last; uint32_t rt_runs;   // the last present (+1) that drew into it as a pass's target, and in how many presents in a row up to it (gfx_vk_draw.inc rt_note)
     int refs, shared, mutable_, fixed_fmt; uint64_t used;   // mutable_: views in another format of the same texel size (a texture view's format); fixed_fmt: only its format and its sRGB twin (vt_create)   // texture objects (serials) resolving to it; in the sharing table; g_fence at its last lookup
+    VkImageUsageFlags usage; int ext_store;   // its usage; ext_store: STORAGE for views of another format only (EXTENDED_USAGE, vt_storage_up), so each view takes the usage its format has (view_get)
 } vtex;
 static nvn_hmap g_tex = {.klen = 8}, g_cpuw = {.klen = 8};   // serial → vtex; serials the CPU wrote (WriteTexels). Keyed by the 8-byte serial
 static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_edge_skips, g_up_bytes, g_draws_skipped;
@@ -1141,6 +1164,7 @@ static vtex *vt_create(const tex_t *t) {
     if (ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) u |= VK_IMAGE_USAGE_STORAGE_BIT;
+    v->usage = u;   // STORAGE added later if the texture is bound to an image slot all the same (vt_storage_up)
     // an uncompressed colour image may be viewed in another format of its texel size (NVN texture views: sRGB over UNORM and the like): mutable. So may a BC image
     // decoded on the CPU, which holds uncompressed texels: a BC7_SRGB view of a BC7 texture is its RGBA8 image viewed as RGBA8_SRGB (gfx_vk_draw.inc view_format)
     int mut = v->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !(f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK);
@@ -1188,6 +1212,61 @@ static vtex *vt_create(const tex_t *t) {
     vkBindImageMemory(g_vk.dev, v->img, v->mem, 0);
     vt_clear_new(v);
     return v;
+}
+// A texture bound to an image slot that was made without storage use, as nvn_mtl.m's image_prepare upgrades one (tex_upgrade): the game left NVN's image flag out of its
+// builder and registered it with RegisterTexture, and a shader loads or stores through it anyway. Ocarina of Time's title does it with a 1920x1080 RGBA8 target (a storage
+// view of an image without STORAGE, which is invalid) and a 2560x1440 RGBA8_SRGB one (its dispatch skipped: sRGB is no storage format here).
+// - The image is made again with STORAGE and MUTABLE_FORMAT, its levels and layers copied over, and swapped in under the same vtex: every serial and the sharing table keep it.
+// - The old image, its views and framebuffers go when the chunk completes, as vt_destroy's do, and the presented frame lets go of it first.
+// - A format the GPU cannot store to (sRGB) takes STORAGE for views in its UNORM twin alone (EXTENDED_USAGE, ext_store), which storage_view then makes.
+// Under g_bk; cb() ends an open render pass. 0: it cannot be (a decoded BC texture, multisample, depth or stencil, no format of it the GPU stores to)
+static uint64_t g_st_up;
+static int vt_storage_up(vtex *v) {
+    if (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) return 1;
+    VkFormat f = v->fmt, sf = f; VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
+    VkImageCreateFlags cf = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | ((v->desc.target == 8 || v->desc.target == 9) && v->layers % 6 == 0 ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0) |
+                            (v->type == VK_IMAGE_TYPE_3D && (v->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0);   // as vt_create makes them
+    int ext = 0;
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {   // EXTENDED_USAGE is Vulkan 1.1's
+        VkFormatProperties tp = {0}; sf = srgb_twin(f); if (sf) vkGetPhysicalDeviceFormatProperties(g_vk.pd, sf, &tp);
+        if (!sf || !(tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || (VK_API_VERSION_MAJOR(g_vk.props.apiVersion) == 1 && VK_API_VERSION_MINOR(g_vk.props.apiVersion) < 1)) sf = VK_FORMAT_UNDEFINED;
+        else { ext = 1; cf |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT; }
+    }
+    VkImageUsageFlags u = v->usage | VK_IMAGE_USAGE_STORAGE_BIT; VkImageFormatProperties ip;
+    const char *why = v->conv ? "a BC texture decoded on the CPU" : v->samples > 1 ? "multisample" : v->aspect != VK_IMAGE_ASPECT_COLOR_BIT ? "depth or stencil" : !sf ? "no format of it the GPU stores to" : NULL;
+    if (!why && (vkGetPhysicalDeviceImageFormatProperties(g_vk.pd, f, v->type, VK_IMAGE_TILING_OPTIMAL, u, cf, &ip) != VK_SUCCESS || ip.maxExtent.width < v->w || ip.maxExtent.height < v->h
+                 || ip.maxExtent.depth < v->d || ip.maxMipLevels < v->levels || ip.maxArrayLayers < v->layers)) why = "the GPU takes no storage image of its size and format";
+    VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkMemoryRequirements mr;
+    VkImageCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = cf, .imageType = v->type, .format = f, .extent = {v->w, v->h, v->d}, .mipLevels = v->levels, .arrayLayers = v->layers,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = u, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    if (!why && vkCreateImage(g_vk.dev, &ic, NULL, &img) != VK_SUCCESS) why = "vkCreateImage failed";
+    if (!why) {
+        vkGetImageMemoryRequirements(g_vk.dev, img, &mr); uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt == UINT32_MAX ? vkb_mem_type(mr.memoryTypeBits, 0) : mt};
+        if (vkAllocateMemory(g_vk.dev, &ma, NULL, &mem) != VK_SUCCESS) why = "no memory for it"; else vkBindImageMemory(g_vk.dev, img, mem, 0);
+    }
+    VkCommandBuffer c = why ? VK_NULL_HANDLE : cb(); if (!why && !c) why = "no command buffer";
+    if (why) {
+        if (img) vkDestroyImage(g_vk.dev, img, NULL);
+        if (mem) vkFreeMemory(g_vk.dev, mem, NULL);
+        RED_ONCE(123, "texture ser=%llu %ux%u format %d, made without storage use, is bound to an image slot and cannot take it (%s): skipped", (unsigned long long)v->serial, v->w, v->h, f, why); return 0;
+    }
+    cb_barrier();   // what drew it before the copy reads it
+    VkImageMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    VkImageCopy r[16]; uint32_t nr = 0;
+    for (uint32_t l = 0; l < v->levels && nr < 16; l++)
+        r[nr++] = (VkImageCopy){{VK_IMAGE_ASPECT_COLOR_BIT, l, 0, v->layers}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, v->layers}, {0, 0, 0},
+                                {v->w >> l ? v->w >> l : 1, v->h >> l ? v->h >> l : 1, v->type == VK_IMAGE_TYPE_3D ? (v->d >> l ? v->d >> l : 1) : 1}};
+    vkCmdCopyImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, nr, r);
+    cb_barrier();
+    vkb_frame_forget(v->serial);
+    views_drop(v->img); dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem);
+    v->img = img; v->mem = mem; v->usage = u; v->ext_store = ext; v->mutable_ = 1; v->fixed_fmt = 0; g_vt_gen++;
+    if (g_st_up++ < 8) LOG("[vk] texture ser=%llu %ux%u format %d bound to an image slot without storage use: made again with it%s (%llu so far)", (unsigned long long)v->serial, v->w, v->h, f,
+                           ext ? ", stored through its UNORM twin" : "", (unsigned long long)g_st_up);
+    return 1;
 }
 // Upload a texture's guest storage (deswizzled on the CPU; BC decoded when the GPU lacks it). The dirty-page stamp is taken and the pages protected before reading (nvn_mtl.m pkg_upload_)
 // texture uploads' CPU time (deswizzle, BC decode); pipelines made and their creation time: the long-frame lines (hle_nvn.c)
@@ -1346,7 +1425,11 @@ static int ab_take(vtex *v, const tex_t *t) {
 // takes over its storage (share_take_over).
 typedef struct { uint64_t pool; int64_t off; nvn_texdesc d; } share_key;
 static nvn_hmap g_share = {.klen = sizeof(share_key)};
-static share_key share_of(const tex_t *t) { share_key k; memset(&k, 0, sizeof k); k.pool = (uint64_t)(uintptr_t)t->pool; k.off = t->off; k.d = t->d; return k; }
+// NVN's image flag says how the texture is registered (mtl_reg_image adds it for RegisterImage), not what it is: the key leaves it out, as nvn_mtl.m's does, so a texture
+// drawn into and then registered as an image is one image, not a second, empty one beside it. One registered without it and bound to an image slot all the same takes
+// storage use then (vt_storage_up)
+static share_key share_of(const tex_t *t) { share_key k; memset(&k, 0, sizeof k); k.pool = (uint64_t)(uintptr_t)t->pool; k.off = t->off; k.d = t->d; k.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE; return k; }
+static int desc_same(const nvn_texdesc *a, const nvn_texdesc *b) { nvn_texdesc x = *a, y = *b; x.flags &= ~NVN_TEXTURE_FLAGS_IMAGE; y.flags &= ~NVN_TEXTURE_FLAGS_IMAGE; return !memcmp(&x, &y, sizeof x); }
 static void vt_unref(vtex *v) { if (--v->refs <= 0 && !v->shared) vt_destroy(v); }
 static void vt_ref(uint64_t serial, vtex *v) { nvn_hm_put(&g_tex, &serial, v); v->refs++; }
 static uint64_t g_share_taken;
@@ -1375,7 +1458,7 @@ static vtex *vt_get(const tex_t *ct) {
     if (!t || !t->serial || !vkb_up()) return NULL;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(30, "texture object no longer valid (magic %#x)", t->magic); return NULL; }
     vtex *v = nvn_hm_get(&g_tex, &t->serial);
-    if (v && (v->store != t->mem || memcmp(&v->desc, &t->d, sizeof v->desc))) {
+    if (v && (v->store != t->mem || !desc_same(&v->desc, &t->d))) {
         static int n; if (n++ < 8) LOG("[vk] texture ser=%llu met again with %s: made anew (storage %p, now %p)", (unsigned long long)t->serial, v->store != t->mem ? "other storage" : "another description", (const void *)v->store, (const void *)t->mem);
         nvn_hm_del(&g_tex, &t->serial); g_vt_gen++; vt_unref(v); v = NULL; }
     int pkg = is_packaged(t);
@@ -1678,6 +1761,7 @@ static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, u
 #include "gfx_vk_posrows.inc"   // the vertex shaders whose position reads its constant buffer rows at run time (vk_pos_rows)
 #include "gfx_vk_draw.inc"
 #include "gfx_vk_dscopy.inc"
+#include "gfx_vk_bcdec.inc"   // a GPU block encoder's blocks decoded into a BC texture the CPU decoded (bcd_decode)
 #include "gfx_vk_readback.inc"   // arena write-backs read through a cached copy where the arena reads slowly (DM_VK_WB_READBACK)
 #include "gfx_vk_shadow.inc"   // DM_VK_SKIP_SHADOWS: a game's shadow map passes left out (vk_shadow_rt)
 
@@ -2172,8 +2256,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         (unsigned long long)g_fwd_early, (unsigned long long)g_fwd_look, fwd_early());
     if (memo_log()) LOG("[vk] memo textures: %llu elements taken as stage_textures resolved them, %llu resolved again; samplers %llu found per ID, %llu made or looked up; image generation %llu (cumulative; gfx_vk_draw.inc tex_once, DM_VK_TEX_ONCE %d)",
         (unsigned long long)g_tc_hit, (unsigned long long)g_tc_again, (unsigned long long)g_sc_hit, (unsigned long long)g_sc_made, (unsigned long long)g_vt_gen, tex_once());
-    LOG("[vk] geometry kept on the GPU: %llu index / vertex bindings from kept copies, %llu copies kept (%llu MB now), %llu copied per draw (cumulative; gfx_vk_draw.inc gc_get)",
-        (unsigned long long)g_gc_hit, (unsigned long long)g_gc_made, (unsigned long long)(g_gc_bytes >> 20), (unsigned long long)g_gc_copy);
+    LOG("[vk] geometry kept on the GPU: %llu index / vertex bindings and %llu read-only storage buffer bindings from kept copies, %llu copies kept (%llu MB now), %llu copied per draw (cumulative; gfx_vk_draw.inc gc_get, sb_keep)",
+        (unsigned long long)(g_gc_hit - g_gc_sb), (unsigned long long)g_gc_sb, (unsigned long long)g_gc_made, (unsigned long long)(g_gc_bytes >> 20), (unsigned long long)g_gc_copy);
     { static unsigned long long f0; static uint64_t g0, w0; uint64_t g = atomic_load(&g_gpu_ns), w = atomic_load(&g_chunk_wait_ns);
       if (frame > f0) LOG("[vk] GPU busy %.2f ms per frame over the last %llu frames (%llu command buffers in all); the replay waited %.2f ms per frame for a free one of %d", (double)(g - g0) / 1e6 / (double)(frame - f0), frame - f0,
                           (unsigned long long)atomic_load(&g_gpu_chunks), (double)(w - w0) / 1e6 / (double)(frame - f0), g_nchunk);

@@ -127,6 +127,7 @@ typedef struct {
     struct { uint32_t miss; struct lmod *m; } var[4]; int nvar;   // fragment shaders: variants with unwritten inputs made constants (ps_variant)
     int b0;   // a module of its set (.spv, .z.spv, .tf.spv; ps_variant only makes inputs private) reads binding 0, the support buffer (spv_b0_used): stage_set writes it only then
     int wlayer;   // a vertex, tessellation or geometry shader that writes the layer (spv_layer_out): its draws get every layer of their targets (rp_prepare)
+    struct { uint32_t miss; struct lmod *m; } avar[4]; int navar;   // alpha-test variants (ps_alpha_mod, spv_alpha.h) by the inputs variant; a NULL module: the transform does not apply
     ds_list *dsf;   // its descriptor sets kept by each chunk, [2 chunk + tf] (dsl, dsl_tf): made at its first set (ds_get), never freed (as the shader)
     uint32_t ndesc;   // descriptors in dsl, an array's counted up to 1024 (what stage_set writes of it): DM_VK_SET_STATS=1 checks each stage_set writes them all
     uint8_t dsbig;   // bit tf: one set of its layout (dsl, dsl_tf) does not fit an empty pool (sh_get ds_fits, else ds_alloc_n, RED 93): ds_get gives none for it, without making another pool
@@ -647,7 +648,7 @@ static uint8_t *gc_alloc(int cls, int *blk, VkDeviceSize *off) {
         if (g_gc_nblk && g_gc_blk[g_gc_nblk - 1].used + n <= GC_BLOCK) { gc_blk *b = &g_gc_blk[g_gc_nblk - 1]; *blk = g_gc_nblk - 1; *off = b->used; b->used += n; return b->p + *off; }
         if (g_gc_nblk < (int)(GC_BUDGET / GC_BLOCK)) {
             gc_blk *b = &g_gc_blk[g_gc_nblk]; memset(b, 0, sizeof *b);
-            VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GC_BLOCK, .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
+            VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GC_BLOCK, .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};   // storage: sb_keep
             if (vkCreateBuffer(g_vk.dev, &bc, NULL, &b->b) != VK_SUCCESS) return NULL;
             VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g_vk.dev, b->b, &mr);
             uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -691,6 +692,19 @@ static gc_ent *gc_get(uintptr_t src, uint64_t n, uint64_t kind, uint64_t out_n, 
     return e;
 }
 static VkBuffer gc_buf(const gc_ent *e) { return g_gc_blk[e->blk].b; }
+// A storage buffer a shader only reads is kept the same way, as its raw bytes (kind 0, so a buffer also read as a vertex stream has one copy). It was copied into the arena once
+// in every chunk that read it and compared with its shadow (ucopy) at every other draw of the chunk: Super Smash Bros. Ultimate's battles read about 44 storage buffers a frame
+// (2.4 to 2.7 MB, tens of KB to hundreds each), the same bytes every frame, and copying and comparing them cost a Retroid Pocket 5's replay thread 29 µs a draw against 22 kept
+// (about 1.2 ms a frame). Its pending writes were dealt with before (draw_view lands them, sb_fwd binds a dispatch's on the GPU), and a write since the stamp, the game's or the
+// host's, sends it back to the copy as gc_get does. DM_VK_SB_KEEP=0 (env.txt): copied in every chunk, as before
+static uint64_t g_gc_sb;   // storage buffer bindings served from a kept copy (also counted in g_gc_hit)
+static int sb_keep_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_SB_KEEP"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_SB_KEEP=0: read-only storage buffers are copied in every chunk"); } return v; }
+static int sb_keep(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *off) {   // → 1 with *b / *off the kept copy (filled now when new); 0: copy it (ucopy)
+    if (!sb_keep_on()) return 0;
+    uint8_t *fill = NULL; gc_ent *e = gc_get((uintptr_t)addr, n, 0, n, &fill); if (!e) return 0;
+    if (fill) { size_t al = (n + 15) & ~(size_t)15; memcpy(fill, (const void *)(uintptr_t)addr, n); if (al > n) memset(fill + n, 0, al - n); }   // bound to the 16-byte range, as ucopy's
+    *b = gc_buf(e); *off = e->off; g_gc_sb++; return 1;
+}
 
 
 // ---------------- Bound state ----------------
@@ -704,7 +718,7 @@ static struct {
     int tex_base, samp_base; uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][6]; int has_vp; float dr[2]; int depth_clamp; float blend_color[4]; p_prim_restart restart;
     p_tf_bind tf[4]; uint64_t tf_off[4]; int tf_on, rast_discard;
-    uint8_t push[2][DMSH_PUSH_SIZE]; float alpha_ref;   // NVN2 push constants, graphics and compute blocks (read as c[DMSH_PUSH_BANK]); the alpha test's reference (no alpha test here yet)
+    uint8_t push[2][DMSH_PUSH_SIZE]; float alpha_ref;   // NVN2 push constants, graphics and compute blocks (read as c[DMSH_PUSH_BANK]); the alpha test's reference (spv_alpha.h)
 } D;
 static int g_d_init;
 // The pipeline key's state (vk_draw_) as the key takes it from D: the fields a blend or depth / stencil object sets, over zeroed bits (the bits they leave over are whatever
@@ -772,7 +786,7 @@ static int draw_state_op(uint32_t op, const void *a) {
                 int ch = 0;                                         // fields but alpha-to-coverage are not in the key)
                 switch (b->kind) {
                     case 0: { blend_st n, o; memcpy(&bs, b->bytes, sizeof bs); memset(&n, 0, sizeof n); memset(&o, 0, sizeof o); blend_k(&n, &bs); blend_k(&o, &D.blend[bs.target & 7]); ch = memcmp(&n, &o, sizeof n) != 0; break; }
-                    case 1: { color_st c; memcpy(&c, b->bytes, sizeof c); ch = c.blend_en != D.color.blend_en || c.logic_op != D.color.logic_op; break; }
+                    case 1: { color_st c; memcpy(&c, b->bytes, sizeof c); ch = c.blend_en != D.color.blend_en || c.logic_op != D.color.logic_op || c.alpha_func != D.color.alpha_func; break; }
                     case 2: ch = memcmp(&D.chmask, b->bytes, sizeof D.chmask) != 0; break;
                     case 3: { ms_st m; memcpy(&m, b->bytes, sizeof m); ch = m.a2c != D.ms.a2c; break; }
                     case 4: { poly_st p; memcpy(&p, b->bytes, sizeof p); ch = p.cull != D.poly.cull || p.front != D.poly.front || p.mode != D.poly.mode || p.offset_en != D.poly.offset_en; break; }
@@ -817,7 +831,7 @@ static int draw_state_op(uint32_t op, const void *a) {
             if (b->offset < DMSH_PUSH_SIZE && b->size <= DMSH_PUSH_SIZE - b->offset) memcpy(D.push[b->compute ? 1 : 0] + b->offset, b->data, b->size);
             else RED_ONCE(132, "push constants at %u, %u bytes, past the %u-byte block: dropped", b->offset, b->size, (unsigned)DMSH_PUSH_SIZE);
             return 1; }
-        case OP_ALPHA_REF: D.alpha_ref = ((const p_alpha_ref *)a)->ref; return 1;   // kept for an alpha test the replay does not do yet (the key's alpha_func is dropped too)
+        case OP_ALPHA_REF: D.alpha_ref = ((const p_alpha_ref *)a)->ref; return 1;   // the alpha test's reference: a push constant set at each draw (spv_alpha.h), not part of the key
         default: return 0;
     }
 }
@@ -856,6 +870,15 @@ make:
     if (swz) { cm.r = swz[0] < 6 ? S_[swz[0]] : cm.r; cm.g = swz[1] < 6 ? S_[swz[1]] : cm.g; cm.b = swz[2] < 6 ? S_[swz[2]] : cm.b; cm.a = swz[3] < 6 ? S_[swz[3]] : cm.a; }
     VkImageViewCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = v->img, .viewType = type, .format = k.fmt, .components = cm,
                                 .subresourceRange = {aspect, level, nlevels, layer, nlayers}};
+    // an image with STORAGE for views of another format (ext_store, vt_storage_up): a view would otherwise take the image's usage, and one in its own format would claim a
+    // storage use that format does not have. Each takes what its format supports, so the format (in the key) decides the usage
+    VkImageViewUsageCreateInfo vu = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+    if (v->ext_store) {
+        VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, k.fmt, &fp); VkFormatFeatureFlags ff = fp.optimalTilingFeatures;
+        vu.usage = v->usage & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT ? VK_IMAGE_USAGE_SAMPLED_BIT : 0) |
+                               (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT ? VK_IMAGE_USAGE_STORAGE_BIT : 0) | (ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0));
+        if (vu.usage) ic.pNext = &vu;
+    }
     if (vkCreateImageView(g_vk.dev, &ic, NULL, &iv) != VK_SUCCESS) { RED_ONCE(81, "image view of format %d type %d failed", v->fmt, type); return VK_NULL_HANDLE; }
     nvn_hm_put(&g_views, &k, iv);
     return iv;
@@ -1064,8 +1087,11 @@ static void prof_write(void) {
 // (one depth plane of a 32×32×32 BC4 texture per pass). Vulkan has no such attachment: the BC image itself was attached, and every submission holding that pass stopped the
 // Adreno 740's command processor ("CP opcode error", three at every Breath of the Wild start, in the kernel log), and the kernel driver dropped each such submission whole,
 // with everything else recorded in it (uploads, other passes). The pass draws into a shadow of blocks × blocks in the view's
-// format instead; the level's (layer's or depth plane's) blocks are copied into it before the pass and back after it (vkCmdCopyImage: a block and a texel of one size)
+// format instead; the level's (layer's or depth plane's) blocks are copied into it before the pass and back after it (vkCmdCopyImage: a block and a texel of one size).
+// A BC texture the CPU decoded (no BC textures on the GPU) is shadowed too, for BC4 and BC5: the shadow keeps its blocks between passes, and after each pass they are
+// decoded into the image on the GPU (gfx_vk_bcdec.inc bcd_decode) instead of copied back
 typedef struct { VkImage base; uint32_t lv, ly; VkFormat f; } bcrt_key;
+static int bcd_takes(const vtex *b); static int bcd_decode(vtex *b, vtex *s, uint32_t lv, uint32_t ly);   // gfx_vk_bcdec.inc
 static nvn_hmap g_bcrt = {.klen = sizeof(bcrt_key)};
 static struct { vtex *base, *sh; uint32_t lv, ly; } g_bcrt_pend[8];   // the pass's shadowed attachments: copied back at rp_end
 static uint64_t g_bcrt_n;
@@ -1079,9 +1105,9 @@ static VkImageSubresourceLayers bcrt_sub(const vtex *b, uint32_t lv, uint32_t ly
 static VkOffset3D bcrt_off(const vtex *b, uint32_t ly) { return (VkOffset3D){0, 0, b->type == VK_IMAGE_TYPE_3D ? (int32_t)ly : 0}; }
 // the shadow of base's level lv, layer (or depth plane) ly, for an attachment view of NVN format nf: NULL when base is not BC or the view is not one block per texel
 static vtex *bcrt_shadow(vtex *b, uint32_t nf, uint32_t lv, uint32_t ly) {
-    int bb = bc_block_bytes(b->fmt); uint32_t m = 0; uint8_t sw[4];
-    if (!bb || b->conv || !nvn_fmt_to_mtl(nf, &m, sw) || !m) return NULL;
-    VkFormat f = vk_of_mtl(m); if (!f || fmt_bytes(f) != bb) return NULL;
+    int bb = bc_block_bytes(b->conv ? b->nvfmt : b->fmt); uint32_t m = 0; uint8_t sw[4];   // a decoded image's blocks: its NVN format's
+    if (!bb || !nvn_fmt_to_mtl(nf, &m, sw) || !m) return NULL;
+    VkFormat f = vk_of_mtl(m); if (!f || fmt_bytes(f) != bb || (b->conv && !bcd_takes(b))) return NULL;
     bcrt_key k; memset(&k, 0, sizeof k); k.base = b->img; k.lv = lv; k.ly = ly; k.f = f;
     vtex *s = nvn_hm_get(&g_bcrt, &k); if (s) return s;
     uint32_t lw = b->w >> lv ? b->w >> lv : 1, lh = b->h >> lv ? b->h >> lv : 1;
@@ -1158,7 +1184,10 @@ static void lin_writeback(int i) {   // attachment i of the pass that ends
 static void rp_end(void) {
     if (!P.active) return;
     occl_end(); prof_pass_end(); vkCmdEndRenderPass(C->cb); P.active = 0; if (dump_on()) dump_pass_end();
-    for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) { bcrt_copy(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly, 1); g_bcrt_pend[i].sh = NULL; }
+    for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) {
+        if (g_bcrt_pend[i].base->conv) bcd_decode(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly);   // decoded on the GPU into the image the game samples
+        else bcrt_copy(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly, 1);
+        g_bcrt_pend[i].sh = NULL; }
     if (linwb_on()) for (int i = 0; i < 8; i++) if (P.cv[i]) lin_writeback(i);
     lsnap_drop_all();   // what no write-back took
 }
@@ -1256,7 +1285,7 @@ static int rp_prepare_(int layered) {
         vtex *sh = cv && cv->set_format ? bcrt_shadow(v, cv->format, lv, ly) : NULL;   // a BC texture written through a one-block-per-texel view (bcrt_shadow)
         if (sh) {
             VkCommandBuffer c = cb(); if (!c) continue;
-            bcrt_copy(v, sh, lv, ly, 0);
+            if (!v->conv) bcrt_copy(v, sh, lv, ly, 0);   // a decoded image holds texels, not blocks: its shadow keeps the blocks its last pass drew
             VkImageView iv = view_get(sh, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, NULL); if (!iv) continue;
             k.color[i] = sh->fmt; k.samples = sh->samples; cvw[i] = iv; nv++; P.cv[i] = sh; P.clv[i] = 0; P.cly[i] = 0; rt_note(sh);
             g_bcrt_pend[i].base = v; g_bcrt_pend[i].sh = sh; g_bcrt_pend[i].lv = lv; g_bcrt_pend[i].ly = ly;
@@ -1323,8 +1352,8 @@ static void ds_chunk_done(chunk *c);
 static void draw_chunk_reset(chunk *c) {
     for (int i = 0; i < c->nar; i++) c->ar[i].used = 0; c->ar_cur = 0;
     if (ds_recycle()) ds_chunk_done(c);
-    else { for (int i = 0; i < c->ndp; i++) vkResetDescriptorPool(g_vk.dev, c->dp[i], 0); c->dp_cur = 0; c->ndsc = 0; }   // the reset freed the copies' sets too
-    c->dsc_used = 0;   // the depth-stencil copies' sets (gfx_vk_dscopy.inc), free again
+    else { for (int i = 0; i < c->ndp; i++) vkResetDescriptorPool(g_vk.dev, c->dp[i], 0); c->dp_cur = 0; c->ndsc = 0; c->nbcd = 0; }   // the reset freed the copies' and decodes' sets too
+    c->dsc_used = 0; c->bcd_used = 0;   // the depth-stencil copies' sets (gfx_vk_dscopy.inc) and the BC decodes' (gfx_vk_bcdec.inc), free again
     for (int i = 0; i < c->nbv; i++) vkDestroyBufferView(g_vk.dev, c->bv[i], NULL); c->nbv = 0;
 }
 
@@ -1449,8 +1478,41 @@ static const struct { const char *n; size_t o, s; } PK_F[] = {{"z", offsetof(pip
     {"topo", offsetof(pipe_key, topo), 1}, {"restart", offsetof(pipe_key, restart), 1}, {"depth_clamp", offsetof(pipe_key, depth_clamp), 1}, {"ll", offsetof(pipe_key, ll), 1},
     {"color", offsetof(pipe_key, color), sizeof(color_st)}, {"chmask", offsetof(pipe_key, chmask), sizeof(chmask_st)}, {"blend", offsetof(pipe_key, blend), sizeof(((pipe_key *)0)->blend)},
     {"ms", offsetof(pipe_key, ms), sizeof(ms_st)}, {"poly", offsetof(pipe_key, poly), sizeof(poly_st)}, {"ds", offsetof(pipe_key, ds), sizeof(ds_st)}};
-typedef struct { VkPipeline p; VkPipelineLayout pl; } pipe_t;
+typedef struct { VkPipeline p; VkPipelineLayout pl; int alpha; } pipe_t;   // alpha: the fragment module is spv_alpha.h's, and the draw sets its reference (a push constant)
 static nvn_hmap g_pipes = {.klen = sizeof(pipe_key)};
+static int is_int_fmt(VkFormat f);   // below: an integer colour format, which takes no alpha test (as in OpenGL)
+// Whether this draw runs NVN's alpha test: a fragment shader, a function other than ALWAYS, and no integer colour 0. A depth-only pass runs it too (shadow maps of
+// foliage rely on it, as on Metal): the test reads what the shader writes to colour 0 whether or not the pass keeps it
+static int alpha_test_on(const pipe_key *k) {
+    return k->sh[1] && !k->tf && k->color.alpha_func && k->color.alpha_func != NVN_ALPHA_FUNC_ALWAYS && !(k->ncolor && is_int_fmt(k->rk.color[0]));
+}
+// The fragment shader's module with the alpha test in it (spv_alpha.h): one per shader and inputs variant, its function set at each pipeline (VkSpecializationInfo,
+// SpecId 0) and the reference a push constant set at each alpha-tested draw, so one module serves every function and reference. A shader whose earlier stage
+// leaves inputs unwritten is transformed first (spv_drop_inputs), then the alpha test (lm_code). NULL: the transform does not apply (colour 0 is no vec4 of
+// float), the draw keeps the shader as it is, and that is remembered so no pipeline retries it
+static pthread_mutex_t g_alpha_mu = PTHREAD_MUTEX_INITIALIZER;   // one variant per shader and inputs variant, made here and in the prewarm thread (pipe_prep) outside the replay's lock
+static lmod *ps_alpha_mod_locked(vshader *s, uint32_t miss) {
+    for (int i = 0; i < s->navar; i++) if (s->avar[i].miss == miss) return s->avar[i].m;
+    char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
+    lmod *m = lm_new_a(p, miss, 1, NULL);   // the code goes through spv_alpha.h (lm_code), and its identifier is of the test in it
+    if (s->navar < 4) { s->avar[s->navar].miss = miss; s->avar[s->navar++].m = m; }
+    if (m) { static int nl; if (nl++ < 8) LOG("[vk] fragment shader %s: alpha-test variant (its function a specialization constant, the reference a push constant)", s->key); }
+    return m;
+}
+static lmod *ps_alpha_mod(vshader *s, uint32_t miss) {   // the cache and the module are one thread's at a time (pipeline creation, the prewarm thread)
+    pthread_mutex_lock(&g_alpha_mu);
+    lmod *m = ps_alpha_mod_locked(s, miss);
+    pthread_mutex_unlock(&g_alpha_mu);
+    return m;
+}
+// The fragment shader's module: the alpha-test variant (spv_alpha.h), and a variant when the earlier stage leaves inputs unwritten (spv_drop_inputs). *alpha is 1
+// when the alpha variant is the one returned; the caller sets the function's specialization then
+static lmod *pipe_ps_mod(const pipe_key *k, vshader *s, int *alpha) {
+    const vshader *pv = k->sh[2] ? k->sh[2] : k->sh[0]; uint32_t miss = pv ? s->io_in & ~pv->io_out : 0;
+    *alpha = 0;
+    if (alpha_test_on(k)) { lmod *m = ps_alpha_mod(s, miss); if (m) { *alpha = 1; return m; } }
+    return miss ? ps_variant(s, miss) : s->mod;
+}
 // ---- Pipelines made again at start ----
 // Creating a pipeline costs the Adreno driver about 2 ms (a shader compile; less when its pipeline cache has the binary): Super Mario Bros. Wonder made 122 in one
 // frame entering a level (222 ms) and a few every time a new effect showed up. Every pipeline made is appended to <DM_PIPELINE_CACHE>.keys (its shaders' keys, the
@@ -1573,17 +1635,24 @@ static void pb_dump(void) {   // crash.c, on the crashing thread, after its back
 static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t *onva, VkPrimitiveTopology *otp) {
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &g_empty_dsl); }
     VkDescriptorSetLayout sets[POOL_SET + 1] = {g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl}; uint32_t nset = 1;
-    VkPipelineShaderStageCreateInfo st[4]; lmod *lms[4]; uint32_t ns = 0;
+    VkPipelineShaderStageCreateInfo st[4]; lmod *lms[4]; uint32_t ns = 0; VkSpecializationInfo psi; memset(&psi, 0, sizeof psi);
+    VkSpecializationMapEntry pme[1]; uint32_t psv = 0; const vshader *pspec = NULL;
     for (int i = 0; i < 4; i++) { vshader *s = k->sh[i]; if (!s) continue;
         sets[s->set & 3] = k->tf ? s->dsl_tf : s->dsl; if ((uint32_t)(s->set & 3) + 1 > nset) nset = (uint32_t)(s->set & 3) + 1;
         lmod *mod = k->tf ? s->modtf : s->stage == SH_VS && k->z && s->modz ? s->modz : s->mod;
-        if (s->stage == SH_PS) { const vshader *pv = k->sh[2] ? k->sh[2] : k->sh[0]; uint32_t miss = pv ? s->io_in & ~pv->io_out : 0; if (miss) mod = ps_variant(s, miss); }   // see spv_drop_inputs
+        if (s->stage == SH_PS) { int alpha = 0; mod = pipe_ps_mod(k, s, &alpha);   // the alpha test (spv_alpha.h) and unwritten inputs (spv_drop_inputs)
+            if (alpha) {   // the variant's function, by SpecId (spv_alpha.h decorates it 0); the reference arrives in a push constant
+                pme[0] = (VkSpecializationMapEntry){0, 0, 4}; psv = k->color.alpha_func; psi = (VkSpecializationInfo){1, pme, 4, &psv}; pspec = s; } }
         if (!mod) return VK_ERROR_INITIALIZATION_FAILED;
-        lms[ns] = mod; st[ns++] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = s->vkstage, .pName = "main",
-            .pSpecializationInfo = s->stage == SH_VS && pos_rows_for(s->key) ? &g_pr_spec : NULL};   // its module: lm_pipeline; run-time rows in the position (gfx_vk_posrows.inc)
+        lms[ns] = mod; st[ns] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = s->vkstage, .pName = "main"};   // its module: lm_pipeline
+        if (s->stage == SH_PS && pspec == s) st[ns].pSpecializationInfo = &psi;
+        if (s->stage == SH_VS && pos_rows_for(s->key)) st[ns].pSpecializationInfo = &g_pr_spec;   // run-time rows in the position (gfx_vk_posrows.inc)
+        ns++;
         if (s->pool) { sets[POOL_SET] = g_pool_dsl; nset = POOL_SET + 1; } }
-    VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nset, .pSetLayouts = sets};
+    VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};   // the alpha test's reference (spv_alpha.h); unused by shaders that do not declare it
+    VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nset, .pSetLayouts = sets, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &pp->pl) != VK_SUCCESS) return VK_ERROR_INITIALIZATION_FAILED;
+    pp->alpha = pspec != NULL;
     VkVertexInputBindingDescription vb[32]; VkVertexInputAttributeDescription va[16]; VkVertexInputBindingDivisorDescriptionEXT vd[32]; uint32_t nvd = 0; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
     for (int i = 0; i < 16; i++) {
         va_st a; memcpy(&a, &k->attr[i], 4);
@@ -1649,13 +1718,9 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     *ons = ns; *onva = nva; *otp = tp;
     return pr;
 }
-static lmod *pipe_ps_mod(const pipe_key *k, vshader *s) {   // the fragment shader's module: a variant when the earlier stage leaves inputs unwritten (spv_drop_inputs)
-    const vshader *pv = k->sh[2] ? k->sh[2] : k->sh[0]; uint32_t miss = pv ? s->io_in & ~pv->io_out : 0;
-    return miss ? ps_variant(s, miss) : s->mod;
-}
 static void pipe_prep(const pipe_key *k) {   // under the lock: what pipe_make would otherwise create in shared state
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &g_empty_dsl); }
-    for (int i = 0; i < 4; i++) if (k->sh[i] && k->sh[i]->stage == SH_PS && !k->tf) pipe_ps_mod(k, k->sh[i]);
+    for (int i = 0; i < 4; i++) if (k->sh[i] && k->sh[i]->stage == SH_PS && !k->tf) { int a; pipe_ps_mod(k, k->sh[i], &a); }
 }
 // ---------------- Pipelines met for the first time, built in the background ----------------
 // A pipeline met for the first time cost the driver's compile on the replay thread, which the game's frame waits for: 20 to 35 ms a graphics pipeline on an Adreno 830, and the
@@ -1983,7 +2048,7 @@ static VkBufferView tbuf_view(const tex_t *t, int write, int cs) {   // cs: a di
     C->bv[C->nbv++] = v;
     return v;
 }
-// a storage image view of a texture: its own image (created with storage usage for NVN_TEXTURE_FLAGS_IMAGE), at the view's level and layers
+// a storage image view of a texture: its own image (created with storage usage for NVN_TEXTURE_FLAGS_IMAGE, or given it when first bound to an image slot: vt_storage_up), at the view's level and layers
 // A storage view: the image is viewed in the format the shader declares (Vulkan needs them to match), which must have its texel size; Unknown takes the image's own.
 // 0 when it cannot be (the draw is then skipped: a wrong-format storage image is undefined, and can hang the GPU)
 // A texture view's own format (view_t set_format): the image viewed in it when it is mutable and the texel sizes match; 0 = the image's
@@ -2001,10 +2066,32 @@ static VkFormat view_format(const vtex *v, const view_t *vv) {
     return f;
 }
 static int g_bind_bad;   // set by stage_set when a binding has no valid descriptor: the draw / dispatch is skipped
+// An image slot's texture made without storage use takes it (vt_storage_up), unless it is a target of the pass a draw prepared (rp_prepare ran before stage_set): rp_start would
+// begin that pass's framebuffer, made on the image the upgrade replaces. A dispatch's copy ends the pass, and the next rp_prepare makes the targets' views again
+// DM_VK_STORAGE_UP (env.txt): 0 leaves such a texture as before (bound as it is, an sRGB one skipped). 1 (default) upgrades one whose own format the GPU stores to, and still
+// skips one that would be stored through its UNORM twin (sRGB): with that, Ocarina of Time's title runs its upscaler's compute, which on the Pad 3's Adreno 830 drew noise over the
+// whole picture and took the GPU from 24 to 108 ms a frame (DeathKhan's nx2android fork met the same and replaced the upscaler). 2: those too, through the twin
+static int st_up_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_VK_STORAGE_UP"); m = e && *e >= '0' && *e <= '2' ? *e - '0' : 1; if (m != 1) LOG("[vk] DM_VK_STORAGE_UP=%d: %s", m, m ? "a texture bound to an image slot without storage use takes it, an sRGB one through its UNORM twin" : "a texture bound to an image slot without storage use is bound as it is"); } return m; }
+static int img_up(vtex *v, int compute) {
+    int m = st_up_mode(); if (!m) return 1;
+    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, v->fmt, &fp);
+    if (m == 1 && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+        RED_ONCE(125, "texture ser=%llu %ux%u format %d, made without storage use, is bound to an image slot in a format the GPU cannot store to: skipped (DM_VK_STORAGE_UP=2 stores it through its UNORM twin)", (unsigned long long)v->serial, v->w, v->h, v->fmt);
+        return 0; }
+    if (!compute) { int hit = P.dv == v; for (int i = 0; i < 8; i++) hit |= P.cv[i] == v;
+        if (hit) { RED_ONCE(124, "texture ser=%llu, made without storage use, is bound to an image slot of a draw that renders to it: skipped", (unsigned long long)v->serial); return 0; } }
+    return vt_storage_up(v);
+}
 static VkImageView storage_view(vtex *v, const view_t *vv, VkImageViewType vt, VkFormat decl) {
     VkFormat f = decl ? decl : v->fmt;
     if (f != v->fmt && (v->conv || !fmt_bytes(v->fmt) || fmt_bytes(v->fmt) != fmt_bytes(f))) { RED_ONCE(110, "image of format %d bound where the shader declares format %d: skipped", v->fmt, f); return VK_NULL_HANDLE; }
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
+    // an sRGB format the GPU cannot store to is stored through its UNORM twin, texels as the shader writes them, as Maxwell's image stores do and the Mac's linear-twin
+    // views (nvn_mtl.m img_fit); the image takes STORAGE for such views (vt_storage_up)
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && srgb_twin(f)) {
+        VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, srgb_twin(f), &tp);
+        if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = srgb_twin(f); fp = tp; }
+    }
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || v->conv) { RED_ONCE(104, "image format %d is not storage-capable here: skipped", f); return VK_NULL_HANDLE; }
     g_view_fmt = f == v->fmt ? VK_FORMAT_UNDEFINED : f;
     VkImageView iv = view_get(v, vt, vv && vv->set_levels ? vv->base_level : 0, 1, vv && vv->set_layers ? vv->min_layer : 0, vv && vv->set_layers ? vv->nlayers : 0, VK_IMAGE_ASPECT_COLOR_BIT, NULL);
@@ -2277,7 +2364,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         VkDeviceSize ao;   // ao: the arena offset (off above is the c0 / uniform buffer word)
         int wr_ = (sb->flags & 1) != 0;   // written by the shader
         if (u && u->addr && (!wr_ || s->stage == SH_CS) && sb_fwd(u->addr, n, wr_, &b, &ao)) g_buf_fwd[wr_]++;   // on the GPU from a dispatch's pending write (buf_fwd)
-        else if (u && u->addr && !wr_) { if (!ucopy((const void *)(uintptr_t)u->addr, n, (n + 15) & ~(size_t)15, &b, &ao)) return 0; }   // read only: shared as uniforms are
+        else if (u && u->addr && !wr_) { if (!sb_keep(u->addr, n, &b, &ao) && !ucopy((const void *)(uintptr_t)u->addr, n, (n + 15) & ~(size_t)15, &b, &ao)) return 0; }   // read only: kept between frames (sb_keep), or shared as uniforms are
         else if (u && u->addr) { uint8_t *d = ar_alloc((n + 15) & ~(size_t)15, &b, &ao); if (!d) return 0; memcpy(d, (const void *)(uintptr_t)u->addr, n);
             if (sb->flags & 1) {   // written by the shader: what it changed is copied back when the chunk completes
                 wb_t *w = wb_add(); uint8_t *snap = malloc(n); if (snap) memcpy(snap, (const void *)(uintptr_t)u->addr, n);   // from guest memory, as d was: the arena may be write-combined (ar_mem_type)
@@ -2359,6 +2446,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             if (tbuf) { VkBufferView v = rg ? tbuf_view(&rg->t, 1, s->stage == SH_CS) : VK_NULL_HANDLE; bvs[nbv + e] = v ? v : dummy_tbuf(); continue; }
             const tc_ent *ce = tex_once() ? tc_el(tc, ci++, tid) : NULL; const treg_t *ri = ce ? (ce->r.ok ? &ce->r : NULL) : rg;   // as the textures above
             VkImageView iv = VK_NULL_HANDLE; vtex *v = !ri ? NULL : ce ? ce->v : vt_get(&ri->t);
+            if (v && !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !img_up(v, s->stage == SH_CS)) { g_bind_bad = 1; v = NULL; }   // made without storage use (vt_storage_up)
             if (v) { iv = storage_view(v, ri->has_v ? &ri->v : NULL, vt, t->fmt); if (!iv) g_bind_bad = 1; }
             if (!iv) iv = dummy_storage(vt, t->fmt);
             if (!iv) g_bind_bad = 1;
@@ -2719,7 +2807,9 @@ static void pipe_key_build(pipe_key *k, int prim) {
       for (int s = 0; s < 16; s++) if (!(streams >> s & 1)) k->stream[s] = (vs_st){0, 0};
       for (uint32_t i = 0; i < 8; i++) if (i >= k->ncolor || !(k->color.blend_en >> i & 1)) memset(&k->blend[i], 0, sizeof k->blend[i]);
       if (k->ncolor < 8) k->chmask.mask &= (1u << (4 * k->ncolor)) - 1;
-      k->color.alpha_func = 0;
+      // the alpha test's function stays in the key while a test runs (a fragment shader and a float colour 0): its pipeline's fragment module is the
+      // alpha-test variant, made by the function and the reference (ps_alpha_mod, VkSpecializationInfo)
+      if (!(k->sh[1] && !k->tf && k->color.alpha_func && k->color.alpha_func != NVN_ALPHA_FUNC_ALWAYS && !(k->ncolor && is_int_fmt(k->rk.color[0])))) k->color.alpha_func = 0;
       if (k->ncolor < 8) k->color.blend_en &= (1u << k->ncolor) - 1;   // enables of targets the pass does not have, and which of the three polygon offsets is on (the pipeline
       k->poly.offset_en = k->poly.offset_en != 0;                       // takes one depth-bias switch): 186,825 keys listed after a few sessions of Super Mario Bros. Wonder
       if (k->color.logic_op != NVN_LOGIC_OP_COPY && !g_vk_feat.logicOp) k->color.logic_op = NVN_LOGIC_OP_COPY;   // drawn as copy anyway (pipe_make)
@@ -2794,6 +2884,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     VkCommandBuffer c = C->cb;
     occl_begin();
     bf_pipeline(c, pp->p);   // binds the command buffer already holds are left out (bf_*)
+    if (pp->alpha) vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof D.alpha_ref, &D.alpha_ref);   // the alpha test's reference, data rather than a key (spv_alpha.h)
     for (int i = 0; i < 4; i++) if (k.sh[i]) vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, (uint32_t)(k.sh[i]->set & 3), 1, &sets[i], k.sh[i]->ndyn, dyn[i]);
     if (pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { g_drop[3]++; return 0; }
     // dynamic state: the viewport (see the file header for the origin), the scissor, stencil, blend constants, depth bias
