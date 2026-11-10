@@ -2086,8 +2086,9 @@ static VkImageView storage_view(vtex *v, const view_t *vv, VkImageViewType vt, V
     if (f != v->fmt && (v->conv || !fmt_bytes(v->fmt) || fmt_bytes(v->fmt) != fmt_bytes(f))) { RED_ONCE(110, "image of format %d bound where the shader declares format %d: skipped", v->fmt, f); return VK_NULL_HANDLE; }
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
     // an sRGB format the GPU cannot store to is stored through its UNORM twin, texels as the shader writes them, as Maxwell's image stores do and the Mac's linear-twin
-    // views (nvn_mtl.m img_fit); the image takes STORAGE for such views (vt_storage_up)
-    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && srgb_twin(f)) {
+    // views (nvn_mtl.m img_fit); the image takes STORAGE for such views (vt_storage_up). Only into an image that has it: with DM_VK_STORAGE_UP=0 an sRGB image without it was
+    // viewed through its twin all the same, an invalid storage view, and Ocarina of Time's title then ran its movie compositor at 8 fps instead of skipping it as before
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && srgb_twin(f)) {
         VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, srgb_twin(f), &tp);
         if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = srgb_twin(f); fp = tp; }
     }
