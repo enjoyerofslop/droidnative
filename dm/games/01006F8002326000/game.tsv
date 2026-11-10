@@ -1,4 +1,4 @@
-# Game profile of Animal Crossing: New Horizons (Switch, base game v0 + update 3.0.3 = v2228224, with the Happy Home Paradise add-on). In bring-up
+# Game profile of Animal Crossing: New Horizons (Switch, base game v0 + update 3.0.3 = v2228224, with the Happy Home Paradise add-on). Plays on the iPhone, and on Android at 30 fps (dm/android/baselines.md)
 # Format: see dm/games/README.md
 # Nintendo EPD's engine (code name Park; sead / agl / gsys, NintendoWare G3d / Ui2d / Vfx2 / Atk / Font, Havok, Pia and NEX for local and online play) on SDK 20.5.4, NVN;
 # modules main + subsdk0 (NintendoSDK_movie) + sdk. RomFS: 97,997 zstd files (.zs, most of them models), BWAV sound, a few Yaz0 SARC archives (.szs), and the in-flight movie

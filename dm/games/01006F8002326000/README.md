@@ -78,6 +78,5 @@ General host changes first needed here; each applies to every game:
 ## Open
 
 - Check the island map (issue #73) with the host's alpha test.
-- `game.tsv` still describes the game as "In bring-up", while it plays on the iPhone.
 - A save on the Mac (the end of the first day) has not been reached.
 - The keyboard's 8 geometry shaders do not translate.
