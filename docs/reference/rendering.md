@@ -2142,6 +2142,20 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** on the Retroid Pocket 5, the crashing pipeline (`f8d70797a143b99f`, `b2f8ca02b9c1a06c`) with the fragment shader's shuffle made a copy of its own value built, and the crash moved to the next of the 23 (`74f249b01166d890`); with the lane ID taken out and the shuffle kept, it still crashed; with all 23 shuffles taken out the game booted. With the fix, `t_quad_shuffle`'s four shuffles are right in all 4,096 pixels, NaN patterns included. Every module rewritten from the packed shaders passes spirv-val: Brilliant Diamond 23 of 21,688, Animal Crossing 500 (a ballot each), Link's Awakening 5, Final Fantasy Resonance 548 fragment shaders (its 1,199 compute ones are left), Mario Kart World 120. With the Adreno 740 and 830's stages (`0x30`), not one module of Brilliant Diamond, Animal Crossing, Link's Awakening, Super Mario Odyssey, Skyward Sword HD or Smash is touched (none uses subgroup operations outside fragment and compute shaders).
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) on a Retroid Pocket 5 ([Android baselines](../../dm/android/baselines.md), problem 2): it boots on the phone's own driver and reaches Eterna City.
 
+### Draws of billions of instances skipped
+
+- **Symptom:** Android only: the game stops drawing, its sound and vsync going on, and the log has `submission N took 2034–10634 ms on the GPU, its end timestamp never written (the driver's hang recovery cut it short)` with a draw of `… x 1366987687 instances` in the submission's list. It happens in every run, at the same scene.
+- **Cause:** the game's own instance count. Final Fantasy Resonance's first field on the Adreno 730 (a Moto Razr Plus 2023) asks for 1 to 3.8 billion instances (0x7993a7d2, 0x7a93a3c2, 0xe0ad0a27, …) of one indexed quad (vertex shader `fb570ef861debd17`, 6 indices) every frame. The GPU works through them until the driver's hang recovery.
+  - It's a direct draw, not an indirect one read on the CPU.
+  - The same field plays on the Adreno 740 and 830.
+  - Not the cause: 32-lane warps in compute shaders (`spv_wide` over compute kept it), the write-back read path (`DM_VK_WB_READBACK=0` kept it), compute shared memory over the GPU's 32 KB (none asks for more), failed pipelines or dropped draws (none).
+  - Where the count comes from isn't found yet: most likely a value the GPU writes and the game reads back.
+- **Fix, a mitigation:** `vk_draw__` skips a draw of more than 2^24 instances, more than any Switch game draws, with a once-only red line naming its shaders and count. The GPU doesn't hang, and what the draw would have shown is missing; the cause stays open.
+- **Check:** Final Fantasy Resonance's `field` route on the Razr.
+  - Without the skip, the GPU hangs as the field appears in every run (5 of 5), with no frame after.
+  - With it (the same condition in a diagnostic build), the field plays at 15–17 fps through the route's walk north, with no hang.
+- **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md) on a Moto Razr Plus 2023 (Adreno 730, Qualcomm's driver V@0615.98).
+
 ### Maxwell's 32-lane warps in a wider subgroup
 
 - **Symptom:** Android only, on a GPU whose subgroups have more than 32 lanes (the Adreno 830: 64 in fragment and compute shaders, its only size): in a fragment shader that exchanges values within its 2×2 quad (Maxwell's `fwidth` and fine derivatives through SHFL), the pixels of lanes 32 and up read another quad's value, or keep their own: half of each wave's pixels get a wrong derivative. No `[RED]` line; the log's `subgroup operations in stages 0x30, 64 lanes` names such a GPU.

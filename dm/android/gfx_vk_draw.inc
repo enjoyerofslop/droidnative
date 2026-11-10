@@ -2906,6 +2906,10 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     { float db[3] = {D.po.units, g_vk_feat.depthBiasClamp ? D.po.clamp : 0, D.po.factor}; if (!bf_same(c, BF_DB, g_bf.db, db, sizeof db)) vkCmdSetDepthBias(c, db[0], db[1], db[2]); }
     // indices: copied, quads made triangles; vertex range for the vertex data copy
     int64_t vlo = 0, vhi = 0; uint32_t count = dw ? (uint32_t)dw->count : (uint32_t)di->count, inst = (uint32_t)(dw ? dw->instances : di->instances); if (!inst) inst = 1;
+    // More instances than any Switch game draws (2^24): the GPU would work through them until the driver's hang recovery cut the submission short, and the game drew no
+    // frame after. Final Fantasy Resonance's first field on the Adreno 730 asks 1 to 3.8 billion of one quad every frame, its own count (not found yet). A mitigation
+    if (inst > (1u << 24)) { RED_ONCE(177, "a draw of %u instances (%#x) skipped, shaders %s %s, %u %s: more than any Switch game draws; the GPU would run it until its hang "
+                                    "recovery (said once; every such draw is skipped)", inst, inst, k.sh[0] ? k.sh[0]->key : "-", k.sh[1] ? k.sh[1]->key : "-", count, di ? "indices" : "vertices"); return 1; }
     int quads = prim == 7, qstrip = prim == 8; VkBuffer ib = VK_NULL_HANDLE; VkDeviceSize ioff = 0; uint32_t icount = count; int i32 = 0;
     if (di) {
         int isz = di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4; const uint8_t *src = (const uint8_t *)(uintptr_t)di->ibuf; uint32_t mx = 0, mn = UINT32_MAX;
