@@ -7,7 +7,8 @@ and Skyward Sword HD the same evening on `main` at `ee18169a`. Each game was pac
 not a verdict: every known problem below that is not marked fixed is open. The Samsung Galaxy S25 Edge's column and Final Fantasy Resonance's rows were
 added 2026-11-10, measured the same way on `main` at `cf42941d` (Brilliant Diamond not yet on the S25 Edge). The Retroid Pocket 5's rows for Odyssey,
 Brilliant Diamond, Animal Crossing and Link's Awakening were measured again 2026-11-10 on `main` at `54e21235`, which turns on a cached copy of storage-buffer
-write-backs on that device's driver for every game (problem 13); with the copy off (`DM_VK_WB_READBACK=0`) only Brilliant Diamond's Eterna City changes.
+write-backs on that device's driver for every game (problem 13); with the copy off (`DM_VK_WB_READBACK=0`) only Brilliant Diamond's Eterna City changes. Super Smash
+Bros. Ultimate's Retroid Pocket 5 rows were measured again the same day on `main` at `3b07c5cf` (problem 16).
 
 ## Devices
 
@@ -42,8 +43,8 @@ median GPU time per frame. Animal Crossing runs at 30 fps on the Switch too.
 | **Animal Crossing: New Horizons 3.0.3**, the new game's airport (a fresh save) | 30 · 33.3 / 34.7–35.4 · GPU 5.3 | 30 · 33.3 / 35.7–35.8 · GPU 7.1 | 30 · 33.2–33.3 / 35.7–36.0 · GPU 12.3–12.4 (2026-11-10, `main` 54e21235) | 30 · 33.4 / 35.8–35.9 · GPU 15.8 |
 | Animal Crossing, outside the player's house (a save) | 30 · 33.3–33.4 / 35.7–35.8 · GPU 9.4–9.7 | 29.9 · 33.3–33.4 / 38.0–38.1 · GPU 15.5–15.9 | 30.0 · 33.3 / 36.3–36.5 · GPU 21.8–22.3 (2026-11-10, after the save fix below; 30.0 again on `main` 32302b99, and with `DM_VK_WB_READBACK=0`) | 30 · 33.2–33.4 / 35.6–36.3 · GPU 22.7–23.1 |
 | **Super Smash Bros. Ultimate 13.0.5**, boot with Android's Roboto as the shared font (fixed: problem 3) | **Crashes** 2–4 s in | **Crashes** | **Crashes** | not run (fixed before) |
-| Smash, the opening movie (with a hinted shared font, now packed with the game) | 60 · 12.0 / 33.9 | 59.9 · 13.1–13.4 / 34.7–35.1 | 59.7 · 13.5–13.9 / 35.5–36.0 | 60 · 9.8–12.4 / 33.5–33.7 · GPU 1.9–2.1 |
-| Smash, a battle (a fuller shared font; stage and CPU fighter vary) | 39.7–59.3 fps | 16.8–29.7 fps, frames up to 215 ms | 13.4–19.3 fps, frames up to 368 ms | 59.9 fps, frames up to 52 ms · GPU 6.3–6.6 |
+| Smash, the opening movie (with a hinted shared font, now packed with the game) | 60 · 12.0 / 33.9 | 59.9 · 13.1–13.4 / 34.7–35.1 | 59.8–59.9 · 11.9–13.9 / 35.8–36.2 · GPU 2.0 (2026-11-10, `main` 3b07c5cf; 59.7 on 2026-11-08) | 60 · 9.8–12.4 / 33.5–33.7 · GPU 1.9–2.1 |
+| Smash, a battle (a fuller shared font; stage and CPU fighter vary) | 39.7–59.3 fps | 16.8–29.7 fps, frames up to 215 ms | 57.0–58.8 · 16.8–17.1 / 22.0–24.4 · GPU 8.5–9.5, frames up to 112–119 ms (2026-11-10, `main` 3b07c5cf: both runs on Fountain of Dreams, the warm-up 56.9 on another stage; from an empty pipeline cache 59.4 on Mushroom Kingdom; 13.4–19.3 fps and frames up to 368 ms on 2026-11-08; problem 16) | 59.9 fps, frames up to 52 ms · GPU 6.3–6.6 |
 | **The Legend of Zelda: Link's Awakening 1.1.0**, the opening movie (a fresh save) | 59.8–59.9 · 16.7 / 17.6–17.7 · GPU 2.3–2.4 | 59.7 · 16.7 / 16.8 · GPU 4.5 (the other run crashed at boot) | 58.8–59.1 · 16.7 / 17.0–17.4 · GPU 5.3–5.7 (2026-11-10, `main` 54e21235) | 60 · 16.7 / 16.8 · GPU 4.9 |
 | Link's Awakening, the overworld at the Ancient Ruins (a save) | 59.9–60 · 16.7 / 17.2–17.3 · GPU 4.1 | 31.3 · 33.2 / 34.7 · GPU 12.0 (the other run crashed at boot) | 32.3–32.4 · 33.1–33.2 / 34.6–34.8 · GPU 12.9 (2026-11-10, `main` 54e21235; 34.7–36.0 on an earlier `main`; the game falls to its 30 fps interval, problem 12) | 38.1–44.6 · 16.8–32.5 / 33.8–34.1 · GPU 13.0–13.7 |
 | **The Legend of Zelda: Skyward Sword HD 1.0.1**, the opening movie (a fresh save) | 55.2–55.9 · 18.1–18.3 / 36.6–37.7 · GPU 2.3–2.4 | 59.9–60 · 16.7 / 24.5–25.1 · GPU 2.8 | 41.1–41.4 · 24.4–24.6 / 49.1–49.8 · GPU 3.7 | 60 · 16.6 / 18.0–18.1 · GPU 2.5 |
@@ -290,6 +291,20 @@ Numbered in the order they were found, so links to a number stay right:
     - **Fix.** A render pass attaches each image once, on every GPU, and leaves its other slots unused (`DM_VK_DUP_SLOTS`, [rendering.md](../../docs/reference/rendering.md#one-image-in-two-colour-slots-of-a-pass-is-drawn-wrong-on-the-adreno-830-android)). About 18 passes a frame in the Shrine.
     - **Check** (S25 Edge, main 54e21235 with the fix and BotW's defaults, a warm-up and 2 runs each way): the Shrine is drawn as on the Odin 2, with no write lost. 29.9 fps, GPU 20.5 ms, against 21.4 ms without the fix. With `DM_VK_DUP_SLOTS=0` it is dark as before. On the Pad 3 only a local test of the same idea has run so far, and it drew the room right.
     - **Not on the Adreno 840.** A Galaxy Z Fold 8 (Qualcomm's driver 0x8034a013, folded) draws the Shrine right either way: 23.7–23.9 fps, frame p95 47.8–48.1 ms, GPU 29.6 ms with the fix, against 23.1–23.3 fps, p95 48.2–48.3 ms, GPU 30.3 ms without it, no write lost.
+16. **Smash's battles on the Retroid Pocket 5 stay just under 60 fps on the heavier stages** (57.0–58.8 fps on `main` at `3b07c5cf`, 2026-11-10; 13.4–19.3 in the
+    first baselines, when its pipelines were built during play: problem 5). Pipelines no longer hold it: from an empty pipeline cache a battle ran at 59.4 fps while
+    560 pipelines were built in the background (about 52 ms each on this driver, 11,656 draws left out meanwhile), and warm runs build almost none. Nor does the GPU,
+    at 5–10 ms a frame. The replay's CPU time does, because it runs in series with the game's own frame: the game's thread waits in `SyncWait` for the frame the
+    replay is still turning into Vulkan, so a frame takes about the replay's wall time plus 5.5 ms. The frames over 20 ms are those with 500–600 draws (330–390 in the
+    60 fps ones), where the replay took 13–18 ms of CPU.
+    - **The replay's cost.** About 27 µs a draw on the phone's Cortex-A77, on the three 2.42 GHz cores and never the 2.84 GHz one (`DM_VK_PLACE_LOG=1`); the power
+      HAL has no performance hint sessions, so nothing raises its clock (`[hint] no performance hint session`). In a profile half of the replay thread was `memcmp`
+      and `memcpy` and about an eighth the driver itself. Most of the copying was read-only storage buffers copied into every chunk and compared at every draw,
+      2.1–2.2 MB a frame of the same bytes: kept on the GPU, the replay takes 22 µs a draw instead of 29 (droidplay-core#162). The completion thread took 1.1–4.0 ms
+      a frame landing 1.1–1.8 MB of storage-buffer write-backs a byte at a time, before the chunk's NVN fence; a word at a time it is about twice as fast
+      (droidplay-core#161).
+    - **Rare long frames** of 90–120 ms remain in warm battles: a few pipelines the background builder leaves to the replay thread (a target drawn for the first
+      time), about 48 ms each, and an 84 ms submission with none, not explained yet.
 
 ## Reading the numbers
 
