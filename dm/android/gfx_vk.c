@@ -96,9 +96,11 @@ static void vk_create(void) {
     if (g_vk.qf == nq) { LOG("[RED] [vk] no graphics queue"); return; }
     uint32_t nd = 0; vkEnumerateDeviceExtensionProperties(g_vk.pd, NULL, &nd, NULL);
     VkExtensionProperties *de = calloc(nd ? nd : 1, sizeof *de); vkEnumerateDeviceExtensionProperties(g_vk.pd, NULL, &nd, de);
-    const char *dext[11]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
-                                              // shader module identifier and pipeline creation cache control
+    const char *dext[12]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
+                                              // shader module identifier, pipeline creation cache control and display timing
     if (has_ext(de, nd, "VK_KHR_swapchain")) { dext[nde++] = "VK_KHR_swapchain"; g_vk.has_swapchain = 1; }
+    { const char *e = getenv("DM_VK_PRESENT_TIMING");   // frames start on the display's vsyncs and are shown at a time given with them (gfx_vk_vsync.inc); Android's loader implements it on every driver
+      if (g_vk.has_swapchain && has_ext(de, nd, "VK_GOOGLE_display_timing") && !(e && *e == '0')) { dext[nde++] = "VK_GOOGLE_display_timing"; g_vk.has_display_timing = 1; } }
     // NVN vertex streams step per N instances (gfx_vk_draw.inc pipe_get). The KHR extension (core in Vulkan 1.4) has the EXT's structures and type values: a device that
     // offers only it (the Mali-G715) read every such stream per instance before. Its property supportsNonZeroFirstInstance says whether a draw may start past instance 0
     int divisor = has_ext(de, nd, "VK_EXT_vertex_attribute_divisor"), div_khr = !divisor && has_ext(de, nd, "VK_KHR_vertex_attribute_divisor");
@@ -1764,6 +1766,7 @@ static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, u
 #include "gfx_vk_bcdec.inc"   // a GPU block encoder's blocks decoded into a BC texture the CPU decoded (bcd_decode)
 #include "gfx_vk_readback.inc"   // arena write-backs read through a cached copy where the arena reads slowly (DM_VK_WB_READBACK)
 #include "gfx_vk_shadow.inc"   // DM_VK_SKIP_SHADOWS: a game's shadow map passes left out (vk_shadow_rt)
+#include "gfx_vk_vsync.inc"   // the pacing grid on the display's vsyncs, and each frame's time to be shown (DM_VK_PRESENT_TIMING)
 
 // ---------------- Submission ----------------
 static void post(post_op o) {   // done when the current chunk completes, after its write-backs
@@ -2124,6 +2127,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
         pthread_mutex_lock(&g_frame_mu);
         g_frame = (vkb_frame){v->img, v->fmt, v->w, v->h, {0, 0, (int)v->w, (int)v->h}, atomic_load(&g_presents) + 1, g_origin_ll}; g_frame_serial = v->serial;
         if (crop && crop[2] > 0 && crop[3] > 0) memcpy(g_frame.crop, crop, sizeof g_frame.crop);
+        g_frame.show_at = vs_show_time(period_s > 0 ? (uint64_t)(period_s * 1e9) : 0);
         pthread_mutex_unlock(&g_frame_mu);
     }
     pthread_mutex_unlock(&g_bk);
@@ -2140,7 +2144,9 @@ void mtl_present_pace(void) {
     g_pace_due = 0;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     hint_frame(now, slept);
+    int locked = vs_snap(&next, g_pace_per);   // next on the display's vsyncs (gfx_vk_vsync.inc)
     if (next > now && next - now < 1000000000ull) { mach_wait_until(next); g_psleep_end = clock_gettime_nsec_np(CLOCK_MONOTONIC); g_psleep_ns = g_psleep_end - now; } else { next = now; g_psleep_ns = 0; }
+    g_vs_start = locked ? next : 0;   // where the next frame's work starts: on the grid, or now when late
     next += g_pace_per; slept = clock_gettime_nsec_np(CLOCK_MONOTONIC);
 }
 void mtl_present_wait(uint64_t ticket) { (void)ticket; }

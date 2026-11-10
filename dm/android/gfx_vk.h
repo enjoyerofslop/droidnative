@@ -42,13 +42,15 @@ typedef struct {
     VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; uint32_t qf;
     VkPhysicalDeviceProperties props; VkPhysicalDeviceMemoryProperties mp;
     int has_bc, has_astc, has_surface, has_swapchain;
+    int has_display_timing;   // VK_GOOGLE_display_timing enabled: frames start on the display's vsyncs and are shown at a given time (gfx_vk_vsync.inc)
     pthread_mutex_t qmu;   // every vkQueueSubmit / vkQueuePresentKHR / vkQueueWaitIdle on q
 } vkb_ctx;
 vkb_ctx *vkb(void);        // made at first use; NULL when the device has no usable Vulkan
 
 // The window texture the game presented last (NVN QueuePresentTexture), for the front end to draw: always in VK_IMAGE_LAYOUT_GENERAL.
 // vkb_frame_lock holds it (the texture is not destroyed meanwhile) until vkb_frame_unlock; 0 = no frame yet
-typedef struct { VkImage img; VkFormat fmt; uint32_t w, h; int crop[4]; uint64_t n; int flip; } vkb_frame;   // flip: stored bottom-up (NVN's lower-left window origin), shown flipped
+typedef struct { VkImage img; VkFormat fmt; uint32_t w, h; int crop[4]; uint64_t n; int flip; uint64_t show_at; } vkb_frame;   // flip: stored bottom-up (NVN's lower-left window origin), shown flipped;
+                                                                                                                      // show_at: when to show it (CLOCK_MONOTONIC ns, 0 = as soon as drawn; gfx_vk_vsync.inc)
 int vkb_frame_lock(vkb_frame *f);
 void vkb_pipeline_cache_save(void);   // the driver's compiled pipelines to DM_PIPELINE_CACHE, when they grew (the app paused or stopped)
 void vkb_frame_unlock(void);
