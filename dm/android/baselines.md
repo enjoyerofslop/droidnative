@@ -155,6 +155,34 @@ Where this GPU differs from the Adreno above:
   The fold was simulated with `cmd device_state`, which locks a phone that has a secure screen lock.
 - **The benchmark's screenshots:** `screencap` needs a display on a phone with two screens; without one, every shot was unreadable before #132.
 
+## A first test: Bayonetta 2 on a OnePlus Pad 3
+
+Bayonetta 2's first Android run (2026-11-10), on a OnePlus Pad 3 (Adreno 830, Qualcomm's driver 0x8032004a, Android 16) with the on-screen controls, from `main` at
+`898ac92f`. The dump is the **base game, 1.0 (`v0`)**; [its profile](../games/01007960049A0000/README.md) is upstream's, for update 1.2, so `build_android_from_nsp.py`
+packed 1.0 from a profile it derived from that one, with no change by hand: NVN, the same 1,856 BNSH shaders in `data000.cpk` as 1.2 (split in 2 min 18 s), all translated
+for Vulkan, none failing. Played by hand over adb (`DM_CTL` presses chosen from screenshots), on a fresh save of its own.
+
+- **From a new game into the prologue's first fights**, with nothing wrong seen in the picture, no crash and no red line:
+  - the title (up about 15 s after launch), Select Game (slot 1), the auto-save notice, Story, and Easy, whose offer of Automatic Mode was taken;
+  - the opening narration, which can't be skipped on a first play, then the prologue's first cutscene (skipped: Plus, Down, A, A);
+  - the chapter card (Prologue: World of Chaos), the Christmas street cutscene (skipped), and a card about the touch controls (the game sees handheld mode);
+  - the combat tutorial, where X's punches land on the angel and are rated, closed from its pause menu (Plus, Down ×4, A);
+  - Verse 1 on the jet: about three minutes of fights in Automatic Mode, angels downed, combos scored, halos gathered.
+- **60 fps in play**, the game's own rate (30 in its cutscenes, as on the Mac):
+
+  | Scene | fps | Frame p50 / p95 / p99 | GPU p50 / p95 | Draws |
+  |---|---|---|---|---|
+  | The combat tutorial | 60.0 | 16.65 / 19.45 / 21.2 ms | 8.0 / 11.4 ms | about 700 |
+  | Verse 1's fights on the jet | 59.9 | 16.64 / 19.16 / 21.3 ms (the longest 123 ms) | 9.95 / 12.3 ms | about 580 |
+
+- **Sound:** one 6-channel AudioOut (the Mac's runs show two), with no underrun. An audio dump (`DM_AUDIO_DUMP`) of the last 80 s of Verse 1 has the front pair at about
+  −28 dBFS RMS, the rear pair about −34, the centre and LFE quieter, peaks about −12.5 dBFS.
+- **Saves:** the auto-save shows SAVING. at Verse 1's start, and the host made 8 save commits. After a restart, Load Game lists slot 1 (Prologue, World of Chaos, Easy,
+  9 min 27 s). Loading it wasn't seen through: another session's benchmark took the device during the load.
+- **1.0's derived profile need not be in the repository:** the script derives it at every build from 1.2's (`v0 is not a version game profile 01007960049A0000
+  registers … packing v0 from a profile derived from it`), and it built and played as derived. Registering 1.0 would change upstream's profile, so it belongs upstream if anywhere.
+- **Not tried:** loading the save into the game, the prologue past Verse 1's first fights, Normal difficulty or manual combat, update 1.2 on Android, and the other devices.
+
 ## Known problems
 
 Numbered in the order they were found, so links to a number stay right:

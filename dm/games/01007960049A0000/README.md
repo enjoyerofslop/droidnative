@@ -4,8 +4,6 @@ Update 1.2 (`v131072`) over the base game, SDK 3.6.0 (no other game's `sdk` buil
 
 On the Mac: the boot, the PlatinumGames logo movie (USM), the title, a new game (slot 1, the auto-save notice, Story, Normal), the opening narration (The Legend of Aesir, which cannot be skipped on a first play), the prologue's cutscene (skipped: Plus, Down, A, A), the tutorial (closed: Plus, Down ×4, A), Verse 1 on the jet, Rodin's cutscene and the next fight with an Umbran Climax and a torture attack, with sound. 60 fps in play (frame time p50 16.67 ms, p95 about 17.5 ms; GPU 2–3.5 ms a frame on an M6), 30 in its cutscenes as the game asks; about 1.6 GB resident and 1.75 GB of Metal allocations. The title is up about 20 s after launch.
 
-On Android: the base game (1.0) plays at 60 fps on a OnePlus Pad 3 from a new game through the opening, the tutorial and the prologue's first fights on the jet, played by hand with sound and its auto-save. See [Android](#android).
-
 ## What it needs
 
 | Setting | Where | Why |
@@ -31,25 +29,6 @@ On Android: the base game (1.0) plays at 60 fps on a OnePlus Pad 3 from a new ga
 ## Mac input
 
 The work folder's `run/route.sh <run> [secs]` boots on a fresh save and presses A five times from the title (slot 1, the notice, Story, Normal); `run/ctl.sh` / `run/step.sh` press and take shots, `run/watch.sh` takes a series of shots, and `run/fight.sh` repeats a simple combo. `run/save_ref` holds the save after Verse 1, `run/save_ref2` the one after the second fight.
-
-## Android
-
-First run on Android, 2026-11-10: a OnePlus Pad 3 (Snapdragon 8 Elite, Adreno 830 with Qualcomm's driver 0x8032004a, Android 16), with the on-screen controls. DroidPlay Core `main` at `898ac92f`, built with `build_android_from_nsp.py` from a cartridge dump of the **base game, 1.0 (`v0`)**, which this profile doesn't register (it is 1.2's), so the script packed it from a profile it derived from this one. Played by hand over adb (`DM_CTL` presses chosen from screenshots), on a fresh save of its own.
-
-- **Built with no change:** NVN, so the Android build takes it. The split found the same 1,856 BNSH shaders in `data000.cpk` as 1.2 (2 min 18 s), and all 1,856 translated for Vulkan with none failing.
-- **Plays from a new game into the prologue's first fights**, with nothing wrong seen in the picture, no crash and no red line:
-  - the title (up about 15 s after launch), Select Game (slot 1), the auto-save notice, Story, and Easy;
-  - Easy's offer of Automatic Mode (yes) and its notice;
-  - the opening narration, which can't be skipped on a first play, then the prologue's first cutscene (skipped: Plus, Down, A, A);
-  - the chapter card (Prologue: World of Chaos), the Christmas street cutscene (skipped), and a card about the touch controls (the game sees handheld mode);
-  - the combat tutorial, where X's punches land on the angel and are rated, closed from its pause menu (Plus, Down ×4, A);
-  - Verse 1 on the jet: about three minutes of fights in Automatic Mode, angels downed, combos scored, halos gathered.
-- **60 fps in play** (the game's own rate; 30 in its cutscenes, as on the Mac):
-  - the tutorial: 60.0 fps, frame p50 16.65 ms, p95 19.45 ms, GPU p50 8.0 ms, about 700 draws;
-  - Verse 1's fights: 59.9 fps, frame p50 16.64 ms, p95 19.16 ms, p99 21.3 ms, the longest frame 123 ms, GPU p50 9.95 ms, p95 12.3 ms, about 580 draws.
-- **Sound:** one 6-channel AudioOut (the Mac's runs show two), with no underrun. An audio dump (`DM_AUDIO_DUMP`) of the last 80 s of Verse 1 has the front pair at about −28 dBFS RMS, the rear pair about −34, the centre and LFE quieter, peaks about −12.5 dBFS.
-- **Saves:** the auto-save shows SAVING. at Verse 1's start, and the host made 8 save commits. After a restart, Load Game lists slot 1 (Prologue, World of Chaos, Easy, 9 min 27 s). Loading it wasn't seen through: another session's run took the device during the load.
-- **Not tried:** loading the save into the game, the prologue past Verse 1's first fights, Normal difficulty or manual combat, update 1.2 on Android, and the other devices.
 
 ## Found on this game
 
