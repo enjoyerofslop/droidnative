@@ -28,7 +28,7 @@
 #      A one-game install of the same game (files/game, the layout before the launcher) is moved there instead of copied again, and its save is copied by the app
 # The picture comes from the Vulkan replay of NVN (dm/android/gfx_vk.c).
 # Needs: Python with lz4, capstone, fonttools and backports.zstd (not on Python 3.14), the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
-import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, time
+import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, re, shutil, struct, subprocess, sys, tarfile, tempfile, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -335,8 +335,66 @@ def stage_link(dst, src):   # a symbolic link, else the files cloned (clone): Wi
 # which the player puts anywhere on the device and picks once in the app. --xapk packs one .xapk instead (an XAPK installer's format: the APK, the RomFS as the app's OBB
 # file Android/obb/<package>/main.1.<package>.obb, icon.jpg and manifest.json), for any size; the two kinds sit side by side, each replacing only its own files. Nothing
 # goes into the library of hosts: the nxnative app stays as it was.
+# The DLC images (aoc/<index>.img) go into the APK while it can hold them; when it can't (Mario Kart 8 Deluxe's Booster Course Pass and its shaders pass 2 GiB with no
+# RomFS at all: droidplay-core issue #169), they follow the RomFS in the same data file, the .romfs beside the APK or the XAPK's OBB, so a player still picks one file and
+# an XAPK still has one expansion. GameStart copies them out of it into games/<title ID>/aoc/ once, where front_android.c points DM_AOC_DIR, so the host reads them as a
+# launcher install's (it mounts DLC by path; only the RomFS goes to it as a descriptor). The RomFS leaves the APK first: the DLC goes beside only with it.
+# The data file: the RomFS image from byte 0 (the host reads it as DM_ROMFS=fd:<descriptor>:0:<romfs_bytes>), then, at dlc_at (the RomFS's end rounded up to DLC_ALIGN),
+# the DLC pack: DLC_MAGIC, the image count and a zero (little-endian 32-bit), a record per image (32-bit index, 32-bit zero, 64-bit offset from dlc_at, 64-bit size), and
+# the images, each at a DLC_ALIGN offset. game.json gives romfs_bytes, data_bytes (the file's whole size) and dlc_at (none: no DLC in it), which GameStart checks.
 # → the files made, the APK (or XAPK) first
-GAME_APP_LIMIT = (2 << 30) - (64 << 20)   # the APK's size with the RomFS inside it, kept clear of 2 GiB for the ZIP's own records
+GAME_APP_LIMIT = (2 << 30) - (64 << 20)   # an APK's size, kept clear of 2 GiB for the ZIP's own records
+DLC_MAGIC, DLC_ALIGN = b'DMAOCPK1', 4096
+
+
+def game_app_limit():   # NXNATIVE_GAME_APP_LIMIT=<bytes>: a smaller limit, so that a smaller game takes a big one's layout (a device check of the DLC beside the APK)
+    v = os.environ.get('NXNATIVE_GAME_APP_LIMIT', '').strip()
+    return int(v) if v.isdigit() else GAME_APP_LIMIT
+
+
+def gib(n): return f'{n / (1 << 30):.2f} GiB'
+
+
+# Where a game app's RomFS and DLC go: → (RomFS in the APK, DLC in the APK). parts: the files the APK must carry, by name (code, shaders, font, the rest), with their
+# sizes. The RomFS leaves the APK first, then the DLC with it; what the APK must carry and can't is a BuildError naming each part
+def game_app_plan(parts, dlc, rom, xapk, limit=GAME_APP_LIMIT):
+    core = sum(parts.values())
+    if core >= limit:
+        raise BuildError(f'a game app can\'t hold this game: the files the APK must carry are {gib(core)} ({", ".join(f"{k} {gib(v)}" for k, v in parts.items())}), and an APK '
+                         f'holds {gib(limit)} (2 GiB less room for its records); the RomFS ({gib(rom)}) and the DLC ({gib(dlc)}) could go beside it, these can\'t. '
+                         'Install it through DroidPlay\'s library instead (without --game-apk), which has no such limit')
+    if not xapk and core + dlc + rom < limit: return True, True
+    return False, core + dlc < limit
+
+
+def dlc_images(aoc):   # → [(index, path)] of aoc/<index>.img, by index; a DLC kept as a folder (an older extraction) can't go into the pack
+    out = []
+    for p in sorted(Path(aoc).iterdir()) if aoc and Path(aoc).is_dir() else []:
+        m = re.fullmatch(r'([1-9][0-9]*)(\.img)?', p.name)
+        if not m: continue
+        if not m.group(2) or not p.is_file(): raise BuildError(f'the DLC {p} is a folder, and a game app carries its DLC beside the APK as images: extract the game again')
+        out.append((int(m.group(1)), p))
+    return sorted(out)
+
+
+def dlc_pack(images):   # → the pack's header and its records [(index, offset from the pack's start, size)], and its length
+    head = len(DLC_MAGIC) + 8 + 24 * len(images); off = -(-head // DLC_ALIGN) * DLC_ALIGN; recs = []
+    for i, p in images:
+        size = Path(p).stat().st_size; recs.append((i, off, size)); off = -(-(off + size) // DLC_ALIGN) * DLC_ALIGN
+    end = recs[-1][1] + recs[-1][2] if recs else head
+    return DLC_MAGIC + struct.pack('<II', len(recs), 0) + b''.join(struct.pack('<IIQQ', i, 0, o, n) for i, o, n in recs), recs, end
+
+
+def write_data(dst, rom, images):   # the data file beside a game app: the RomFS (an APFS clone where the volume makes one, never a hard link: the DLC is appended), then the DLC pack
+    rom_bytes = Path(rom).stat().st_size; at = -(-rom_bytes // DLC_ALIGN) * DLC_ALIGN
+    head, recs, _ = dlc_pack(images); Path(dst).unlink(missing_ok=True)
+    if not (sys.platform == 'darwin' and subprocess.run(['cp', '-c', str(rom), str(dst)], capture_output=True).returncode == 0): shutil.copyfile(rom, dst)
+    with open(dst, 'r+b') as f:
+        f.truncate(at); f.seek(at); f.write(head)
+        for (i, p), (_, off, size) in zip(images, recs):
+            f.seek(at + off)
+            with open(p, 'rb') as src: shutil.copyfileobj(src, f, 16 << 20)
+    return at
 
 
 # The game's defaults.txt: the language, then the profile's Android switches (dm/games/<id>/android_defaults.txt: KEY=VALUE per line, # comments), for a game that needs
@@ -355,17 +413,25 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
     rom = bi.rfs.source(game)
     if not bi.rfs.is_image(rom): raise BuildError(f'a game app reads the RomFS as one image ({game}/RomFS.img), and this extraction has a RomFS folder: extract the game again')
     stage = work / 'game_app'; shutil.rmtree(stage, ignore_errors=True); stage.mkdir(parents=True)
-    for name, src in (('code', patched), ('spv', spv), ('font', font), ('aoc', aoc)):
+    def walk(p): return [(Path(r, f), Path(r, f).stat().st_size) for r, _, fs in os.walk(p, followlinks=True) for f in fs] if p and Path(p).is_dir() else []
+    for name, src in (('code', patched), ('spv', spv), ('font', font)):
         if src and Path(src).is_dir(): stage_link(stage / name, Path(src).resolve())
     for f in ('icon.jpg', 'control.nacp'):
         if (game / f).is_file(): stage_link(stage / f, (game / f).resolve())
     (stage / 'defaults.txt').write_text(defaults, encoding='utf-8', newline='\n')   # \n on Windows too, as the phone's files are
-    (stage / 'game.json').write_text(json.dumps({**meta, 'package': pkg}, indent=1), encoding='utf-8', newline='\n')
+    staged = [(f.relative_to(stage).as_posix(), n) for f, n in walk(stage)]
+    parts = {'code': 0, 'shaders': 0, 'font': 0, 'the rest': 4096 + sum(len(f) + 1 for f, _ in staged)}   # the rest: icon, control data, defaults; game.json and files.txt
+    for f, n in staged: parts[{'code': 'code', 'spv': 'shaders', 'font': 'font'}.get(f.split('/')[0], 'the rest')] += n
+    rom_bytes = Path(str(rom)).stat().st_size; dlc = sum(n for _, n in walk(aoc))
+    inside, dlc_inside = game_app_plan(parts, dlc, rom_bytes, xapk, game_app_limit())
+    if dlc_inside and dlc: stage_link(stage / 'aoc', Path(aoc).resolve())
+    out_images = dlc_images(aoc) if dlc and not dlc_inside else []
+    dlc_at = -(-rom_bytes // DLC_ALIGN) * DLC_ALIGN if out_images else 0
+    data_bytes = (dlc_at + dlc_pack(out_images)[2]) if out_images else rom_bytes
+    info = {**meta, 'package': pkg, 'data_bytes': data_bytes, **({'dlc_at': dlc_at} if dlc_at else {})}
+    (stage / 'game.json').write_text(json.dumps(info, indent=1), encoding='utf-8', newline='\n')
     files = sorted(Path(r, f).relative_to(stage).as_posix() for r, _, fs in os.walk(stage, followlinks=True) for f in fs)
     (stage / 'files.txt').write_text(''.join(f + '\n' for f in files + ['files.txt']), encoding='utf-8', newline='\n')
-    rom_bytes = Path(str(rom)).stat().st_size
-    others = sum(Path(stage, f).stat().st_size for f in files)
-    inside = not xapk and others + rom_bytes < GAME_APP_LIMIT
     out_dir.mkdir(parents=True, exist_ok=True)
     base = safe_name(meta.get('name') or g.id) or g.id
     apk = (work / f'{pkg}.apk') if xapk else out_dir / f'{base}.apk'
@@ -379,7 +445,7 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
         out = out_dir / f'{base}.xapk'; obb = f'Android/obb/{pkg}/main.1.{pkg}.obb'
         manifest = {'xapk_version': 2, 'package_name': pkg, 'name': meta.get('name') or g.id, 'locales_name': {}, 'version_code': '1', 'version_name': '0.1',
                     'min_sdk_version': '29', 'target_sdk_version': '34', 'permissions': ['android.permission.VIBRATE'],
-                    'total_size': apk.stat().st_size + rom_bytes, 'expansions': [{'file': obb, 'install_location': 'EXTERNAL_STORAGE', 'install_path': obb}]}
+                    'total_size': apk.stat().st_size + data_bytes, 'expansions': [{'file': obb, 'install_location': 'EXTERNAL_STORAGE', 'install_path': obb}]}
         if icon.is_file(): manifest['icon'] = 'icon.jpg'
         tmp = out.with_suffix('.xapk.part')
         import zipfile
@@ -387,15 +453,27 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
             z.writestr('manifest.json', json.dumps(manifest, indent=1, ensure_ascii=False))
             if icon.is_file(): z.write(icon, 'icon.jpg')
             z.write(apk, f'{pkg}.apk')
-            with open(str(rom), 'rb') as src, z.open(zipfile.ZipInfo(obb, datetime.datetime.now().timetuple()[:6]), 'w', force_zip64=True) as dst:
+            with z.open(zipfile.ZipInfo(obb, datetime.datetime.now().timetuple()[:6]), 'w', force_zip64=True) as dst:   # the OBB: the RomFS, then the DLC pack when the APK can't hold it
                 done = 0
-                while chunk := src.read(16 << 20):
-                    dst.write(chunk); done += len(chunk); bi.PROG.set(step='packing the XAPK', done=done, total=rom_bytes, unit='B')
+                def put(path):
+                    nonlocal done
+                    with open(str(path), 'rb') as src:
+                        while chunk := src.read(16 << 20):
+                            dst.write(chunk); done += len(chunk); bi.PROG.set(step='packing the XAPK', done=done, total=data_bytes, unit='B')
+                put(rom)
+                if out_images:
+                    head, recs, _ = dlc_pack(out_images)
+                    dst.write(b'\0' * (dlc_at - rom_bytes)); dst.write(head); pos = len(head)
+                    for (_, p), (_, off, n) in zip(out_images, recs): dst.write(b'\0' * (off - pos)); put(p); pos = off + n
         tmp.replace(out); apk.unlink(missing_ok=True); made = [out]
-    else:   # an APK and the RomFS beside it, or an APK with it inside, whichever the game's size gave: a .romfs left from the other way goes
+    else:   # an APK and the data file beside it, or an APK with the RomFS inside, whichever the game's size gave: a .romfs left from the other way goes
         made = [apk]; romfs = out_dir / f'{base}.romfs'
         if inside: romfs.unlink(missing_ok=True)
-        else: clone(str(rom), romfs); made.append(romfs)
+        else:
+            if out_images: write_data(romfs, rom, out_images)
+            else: clone(str(rom), romfs)
+            made.append(romfs)
+    if out_images: say(f'the DLC ({len(out_images)} image{"s" * (len(out_images) != 1)}, {gib(dlc)}) is in {made[-1].name} after the RomFS: the APK can\'t hold it; the app copies it out at its first start')
     return made, inside
 
 

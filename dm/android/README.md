@@ -108,7 +108,15 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
      of the extraction's `RomFS.img`), which can go anywhere on the device or its SD card.
 
   Each is checked for the image's mark and for the size `game.json` gives.
-- **`--xapk`** packs one `<name>.xapk` instead, an XAPK installer's format: `manifest.json`, `icon.jpg`, `<package>.apk` and the RomFS as its OBB file, stored.
+- **DLC** (`aoc/<index>.img`) goes into the APK while it fits. When it doesn't (Mario Kart 8 Deluxe's Booster Course Pass and its shaders pass 2 GiB with no RomFS,
+  issue #169), it follows the RomFS in the same data file, the `.romfs` or the OBB, so the player still picks one file: the RomFS image from byte 0, then at `dlc_at`
+  (the RomFS's end rounded up to 4 KiB) a pack, `DMAOCPK1`, the image count, a record per image (index, offset, size) and the images at 4 KiB offsets. `game.json` gives
+  `dlc_at` and the file's whole size, `data_bytes`. GameStart copies the images out once into `games/<id>/aoc/`, where `front_android.c` points `DM_AOC_DIR` (the host
+  mounts DLC by path; only the RomFS reaches it as a descriptor), and again after an update of the app. The RomFS leaves the APK first, and the DLC only with it.
+  What the APK must still carry and can't (the code, the shaders and the font past 2 GiB) stops the build with each part's size: such a game installs through the
+  library instead. `NXNATIVE_GAME_APP_LIMIT=<bytes>` lowers the limit, so a smaller game takes a big one's layout (a check of the DLC beside the APK).
+- **`--xapk`** packs one `<name>.xapk` instead, an XAPK installer's format: `manifest.json`, `icon.jpg`, `<package>.apk` and the RomFS (with the DLC after it, as
+  above, when the APK can't hold it) as its OBB file, stored.
   An XAPK installer installs the APK and puts the OBB in place (Android 11+ lets an app holding `REQUEST_INSTALL_PACKAGES` write other apps' OBB folders).
 - `--out <folder>` puts them elsewhere than the NSP folder. The two kinds sit side by side; each replaces only its own files.
 

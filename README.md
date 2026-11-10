@@ -274,7 +274,7 @@ Turnip (15 on its own driver), and at 60 fps on an Odin 2, as on its own driver.
 ```
 python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k "<your prod.keys>"    build, install, copy the game
                          (a Switch 2 game: the folder with its .nup or dump, or the .nup itself; no keys needed)
-    --game-apk [--xapk]  the game as an app of its own (<name>.apk, plus <name>.romfs for a game over 2 GB, or one .xapk); no device needed
+    --game-apk [--xapk]  the game as an app of its own (<name>.apk, plus <name>.romfs, with its DLC after the RomFS, for a game over 2 GB, or one .xapk); no device needed
     -p v0                pack the base game instead of the newest version in the folder (a version the profile does not register is packed from a derived profile)
     -l es-419            the default game language (a code or a name)
     --serial <device>    the adb device, when more than one is connected
