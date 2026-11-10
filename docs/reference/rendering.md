@@ -2115,6 +2115,25 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Fix:** `gc_get` keeps a range of guest memory (an index buffer, a whole vertex buffer, or a vertex buffer's attribute as converted) in a GPU buffer of its own once it was seen unchanged in a later frame, and binds it at the draw's offset while the dirty-page tracker shows no write since its stamp (the stamp is taken before the pages are protected). A range written twice goes back to the per-draw copy and is no longer protected, so a buffer rewritten every frame costs no faults; it is looked at again after 600 presents. Kept 16- and 32-bit indices stay in their own size (Vulkan's restart index is the type's all-ones, as NVN's), halving a 16-bit draw's index reads on the GPU. A kept copy's memory is reused once the chunks that read it have completed. `DM_VK_GEOCACHE=0` turns it off; the `[vk] geometry kept on the GPU` line counts it.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): far map view CPU 84–118 → 40 ms a frame and frame time p50 64–176 → 48 ms; the normal map view about 35 ms (POCO X5, 95 % of the index and vertex bindings from kept copies, 29 MB kept). With 16-bit indices the far view's GPU time went from about 39 to 34–41 ms a frame (it is bound by geometry: a lower render scale barely changed it). Keeping the game's uniform buffers the same way did not help: they change every frame.
 
+
+### Read-only storage buffers copied into every chunk
+
+- **Symptom:** Android only: a game whose shaders read large storage buffers spends a share of the replay thread in `memcmp` and `memcpy` under `stage_set`
+  (`ucopy`), and the `constant and storage buffer copies` line counts megabytes copied to the arena (and as many again to the shadows) every frame.
+- **Cause:** a storage buffer a shader only reads was handled as a uniform buffer is (`ucopy`): copied into the arena once in every chunk that read it, with a host
+  shadow of it, and compared with that shadow at every other draw of the chunk that bound it. A chunk is 48 to 64 draws, so a buffer read across the frame was
+  copied several times a frame, though its bytes rarely change: Super Smash Bros. Ultimate's battles read about 44 storage buffers a frame (2.4 to 2.7 MB, tens to
+  hundreds of KB each), and every one seen in an earlier frame was the same, byte for byte.
+- **Fix:** `sb_keep` (`gfx_vk_draw.inc`) keeps such a buffer as the [geometry above](#geometry-kept-on-the-gpu-between-frames) is (`gc_get`, its raw bytes, so a
+  buffer also read as a vertex stream has one copy; the kept blocks carry storage usage too): once seen unchanged in a later frame it is bound from its kept copy
+  while the dirty-page tracker shows no write since its stamp, and a write sends it back to the copy. Its pending writes were dealt with before it is looked up:
+  `draw_view` lands them, and `sb_fwd` binds a dispatch's pending write on the GPU. The `[vk] geometry kept on the GPU` line counts its bindings apart.
+  `DM_VK_SB_KEEP=0` (env.txt): copied in every chunk, as before.
+- **Check:** Super Smash Bros. Ultimate's `battle` route on a Retroid Pocket 5 (Adreno 650, V@0746.0). A test build comparing every kept copy it bound again with
+  guest memory found no difference in 55,000 bindings (23 GB). The arena copies fell from 2.1–2.2 MB a frame to 0.22–0.23 MB (26 to 34 storage bindings a frame
+  from kept copies). A test build that turned the keeping on and off every 300 presents, in two battles (each on one stage): the replay thread took 21.2 to 23.4 µs a
+  draw with it against 24.9 to 31.7 without (means 22.2 and 29.4), about 1.2 ms a frame at 200 draws; both stages held 60 fps either way.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) ([Android baselines](../../dm/android/baselines.md)).
 ### Texture and sampler banks packed in one `cbuf_slot`
 
 - **Symptom:** Android only: a black picture while the game runs at full rate with no draw dropped; every render target of a pass dump is all zero, and the dump's binding lines show `tid 0 sid 0 -> none` for every texture.

@@ -647,7 +647,7 @@ static uint8_t *gc_alloc(int cls, int *blk, VkDeviceSize *off) {
         if (g_gc_nblk && g_gc_blk[g_gc_nblk - 1].used + n <= GC_BLOCK) { gc_blk *b = &g_gc_blk[g_gc_nblk - 1]; *blk = g_gc_nblk - 1; *off = b->used; b->used += n; return b->p + *off; }
         if (g_gc_nblk < (int)(GC_BUDGET / GC_BLOCK)) {
             gc_blk *b = &g_gc_blk[g_gc_nblk]; memset(b, 0, sizeof *b);
-            VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GC_BLOCK, .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
+            VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GC_BLOCK, .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};   // storage: sb_keep
             if (vkCreateBuffer(g_vk.dev, &bc, NULL, &b->b) != VK_SUCCESS) return NULL;
             VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g_vk.dev, b->b, &mr);
             uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -691,6 +691,19 @@ static gc_ent *gc_get(uintptr_t src, uint64_t n, uint64_t kind, uint64_t out_n, 
     return e;
 }
 static VkBuffer gc_buf(const gc_ent *e) { return g_gc_blk[e->blk].b; }
+// A storage buffer a shader only reads is kept the same way, as its raw bytes (kind 0, so a buffer also read as a vertex stream has one copy). It was copied into the arena once
+// in every chunk that read it and compared with its shadow (ucopy) at every other draw of the chunk: Super Smash Bros. Ultimate's battles read about 44 storage buffers a frame
+// (2.4 to 2.7 MB, tens of KB to hundreds each), the same bytes every frame, and copying and comparing them cost a Retroid Pocket 5's replay thread 29 µs a draw against 22 kept
+// (about 1.2 ms a frame). Its pending writes were dealt with before (draw_view lands them, sb_fwd binds a dispatch's on the GPU), and a write since the stamp, the game's or the
+// host's, sends it back to the copy as gc_get does. DM_VK_SB_KEEP=0 (env.txt): copied in every chunk, as before
+static uint64_t g_gc_sb;   // storage buffer bindings served from a kept copy (also counted in g_gc_hit)
+static int sb_keep_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_SB_KEEP"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_SB_KEEP=0: read-only storage buffers are copied in every chunk"); } return v; }
+static int sb_keep(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *off) {   // → 1 with *b / *off the kept copy (filled now when new); 0: copy it (ucopy)
+    if (!sb_keep_on()) return 0;
+    uint8_t *fill = NULL; gc_ent *e = gc_get((uintptr_t)addr, n, 0, n, &fill); if (!e) return 0;
+    if (fill) { size_t al = (n + 15) & ~(size_t)15; memcpy(fill, (const void *)(uintptr_t)addr, n); if (al > n) memset(fill + n, 0, al - n); }   // bound to the 16-byte range, as ucopy's
+    *b = gc_buf(e); *off = e->off; g_gc_sb++; return 1;
+}
 
 
 // ---------------- Bound state ----------------
@@ -2276,7 +2289,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         VkDeviceSize ao;   // ao: the arena offset (off above is the c0 / uniform buffer word)
         int wr_ = (sb->flags & 1) != 0;   // written by the shader
         if (u && u->addr && (!wr_ || s->stage == SH_CS) && sb_fwd(u->addr, n, wr_, &b, &ao)) g_buf_fwd[wr_]++;   // on the GPU from a dispatch's pending write (buf_fwd)
-        else if (u && u->addr && !wr_) { if (!ucopy((const void *)(uintptr_t)u->addr, n, (n + 15) & ~(size_t)15, &b, &ao)) return 0; }   // read only: shared as uniforms are
+        else if (u && u->addr && !wr_) { if (!sb_keep(u->addr, n, &b, &ao) && !ucopy((const void *)(uintptr_t)u->addr, n, (n + 15) & ~(size_t)15, &b, &ao)) return 0; }   // read only: kept between frames (sb_keep), or shared as uniforms are
         else if (u && u->addr) { uint8_t *d = ar_alloc((n + 15) & ~(size_t)15, &b, &ao); if (!d) return 0; memcpy(d, (const void *)(uintptr_t)u->addr, n);
             if (sb->flags & 1) {   // written by the shader: what it changed is copied back when the chunk completes
                 wb_t *w = wb_add(); uint8_t *snap = malloc(n); if (snap) memcpy(snap, (const void *)(uintptr_t)u->addr, n);   // from guest memory, as d was: the arena may be write-combined (ar_mem_type)
