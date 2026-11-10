@@ -1053,6 +1053,7 @@ typedef struct {
     int pkg; uint64_t stamp, seen; const void *span; uint8_t *edge[2]; uint32_t edge_n[2];
     uint64_t rt_last; uint32_t rt_runs;   // the last present (+1) that drew into it as a pass's target, and in how many presents in a row up to it (gfx_vk_draw.inc rt_note)
     int refs, shared, mutable_, fixed_fmt; uint64_t used;   // mutable_: views in another format of the same texel size (a texture view's format); fixed_fmt: only its format and its sRGB twin (vt_create)   // texture objects (serials) resolving to it; in the sharing table; g_fence at its last lookup
+    VkImageUsageFlags usage; int ext_store;   // its usage; ext_store: STORAGE for views of another format only (EXTENDED_USAGE, vt_storage_up), so each view takes the usage its format has (view_get)
 } vtex;
 static nvn_hmap g_tex = {.klen = 8}, g_cpuw = {.klen = 8};   // serial → vtex; serials the CPU wrote (WriteTexels). Keyed by the 8-byte serial
 static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_edge_skips, g_up_bytes, g_draws_skipped;
@@ -1141,6 +1142,7 @@ static vtex *vt_create(const tex_t *t) {
     if (ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) u |= VK_IMAGE_USAGE_STORAGE_BIT;
+    v->usage = u;   // STORAGE added later if the texture is bound to an image slot all the same (vt_storage_up)
     // an uncompressed colour image may be viewed in another format of its texel size (NVN texture views: sRGB over UNORM and the like): mutable. So may a BC image
     // decoded on the CPU, which holds uncompressed texels: a BC7_SRGB view of a BC7 texture is its RGBA8 image viewed as RGBA8_SRGB (gfx_vk_draw.inc view_format)
     int mut = v->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !(f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK);
@@ -1188,6 +1190,61 @@ static vtex *vt_create(const tex_t *t) {
     vkBindImageMemory(g_vk.dev, v->img, v->mem, 0);
     vt_clear_new(v);
     return v;
+}
+// A texture bound to an image slot that was made without storage use, as nvn_mtl.m's image_prepare upgrades one (tex_upgrade): the game left NVN's image flag out of its
+// builder and registered it with RegisterTexture, and a shader loads or stores through it anyway. Ocarina of Time's title does it with a 1920x1080 RGBA8 target (a storage
+// view of an image without STORAGE, which is invalid) and a 2560x1440 RGBA8_SRGB one (its dispatch skipped: sRGB is no storage format here).
+// - The image is made again with STORAGE and MUTABLE_FORMAT, its levels and layers copied over, and swapped in under the same vtex: every serial and the sharing table keep it.
+// - The old image, its views and framebuffers go when the chunk completes, as vt_destroy's do, and the presented frame lets go of it first.
+// - A format the GPU cannot store to (sRGB) takes STORAGE for views in its UNORM twin alone (EXTENDED_USAGE, ext_store), which storage_view then makes.
+// Under g_bk; cb() ends an open render pass. 0: it cannot be (a decoded BC texture, multisample, depth or stencil, no format of it the GPU stores to)
+static uint64_t g_st_up;
+static int vt_storage_up(vtex *v) {
+    if (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) return 1;
+    VkFormat f = v->fmt, sf = f; VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
+    VkImageCreateFlags cf = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | ((v->desc.target == 8 || v->desc.target == 9) && v->layers % 6 == 0 ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0) |
+                            (v->type == VK_IMAGE_TYPE_3D && (v->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0);   // as vt_create makes them
+    int ext = 0;
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {   // EXTENDED_USAGE is Vulkan 1.1's
+        VkFormatProperties tp = {0}; sf = srgb_twin(f); if (sf) vkGetPhysicalDeviceFormatProperties(g_vk.pd, sf, &tp);
+        if (!sf || !(tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || (VK_API_VERSION_MAJOR(g_vk.props.apiVersion) == 1 && VK_API_VERSION_MINOR(g_vk.props.apiVersion) < 1)) sf = VK_FORMAT_UNDEFINED;
+        else { ext = 1; cf |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT; }
+    }
+    VkImageUsageFlags u = v->usage | VK_IMAGE_USAGE_STORAGE_BIT; VkImageFormatProperties ip;
+    const char *why = v->conv ? "a BC texture decoded on the CPU" : v->samples > 1 ? "multisample" : v->aspect != VK_IMAGE_ASPECT_COLOR_BIT ? "depth or stencil" : !sf ? "no format of it the GPU stores to" : NULL;
+    if (!why && (vkGetPhysicalDeviceImageFormatProperties(g_vk.pd, f, v->type, VK_IMAGE_TILING_OPTIMAL, u, cf, &ip) != VK_SUCCESS || ip.maxExtent.width < v->w || ip.maxExtent.height < v->h
+                 || ip.maxExtent.depth < v->d || ip.maxMipLevels < v->levels || ip.maxArrayLayers < v->layers)) why = "the GPU takes no storage image of its size and format";
+    VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkMemoryRequirements mr;
+    VkImageCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = cf, .imageType = v->type, .format = f, .extent = {v->w, v->h, v->d}, .mipLevels = v->levels, .arrayLayers = v->layers,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = u, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    if (!why && vkCreateImage(g_vk.dev, &ic, NULL, &img) != VK_SUCCESS) why = "vkCreateImage failed";
+    if (!why) {
+        vkGetImageMemoryRequirements(g_vk.dev, img, &mr); uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt == UINT32_MAX ? vkb_mem_type(mr.memoryTypeBits, 0) : mt};
+        if (vkAllocateMemory(g_vk.dev, &ma, NULL, &mem) != VK_SUCCESS) why = "no memory for it"; else vkBindImageMemory(g_vk.dev, img, mem, 0);
+    }
+    VkCommandBuffer c = why ? VK_NULL_HANDLE : cb(); if (!why && !c) why = "no command buffer";
+    if (why) {
+        if (img) vkDestroyImage(g_vk.dev, img, NULL);
+        if (mem) vkFreeMemory(g_vk.dev, mem, NULL);
+        RED_ONCE(123, "texture ser=%llu %ux%u format %d, made without storage use, is bound to an image slot and cannot take it (%s): skipped", (unsigned long long)v->serial, v->w, v->h, f, why); return 0;
+    }
+    cb_barrier();   // what drew it before the copy reads it
+    VkImageMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    VkImageCopy r[16]; uint32_t nr = 0;
+    for (uint32_t l = 0; l < v->levels && nr < 16; l++)
+        r[nr++] = (VkImageCopy){{VK_IMAGE_ASPECT_COLOR_BIT, l, 0, v->layers}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, v->layers}, {0, 0, 0},
+                                {v->w >> l ? v->w >> l : 1, v->h >> l ? v->h >> l : 1, v->type == VK_IMAGE_TYPE_3D ? (v->d >> l ? v->d >> l : 1) : 1}};
+    vkCmdCopyImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, nr, r);
+    cb_barrier();
+    vkb_frame_forget(v->serial);
+    views_drop(v->img); dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem);
+    v->img = img; v->mem = mem; v->usage = u; v->ext_store = ext; v->mutable_ = 1; v->fixed_fmt = 0; g_vt_gen++;
+    if (g_st_up++ < 8) LOG("[vk] texture ser=%llu %ux%u format %d bound to an image slot without storage use: made again with it%s (%llu so far)", (unsigned long long)v->serial, v->w, v->h, f,
+                           ext ? ", stored through its UNORM twin" : "", (unsigned long long)g_st_up);
+    return 1;
 }
 // Upload a texture's guest storage (deswizzled on the CPU; BC decoded when the GPU lacks it). The dirty-page stamp is taken and the pages protected before reading (nvn_mtl.m pkg_upload_)
 // texture uploads' CPU time (deswizzle, BC decode); pipelines made and their creation time: the long-frame lines (hle_nvn.c)
@@ -1346,7 +1403,11 @@ static int ab_take(vtex *v, const tex_t *t) {
 // takes over its storage (share_take_over).
 typedef struct { uint64_t pool; int64_t off; nvn_texdesc d; } share_key;
 static nvn_hmap g_share = {.klen = sizeof(share_key)};
-static share_key share_of(const tex_t *t) { share_key k; memset(&k, 0, sizeof k); k.pool = (uint64_t)(uintptr_t)t->pool; k.off = t->off; k.d = t->d; return k; }
+// NVN's image flag says how the texture is registered (mtl_reg_image adds it for RegisterImage), not what it is: the key leaves it out, as nvn_mtl.m's does, so a texture
+// drawn into and then registered as an image is one image, not a second, empty one beside it. One registered without it and bound to an image slot all the same takes
+// storage use then (vt_storage_up)
+static share_key share_of(const tex_t *t) { share_key k; memset(&k, 0, sizeof k); k.pool = (uint64_t)(uintptr_t)t->pool; k.off = t->off; k.d = t->d; k.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE; return k; }
+static int desc_same(const nvn_texdesc *a, const nvn_texdesc *b) { nvn_texdesc x = *a, y = *b; x.flags &= ~NVN_TEXTURE_FLAGS_IMAGE; y.flags &= ~NVN_TEXTURE_FLAGS_IMAGE; return !memcmp(&x, &y, sizeof x); }
 static void vt_unref(vtex *v) { if (--v->refs <= 0 && !v->shared) vt_destroy(v); }
 static void vt_ref(uint64_t serial, vtex *v) { nvn_hm_put(&g_tex, &serial, v); v->refs++; }
 static uint64_t g_share_taken;
@@ -1375,7 +1436,7 @@ static vtex *vt_get(const tex_t *ct) {
     if (!t || !t->serial || !vkb_up()) return NULL;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(30, "texture object no longer valid (magic %#x)", t->magic); return NULL; }
     vtex *v = nvn_hm_get(&g_tex, &t->serial);
-    if (v && (v->store != t->mem || memcmp(&v->desc, &t->d, sizeof v->desc))) {
+    if (v && (v->store != t->mem || !desc_same(&v->desc, &t->d))) {
         static int n; if (n++ < 8) LOG("[vk] texture ser=%llu met again with %s: made anew (storage %p, now %p)", (unsigned long long)t->serial, v->store != t->mem ? "other storage" : "another description", (const void *)v->store, (const void *)t->mem);
         nvn_hm_del(&g_tex, &t->serial); g_vt_gen++; vt_unref(v); v = NULL; }
     int pkg = is_packaged(t);

@@ -856,6 +856,15 @@ make:
     if (swz) { cm.r = swz[0] < 6 ? S_[swz[0]] : cm.r; cm.g = swz[1] < 6 ? S_[swz[1]] : cm.g; cm.b = swz[2] < 6 ? S_[swz[2]] : cm.b; cm.a = swz[3] < 6 ? S_[swz[3]] : cm.a; }
     VkImageViewCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = v->img, .viewType = type, .format = k.fmt, .components = cm,
                                 .subresourceRange = {aspect, level, nlevels, layer, nlayers}};
+    // an image with STORAGE for views of another format (ext_store, vt_storage_up): a view would otherwise take the image's usage, and one in its own format would claim a
+    // storage use that format does not have. Each takes what its format supports, so the format (in the key) decides the usage
+    VkImageViewUsageCreateInfo vu = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+    if (v->ext_store) {
+        VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, k.fmt, &fp); VkFormatFeatureFlags ff = fp.optimalTilingFeatures;
+        vu.usage = v->usage & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT ? VK_IMAGE_USAGE_SAMPLED_BIT : 0) |
+                               (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT ? VK_IMAGE_USAGE_STORAGE_BIT : 0) | (ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0));
+        if (vu.usage) ic.pNext = &vu;
+    }
     if (vkCreateImageView(g_vk.dev, &ic, NULL, &iv) != VK_SUCCESS) { RED_ONCE(81, "image view of format %d type %d failed", v->fmt, type); return VK_NULL_HANDLE; }
     nvn_hm_put(&g_views, &k, iv);
     return iv;
@@ -1982,7 +1991,7 @@ static VkBufferView tbuf_view(const tex_t *t, int write, int cs) {   // cs: a di
     C->bv[C->nbv++] = v;
     return v;
 }
-// a storage image view of a texture: its own image (created with storage usage for NVN_TEXTURE_FLAGS_IMAGE), at the view's level and layers
+// a storage image view of a texture: its own image (created with storage usage for NVN_TEXTURE_FLAGS_IMAGE, or given it when first bound to an image slot: vt_storage_up), at the view's level and layers
 // A storage view: the image is viewed in the format the shader declares (Vulkan needs them to match), which must have its texel size; Unknown takes the image's own.
 // 0 when it cannot be (the draw is then skipped: a wrong-format storage image is undefined, and can hang the GPU)
 // A texture view's own format (view_t set_format): the image viewed in it when it is mutable and the texel sizes match; 0 = the image's
@@ -2000,10 +2009,32 @@ static VkFormat view_format(const vtex *v, const view_t *vv) {
     return f;
 }
 static int g_bind_bad;   // set by stage_set when a binding has no valid descriptor: the draw / dispatch is skipped
+// An image slot's texture made without storage use takes it (vt_storage_up), unless it is a target of the pass a draw prepared (rp_prepare ran before stage_set): rp_start would
+// begin that pass's framebuffer, made on the image the upgrade replaces. A dispatch's copy ends the pass, and the next rp_prepare makes the targets' views again
+// DM_VK_STORAGE_UP (env.txt): 0 leaves such a texture as before (bound as it is, an sRGB one skipped). 1 (default) upgrades one whose own format the GPU stores to, and still
+// skips one that would be stored through its UNORM twin (sRGB): with that, Ocarina of Time's title runs its upscaler's compute, which on the Pad 3's Adreno 830 drew noise over the
+// whole picture and took the GPU from 24 to 108 ms a frame (DeathKhan's nx2android fork met the same and replaced the upscaler). 2: those too, through the twin
+static int st_up_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_VK_STORAGE_UP"); m = e && *e >= '0' && *e <= '2' ? *e - '0' : 1; if (m != 1) LOG("[vk] DM_VK_STORAGE_UP=%d: %s", m, m ? "a texture bound to an image slot without storage use takes it, an sRGB one through its UNORM twin" : "a texture bound to an image slot without storage use is bound as it is"); } return m; }
+static int img_up(vtex *v, int compute) {
+    int m = st_up_mode(); if (!m) return 1;
+    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, v->fmt, &fp);
+    if (m == 1 && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+        RED_ONCE(125, "texture ser=%llu %ux%u format %d, made without storage use, is bound to an image slot in a format the GPU cannot store to: skipped (DM_VK_STORAGE_UP=2 stores it through its UNORM twin)", (unsigned long long)v->serial, v->w, v->h, v->fmt);
+        return 0; }
+    if (!compute) { int hit = P.dv == v; for (int i = 0; i < 8; i++) hit |= P.cv[i] == v;
+        if (hit) { RED_ONCE(124, "texture ser=%llu, made without storage use, is bound to an image slot of a draw that renders to it: skipped", (unsigned long long)v->serial); return 0; } }
+    return vt_storage_up(v);
+}
 static VkImageView storage_view(vtex *v, const view_t *vv, VkImageViewType vt, VkFormat decl) {
     VkFormat f = decl ? decl : v->fmt;
     if (f != v->fmt && (v->conv || !fmt_bytes(v->fmt) || fmt_bytes(v->fmt) != fmt_bytes(f))) { RED_ONCE(110, "image of format %d bound where the shader declares format %d: skipped", v->fmt, f); return VK_NULL_HANDLE; }
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
+    // an sRGB format the GPU cannot store to is stored through its UNORM twin, texels as the shader writes them, as Maxwell's image stores do and the Mac's linear-twin
+    // views (nvn_mtl.m img_fit); the image takes STORAGE for such views (vt_storage_up)
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && srgb_twin(f)) {
+        VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, srgb_twin(f), &tp);
+        if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = srgb_twin(f); fp = tp; }
+    }
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || v->conv) { RED_ONCE(104, "image format %d is not storage-capable here: skipped", f); return VK_NULL_HANDLE; }
     g_view_fmt = f == v->fmt ? VK_FORMAT_UNDEFINED : f;
     VkImageView iv = view_get(v, vt, vv && vv->set_levels ? vv->base_level : 0, 1, vv && vv->set_layers ? vv->min_layer : 0, vv && vv->set_layers ? vv->nlayers : 0, VK_IMAGE_ASPECT_COLOR_BIT, NULL);
@@ -2358,6 +2389,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             if (tbuf) { VkBufferView v = rg ? tbuf_view(&rg->t, 1, s->stage == SH_CS) : VK_NULL_HANDLE; bvs[nbv + e] = v ? v : dummy_tbuf(); continue; }
             const tc_ent *ce = tex_once() ? tc_el(tc, ci++, tid) : NULL; const treg_t *ri = ce ? (ce->r.ok ? &ce->r : NULL) : rg;   // as the textures above
             VkImageView iv = VK_NULL_HANDLE; vtex *v = !ri ? NULL : ce ? ce->v : vt_get(&ri->t);
+            if (v && !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !img_up(v, s->stage == SH_CS)) { g_bind_bad = 1; v = NULL; }   // made without storage use (vt_storage_up)
             if (v) { iv = storage_view(v, ri->has_v ? &ri->v : NULL, vt, t->fmt); if (!iv) g_bind_bad = 1; }
             if (!iv) iv = dummy_storage(vt, t->fmt);
             if (!iv) g_bind_bad = 1;

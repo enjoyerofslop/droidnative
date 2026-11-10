@@ -2027,6 +2027,25 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - the picture did not change there: the forest stays black for another cause, see the game's note.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2).
 
+### A texture without NVN's image flag bound to an image slot (Android)
+
+- **Symptom:** Android, Ocarina of Time's title: `[RED] [vk] image format 43 is not storage-capable here: skipped` (a 2560x1440 RGBA8_SRGB texture), and with #149 `[RED] [vk] image of format 37 bound to an image slot (format 37) without storage use` (a 1920x1080 RGBA8 one).
+- **Cause:** the game builds these textures without NVN's image flag, registers them with `RegisterTexture`, and binds them to image slots all the same. An image slot reads a texture-pool entry as a texture does.
+  - `vt_create` gives `STORAGE` only to a texture with the image flag. So the RGBA8 one got a storage view of an image without `STORAGE`, which is invalid, and the sRGB one's dispatch was skipped: sRGB is no storage format on Adreno.
+  - The flag was also part of the image's sharing key. A texture drawn into and then registered with `RegisterImage` (which adds the flag, `mtl_reg_image`) got a second, empty image beside the first.
+  - The Mac upgrades such a texture when it's bound to an image slot (`nvn_mtl.m` `image_prepare`, `tex_upgrade`), and its sharing key leaves the flag out.
+- **Fix:** the same on Vulkan.
+  - The sharing key and the description check leave the image flag out (`share_of`, `desc_same`).
+  - An image slot's texture without `STORAGE` is made again with it and `MUTABLE_FORMAT`, its levels and layers copied over, and swapped in under the same texture (`vt_storage_up`). Every name of it keeps it; the old image, its views and framebuffers go when the chunk completes.
+  - **sRGB, behind `DM_VK_STORAGE_UP=2`:** a format the GPU can't store to takes `STORAGE` for its UNORM twin's views alone (`EXTENDED_USAGE`), and each view takes the usage its format has (`view_get`). `storage_view` stores sRGB through that twin: image stores write texels as the shader gives them, as Maxwell's do and the Mac's linear-twin views (`img_fit`).
+    - Not the default: with it, Ocarina of Time's title runs the compute that writes the 2560x1440 sRGB target, its upscaler's. On the Pad 3 that drew noise over the whole picture and took the GPU from 24 to 108 ms a frame. DeathKhan's nx2android fork met the same flood and replaced the upscaler (`8569eeb`); Banana Native measured the upscaler at 58.5 ms a frame on the Fold.
+    - By default (`1`) such a texture's draw or dispatch is still skipped, as before, now with red line 125. `0` binds every such texture as it is, as before.
+  - A decoded BC texture, a multisample or depth one, or one the GPU takes no storage image of is still skipped, with red line 123. So is one bound to an image slot of a draw that renders to it (124).
+- **Check:** OnePlus Pad 3 (Adreno 830), against main `61eb7c31`, launches alternated:
+  - Ocarina of Time's title (route `title`): the RGBA8 target is upgraded and red line 104 is gone. The sRGB target is skipped with red line 125, the picture is main's, and the speed too (20.1 fps, GPU p50 24.3 ms on both). With `DM_VK_STORAGE_UP=2` the sRGB one is upgraded too, and its compute draws noise over the picture at 8.4 fps, GPU 108 ms (twice the same).
+  - Super Mario Odyssey (`opening`) and Brilliant Diamond (`eterna`), two runs each: no upgrade and no red line. 60 fps throughout, frame p50 within 0.05 ms. GPU p50 7.94–7.97 against 8.04–8.10 ms (SMO) and 10.07–10.11 against 10.14–10.36 ms (BD); the branch always ran second in each pair.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2), by the nx2android picks run on a Galaxy S25 Edge.
+
 ### A render pass with colour slot 0 empty hangs a later pass on the Adreno 830 (Android)
 
 - **Symptom:** Breath of the Wild loses the GPU on a OnePlus Pad 3 (Adreno 830, driver 0x8032004a) at its first frame in the field: `vkQueueSubmit` gives -4 and the loading screen stays up. Before that, one submission a frame takes 250–340 ms on the GPU with its end timestamp never written: the driver's hang recovery. The hang report names one draw, a vertical blur into a 640×360 RGBA8 target (vertex `2decd3e894b3736a`, fragment `26ae1640f3448ba4`). An Ayn Odin 2 (Adreno 740) runs the same frames.
