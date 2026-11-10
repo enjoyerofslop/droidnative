@@ -133,7 +133,9 @@ typedef struct {
     uint8_t dsbig;   // bit tf: one set of its layout (dsl, dsl_tf) does not fit an empty pool (sh_get ds_fits, else ds_alloc_n, RED 93): ds_get gives none for it, without making another pool
     uint8_t cbdyn[18], ndyn;   // set_reuse: cb[i] a dynamic uniform buffer, its offset at cbdyn[i] of the bind's (0xff: a plain one, its offset in the set); ndyn of them
     uint8_t pool;   // reads the texture pool by ID: its modules read the pool set (gfx_vk_pool.inc), which its pipelines' layouts take at POOL_SET
+    struct memu_t *memu;   // a task or mesh shader's compute form, on a GPU without VK_EXT_mesh_shader (gfx_vk_meshemu.inc: its facts, pipeline and pass-through vertex shader)
 } vshader;
+static int memu_on(void); static int memu_facts(vshader *s, const jv *e); static int memu_ready(vshader *s);   // gfx_vk_meshemu.inc
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
 // never matched the draw before, and stage_set wrote every set of every stage: Breath of the Wild about 7,500 a frame, vkUpdateDescriptorSets 3.4 ms a frame of the
 // replay on an Ayn Odin 2. With the constant buffers dynamic uniform buffers, their offsets go to vkCmdBindDescriptorSets, and what a set holds (buffer, range, views,
@@ -484,7 +486,10 @@ static vshader *sh_get(const char *key) {
                : s->stage == SH_MS ? VK_SHADER_STAGE_MESH_BIT_EXT : s->stage == SH_TK ? VK_SHADER_STAGE_TASK_BIT_EXT : VK_SHADER_STAGE_VERTEX_BIT;
     s->set = js_int(&r, "set", s->stage == SH_PS ? 1 : s->stage == SH_GS || s->stage == SH_TK ? 2 : 0);
     s->io_prim = (uint32_t)js_int(&r, "prim_locs", 0);
-    if ((s->stage == SH_MS || s->stage == SH_TK) && !g_mesh) { js_free(&r); RED_ONCE(161, "task / mesh shader %s on a GPU without VK_EXT_mesh_shader: its draws are skipped", s->key); return NULL; }
+    if ((s->stage == SH_MS || s->stage == SH_TK) && !g_mesh) {   // its compute form (gfx_vk_meshemu.inc): the kernel's own bindings at set 0 of a compute pipeline
+        if (!memu_on() || !memu_facts(s, js_get(&r, "mesh_emu"))) { js_free(&r); RED_ONCE(161, "task / mesh shader %s on a GPU without VK_EXT_mesh_shader, and no compute form of it (DM_VK_MESH_EMU, res.json mesh_emu): its draws are skipped", s->key); return NULL; }
+        s->vkstage = VK_SHADER_STAGE_COMPUTE_BIT; s->set = 0;
+    }
     const jv *a = js_get(&r, "cbufs"); uint32_t rext[CB_MAX] = {0};   // rext: res.json's extents (cb_ext_pick)
     for (int i = 0; a && i < a->n && s->ncb < CB_MAX; i++) { rext[s->ncb] = (uint32_t)js_int(&a->kid[i], "ext", 0); s->cb[s->ncb++] = (rb_cbuf){js_int(&a->kid[i], "binding", 0), js_int(&a->kid[i], "slot", 0), 0}; }
     a = js_get(&r, "sbufs");
@@ -504,10 +509,10 @@ static vshader *sh_get(const char *key) {
     for (int b = 0; a && a->t == 3 && b < a->n && b < 4; b++) if (a->kid[b].t == 3 && a->kid[b].n == 2) s->tf_stride[b] = (uint32_t)a->kid[b].kid[1].num;
     js_free(&r);
     t_pool_info = 0;
-    snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(p, &s->b0);
+    snprintf(p, sizeof p, s->memu ? "%s/%s.cs.spv" : "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(p, &s->b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
       if (w) { spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
-    if (s->stage == SH_VS || s->stage == SH_MS) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(p, &s->b0); }
+    if (s->stage == SH_VS || (s->stage == SH_MS && !s->memu)) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(p, &s->b0); }
     if (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(p, &s->b0); }
     if (!s->mod) return NULL;
     // a pool read spv_pool left, or pool arrays res.json names that it found no variable for: their arrays would be in no layout
@@ -533,6 +538,7 @@ static vshader *sh_get(const char *key) {
         if (vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &s->dsl_tf) != VK_SUCCESS) s->modtf = VK_NULL_HANDLE;
         if (!ds_fits(b, nb)) s->dsbig |= 2;
     }
+    if (s->memu && !memu_ready(s)) return NULL;   // a mesh shader's pass-through vertex shader
     s->ok = 1;
     if (vk_debug()) LOG("[vk] shader %s stage %d: %d constant buffers, %d storage buffers, %d textures, %d images%s%s", s->key, s->stage, s->ncb, s->nsb, s->ntx, s->nim, s->modz ? ", depth -1..1 variant" : "", s->b0 ? ", reads the support buffer" : "");
     return s;

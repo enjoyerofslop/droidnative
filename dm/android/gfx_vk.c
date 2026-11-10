@@ -1666,6 +1666,7 @@ static void clear_tex(const p_clear_tex *ct) {
 static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip);   // below (the pass dump's PNGs)
 #include "gfx_vk_draw.inc"
 #include "gfx_vk_mesh.inc"
+#include "gfx_vk_meshemu.inc"   // the same draws in compute form, on a GPU without VK_EXT_mesh_shader
 #include "gfx_vk_dscopy.inc"
 #include "gfx_vk_readback.inc"   // arena write-backs read through a cached copy where the arena reads slowly (DM_VK_WB_READBACK)
 
@@ -1843,7 +1844,7 @@ void mtl_exec(const uint8_t *p) {
                 if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
                 { p_draw t; const p_draw *dw = draw_rec(a, h.size, &t);   // short records: draw_rec (nvn_obj.h)
                   if (dw->prim == DM_PRIM_MESH_TASKS) {   // NVN2's DrawMeshTasks: on VK_EXT_mesh_shader (gfx_vk_mesh.inc); the Adreno 7xx drivers and Turnip have none, and no lowering is ported
-                      if (g_mesh) { if (!vk_mesh_draw(dw)) g_draws_dropped++; break; }
+                      if (g_mesh || memu_on()) { if (!vk_mesh_draw(dw)) g_draws_dropped++; break; }   // VK_EXT_mesh_shader, else their compute form (gfx_vk_meshemu.inc)
                       RED_ONCE(131, "task / mesh shader draws (NVN2 DrawMeshTasks) are skipped: no VK_EXT_mesh_shader on this GPU (Mario Kart World's roadside bushes and grass tufts)"); g_mesh_skipped++; break; }
                   if (!vk_draw(dw, NULL)) g_draws_dropped++; break; }
             case OP_DRAW_IDX: if (rc_skips()) break;

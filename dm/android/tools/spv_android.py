@@ -51,8 +51,9 @@ def emit(hdr, ins):
 def ext_name(x):   # OpExtension's literal string
     return b''.join(struct.pack('<I', v) for v in x[1:]).split(b'\0')[0].decode()
 
-def process(data, stage, cbsize=None):
-    """→ (header, instructions, interlock removed, size table taken out: None when the shader has none, else True, or False when its use was not the translator's)"""
+def process(data, stage, cbsize=None, keep=()):
+    """→ (header, instructions, interlock removed, size table taken out: None when the shader has none, else True, or False when its use was not the translator's).
+    keep: variables whose descriptor set stays as it is (spv_meshemu.compute's buffers)"""
     hdr, ins = parse(data)
     stripped = None
     if cbsize is not None: hdr, ins, stripped = cbsize_strip(hdr, ins, cbsize)
@@ -60,7 +61,7 @@ def process(data, stage, cbsize=None):
     out = []
     for x in ins:
         op = x[0]
-        if op == OP_DECORATE and x[2] == DEC_DESCRIPTORSET: x = x[:3] + [s]
+        if op == OP_DECORATE and x[2] == DEC_DESCRIPTORSET and x[1] not in keep: x = x[:3] + [s]
         if op == OP_CAP and x[1] in INTERLOCK_CAPS: interlock = True; continue
         if op == OP_EXT and ext_name(x) == 'SPV_EXT_fragment_shader_interlock': continue
         if op == OP_EXECMODE and x[2] in INTERLOCK_MODES: continue
@@ -755,7 +756,7 @@ def upgrade(out, key):
 def main():
     src, dst = Path(sys.argv[1]), Path(sys.argv[2]); dst.mkdir(parents=True, exist_ok=True)
     keys = sys.argv[3:] or sorted(p.stem for p in src.glob('*.spv') if not p.name.endswith('.reader.spv'))
-    n = nz = bad = eb = ew = ncs = 0
+    n = nz = bad = eb = ew = ncs = nemu = 0
     for k in keys:
         res = json.loads((src / f'{k}.res.json').read_text(encoding='utf-8'))
         stage = res.get('stage', 'vs')
@@ -764,6 +765,7 @@ def main():
         if res.get('mesh'):   # a task or mesh shader translated as compute (spv_build.py): the stage module, and a mesh shader's depth -1..1 variant
             import spv_mesh
             mesh = res.pop('mesh'); stage = res['stage'] = mesh['info']['kind']
+            kernel = data
             try:
                 plain, res['prim_locs'] = spv_mesh.wrap(data, mesh['info'], mesh['lay'])
                 zdata = spv_mesh.wrap(data, mesh['info'], mesh['lay'], gl=True)[0] if stage == 'ms' else None
@@ -772,6 +774,16 @@ def main():
             data = plain
             if zdata:
                 zh, zi, _, _ = process(zdata, stage, cs); (dst / f'{k}.z.spv').write_bytes(emit(zh, zi)); nz += 1
+            try:   # the emulation's forms (spv_meshemu.py): what a GPU without VK_EXT_mesh_shader runs instead (gfx_vk_meshemu.inc)
+                import spv_meshemu
+                cdata, keep = spv_meshemu.compute(kernel, mesh['info'], mesh['lay'])
+                ch, ci, _, _ = process(cdata, 'cs', cs, keep); (dst / f'{k}.cs.spv').write_bytes(emit(ch, ci))
+                if stage == 'ms':
+                    (dst / f'{k}.pvs.spv').write_bytes(spv_meshemu.vertex(mesh['info']))
+                    (dst / f'{k}.pvs.z.spv').write_bytes(spv_meshemu.vertex(mesh['info'], gl=True))
+                res['mesh_emu'] = spv_meshemu.facts(mesh['info']); nemu += 1
+            except ValueError as e:
+                print(f'[RED] {k}: {e}: no compute form (a GPU without VK_EXT_mesh_shader skips its draws)'); res['mesh_emu'] = None
         hdr, ins, interlock, stripped = process(data, stage, cs)
         (dst / f'{k}.spv').write_bytes(emit(hdr, ins)); n += 1
         if interlock: res.setdefault('notes', []).append('android: fragment shader interlock removed (no ordering of overlapping fragments)')
@@ -787,7 +799,8 @@ def main():
             z = z_variant(hdr, ins)
             if z: (dst / f'{k}.z.spv').write_bytes(z); nz += 1
             else: bad += 1; print(f'[RED] {k}: no position output found, no depth -1..1 variant')
-    print(f'spv_android: {n} shaders, {nz} depth variants, {bad} without one; constant buffers: {eb} with a known extent, {ew} read whole; the size table taken out of {ncs}')
+    print(f'spv_android: {n} shaders, {nz} depth variants, {bad} without one; constant buffers: {eb} with a known extent, {ew} read whole; the size table taken out of {ncs}'
+          + (f'; {nemu} task / mesh shaders in compute form too' if nemu else ''))
 
 if __name__ == '__main__':
     main()
