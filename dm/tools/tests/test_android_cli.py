@@ -120,9 +120,11 @@ class Windows(unittest.TestCase):
 MB = 1 << 20
 
 
-def jdk():   # (javac, java) of JAVA_HOME, else of PATH, when javac runs (a Mac's /usr/bin/javac is there with no JDK behind it); else None
-    home = os.environ.get('JAVA_HOME'); tools = [str(Path(home, 'bin', t)) for t in ('javac', 'java')] if home else [shutil.which('javac'), shutil.which('java')]
-    try: return tuple(tools) if all(tools) and subprocess.run([tools[0], '-version'], capture_output=True, timeout=60).returncode == 0 else None
+def jdk() -> 'tuple[str, str] | None':   # (javac, java) of JAVA_HOME, else of PATH, when javac runs (a Mac's /usr/bin/javac is there with no JDK behind it); else None
+    home = os.environ.get('JAVA_HOME')
+    javac, java = (str(Path(home, 'bin', 'javac')), str(Path(home, 'bin', 'java'))) if home else (shutil.which('javac'), shutil.which('java'))
+    if not javac or not java: return None
+    try: return (javac, java) if subprocess.run([javac, '-version'], capture_output=True, timeout=60).returncode == 0 else None
     except (OSError, subprocess.SubprocessError): return None
 
 
@@ -202,6 +204,7 @@ class GameApp(Base):   # droidplay-core issue #169: a game app whose DLC doesn't
 
     @unittest.skipUnless(JDK and ANDROID_JAR, 'needs a JDK (JAVA_HOME, or javac on PATH) and the Android SDK (ANDROID_HOME, or the Mac\'s default)')
     def test_gamestart_reads_the_packers_pack(self):   # GameStart's own parser, run on a JVM over the SDK's android.jar stubs, against a pack this script wrote
+        assert JDK is not None and ANDROID_JAR is not None   # (the skip above)
         javac, java = JDK; jar = ANDROID_JAR
         made, inside, info, stage, game, aoc = self.make(False, 512 << 10)
         src = self.tmp / 'jsrc'; out = self.tmp / 'jout'; src.mkdir(); out.mkdir()
