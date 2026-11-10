@@ -419,13 +419,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
   - Each frame is given the time to be shown (`vkb_frame.show_at`, presented with `VkPresentTimesInfoGOOGLE`): the first vsync at least its period after its start, half a refresh early.
   - A frame whose work and copy fit its period less one refresh is shown on that vsync, one refresh after the earliest it could have been; a later one at the next.
   - At one refresh, FIFO already shows a frame each vsync, and with no whole number of refreshes the frames fall between vsyncs whatever their times, so neither is touched.
+  - A refresh under 8 ms is a variable-rate panel's vsync timeline, not its refresh. The Pixel 9 Pro XL reports 4.17 ms (240 Hz) and shows each frame when it is ready, at least 8.33 ms after the last, so it is left as before. Locked to that timeline, Divinity's 30 fps showed 52 off-beat frames in 496 against 46 in 495 without the schedule, and 60 fps (4 "refreshes") was locked too.
   - `DM_VK_PRESENT_TIMING=0` turns it off.
   - A first version (#131) gave the present times on a schedule kept apart from the grid. It stopped early frames, but its slots sat after the latch, so for some phases more frames missed it (Breath of the Wild: 132 off-beat against 44).
 - **Found on:** the OnePlus Pad 3 (Adreno 830, Android 16, display at 60 Hz), two rounds of runs in turn with and without it, frames from `dumpsys SurfaceFlinger --latency` at four or five moments of each run:
   - [Divinity: Original Sin 2](../../dm/games/010027400CDC6000/README.md), `hold`: 4 off-beat of 1,003 frames, against 57 of 1,006 (1 + 1 and 1 + 1, against 1 + 1 and 27 + 28);
   - [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) at its 30 fps target, `outdoors`: 44 of 1,258, against 105 of 1,257 (12 + 12 and 10 + 10, against 33 + 32 and 21 + 19). What is left are frames over its budget (frame p95 39 ms); 2 to 3 presents in 1,800 came after their time;
   - frame rate and frame time p50 / p95 unchanged.
-- **Not checked yet:** other GPUs (Adreno 740, Mali, Xclipse), a 120 Hz display, Animal Crossing, Super Mario Odyssey at 60 fps (untouched by design).
+- **Not checked yet:** the Adreno 740 and the Xclipse; a fixed 120 Hz display; Animal Crossing; Super Mario Odyssey at 60 fps (untouched by design). On the Pixel 9 Pro XL (Mali-G715, variable rate) it now stays off: 17 off-beat of 248 at 30 fps, as without it.
 
 ## CPU cost and pacing
 
