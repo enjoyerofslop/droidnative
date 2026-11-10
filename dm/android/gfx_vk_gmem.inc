@@ -152,6 +152,23 @@ static void gm_device_made(void) {   // the device has the extensions: their ent
 // the tracker (Banana Native: Pokemon Pokopia stopped there). A pool made again at an address that had a buffer address is placed at its Initialize (the game's address
 // cache, hle_nvn.c pool_mark_addressed, does not ask again for the same storage)
 typedef struct { int what; VkResult r; size_t n; uintptr_t lo; void *q; double mbs, ms; } gm_note;   // what went wrong or was measured, logged once the swap is over
+// Whether something still to land writes into [lo, hi) (caller holds g_bk, so the replay records nothing meanwhile): a write-back, a queued copy, a counter report or an event
+// word, which the completion thread writes when its chunk completes. Only then is the GPU waited for before the swap. The GPU itself reaches a pool's pages only once it
+// is placed, and what the chunks in flight read of it was copied when they were recorded. A swap waited for everything before (all_wait): Kokiri Forest places pools all
+// the way through, about 2,000 pieces a minute on the Fold, and each wait emptied the GPU's queue
+static uint64_t g_gm_waits;   // swaps that waited
+static int gm_pend_in(const chunk *c, uintptr_t lo, uintptr_t hi) {
+    if (chunk_hits(c, lo, hi, 1)) return 1;
+    for (int i = 0; i < c->npost; i++) { const post_op *o = &c->post[i]; uintptr_t a = o->kind == 1 ? (uintptr_t)o->val : (uintptr_t)o->addr; if (a + 32 > lo && a < hi) return 1; }
+    return 0;
+}
+static int gm_pending(uintptr_t lo, uintptr_t hi) {
+    if (C && gm_pend_in(C, lo, hi)) return 1;
+    int hit = 0; pthread_mutex_lock(&g_cmu);
+    for (int f = 0; f < g_fifo_n && !hit; f++) hit = gm_pend_in(g_fifo[f], lo, hi);
+    pthread_mutex_unlock(&g_cmu);
+    return hit;
+}
 static __thread gm_note t_gn;
 static uint64_t gm_now(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
 static void gm_seg_insert(const gm_seg *s) {   // caller holds g_gm_mu
@@ -283,7 +300,7 @@ static void gm_place(const void *mem, uint64_t size, int live) {   // live: the 
                                                                                                 g_gm_bytes / 1073741824.0, g_gm_cap / 1073741824.0, (unsigned long)lo, (unsigned long long)size); return; }
     // in use: the GPU idle and the replay held first, then the tracker (its fault handler may be what the completion thread would wait in); lock order g_gm_pl, g_bk, the tracker's
     int bk = live && !t_bk_sub; if (bk) pthread_mutex_lock(&g_bk);
-    if (live) { all_wait(); nvn_dirty_open(mem, size); }
+    if (live) { if (gm_pending(lo, hi)) { all_wait(); g_gm_waits++; } nvn_dirty_open(mem, size); }
     gm_note fail = {0}, probe = {0}; int placed = 0;
     for (uintptr_t a = lo; a < hi && gm_on(); a += g_gm_piece) {   // pieces placed before a failure stay placed: each is an entry of its own
         size_t n = hi - a < g_gm_piece ? (size_t)(hi - a) : (size_t)g_gm_piece; gm_seg s;
@@ -342,22 +359,30 @@ static void gm_unplace(const void *mem) {
 // ---- The table and the write log (stage_set, the replay's thread under g_bk) ----
 // The table: entry 0 empty, then the placed pieces by address, each {start, end, device address minus start}, unused entries starting at ~0, and the 2 MiB chunk hints, as
 // nvn_mtl.m gmem_map lays it out (dmsh_abi.h DMSH_GMEM_MAP_*). Built again when a piece comes or goes; the one it replaces is destroyed once the chunk recorded now completes
-typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; uint64_t gen; } gm_tab;
+// The tables replaced go to a short list and are filled again once the chunk that may have read them last has completed: Kokiri Forest builds about 500 a minute as pools
+// are placed, and each new one's vkAllocateMemory was 8.6% of the replay thread on the Fold
+typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; uint64_t gen, seq; } gm_tab;   // seq: kept until that chunk completed
 static void gm_selftest(void);   // DM_VK_RAW_GMEM_TEST (gfx_vk_gmem_check.inc)
-static gm_tab g_gt;
+static gm_tab g_gt, g_gt_free[8]; static int g_ngt_free; static uint64_t g_gm_tab_new;
+static int gm_tab_new(gm_tab *t) {   // a new table buffer, host-visible and mapped
+    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GM_TAB_BYTES, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    if (vkCreateBuffer(g_vk.dev, &bc, NULL, &t->b) != VK_SUCCESS) return 0;
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g_vk.dev, t->b, &mr);
+    uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (mt == UINT32_MAX) mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt};
+    if (mt == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ma, NULL, &t->m) != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, t->b, NULL); t->b = VK_NULL_HANDLE; return 0; }
+    vkBindBufferMemory(g_vk.dev, t->b, t->m, 0);
+    if (vkMapMemory(g_vk.dev, t->m, 0, VK_WHOLE_SIZE, 0, (void **)&t->p) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, t->m, NULL); vkDestroyBuffer(g_vk.dev, t->b, NULL); t->b = VK_NULL_HANDLE; return 0; }
+    g_gm_tab_new++; return 1;
+}
 static int gm_table(void) {
     uint64_t gen = atomic_load(&g_gm_gen);
     if (g_gt.b && g_gt.gen == gen) return 1;
     gm_tab t = {0};
-    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GM_TAB_BYTES, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
-    if (vkCreateBuffer(g_vk.dev, &bc, NULL, &t.b) != VK_SUCCESS) return 0;
-    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g_vk.dev, t.b, &mr);
-    uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-    if (mt == UINT32_MAX) mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt};
-    if (mt == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ma, NULL, &t.m) != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, t.b, NULL); return 0; }
-    vkBindBufferMemory(g_vk.dev, t.b, t.m, 0);
-    if (vkMapMemory(g_vk.dev, t.m, 0, VK_WHOLE_SIZE, 0, (void **)&t.p) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, t.m, NULL); vkDestroyBuffer(g_vk.dev, t.b, NULL); return 0; }
+    pthread_mutex_lock(&g_cmu); uint64_t done = g_seq_done; pthread_mutex_unlock(&g_cmu);
+    for (int i = 0; i < g_ngt_free; i++) if (g_gt_free[i].seq <= done) { t = g_gt_free[i]; g_gt_free[i] = g_gt_free[--g_ngt_free]; break; }
+    if (!t.b && !gm_tab_new(&t)) return 0;
     static uint64_t (*seg)[3]; static int cseg; int n = 0, over = 0;   // the pieces as the table's ranges, then laid out (gmem_table.h)
     pthread_mutex_lock(&g_gm_mu);
     t.gen = atomic_load(&g_gm_gen);
@@ -366,7 +391,8 @@ static int gm_table(void) {
     pthread_mutex_unlock(&g_gm_mu);
     n = gmem_table_fill(t.p, (const uint64_t (*)[3])seg, n, &over);
     if (over) RED_ONCE(163, "raw global memory: %d more placed pieces than the %d entries of the pool table: addresses in them are not reached", over, DMSH_GMEM_MAP_ENTRIES - 1);
-    if (g_gt.b) { dead_add(5, (uint64_t)g_gt.b); dead_add(4, (uint64_t)g_gt.m); }
+    if (g_gt.b) { g_gt.seq = C ? C->seq : g_seq;   // the chunk recorded now may read it
+        if (g_ngt_free < 8) g_gt_free[g_ngt_free++] = g_gt; else { dead_add(5, (uint64_t)g_gt.b); dead_add(4, (uint64_t)g_gt.m); } }
     g_gt = t; g_gm_tabs++;
     { static int said; if (!said++) { LOG("[vk] raw global memory: pool table of %d placed pieces, built again whenever a pool is placed or given back", n - 1); gm_selftest(); } }
     return 1;
@@ -422,9 +448,9 @@ static void gm_stat(void) {
         LOG("[vk] raw global memory: memory pools by the addresses taken in them: a buffer's %llu (%.1f MiB), only a texture's %llu (%.1f MiB), none %llu (%.1f MiB); the largest (MiB, b/t/-):%s",
             (unsigned long long)nb[1], by[1] / 1048576.0, (unsigned long long)nb[2], by[2] / 1048576.0, (unsigned long long)nb[0], by[0] / 1048576.0, t); }
     LOG("[vk] raw global memory: %d placed pieces, %.1f MiB (peak %.1f), placing took %.0f ms, giving back %.0f ms (%llu given back, %llu kept placed); pools not placed: %llu over DM_VK_RAW_GMEM_MAX, %llu overlapping, "
-        "%llu failed; %llu tables built; %llu bindings of the table, %llu of a write log (%llu logs with stores, %llu entry bits, %llu CPU reads that met their chunk); draws that met pending write-backs: %llu as they were, %llu landed first (cumulative)",
+        "%llu failed; %llu swaps waited for the GPU; %llu tables built (%llu buffers made); %llu bindings of the table, %llu of a write log (%llu logs with stores, %llu entry bits, %llu CPU reads that met their chunk); draws that met pending write-backs: %llu as they were, %llu landed first (cumulative)",
         g_ngm, g_gm_bytes / 1048576.0, g_gm_peak / 1048576.0, g_gm_place_ns / 1e6, g_gm_give_ns / 1e6, (unsigned long long)g_gm_given, (unsigned long long)g_gm_kept, (unsigned long long)g_gm_capped,
-        (unsigned long long)g_gm_overlap, (unsigned long long)g_gm_failed, (unsigned long long)g_gm_tabs, (unsigned long long)g_gm_draws, (unsigned long long)g_gm_stdraws, (unsigned long long)g_gm_logs,
+        (unsigned long long)g_gm_overlap, (unsigned long long)g_gm_failed, (unsigned long long)g_gm_waits, (unsigned long long)g_gm_tabs, (unsigned long long)g_gm_tab_new, (unsigned long long)g_gm_draws, (unsigned long long)g_gm_stdraws, (unsigned long long)g_gm_logs,
         (unsigned long long)g_gm_logbits, (unsigned long long)g_gm_store_hits, (unsigned long long)g_gm_unsynced, (unsigned long long)g_gm_synced);
 }
 #include "gfx_vk_gmem_check.inc"   // DM_VK_RAW_GMEM_TEST and DM_VK_RAW_GMEM_CHECK: the self-test on the GPU and the pointers the shaders read
