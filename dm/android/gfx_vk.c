@@ -48,6 +48,7 @@ static __thread int t_bk_sub;   // this thread holds g_bk for a submission (mtl_
 // ---------------- The device ----------------
 static uint32_t g_sg_stages = VK_SHADER_STAGE_ALL;   // the stages that run subgroup operations (subgroupSupportedStages; spv_limits.h); all when not known
 static uint32_t g_sg_size = 32;   // the subgroup size (subgroupSize): over 32, Maxwell's warps are 32-lane parts of a subgroup (spv_wide.h)
+static int g_sg_comp32;   // compute pipelines whose shader uses subgroup operations are made with 32-lane subgroups (VK_EXT_subgroup_size_control; gfx_vk_lmod.inc)
 static VkPhysicalDeviceFeatures g_vk_feat; static int g_divisor;   // what the device was created with; VK_EXT_vertex_attribute_divisor or the KHR one   // what the device was created with
 // The KHR divisor without supportsNonZeroFirstInstance (the Pixel 9 Pro XL's Mali-G715): a draw with a stream stepping per N > 1 instances must start at instance 0, so its
 // base instance moves into the instance-rate streams' offsets instead (gfx_vk_draw.inc inst_shift)
@@ -96,8 +97,8 @@ static void vk_create(void) {
     if (g_vk.qf == nq) { LOG("[RED] [vk] no graphics queue"); return; }
     uint32_t nd = 0; vkEnumerateDeviceExtensionProperties(g_vk.pd, NULL, &nd, NULL);
     VkExtensionProperties *de = calloc(nd ? nd : 1, sizeof *de); vkEnumerateDeviceExtensionProperties(g_vk.pd, NULL, &nd, de);
-    const char *dext[12]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
-                                              // shader module identifier, pipeline creation cache control and display timing
+    const char *dext[13]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
+                                              // shader module identifier, pipeline creation cache control, display timing and subgroup size control
     if (has_ext(de, nd, "VK_KHR_swapchain")) { dext[nde++] = "VK_KHR_swapchain"; g_vk.has_swapchain = 1; }
     { const char *e = getenv("DM_VK_PRESENT_TIMING");   // frames start on the display's vsyncs and are shown at a time given with them (gfx_vk_vsync.inc); Android's loader implements it on every driver
       if (g_vk.has_swapchain && has_ext(de, nd, "VK_GOOGLE_display_timing") && !(e && *e == '0')) { dext[nde++] = "VK_GOOGLE_display_timing"; g_vk.has_display_timing = 1; } }
@@ -122,6 +123,18 @@ static void vk_create(void) {
     { const char *e = getenv("DM_VK_POOL"); int pool = !(e && *e == '0'); g_nonuni = pool && has_ext(de, nd, "VK_EXT_descriptor_indexing"); g_null_desc = pool && has_ext(de, nd, "VK_EXT_robustness2"); }
     // pipelines from the driver's cache by their modules' identifiers, the modules made only when it lacks one (gfx_vk_lmod.inc). DM_VK_MODULE_ID=0: modules made at once
     int smid; { const char *e = getenv("DM_VK_MODULE_ID"); smid = !(e && *e == '0') && has_ext(de, nd, "VK_EXT_shader_module_identifier") && has_ext(de, nd, "VK_EXT_pipeline_creation_cache_control"); }
+    // Maxwell's warp instructions in compute shaders, translated for 32 lanes, on a GPU whose subgroups are wider (the Xclipse 950's 64): t_warp_reduce's whole-warp
+    // reduction sums only lanes 0-31 there, as a shuffle from lane 32 or up falls outside its warp's clamp and lane 32 is no warp's lane 0. spv_wide rewrites only
+    // fragment shaders. A GPU that can run compute shaders in 32-lane subgroups (VK_EXT_subgroup_size_control: a required size in compute, 32 within its sizes)
+    // gets those compute pipelines made so (lm_pipeline), each subgroup then one Maxwell warp. The Adreno 8xx (64 lanes only) and the Mali-G715 (16) cannot.
+    // DM_VK_WARP32=0 (env.txt): compute pipelines as wide as the driver picks
+    int sgc = 0; { const char *e = getenv("DM_VK_WARP32");
+      if (g_sg_size > 32 && !(e && *e == '0') && has_ext(de, nd, "VK_EXT_subgroup_size_control")) {
+          VkPhysicalDeviceSubgroupSizeControlPropertiesEXT sc = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT};
+          VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sc}; vkGetPhysicalDeviceProperties2(g_vk.pd, &p2);
+          // a workgroup as large as the GPU takes must fit in its subgroups at 32 lanes each, or a pipeline with one would be invalid
+          sgc = (sc.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) && sc.minSubgroupSize <= 32 && sc.maxSubgroupSize >= 32 &&
+                (uint64_t)sc.maxComputeWorkgroupSubgroups * 32 >= g_vk.props.limits.maxComputeWorkGroupInvocations; } }
     free(de);
     VkPhysicalDeviceFeatures want = {.textureCompressionBC = f.textureCompressionBC, .textureCompressionASTC_LDR = f.textureCompressionASTC_LDR,
                                      .textureCompressionETC2 = f.textureCompressionETC2, .independentBlend = f.independentBlend, .geometryShader = f.geometryShader,
@@ -145,6 +158,7 @@ static void vk_create(void) {
     VkPhysicalDeviceDescriptorIndexingFeaturesEXT diq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = qn}; if (g_nonuni) qn = &diq;
     VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT pcq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT, .pNext = qn};
     VkPhysicalDeviceShaderModuleIdentifierFeaturesEXT smq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MODULE_IDENTIFIER_FEATURES_EXT, .pNext = &pcq}; if (smid) qn = &smq;
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT scq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT, .pNext = qn}; if (sgc) qn = &scq;
     VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = qn};
     if (VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 1 || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1) vkGetPhysicalDeviceFeatures2(g_vk.pd, &f2);
     hqr = hqr && hq.hostQueryReset;
@@ -154,6 +168,7 @@ static void vk_create(void) {
     if ((g_null_desc = g_null_desc && rbq.nullDescriptor)) dext[nde++] = "VK_EXT_robustness2";
     smid = smid && smq.shaderModuleIdentifier && pcq.pipelineCreationCacheControl;
     if (smid) { dext[nde++] = "VK_EXT_pipeline_creation_cache_control"; dext[nde++] = "VK_EXT_shader_module_identifier"; }
+    if ((g_sg_comp32 = sgc && scq.subgroupSizeControl)) dext[nde++] = "VK_EXT_subgroup_size_control";
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT dve = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT, .vertexAttributeInstanceRateDivisor = dv.vertexAttributeInstanceRateDivisor};
     VkPhysicalDeviceHostQueryResetFeaturesEXT hqe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT, .pNext = divisor ? &dve : NULL, .hostQueryReset = VK_TRUE};
     VkPhysicalDeviceShaderDrawParametersFeatures dpe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES, .pNext = hqr ? (void *)&hqe : divisor ? (void *)&dve : NULL, .shaderDrawParameters = dp.shaderDrawParameters};
@@ -168,6 +183,7 @@ static void vk_create(void) {
     VkPhysicalDeviceDescriptorIndexingFeaturesEXT die = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = en, .shaderSampledImageArrayNonUniformIndexing = VK_TRUE}; if (g_nonuni) en = &die;
     VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT pce = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT, .pNext = en, .pipelineCreationCacheControl = VK_TRUE};
     VkPhysicalDeviceShaderModuleIdentifierFeaturesEXT sme = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MODULE_IDENTIFIER_FEATURES_EXT, .pNext = &pce, .shaderModuleIdentifier = VK_TRUE}; if (smid) en = &sme;
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sce = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT, .pNext = en, .subgroupSizeControl = VK_TRUE}; if (g_sg_comp32) en = &sce;
     VkDeviceCreateInfo dc = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = en, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qc, .enabledExtensionCount = nde, .ppEnabledExtensionNames = dext,
                              .pEnabledFeatures = &want};
     if (vkCreateDevice(g_vk.pd, &dc, NULL, &g_vk.dev) != VK_SUCCESS) { LOG("[RED] [vk] no Vulkan device"); return; }
@@ -178,7 +194,8 @@ static void vk_create(void) {
     LOG("[vk] shader modules: %s", g_smid ? "made only for a pipeline the driver's cache does not have, which takes their identifiers (VK_EXT_shader_module_identifier; DM_VK_MODULE_ID=0: made at once)" : "made as each shader loads");
     LOG("[vk] query resets: %s", g_qreset ? "on the host, the queries each chunk used, once read (VK_EXT_host_query_reset)" : qr_used() ? "in the command buffer, the queries the chunk used last time"
                                                                                                                                      : "in the command buffer, every pool at every chunk begin (DM_VK_QRESET_USED=0)");
-    LOG("[vk] descriptor sets bound at once: %u, subgroup operations in stages %#x, %u lanes", g_vk.props.limits.maxBoundDescriptorSets, g_sg_stages, g_sg_size);
+    LOG("[vk] descriptor sets bound at once: %u, subgroup operations in stages %#x, %u lanes%s", g_vk.props.limits.maxBoundDescriptorSets, g_sg_stages, g_sg_size,
+        g_sg_comp32 ? "; compute shaders that use them in 32-lane subgroups, one per Maxwell warp (VK_EXT_subgroup_size_control; DM_VK_WARP32=0: as the driver picks)" : "");
     { void crash_set_gfx_hook(void (*)(void)); crash_set_gfx_hook(pb_dump); }   // a crash dump lists the pipelines being built (gfx_vk_draw.inc)
     LOG("[vk] %s (Vulkan %u.%u.%u): BC %s, ASTC %s", g_vk.props.deviceName, VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion),
         VK_API_VERSION_PATCH(g_vk.props.apiVersion), g_vk.has_bc ? "native" : "decoded on the CPU", g_vk.has_astc ? "native" : "missing");

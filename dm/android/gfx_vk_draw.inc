@@ -369,6 +369,7 @@ static size_t spv_fit_wide(const uint32_t *code, size_t nw, const char *what, ui
     *out = NULL;
     uint32_t st = on && g_sg_size > 32 ? spv_wide_wanted(code, nw, g_sg_stages) : 0;
     if (!st) return 0;
+    if (st == VK_SHADER_STAGE_COMPUTE_BIT && g_sg_comp32) return 0;   // as translated, its pipelines made with 32-lane subgroups (lm_pipeline)
     if (!(st & SPV_WIDE_STAGES)) {   // a stage no device test covers yet: as translated, said once for each
         static _Atomic uint32_t told;
         if (!(atomic_fetch_or(&told, st) & st))

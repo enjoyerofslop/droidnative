@@ -4,8 +4,9 @@ asked for checks that it writes no further. Skipped without the NDK.
 With DM_SPV_DIR=<a game's packed spv folder>, also run over every module there with 16-lane fragment and compute subgroups (each result must pass spirv-val
 wherever the module itself does).
 With DM_TEST_SERIAL=<adb serial>, dm/android/tests/t_warp_reduce.c is built for Android and run on that device with a compute shader whose whole-warp reductions
-are the translator's: rewritten for the device's subgroup size where it is under 32, its sum, minimum, maximum and OR must be the workgroup's; where it is 32 or
-more, as translated."""
+are the translator's: rewritten for the device's subgroup size where it is under 32, its sum, minimum, maximum and OR must be the workgroup's; where it is 32,
+as translated; where it is more, as translated in a pipeline that asks for 32-lane subgroups, as the replay does (skipped where the GPU cannot give compute
+shaders 32)."""
 import ctypes
 import os
 from pathlib import Path
@@ -287,8 +288,8 @@ class SpvNarrow(unittest.TestCase):
         subprocess.run([adb, '-s', serial, 'shell', 'mkdir', '-p', d], check=True)
         data = self.asm(CS, 'dev_cs'); (self.tmp / 'cs_in.spv').write_bytes(data)
         for f in (exe, self.tmp / 'cs_in.spv'): subprocess.run([adb, '-s', serial, 'push', f, d], check=True, capture_output=True)
-        def on_device(cs):
-            r = subprocess.run([adb, '-s', serial, 'shell', f'cd {d} && chmod 755 t_warp_reduce && ./t_warp_reduce {cs}; echo "exit $?"'], capture_output=True, text=True)
+        def on_device(cs, req=''):
+            r = subprocess.run([adb, '-s', serial, 'shell', f'cd {d} && chmod 755 t_warp_reduce && ./t_warp_reduce {cs} {req}; echo "exit $?"'], capture_output=True, text=True)
             print(r.stdout.strip()); return r.stdout
         translated = on_device('cs_in.spv')
         m = re.search(r'subgroup size (\d+)', translated); assert m, translated
@@ -297,6 +298,12 @@ class SpvNarrow(unittest.TestCase):
             out, what = self.run_on(data, size=size); self.assertTrue(what & STEP); assert out is not None
             (self.tmp / 'cs_out.spv').write_bytes(out); subprocess.run([adb, '-s', serial, 'push', self.tmp / 'cs_out.spv', d], check=True, capture_output=True)
             result = on_device('cs_out.spv')
+        elif size > 32:   # as translated, in the 32-lane subgroups the replay asks for (gfx_vk.c g_sg_comp32), where the GPU can give compute shaders that size
+            result = on_device('cs_in.spv', '32')
+            if result.strip().endswith('exit 3'):
+                subprocess.run([adb, '-s', serial, 'shell', 'rm', '-r', d], capture_output=True)
+                right = translated.strip().endswith('exit 0')
+                self.skipTest(f'{size}-lane subgroups, and compute shaders cannot be given 32: left as translated, which gives {"the right" if right else "wrong"} results here')
         else: result = translated
         subprocess.run([adb, '-s', serial, 'shell', 'rm', '-r', d], capture_output=True)
         self.assertTrue(result.strip().endswith('exit 0'), result)

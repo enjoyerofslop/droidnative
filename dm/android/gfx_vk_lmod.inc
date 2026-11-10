@@ -6,7 +6,9 @@
 // VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT, which the driver's cache serves (2 ms) or answers VK_PIPELINE_COMPILE_REQUIRED (0.02 ms). Only then are
 // its modules made, from the files again through the same rewrites, and the pipeline compiled as before. The SPIR-V is not kept meanwhile (Brilliant Diamond's
 // modules are about 28 KB each). Without the extension, or with DM_VK_MODULE_ID=0 (env.txt), every module is made at once, as before
-typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha; uint8_t id[VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT]; char path[]; } lmod;   // miss: ps_variant's (0: the file as it is); alpha: spv_alpha.h's test added to the code
+// miss: ps_variant's (0: the file as it is); alpha: spv_alpha.h's test added to the code; w32: a compute shader that uses subgroup operations, whose pipelines are made
+// with 32-lane subgroups (g_sg_comp32, gfx_vk.c)
+typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha; uint8_t w32, id[VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT]; char path[]; } lmod;
 static _Atomic uint64_t g_lm_ids, g_lm_hit, g_lm_miss;   // modules known by their identifier; pipelines the driver's cache gave for identifiers; pipelines that needed modules after all
 static __thread int t_pool_info;   // what spv_pool did to the modules lm_code made since sh_get cleared it
 // The module's code as it is made (to free): the file; a fragment shader variant's unwritten inputs made constants (spv_drop_inputs), else the vertex pipeline's
@@ -51,6 +53,7 @@ static lmod *lm_new_a(const char *path, uint32_t miss, int alpha, int *b0) {
     size_t n = 0; uint32_t *code = lm_code(path, miss, alpha, 1, b0, &n); if (!code) return NULL;
     size_t pl = strlen(path) + 1; lmod *l = calloc(1, sizeof *l + pl); if (!l) { free(code); return NULL; }
     memcpy(l->path, path, pl); l->miss = miss; l->alpha = alpha;
+    l->w32 = g_sg_comp32 && spv_wide_wanted(code, n, g_sg_stages) == VK_SHADER_STAGE_COMPUTE_BIT;
     if (g_smid) {
         VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = n * 4, .pCode = code};
         VkShaderModuleIdentifierEXT id = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_IDENTIFIER_EXT};
@@ -71,13 +74,16 @@ static VkShaderModule lm_module(lmod *l) {   // the module itself, made now when
     return made;
 }
 // A graphics (gp) or compute (cp) pipeline whose ns stages st name the modules lms: from the identifiers of those not made yet when the driver's cache has the
-// pipeline, else with the modules made now. Called with or without the replay's lock, as pipe_make and cpipe_get are
+// pipeline, else with the modules made now; a w32 module's stage with 32-lane subgroups. Called with or without the replay's lock, as pipe_make and cpipe_get are
 static VkResult lm_pipeline(VkGraphicsPipelineCreateInfo *gp, VkComputePipelineCreateInfo *cp, VkPipelineShaderStageCreateInfo *st, lmod *const *lms, uint32_t ns, VkPipeline *out) {
-    VkPipelineShaderStageModuleIdentifierCreateInfoEXT sid[5]; int byid = 0;
+    VkPipelineShaderStageModuleIdentifierCreateInfoEXT sid[5]; VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT w32[5]; int byid = 0;
     for (uint32_t i = 0; i < ns && i < 5; i++) {
+        if (lms[i]->w32) { w32[i] = (VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
+                                                                                             .pNext = (void *)st[i].pNext, .requiredSubgroupSize = 32};
+                           st[i].pNext = &w32[i]; }
         st[i].module = atomic_load(&lms[i]->m);
         if (!st[i].module) { sid[i] = (VkPipelineShaderStageModuleIdentifierCreateInfoEXT){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_MODULE_IDENTIFIER_CREATE_INFO_EXT,
-                                                                                         .identifierSize = lms[i]->idn, .pIdentifier = lms[i]->id};
+                                                                                         .pNext = st[i].pNext, .identifierSize = lms[i]->idn, .pIdentifier = lms[i]->id};
                              st[i].pNext = &sid[i]; byid = 1; }
     }
     VkPipelineCreateFlags *fl = gp ? &gp->flags : &cp->flags; VkResult pr;
@@ -88,7 +94,7 @@ static VkResult lm_pipeline(VkGraphicsPipelineCreateInfo *gp, VkComputePipelineC
         if (pr == VK_SUCCESS) { atomic_fetch_add(&g_lm_hit, 1); return pr; }
         // VK_PIPELINE_COMPILE_REQUIRED, the cache's answer for a pipeline it does not have (any other answer is taken as that too): the modules, then a compile
         atomic_fetch_add(&g_lm_miss, 1); *out = VK_NULL_HANDLE;
-        for (uint32_t i = 0; i < ns && i < 5; i++) if (!st[i].module) { st[i].pNext = NULL; if (!(st[i].module = lm_module(lms[i]))) return VK_ERROR_INITIALIZATION_FAILED; }
+        for (uint32_t i = 0; i < ns && i < 5; i++) if (!st[i].module) { st[i].pNext = sid[i].pNext; if (!(st[i].module = lm_module(lms[i]))) return VK_ERROR_INITIALIZATION_FAILED; }
     }
     return gp ? vkCreateGraphicsPipelines(g_vk.dev, pcache(), 1, gp, NULL, out) : vkCreateComputePipelines(g_vk.dev, pcache(), 1, cp, NULL, out);
 }

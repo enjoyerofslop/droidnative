@@ -145,8 +145,8 @@ Where this GPU differs from the Adreno above:
   1.4 and 2.1 GB.
 - **No BC textures** (`BC decoded on the CPU`), as on the Pixel: Brilliant Diamond draws right, without either of the symptoms #133 fixes.
 - **64-lane subgroups in every stage** (stages 0x3d3f, sizes 32 to 64, a required size in compute only): `spv_wide` rewrote Brilliant Diamond's 23 `fwidth` fragment shaders.
-  No vertex shader of the nine games packed for Android on the Mac uses subgroup operations. Compute shaders in Final Fantasy Resonance (1,199) and Mario Kart World (184) do, and stay as
-  translated, with `spv_wide`'s red line; neither game has run on this phone.
+  No vertex shader of the nine games packed for Android on the Mac uses subgroup operations. Compute shaders in Final Fantasy Resonance (1,199) and Mario Kart World (184) do: their
+  pipelines are made with 32-lane subgroups, which this GPU can give compute shaders ([Maxwell's 32-lane warps in a wider subgroup, in compute shaders](../../docs/reference/rendering.md#maxwells-32-lane-warps-in-a-wider-subgroup-in-compute-shaders)).
 - **The cover screen:** folding the phone while the game plays puts it in the background (focus states 2 and 3, audio suspended) and shows Samsung's own cover home on the cover
   screen. The game process keeps running, and nothing crashes. Opening the phone brings back its lock screen first. Not seen:
   - the game's return after unlocking (the next install stopped it);

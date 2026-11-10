@@ -1,7 +1,9 @@
-// t_warp_reduce <comp.spv>: whether a compute shader's whole-warp reductions, as the translator writes Maxwell's (SHFL.BFLY by 1, 2, 4, 8 and 16 lanes, clamp 31,
+// t_warp_reduce <comp.spv> [<required subgroup size>]: whether a compute shader's whole-warp reductions, as the translator writes Maxwell's (SHFL.BFLY by 1, 2, 4, 8 and 16 lanes, clamp 31,
 // then lane 0 of each warp adds its result into memory with an atomic), give the workgroup's sum, minimum, maximum and OR on this GPU. One workgroup of 64
 // invocations; invocation i holds hash(i + 1) & 0xffff; the shader (dm/tools/tests/test_spv_narrow.py writes it, as translated and as spv_narrow.h rewrites it) adds,
-// mins, maxes and ORs its warp's into a storage buffer of 4 words. Exit 0 when all four are right.
+// mins, maxes and ORs its warp's into a storage buffer of 4 words. Exit 0 when all four are right. With a required subgroup size, the pipeline asks for it
+// (VK_EXT_subgroup_size_control), as the replay does for compute shaders on a GPU whose subgroups are wider than 32 lanes (gfx_vk_draw.inc cpipe_get); exit 3 when the
+// GPU cannot give it to compute shaders
 // test_spv_narrow.py builds and runs it on a device with DM_TEST_SERIAL=<adb serial>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,17 +12,24 @@
 static uint32_t hash(uint32_t x) { uint32_t h = x * 2654435761u; h ^= h >> 15; h *= 739982445u; h ^= h >> 12; return h; }   // test_spv_narrow.py's, in the shader
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
+    uint32_t req = argc > 2 ? (uint32_t)atoi(argv[2]) : 0;
     FILE *f = fopen(argv[1], "rb"); if (!f) return 2;
     static uint32_t code[1 << 16]; size_t nb = fread(code, 1, sizeof code, f); fclose(f);
-    VkApplicationInfo ai = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_1};
+    VkApplicationInfo ai = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = req ? VK_API_VERSION_1_3 : VK_API_VERSION_1_1};
     VkInstanceCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai};
     VkInstance in; CK(vkCreateInstance(&ic, NULL, &in));
     uint32_t n = 1; VkPhysicalDevice pd; vkEnumeratePhysicalDevices(in, &n, &pd);
-    VkPhysicalDeviceSubgroupProperties sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceSubgroupSizeControlProperties sc = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
+    VkPhysicalDeviceSubgroupProperties sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES, .pNext = req ? &sc : NULL};
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sg}; vkGetPhysicalDeviceProperties2(pd, &p2);
     printf("%s, subgroup size %u, stages %#x\n", p2.properties.deviceName, sg.subgroupSize, sg.supportedStages);
+    if (req) {
+        printf("required subgroup size %u: sizes %u to %u, in stages %#x\n", req, sc.minSubgroupSize, sc.maxSubgroupSize, sc.requiredSubgroupSizeStages);
+        if (!(sc.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) || req < sc.minSubgroupSize || req > sc.maxSubgroupSize) return 3;
+    }
+    VkPhysicalDeviceSubgroupSizeControlFeatures scf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES, .subgroupSizeControl = VK_TRUE};
     float pri = 1; VkDeviceQueueCreateInfo qc = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &pri};
-    VkDeviceCreateInfo dc = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qc};
+    VkDeviceCreateInfo dc = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = req ? &scf : NULL, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qc};
     VkDevice d; CK(vkCreateDevice(pd, &dc, NULL, &d)); VkQueue q; vkGetDeviceQueue(d, 0, 0, &q);
     VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(pd, &mp);
     VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT}; VkBuffer buf; CK(vkCreateBuffer(d, &bc, NULL, &buf));
@@ -34,8 +43,9 @@ int main(int argc, char **argv) {
     VkDescriptorSetLayoutCreateInfo dlc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &lb}; VkDescriptorSetLayout dl; CK(vkCreateDescriptorSetLayout(d, &dlc, NULL, &dl));
     VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dl}; VkPipelineLayout pl; CK(vkCreatePipelineLayout(d, &lc, NULL, &pl));
     VkShaderModuleCreateInfo mc = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = code}; VkShaderModule m; CK(vkCreateShaderModule(d, &mc, NULL, &m));
-    VkComputePipelineCreateInfo cc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-                                      .module = m, .pName = "main"}, .layout = pl};
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = req};
+    VkComputePipelineCreateInfo cc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = req ? &rs : NULL,
+                                      .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"}, .layout = pl};
     VkPipeline pipe; CK(vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &cc, NULL, &pipe));
     VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
     VkDescriptorPoolCreateInfo dpc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps}; VkDescriptorPool dp; CK(vkCreateDescriptorPool(d, &dpc, NULL, &dp));
