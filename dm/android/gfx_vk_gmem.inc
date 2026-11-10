@@ -22,7 +22,10 @@
 //   ran raw stores counts as a write-back of unknown range until it completes (chunk_hits): the next CPU read of guest memory waits for it, as nvn_mtl.m counts the stores as a
 //   write anywhere until it has learned their pools. Each store also sets its table entry's bit in a write log (DMSH_GMEM_LOG_CB_OFFSET): every draw with stores gets a zeroed
 //   log from the arena, read when its chunk completes, and the pools it names are logged (the Mac's learned pools are the next step). DM_VK_RAW_GMEM_STORE_WAIT=0: not waited for
-// Off unless DM_VK_RAW_GMEM=1 (env.txt) and the device has a route. Off, nothing changes: the device is made as before and the table binding reads 16 zero bytes.
+// On for a Switch 2 game (its sdk module's spec is Ounce: loader.c dm_sdk_ounce) whose device has a route; DM_VK_RAW_GMEM=1 turns it on for any game (Frostpunk's sdk is a
+// Switch 1 one with NVN2's mesh shaders), =0 off. The device is made before the game's modules are loaded (at the window's surface), so it takes the extensions whenever the
+// GPU has them and DM_VK_RAW_GMEM is not 0; which game it is is settled at its first memory pool (gm_game). Off, nothing else changes: no pool is placed and the table binding
+// reads 16 zero bytes.
 #ifndef VK_EXT_map_memory_placed   // Vulkan 1.3.290; the NDK r28 headers are 1.3.275
 #define VK_EXT_map_memory_placed 1
 #define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT ((VkStructureType)1000272000)
@@ -41,8 +44,14 @@ typedef struct { VkStructureType sType; const void *pNext; void *pPlacedAddress;
 #endif
 #include "gmem_table.h"   // the table's layout and the translator's lookup, free of Vulkan (dm/tools/tests/test_gmem_table.py)
 enum { GM_TAB_BYTES = GMEM_TAB_BYTES, GM_LOG_BYTES = DMSH_GMEM_MAP_ENTRIES / 8, GM_SEEN = 256 };
-typedef struct { uintptr_t lo, hi; const void *pool; VkDeviceMemory m; VkBuffer b; uint64_t gpu; AHardwareBuffer *ahb; } gm_seg;   // one placed allocation over [lo, hi) of the pool at pool; ahb: the AHardwareBuffer route's buffer
-static int g_gm_on;   // decided at device creation (gm_feat_take, gm_device_made)
+// A piece's buffer is bound in place as whatever the game's buffer at that address is read as (gfx_vk_gmem_inplace.inc; a dispatch's write read as a vertex stream or a buffer
+// texture through fwd_hit), so it takes every buffer usage
+#define GM_USAGE (VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | \
+                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | \
+                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+typedef struct { uintptr_t lo, hi; const void *pool; VkDeviceMemory m; VkBuffer b; uint64_t gpu; AHardwareBuffer *ahb; uint64_t *rd; } gm_seg;   // one placed allocation over [lo, hi) of the pool at pool;
+                                                                                                                                  // ahb: the AHardwareBuffer route's buffer; rd: each page's last in-place read (gfx_vk_gmem_inplace.inc)
+static int g_gm_on;   // the device has a route (gm_feat_take, gm_device_made); gm_on also asks gm_game
 static int g_gm_mode, g_gm_has_placed, g_gm_has_ahb;   // the route: 1 placed maps, 2 AHardwareBuffers; what the device offers
 static PFN_vkGetAndroidHardwareBufferPropertiesANDROID g_gm_ahbp;
 static PFN_vkMapMemory2KHR g_gm_map2; static PFN_vkUnmapMemory2KHR g_gm_unmap2; static PFN_vkGetBufferDeviceAddressKHR g_gm_bda;
@@ -55,11 +64,18 @@ static gm_seg *g_gm; static int g_ngm, g_cgm;   // sorted by lo, disjoint
 static _Atomic uint64_t g_gm_gen = 1;   // bumped by every placement and give-back: the table is built again at its next bind
 static uint64_t g_gm_bytes, g_gm_peak, g_gm_capped, g_gm_failed, g_gm_overlap, g_gm_given, g_gm_kept, g_gm_place_ns, g_gm_give_ns;
 static uint64_t g_gm_tabs, g_gm_draws, g_gm_stdraws, g_gm_logs, g_gm_logbits, g_gm_unsynced, g_gm_synced;
-static int gm_on(void) { return g_gm_on; }
+static int gm_game(void);   // below: whether this game takes raw global memory
+static int gm_on(void) { return g_gm_on && gm_game(); }
 static int gm_store_wait(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_STORE_WAIT"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAW_GMEM_STORE_WAIT=0: CPU reads of guest memory do not wait for raw stores"); } return v; }
 
-// ---- The device (vk_create): the extensions and features, asked for only with DM_VK_RAW_GMEM=1 ----
-static int gm_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM"); v = e && *e == '1'; } return v; }
+// ---- The device (vk_create): the extensions and features, unless DM_VK_RAW_GMEM=0 ----
+static int gm_env(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_VK_RAW_GMEM"); v = e && *e == '1' ? 1 : e && *e == '0' ? 0 : -1; } return v; }   // 1 on, 0 off, -1 a Switch 2 game's
+// Settled at the first call, from a memory pool's Initialize or later (the sdk module is loaded by then); the log line comes once the device is known to have a route
+static int gm_game(void) {
+    static int v = -1; if (v >= 0) return v;
+    int env = gm_env(); v = env == 1 ? 1 : env == 0 ? 0 : dm_sdk_ounce();
+    return v;
+}
 static int gm_want(const VkExtensionProperties *e, uint32_t n) {
     if (!gm_env()) return 0;
     g_gm_has_placed = has_ext(e, n, "VK_KHR_map_memory2") && has_ext(e, n, "VK_EXT_map_memory_placed");
@@ -67,7 +83,8 @@ static int gm_want(const VkExtensionProperties *e, uint32_t n) {
     int ok = has_ext(e, n, "VK_KHR_buffer_device_address") && (g_gm_has_placed || g_gm_has_ahb);
     // Virtual pools alias physical pages only when the guest's memory is in files (DM_GUEST_FILE=1, hle_nvn.c vpool_map): a placed map would replace such an alias
     const char *gf = getenv("DM_GUEST_FILE"); if (ok && gf && *gf == '1') { LOG("[RED] [vk] raw global memory: off with DM_GUEST_FILE=1 (a placed pool would replace a virtual pool's alias of its pages)"); return 0; }
-    if (!ok) LOG("[RED] [vk] raw global memory: DM_VK_RAW_GMEM=1, but this GPU lacks VK_KHR_buffer_device_address, or both VK_EXT_map_memory_placed and VK_ANDROID_external_memory_android_hardware_buffer: raw loads read 0");
+    if (!ok) LOG("%s[vk] raw global memory: this GPU lacks VK_KHR_buffer_device_address, or both VK_EXT_map_memory_placed and VK_ANDROID_external_memory_android_hardware_buffer: a Switch 2 game's raw loads read 0",
+                 gm_env() == 1 ? "[RED] " : "");
     return ok;
 }
 static void *gm_feat_query(void *next) {   // into vkGetPhysicalDeviceFeatures2's chain
@@ -108,7 +125,7 @@ static void gm_device_made(void) {   // the device has the extensions: their ent
     long pg = sysconf(_SC_PAGESIZE); g_gm_align = pp.minPlacedMemoryMapAlignment > (VkDeviceSize)pg ? pp.minPlacedMemoryMapAlignment : (VkDeviceSize)pg;
     // A pool's pages are what the game's CPU code reads and writes, its atomics included: the type must be cached (a write-combined or uncached mapping would make every guest
     // access slow, and exclusives on it may never succeed), and coherent, since nothing flushes. Device-local when the GPU offers it so
-    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 65536, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR};
+    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 65536, .usage = GM_USAGE};
     VkBuffer b; VkMemoryRequirements mr = {0};
     if (vkCreateBuffer(g_vk.dev, &bc, NULL, &b) == VK_SUCCESS) { vkGetBufferMemoryRequirements(g_vk.dev, b, &mr); vkDestroyBuffer(g_vk.dev, b, NULL); }
     const VkMemoryPropertyFlags hv = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
@@ -117,11 +134,12 @@ static void gm_device_made(void) {   // the device has the extensions: their ent
     else if (g_gm_mt == UINT32_MAX) { LOG("[RED] [vk] raw global memory: no host-visible, coherent and cached memory type for the pools (of the types %#x): off", mr.memoryTypeBits); return; }
     g_gm_cap = gm_size_env("DM_VK_RAW_GMEM_MAX");
     g_gm_on = 1;
-    if (g_gm_mode == 2) LOG("[vk] raw global memory on (DM_VK_RAW_GMEM=1): memory pools become AHardwareBuffers mapped at their own addresses and imported with device addresses "
-                            "(%s), pieces of up to %llu MiB%s", g_gm_has_placed ? "DM_VK_RAW_GMEM_AHB=1" : "no VK_EXT_map_memory_placed", (unsigned long long)(g_gm_piece >> 20), g_gm_cap ? ", capped by DM_VK_RAW_GMEM_MAX" : "");
-    else LOG("[vk] raw global memory on (DM_VK_RAW_GMEM=1): memory pools become placed Vulkan memory at their own addresses, memory type %u (flags %#x), pieces of up to %llu MiB, alignment %llu, "
-        "unmap reserve %u%s", g_gm_mt, g_vk.mp.memoryTypes[g_gm_mt].propertyFlags, (unsigned long long)(g_gm_piece >> 20), (unsigned long long)g_gm_align, g_gm_mpq.memoryUnmapReserve,
-        g_gm_cap ? ", capped by DM_VK_RAW_GMEM_MAX" : "");
+    if (g_gm_mode == 2) LOG("[vk] raw global memory ready (%s): memory pools of a game that takes it become AHardwareBuffers mapped at their own addresses and imported with device addresses "
+                            "(%s), pieces of up to %llu MiB%s", gm_env() == 1 ? "DM_VK_RAW_GMEM=1" : "a Switch 2 game's; DM_VK_RAW_GMEM=0 turns it off",
+                            g_gm_has_placed ? "DM_VK_RAW_GMEM_AHB=1" : "no VK_EXT_map_memory_placed", (unsigned long long)(g_gm_piece >> 20), g_gm_cap ? ", capped by DM_VK_RAW_GMEM_MAX" : "");
+    else LOG("[vk] raw global memory ready (%s): memory pools of a game that takes it become placed Vulkan memory at their own addresses, memory type %u (flags %#x), pieces of up to %llu MiB, "
+        "alignment %llu, unmap reserve %u%s", gm_env() == 1 ? "DM_VK_RAW_GMEM=1" : "a Switch 2 game's; DM_VK_RAW_GMEM=0 turns it off", g_gm_mt, g_vk.mp.memoryTypes[g_gm_mt].propertyFlags,
+        (unsigned long long)(g_gm_piece >> 20), (unsigned long long)g_gm_align, g_gm_mpq.memoryUnmapReserve, g_gm_cap ? ", capped by DM_VK_RAW_GMEM_MAX" : "");
 }
 
 // ---- Placing a pool: when the game first takes a buffer address in it (mtl_pool_addressed), as the Mac lists only such pools ----
@@ -143,7 +161,7 @@ static void gm_seg_insert(const gm_seg *s) {   // caller holds g_gm_mu
 }
 static int gm_place1(uintptr_t lo, size_t n, gm_seg *s) {   // [lo, lo + n) as one placed allocation; 0: the range is as it was (t_gn says why). Logs nothing
     memset(s, 0, sizeof *s); s->lo = lo; s->hi = lo + n; t_gn = (gm_note){0, VK_SUCCESS, n, lo, NULL, 0, 0};
-    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR};
+    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = GM_USAGE};
     if (vkCreateBuffer(g_vk.dev, &bc, NULL, &s->b) != VK_SUCCESS) { t_gn.what = 1; return 0; }
     VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g_vk.dev, s->b, &mr);
     // a placed map is of the whole allocation (memoryMapRangePlaced is 0 on the Adreno 840): one larger than the range would cover the bytes after it
@@ -203,7 +221,7 @@ static int gm_place1_ahb(uintptr_t lo, size_t n, gm_seg *s) {   // as gm_place1,
     // imported first: a failure leaves the guest's pages as they are
     VkAndroidHardwareBufferPropertiesANDROID hp = {.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID};
     VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID};
-    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = n, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR};
+    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = n, .usage = GM_USAGE};
     int ok = (t_gn.r = g_gm_ahbp(g_vk.dev, s->ahb, &hp)) == VK_SUCCESS && hp.memoryTypeBits && vkCreateBuffer(g_vk.dev, &bc, NULL, &s->b) == VK_SUCCESS;
     if (ok) {
         uint32_t mt = vkb_mem_type(hp.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); if (mt == UINT32_MAX) mt = (uint32_t)__builtin_ctz(hp.memoryTypeBits);
@@ -250,7 +268,8 @@ static void gm_note_log(const gm_note *g) {   // t_gn, outside the swap
 static uintptr_t (*g_gm_addr)[2]; static int g_ngma, g_cgma;   // ranges of pools the game took a buffer address in, kept after they are given back (under g_gm_pl)
 static int gm_was_addressed(uintptr_t lo, uintptr_t hi) { for (int i = 0; i < g_ngma; i++) if (g_gm_addr[i][0] < hi && lo < g_gm_addr[i][1]) return 1; return 0; }
 static void gm_place(const void *mem, uint64_t size, int live) {   // live: the pool is in use (mtl_pool_addressed); 0: at its Initialize, before anything uses it
-    if (!size || !gm_env() || !vkb() || !gm_on()) return;   // (the switch first: without it the device is not made here, earlier than it would be)
+    if (!size || !gm_game() || !vkb() || !gm_on()) return;   // (the game first: for another game the device is not made here, earlier than it would be)
+    { static int said; if (!said++) LOG("[vk] raw global memory on: %s; memory pools are placed at their first buffer address", gm_env() == 1 ? "DM_VK_RAW_GMEM=1" : "a Switch 2 game (DM_VK_RAW_GMEM=0 turns it off)"); }
     uintptr_t lo = (uintptr_t)mem, hi = lo + size;
     pthread_mutex_lock(&g_gm_pl);
     if (!live && !gm_was_addressed(lo, hi)) { pthread_mutex_unlock(&g_gm_pl); return; }
@@ -270,7 +289,7 @@ static void gm_place(const void *mem, uint64_t size, int live) {   // live: the 
         size_t n = hi - a < g_gm_piece ? (size_t)(hi - a) : (size_t)g_gm_piece; gm_seg s;
         int ok = g_gm_mode == 2 ? gm_place1_ahb(a, n, &s) : gm_place1(a, n, &s); if (t_gn.what == 9) probe = t_gn;
         if (!ok) { fail = t_gn; g_gm_failed++; break; }
-        s.pool = mem; placed++;
+        s.pool = mem; s.rd = calloc((n + 4095) >> 12, sizeof *s.rd); placed++;
         pthread_mutex_lock(&g_gm_mu); gm_seg_insert(&s); g_gm_bytes += n; if (g_gm_bytes > g_gm_peak) g_gm_peak = g_gm_bytes; atomic_fetch_add(&g_gm_gen, 1); pthread_mutex_unlock(&g_gm_mu);
     }
     if (live) nvn_dirty_close();
@@ -312,6 +331,7 @@ static void gm_unplace(const void *mem) {
             if (a != (void *)s->lo) die("raw global memory: pool memory %#lx+%#zx could not be given back (errno %d)", (unsigned long)s->lo, len, errno);
             memcpy(a, t, len); munmap(t, len); }
         if (s->ahb) { vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); AHardwareBuffer_release(s->ahb); }   // the mapping is ours: the pages replaced it first
+        free(s->rd);
         g_gm_given++;
     }
     g_gm_give_ns += gm_now() - t0;
@@ -375,7 +395,7 @@ static void gm_chunk_done(chunk *c) {
         }
         g_gm_logs += any;
     }
-    c->ngml = 0; c->gm_st = 0;
+    c->ngml = 0; c->gm_st = 0; c->ip_wr = 0;
 }
 // Before a draw or dispatch whose shaders bind the table (draw_view): the GPU reads guest memory when it runs, not when the replay copies, so a write-back still pending (a storage
 // buffer an earlier dispatch wrote in its arena copy) is not in guest memory for it yet. DM_VK_RAW_GMEM_SYNC=1 lands every pending write-back first (as cpu_view does for a CPU
@@ -389,8 +409,10 @@ static int gm_view(vshader *const sh[4]) {   // 1: everything pending landed (cp
     if (!gm_sync()) { g_gm_unsynced++; return 0; }
     g_gm_synced++; cpu_view(); return 1;
 }
+static void gm_ip_stat(void);   // gfx_vk_gmem_inplace.inc
 static void gm_stat(void) {
     if (!gm_on() && !g_ngm) return;
+    gm_ip_stat();
     {   uint64_t by[4] = {0}, nb[4] = {0}; const pool_rng *big[8] = {0};   // the pools by the addresses the game took in them (mtl_pool_addressed), and the largest
         pthread_mutex_lock(&g_pool_mu);
         for (int i = 0; i < g_npool; i++) { const pool_rng *p = &g_pools[i]; int c = p->how & 1 ? 1 : p->how & 2 ? 2 : 0; by[c] += (uint64_t)(p->hi - p->lo); nb[c]++;
@@ -406,3 +428,4 @@ static void gm_stat(void) {
         (unsigned long long)g_gm_logbits, (unsigned long long)g_gm_store_hits, (unsigned long long)g_gm_unsynced, (unsigned long long)g_gm_synced);
 }
 #include "gfx_vk_gmem_check.inc"   // DM_VK_RAW_GMEM_TEST and DM_VK_RAW_GMEM_CHECK: the self-test on the GPU and the pointers the shaders read
+#include "gfx_vk_gmem_inplace.inc"   // storage buffers bound in their placed pools (DM_VK_INPLACE)

@@ -226,7 +226,8 @@ typedef struct { int st; size_t off, row_bytes, rows, src_pitch, dst_pitch; uint
                  // snapshot kept only for the revert check (DM_VK_LINWB_SNAP=0 with DM_VK_WB_REVERT=1); snap_cap: snap / dsnap is a pooled buffer of that size (snap_give), 0: malloc'd;
                  // the texture's serial, image, NVN format, texel block bytes, size and storage size
                  // rb: its GPU copy's offset in the chunk's readback buffer + 1 (gfx_vk_readback.inc rb_record), 0: read from its source
-                 int lin; uint8_t *dsnap; size_t snap_cap; uint64_t ser, img; uint32_t fmt, bpb, w, h; uint64_t tsize; size_t rb; } wb_t;
+                 // inpl: a storage buffer the GPU writes in its placed pool (gfx_vk_gmem_inplace.inc), bound as ipb at off: nothing to copy, its pages prepared once the chunk completes
+                 int lin; uint8_t *dsnap; size_t snap_cap; uint64_t ser, img; uint32_t fmt, bpb, w, h; uint64_t tsize; size_t rb; VkBuffer ipb; int inpl; } wb_t;
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize n, used; } arena_blk;
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; uint64_t q0, q1; } post_op;   // kind 1 event, 2 counter, 3 samples passed (occlusion queries q0..q1)
 typedef struct { int kind; uint64_t h; } dead_t;
@@ -253,7 +254,7 @@ typedef struct chunk {
     VkDescriptorSet *bcd; int nbcd, cbcd, bcd_used;   // the GPU BC decodes' sets (gfx_vk_bcdec.inc bcd_set), the same way
     uint64_t rq_ticket;   // its submission's ticket with the recorder on (gfx_vk_rec.inc rec_submit), 0 when submitted by the replay
     ds_list **dl; int ndl, cdl; ds_list **dt; int ndt, cdt; int nds;   // recycled descriptor sets (gfx_vk_draw.inc ds_get): the lists holding sets, those handed out from in this recording, the sets held
-    gm_logref *gml; int ngml, cgml, gm_st;   // its raw store write logs; gm_st: a shader with raw stores ran in it (gfx_vk_gmem.inc)
+    gm_logref *gml; int ngml, cgml, gm_st, ip_wr;   // its raw store write logs; gm_st: a shader with raw stores ran in it (gfx_vk_gmem.inc); ip_wr: one wrote a storage buffer in place
     struct { const char *a, *b; uint32_t n, m; char kind; } cr[CR_MAX]; int ncr;   // what it recorded, the last CR_MAX of ncr (crumb): named when the GPU hangs or is lost in it (gpu_slow)
 } chunk;
 // Chunks in use (g_nchunk of NCHUNK_MAX): the one being recorded and those submitted, until the completion thread is done with them. With none free, cur() waits for the
@@ -561,7 +562,7 @@ static uint64_t chunk_submit(uint64_t nvn_fence) {
     rp_end();
     int rec = C->open;   // a chunk whose command buffer was never begun is submitted with none: the fence alone
     int deferred = rec_on();   // the recorder ends the command buffer and submits it after the calls queued before (rec_submit): the replay goes on recording meanwhile
-    if (rec && C->gm_st) {   // raw stores wrote guest memory itself (gfx_vk_gmem.inc): made visible to the host, which reads it once the fence is signalled
+    if (rec && (C->gm_st || C->ip_wr)) {   // raw stores or storage buffers written in place wrote guest memory itself (gfx_vk_gmem.inc): made visible to the host, which reads it once the fence is signalled
         VkMemoryBarrier hb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT};
         vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL, 0, NULL); }
     if (rec) { cb_barrier(); rb_record(C); if (C->ts) vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsq, 2 * (uint32_t)(C - g_ch) + 1); if (!deferred) vkEndCommandBuffer(C->cb); C->open = 0; }
@@ -640,7 +641,9 @@ static int wr_pending(uintptr_t lo, uintptr_t hi) {
     return hit;
 }
 static uint64_t g_mem_cur, g_mem_fly, g_mem_free;   // the same for the submission's own CPU writes and small copies (uniform buffer updates, buffer copies and fills)
+static void gm_ip_write(uintptr_t lo, uintptr_t hi);   // gfx_vk_gmem_inplace.inc: a chunk still to run that reads those pages in place runs first
 static void mem_view(uint64_t rd, uint64_t rn, uint64_t wr, uint64_t wn) {
+    if (wn) gm_ip_write((uintptr_t)wr, (uintptr_t)(wr + wn));
     if (vk_safe()) { cpu_view(); return; }
     uint64_t c = g_view_cur, f = g_view_fly, e = g_view_free;
     rd_rng r[1] = {{(uintptr_t)rd, (uintptr_t)(rd + rn)}}, w[1] = {{(uintptr_t)wr, (uintptr_t)(wr + wn)}};
@@ -876,6 +879,7 @@ static void chunk_done(chunk *c) {
     rb_invalidate(c);   // before any write-back is read from the GPU's copies
     uint64_t wt0 = c->nwb ? clock_gettime_nsec_np(CLOCK_MONOTONIC) : 0, an = 0, ab = 0, ar = 0;
     for (int i = 0; i < c->nwb; i++) { const wb_t *w = &c->wb[i];
+        if (w->inpl) { dm_guest_write_prepare(w->dst, w->row_bytes); continue; }   // the GPU wrote guest memory itself: its pages count as written (and are writable) from now on
         const uint8_t *s = w->rb ? c->rb.p + (w->rb - 1) : (w->st >= SP_ST ? c->sb[w->st - SP_ST].p : w->st >= 0 ? c->stg[w->st].p : c->ar[-1 - w->st].p) + w->off;
         if (w->st < 0) { an++; ab += w->rows ? w->src_pitch * (w->rows - 1) + w->row_bytes : 0; ar += w->rb != 0; }
         if (w->lin && wb_revert_on()) rv_check(w, s);   // before it lands: guest memory still holds what the CPU wrote during the pass
@@ -2384,9 +2388,9 @@ static void bound_preserve(void) {
 
 // The rest of the interface Metal gives and Android does not need yet
 void mtl_tex_gpu_written(const tex_t *t) { (void)t; }   // Metal's record of GPU-written storage (tex_cpu_content); tex_init_fill here decides by the pool's flags
-static int gm_env(void);   // gfx_vk_gmem.inc: DM_VK_RAW_GMEM=1
-void mtl_pool_addressed(const void *mem, uint64_t size) {   // raw global memory: which pools the game took a GPU address in (counted in gfx_vk_gmem.inc gm_stat); nothing without DM_VK_RAW_GMEM=1
-    if (!gm_env()) return;
+static int gm_game(void);   // gfx_vk_gmem.inc: a Switch 2 game's, or DM_VK_RAW_GMEM=1
+void mtl_pool_addressed(const void *mem, uint64_t size) {   // raw global memory: which pools the game took a GPU address in (counted in gfx_vk_gmem.inc gm_stat); nothing for a game without it
+    if (!gm_game()) return;
     pthread_mutex_lock(&g_pool_mu);
     int i = pool_find((const uint8_t *)mem, size ? size : 1);
     int whole = i >= 0 && (const uint8_t *)mem == g_pools[i].lo && (const uint8_t *)mem + size >= g_pools[i].hi, first = whole && !(g_pools[i].how & 1);

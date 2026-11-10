@@ -1,0 +1,86 @@
+// ---- Storage buffers bound in their placed pools (DM_VK_INPLACE) ----
+// A storage buffer a shader only reads was copied into the arena once per chunk and compared whole with that copy at every later draw of the chunk (ucopy), unless the
+// geometry cache kept it (sb_keep: up to 8 MB, and not written by the game in two frames running). Ocarina of Time's Kokiri Forest reads buffers the game writes every frame:
+// on the Galaxy Z Fold 8 that compare was 83% of the replay thread (simpleperf: __memcmp_aarch64 under ucopy, stage_set's read-only storage buffer line), and the copies
+// about 165 MB a second to the arena and as much again to the shadows. A placed pool's pages are the GPU's own memory (gfx_vk_gmem.inc), so such a buffer is bound as the
+// piece's VkBuffer at its offset: no copy and no compare, and the GPU reads what the game wrote, as on the console.
+// - The GPU reads it when it runs, not when the replay records. The game's own writes are ordered by its fences, which complete when the GPU has run the work before them
+//   (mtl_sub_commit), as on the console. The replay's writes are not: it writes guest memory on the CPU while it records (uniform buffer updates, small copies and fills:
+//   mem_view), and a draw recorded before that write and still to run would read the new bytes. So each page read in place keeps the chunk that last read it (gm_seg rd),
+//   and a write by the replay to such a page waits for that chunk first (gm_ip_write: the chunk being recorded is submitted and waited for, one in flight waited for).
+//   Write-backs, linear render targets' and large copies land in guest memory when their chunk completes, after everything recorded before them has run; a draw recorded
+//   after them lands them first when it reads their range (draw_view), and a dispatch's pending write is bound on the GPU instead (sb_fwd), as before.
+// - Not in place: a buffer in no placed piece (raw global memory off, a pool the game never took a buffer address in), one that crosses two pieces, one at an offset that
+//   is not a multiple of minStorageBufferOffsetAlignment, and one the shader writes (still copied and written back when its chunk completes).
+// DM_VK_INPLACE=0 (env.txt): copied as before
+static int ip_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_INPLACE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_INPLACE=0: read-only storage buffers in placed pools are copied as before"); } return v; }
+static uint64_t g_ip_binds, g_ip_bytes, g_ip_span, g_ip_unal, g_ip_wcur, g_ip_wfly, g_ip_wfree, g_ip_wnone;
+static int g_ip_any;   // a buffer was bound in place (the replay's writes look only then)
+static int gm_seg_at(uintptr_t a) {   // the piece holding a, or -1 (caller holds g_gm_mu)
+    int lo = 0, hi = g_ngm - 1;
+    while (lo <= hi) { int m = (lo + hi) / 2; if (a < g_gm[m].lo) hi = m - 1; else if (a >= g_gm[m].hi) lo = m + 1; else return m; }
+    return -1;
+}
+// a read-only storage buffer [addr, addr + n): 1 with *b, *off, *range the piece's buffer to bind; 0: copy it as before. The replay's thread, under g_bk, with a chunk open
+static int gm_inplace(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *off, VkDeviceSize *range) {
+    if (!n || !C || !g_ngm || !ip_on() || !gm_on()) return 0;
+    static struct { uint64_t a, n, seq; } memo[512];   // the stamps already made by this chunk: a buffer is often bound by many draws of one chunk
+    unsigned h = (unsigned)((addr >> 6) ^ (addr >> 17) ^ n) & 511;
+    VkDeviceSize al = g_vk.props.limits.minStorageBufferOffsetAlignment ? g_vk.props.limits.minStorageBufferOffsetAlignment : 1;
+    pthread_mutex_lock(&g_gm_mu);
+    int i = gm_seg_at((uintptr_t)addr);
+    if (i < 0) { pthread_mutex_unlock(&g_gm_mu); return 0; }
+    const gm_seg *s = &g_gm[i]; VkDeviceSize o = (VkDeviceSize)(addr - s->lo);
+    if (addr + n > s->hi) { pthread_mutex_unlock(&g_gm_mu); g_ip_span++; return 0; }
+    if (o % al) { pthread_mutex_unlock(&g_gm_mu); g_ip_unal++; return 0; }
+    if (s->rd && !(memo[h].a == addr && memo[h].n == n && memo[h].seq == C->seq)) {
+        uint64_t sq = C->seq; for (size_t p = (size_t)(o >> 12), e = (size_t)((o + n - 1) >> 12); p <= e; p++) s->rd[p] = sq;
+        memo[h].a = addr; memo[h].n = n; memo[h].seq = sq;
+    }
+    VkDeviceSize r = (n + 15) & ~(VkDeviceSize)15; if (o + r > (VkDeviceSize)(s->hi - s->lo)) r = n;   // bound to the 16-byte range, as the copies are, within the piece
+    *b = s->b; *off = o; *range = r;
+    pthread_mutex_unlock(&g_gm_mu);
+    g_ip_binds++; g_ip_bytes += n; g_ip_any = 1;
+    return 1;
+}
+// A storage buffer the shader writes, in a placed pool: bound there too, with a write-back that copies nothing (wb_t inpl). CPU reads of its range wait for its chunk as they did
+// for the copy's write-back (chunk_hits), a later dispatch reads it on the GPU from the piece (fwd_hit), and when the chunk completes its pages are prepared (chunk_done:
+// counted as written, so a kept copy or a texture over them is made again, and writable). It was copied into the arena with a snapshot, and written back by comparing the
+// two: in Kokiri Forest about 101 write-backs and 49 MB a frame, copied twice by the replay thread and compared by the completion thread (13.9 ms a frame).
+// DM_VK_INPLACE_WRITE=0 (env.txt): written ones copied and written back as before
+static int ip_w_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_INPLACE_WRITE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_INPLACE_WRITE=0: written storage buffers are copied and written back as before"); } return v; }
+static uint64_t g_ip_wbinds, g_ip_wbytes;
+static int gm_inplace_w(uint64_t addr, size_t n, int cs, VkBuffer *b, VkDeviceSize *off, VkDeviceSize *range) {
+    if (!ip_w_on() || !gm_inplace(addr, n, b, off, range)) return 0;
+    g_ip_binds--; g_ip_bytes -= n;   // (counted as written, not read)
+    wb_t *w = wb_add(); if (!w) return 0;
+    *w = (wb_t){0, (size_t)*off, n, 1, n, n, (uint8_t *)(uintptr_t)addr, NULL, cs}; w->ipb = *b; w->inpl = 1;
+    if (cs) C->nfwd++;
+    C->ip_wr = 1; g_ip_wbinds++; g_ip_wbytes += n;
+    return 1;
+}
+// The replay is about to write guest memory [lo, hi) on the CPU (mem_view): a chunk still to run that reads those pages in place runs first
+static void gm_ip_write(uintptr_t lo, uintptr_t hi) {
+    if (!g_ip_any || hi <= lo) return;
+    uint64_t need = 0;
+    pthread_mutex_lock(&g_gm_mu);
+    int a = 0, z = g_ngm; while (a < z) { int m = (a + z) / 2; if (g_gm[m].hi <= lo) a = m + 1; else z = m; }   // the first piece ending past lo
+    for (int i = a; i < g_ngm && g_gm[i].lo < hi; i++) {
+        const gm_seg *s = &g_gm[i]; if (!s->rd) continue;
+        uintptr_t x = lo > s->lo ? lo : s->lo, y = hi < s->hi ? hi : s->hi;
+        for (size_t p = (x - s->lo) >> 12, e = (y - 1 - s->lo) >> 12; p <= e; p++) if (s->rd[p] > need) need = s->rd[p];
+    }
+    pthread_mutex_unlock(&g_gm_mu);
+    if (!need) { g_ip_wnone++; return; }
+    pthread_mutex_lock(&g_cmu); uint64_t done = g_seq_done; pthread_mutex_unlock(&g_cmu);
+    if (need <= done) { g_ip_wfree++; return; }
+    if (C && need >= C->seq) { g_ip_wcur++; submit_wait(); }
+    else { g_ip_wfly++; seq_wait(need); }
+}
+static void gm_ip_stat(void) {
+    if (!g_ip_binds && !g_ip_wbinds && !g_ip_span && !g_ip_unal) return;
+    LOG("[vk] storage buffers bound in their placed pools: %llu read-only bindings (%llu MB read in place), %llu written ones (%llu MB), not in place %llu crossing two pieces, %llu at an offset not a multiple of %llu; "
+        "the replay's CPU writes over pages read in place: %llu waited for the chunk being recorded, %llu for one in flight, %llu after it had run, %llu over none (cumulative; gfx_vk_gmem_inplace.inc)",
+        (unsigned long long)g_ip_binds, (unsigned long long)(g_ip_bytes >> 20), (unsigned long long)g_ip_wbinds, (unsigned long long)(g_ip_wbytes >> 20), (unsigned long long)g_ip_span, (unsigned long long)g_ip_unal,
+        (unsigned long long)g_vk.props.limits.minStorageBufferOffsetAlignment, (unsigned long long)g_ip_wcur, (unsigned long long)g_ip_wfly, (unsigned long long)g_ip_wfree, (unsigned long long)g_ip_wnone);
+}
