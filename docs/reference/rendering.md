@@ -2078,6 +2078,23 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - Super Mario Odyssey (`opening`) and Brilliant Diamond (`eterna`), two runs each: no upgrade and no red line. 60 fps throughout, frame p50 within 0.05 ms. GPU p50 7.94–7.97 against 8.04–8.10 ms (SMO) and 10.07–10.11 against 10.14–10.36 ms (BD); the branch always ran second in each pair.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2), by the nx2android picks run on a Galaxy S25 Edge.
 
+### Ocarina of Time's upscaler network draws noise on the Adreno 830 (Android)
+
+- **Symptom:** Android, Ocarina of Time in Kokiri Forest on a OnePlus Pad 3 (Adreno 830): white streaks of noise over the whole picture, the HUD drawn over them. Before #167 the forest was black there.
+- **Cause:** the game upscales its 1440x810 scene to 1920x1080 with a neural network in one compute dispatch (agl's NDSR, `fa3033d05c0a41d6`, matrix tiles through shared memory). Its output is noise on this GPU. #167 made the storage images feeding it valid, and the noise appeared.
+  - Skipping that one dispatch (a test build) leaves the picture clean.
+  - DeathKhan's nx2android fork met the same on the Odin 3's Adreno 830 (`8569eeb`), and Banana Native measured the network at 58.5 ms a frame on the Galaxy Z Fold 8.
+- **Fix:** the network is replaced by a bilinear scale and a signed square (`gfx_vk_upsq.inc`, `shaders/upscale_square.comp`), the fork's idea written anew. No network detail is added.
+  - `DM_VK_UPSCALER_SQUARE_CS` lists the networks' compute shader keys; the game's `android_defaults.txt` names `fa3033d05c0a41d6`.
+  - `stage_set` notes such a shader's first texture and first image, and `vk_dispatch` runs the replacement in place of the network's dispatch. It samples the input at each output texel's centre, writes `x * |x|` into an RGBA16F intermediate and blits that into the output. The input holds square-root encoded colour and the output linear colour.
+  - The decode is the fork's audited one, so it's kept to its formats: an E5B9G9R9, B10G11R11 or RGBA16F input and a B10G11R11 output. Any other pair, or a GPU that can't filter, store or blit them, runs the network, with a red line (126-129). `=0` runs every network.
+  - Not the title's 2560x1440 sRGB target: that is written by `4f41ccf24f163e0d`, the title movie's compositor, which reads the movie network's output (the replay skips that network's U-Net). It stays skipped by default (#167's `DM_VK_STORAGE_UP=1`).
+- **Check:** Kokiri Forest on the Pad 3 (route `kokiri`, a test build with #150 and #83 merged, one run each):
+  - the noise is gone; the forest is black underneath, for the fog's NaN and the task and mesh draws the 830's driver can't run (no `VK_EXT_mesh_shader`);
+  - main's default (no raw global memory): 4.1 fps and frame p50 240-242 ms either way. GPU p50 rises from 44.6 to 62.8 ms, about as with the network's dispatch skipped (61.1 ms): the passes after it cost more on a clean picture than on the noise;
+  - with raw global memory (#150, `DM_VK_RAW_GMEM=1`): 1.5 → 4.0 fps, frame p50 390 → 247 ms, submit CPU 343 → 209 ms.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2).
+
 ### A render pass with colour slot 0 empty hangs a later pass on the Adreno 830 (Android)
 
 - **Symptom:** Breath of the Wild loses the GPU on a OnePlus Pad 3 (Adreno 830, driver 0x8032004a) at its first frame in the field: `vkQueueSubmit` gives -4 and the loading screen stays up. Before that, one submission a frame takes 250–340 ms on the GPU with its end timestamp never written: the driver's hang recovery. The hang report names one draw, a vertical blur into a 640×360 RGBA8 target (vertex `2decd3e894b3736a`, fragment `26ae1640f3448ba4`). An Ayn Odin 2 (Adreno 740) runs the same frames.
