@@ -71,6 +71,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 - [Storage buffer write-backs read from memory the CPU maps uncached](../../../docs/reference/rendering.md#storage-buffer-write-backs-read-from-memory-the-cpu-maps-uncached): Eterna City on a Retroid Pocket 5's own driver at 24 fps, 54.6–60.0 after.
 - [Maxwell's 32-lane warps in a wider subgroup](../../../docs/reference/rendering.md#maxwells-32-lane-warps-in-a-wider-subgroup): on the Adreno 830's 64-lane subgroups the same 23 `fwidth` shaders read other quads' values in lanes 32-63 as translated; rewritten so that each 32 lanes are one warp (not yet compared in a frame).
 - [Shader modules made only for pipelines the driver's cache lacks](../../../docs/reference/rendering.md#shader-modules-made-only-for-pipelines-the-drivers-cache-lacks): on a Galaxy Z Flip 7 (Xclipse 950) its 8,844 modules took 6.1–9.6 s of every start; the first frame at 3.3 s after, 9.7–17.9 before.
+- [Layer output from vertex shaders on a GPU that has none](../../../docs/reference/rendering.md#layer-output-from-vertex-shaders-on-a-gpu-that-has-none): the crash at every boot in the Moto Razr Plus 2023's Adreno 730 driver (V@0615.98) compiler, from 12 vertex shaders that write the layer.
 
 ## Open
 

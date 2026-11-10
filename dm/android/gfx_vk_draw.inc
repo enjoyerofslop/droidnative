@@ -415,6 +415,26 @@ static size_t spv_fit_narrow(const uint32_t *code, size_t nw, const char *what, 
         LOG("[RED] [vk] %s: a whole-warp reduction step past the GPU's %u-lane subgroup whose result spv_narrow does not follow: left as translated (its shuffle reads the lane's own value)", what, g_sg_size);
     *out = o; return k;
 }
+// The module with its layer and viewport output made ordinary outputs, on a GPU that has no such output from vertex shaders (spv_layer.h): no
+// VK_EXT_shader_viewport_index_layer, Vulkan 1.1. Its compiler crashed on them (the Adreno 730's driver V@0615.98). In *out (to free); 0 when it needs nothing.
+// DM_SPV_LAYER=0 (env.txt): modules as translated
+static size_t spv_fit_layer(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LAYER"); on = !(e && *e == '0'); }
+    *out = NULL;
+    if (!on || g_layer_out || !spv_layer_wanted(code, nw)) return 0;
+    uint32_t *o = malloc(nw * 4); size_t k = o ? spv_layer(code, nw, o, nw) : 0;
+    static _Atomic int logged, nred;
+    if (!k) {
+        int parsed = o != NULL; free(o);
+        if (parsed && atomic_fetch_add(&nred, 1) < 8) LOG("[RED] [vk] %s declares layer or viewport output that spv_layer does not rewrite (a block member): made as it is, on a GPU without it", what);
+        return 0;
+    }
+    if (!atomic_exchange(&logged, 1))
+        LOG("[vk] the GPU has no layer or viewport output from vertex shaders (no VK_EXT_shader_viewport_index_layer, Vulkan 1.1): shaders that write them write an unused "
+            "output instead, and draw to layer 0 and viewport 0 (DM_SPV_LAYER=0: as translated). First: %s", what);
+    if (vk_debug()) LOG("[vk] %s: layer or viewport output rewritten as an ordinary output", what);
+    *out = o; return k;
+}
 // The module without subgroup operations in a stage where the GPU runs none (spv_limits.h), in *out (to free); 0 when it needs nothing. A GPU that runs them in
 // every graphics stage gets every module as translated, untouched; so does one that runs them in the module's stage. DM_SPV_LIMITS=0 (env.txt): modules as translated
 static size_t spv_fit(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {

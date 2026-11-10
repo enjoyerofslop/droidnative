@@ -28,6 +28,7 @@
 #include "spv_readonly.h"
 #include "spv_alpha.h"
 #include "spv_limits.h"
+#include "spv_layer.h"   // layer and viewport output made ordinary outputs on a GPU that has none (gfx_vk_draw.inc spv_fit_layer)
 #include "spv_pool.h"
 #include "spv_wide.h"
 #include "spv_narrow.h"   // each subgroup of a GPU narrower than 32 lanes a warp of its own (gfx_vk_draw.inc spv_fit_narrow)
@@ -47,6 +48,7 @@ static __thread int t_bk_sub;   // this thread holds g_bk for a submission (mtl_
 
 // ---------------- The device ----------------
 static uint32_t g_sg_stages = VK_SHADER_STAGE_ALL;   // the stages that run subgroup operations (subgroupSupportedStages; spv_limits.h); all when not known
+static int g_layer_out = 1;   // vertex shaders may write the layer and viewport index: VK_EXT_shader_viewport_index_layer or Vulkan 1.2 (spv_layer.h)
 static uint32_t g_sg_size = 32;   // the subgroup size (subgroupSize): over 32, Maxwell's warps are 32-lane parts of a subgroup (spv_wide.h)
 static VkPhysicalDeviceFeatures g_vk_feat; static int g_divisor;   // what the device was created with; VK_EXT_vertex_attribute_divisor or the KHR one   // what the device was created with
 // The KHR divisor without supportsNonZeroFirstInstance (the Pixel 9 Pro XL's Mali-G715): a draw with a stream stepping per N > 1 instances must start at instance 0, so its
@@ -114,6 +116,8 @@ static void vk_create(void) {
     if (g_stencil_export) dext[nde++] = "VK_EXT_shader_stencil_export";
     // colour images name the formats they are viewed in (vt_create: Adreno's framebuffer compression); core only from Vulkan 1.2, and the instance asks for 1.1
     if ((g_fmt_list = has_ext(de, nd, "VK_KHR_image_format_list"))) dext[nde++] = "VK_KHR_image_format_list";
+    // A 1.2 device's shaderOutputLayer isn't asked (the instance asks for 1.1); every 1.2 or later GPU here takes the translator's layer output as it is
+    g_layer_out = has_ext(de, nd, "VK_EXT_shader_viewport_index_layer") || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1 || VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 2;
     int hqr = qr_host_env() && has_ext(de, nd, "VK_EXT_host_query_reset");   // the completion thread resets the queries a chunk used (Query resets below); core only from Vulkan 1.2
     int memreport = mr_want(de, nd);   // DM_VK_MEMREPORT (gfx_vk_memreport.inc)
     if (memreport) dext[nde++] = "VK_EXT_device_memory_report";
