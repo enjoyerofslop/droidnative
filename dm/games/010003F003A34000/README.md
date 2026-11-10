@@ -55,7 +55,8 @@ First run on Android, 2026-11-10: a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Eli
 - **Starting:** the first frame comes about 0.4 s after the host starts, and the controller screen is up within 10 s. With a save, the Game Freak and Pokémon logos and the title screen come next; without one, the game goes straight into the opening.
 - **Sound:** Wwise opens its 10 banks (`Init.bnk`, `System_Common.bnk` and the others in `bin/sound/NX64/wwise/bank`) and streams its `.wem` music, on AAudio at 48 kHz stereo with no underrun.
   - It asks for an `English(US)` copy of each bank first, which the RomFS doesn't have: Wwise's localized lookup, not an error.
-  - Not checked by ear or with `DM_AUDIO_DUMP`.
+  - Confirmed by an audio dump (`DM_AUDIO_DUMP`, 156 s from the Route 1 save: walking and a catch). The front channels carry the mix at about −22 dBFS RMS, peaks to −6.4 dBFS; the centre and LFE channels are silent, the rear pair nearly so.
+  - The music runs from the title on, steady at −24 dBFS on Route 1. The menu's confirm sound is the only signal before it, at each A press on the controller screen. The level changes at the wild encounter, and louder peaks come with the catch fanfare and Pikachu's level-up.
 - **Two `[RED]` lines,** each kind at boot only:
   - `more than 16 font engines with a small work buffer: this one keeps the game's`, 5 times. The game makes 21 `nn::fontll` engines with small work buffers, and `hle_sdk16.c` gives host memory to 16. Every text seen drew.
   - `a second NVN queue submits: the Vulkan replay shares one state between queues`, as in Pokémon Shield. Nothing in the picture showed it.
