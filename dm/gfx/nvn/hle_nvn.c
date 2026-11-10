@@ -268,12 +268,13 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     return 1;
 }
 static void fl_add(const uint8_t *a, uint64_t n); static void fl_drop(const uint8_t *a, uint64_t n);   // flushed ranges, see nvn_flushed
+static void ft_drop(const uint8_t *a, uint64_t n);   // first-touch textures over a pool that goes, see ft_add
 NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     // Dead to the replay first (its IDs marked gone under g_rmu, the magic cleared), then torn down: a texture resolving on the submit thread must not find the page table or the storage already gone
     mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0;
     if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
     if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
- nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); mtl_sp_phys_gone(((pool_t *)p)->mem, ((pool_t *)p)->size); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size);
+ nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); mtl_sp_phys_gone(((pool_t *)p)->mem, ((pool_t *)p)->size); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size); ft_drop(((pool_t *)p)->mem, ((pool_t *)p)->size);
  dm_device_share(((pool_t *)p)->mem, ((pool_t *)p)->size, 0); } }
 static void ft_flush(const uint8_t *a, uint64_t n);
 NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {   // see ft_add and nvn_flushed
@@ -450,10 +451,35 @@ static void ft_add(const tex_t *t) {
     g_ft[g_nft++] = f;
     pthread_mutex_unlock(&g_ft_mu);
 }
+// The queue scheduler replays a submission after the game's call returns (nvn_queue.inc), so a texture Finalized (or initialized again) after its submission is still drawn
+// by it, and its first use there (nvn_ft_written) needs the entry. The deletion waits until every job made before it has ended (ft_del_drain, at each submission the replay
+// starts); with no job in flight it is at once. shirai91/nx2android e6947362 defers it until the next job for that fork's replay thread, which takes jobs in order
+typedef struct { uint64_t serial, seq; } ft_rel;
+static ft_rel *g_ftrel; static size_t g_nftrel, g_cftrel;   // under g_ft_mu
+static uint64_t nvn_jobs_newest(void), nvn_jobs_oldest(void);   // nvn_queue.inc
+static void ft_del_now(uint64_t serial) {   // g_ft_mu held
+    for (size_t i = 0; i < g_nft; i++) if (g_ft[i].t.serial == serial) { g_ft[i] = g_ft[--g_nft]; break; }
+}
 static void ft_del(uint64_t serial) {
     if (!DM_GAME_TEX_FLUSH_UPLOAD || !serial) return;
+    uint64_t seq = nvn_jobs_newest();
     pthread_mutex_lock(&g_ft_mu);
-    for (size_t i = 0; i < g_nft; i++) if (g_ft[i].t.serial == serial) { g_ft[i] = g_ft[--g_nft]; break; }
+    if (!seq) ft_del_now(serial);
+    else { if (g_nftrel == g_cftrel && !(g_ftrel = realloc(g_ftrel, (g_cftrel = g_cftrel ? 2 * g_cftrel : 256) * sizeof *g_ftrel))) die("flush_tex allocation failed"); g_ftrel[g_nftrel++] = (ft_rel){serial, seq}; }
+    pthread_mutex_unlock(&g_ft_mu);
+}
+static void ft_del_drain(void) {   // the replay thread, as a submission starts
+    if (!DM_GAME_TEX_FLUSH_UPLOAD) return;
+    uint64_t oldest = nvn_jobs_oldest();
+    pthread_mutex_lock(&g_ft_mu);
+    size_t o = 0; for (size_t i = 0; i < g_nftrel; i++) { if (g_ftrel[i].seq < oldest) ft_del_now(g_ftrel[i].serial); else g_ftrel[o++] = g_ftrel[i]; }
+    g_nftrel = o;
+    pthread_mutex_unlock(&g_ft_mu);
+}
+static void ft_drop(const uint8_t *a, uint64_t n) {   // a pool goes: the textures over it that were never Finalized leave the list (their entries pointed at dead memory and stayed for good)
+    if (!DM_GAME_TEX_FLUSH_UPLOAD || !a || !n) return;
+    pthread_mutex_lock(&g_ft_mu);
+    for (size_t i = 0; i < g_nft;) if (g_ft[i].mem >= a && g_ft[i].mem < a + n) g_ft[i] = g_ft[--g_nft]; else i++;
     pthread_mutex_unlock(&g_ft_mu);
 }
 // Profile tex_dirty_upload: Tears of the Kingdom fills some textures from the CPU after creating them and publishes them with no NVN flush at all (os::FlushDataCache runs
@@ -588,7 +614,8 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
     //   previously every init created a new private MTLTexture and the old one stayed in the serial table forever, so GPU memory grew about 13 MB per frame (killed by the memory watchdog at 24 GB)
-    if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); mtl_tex_release(o); }
+    //   The old serial also leaves the first-touch list (ft_del, as Finalize does): kept, every such re-initialization added an entry that only a write to its pages removed, and the per-submission poll walked them all
+    if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); ft_del(o->serial); mtl_tex_release(o); }
     memset(o, 0, sizeof *o);
     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
     o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
@@ -2097,13 +2124,13 @@ static void fstep_tick(const win_t *o, int c) {
     double cpu = shown - (pw + ps) / v, cost = cpu > gpu ? cpu : gpu;
     if (shown > 0) { int b = (int)(cost * 20 + 0.5), bg = (int)(gpu * 20 + 0.5); chist[b < 0 ? 0 : b > 160 ? 160 : b]++; ghist[bg > 160 ? 160 : bg]++; cn++; cpw += pw; cps += ps; cgb += gpu > cpu; cg0 += gpu <= 0; }
     int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
-         kmin0 = g_fs.kmin, probe0 = g_fs.probe;
+         kmin0 = g_fs.kmin, probe0 = g_fs.probe, pphase = nvn_fstep_probe_phase(&g_fs);
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) : 0;
     uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed;
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
     int hz = front_screen_max_fps(); g_fs.shown_slack = hz > fstep_hz() && hz % fstep_hz() && mtl_link_active() ? (double)fstep_hz() / hz : 0;
-    int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, k0 ? k0 : kmin, kmin, probe0) && dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
+    int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, k0 ? k0 : kmin, kmin, pphase) && dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
     // Present snapshots (nvn_mtl.m snap_take): the game runs up to a frame ahead of the screen, so a frame whose work runs long is absorbed instead of shown late, and its cost is
     // no evidence against the hold (Breath of the Wild in Zora's Domain stepped to 30 at a GPU time of 0.75 vsyncs: the frame's CPU time held its waits on its own GPU work).
     // Lateness is then what the screen shows: the on-screen interval of the frame 8 presents back against its hold (pres_expect_ms), late by a quarter or dropped
@@ -2122,6 +2149,9 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.per_vsync = fstep_hz() / 60;
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
+    { static int tr = -1; if (tr < 0) { const char *e = getenv("DM_FSTEP_TRACE"); tr = e && atoi(e) > 0; }   // DM_FSTEP_TRACE=1: the controller's inputs every 15th frame (vsyncs)
+      if (tr && o->presents % 15 == 0) LOG("[nvn] fstep trace %llu: hold %d shown %.2f wait %.2f cpu %.2f gpu %.2f cost %.2f fit_run %d since %.0f hold-off %.0f trial %d late_run %d screen %d",
+          (unsigned long long)o->presents, g_fs.k, shown, pw / v, cpu, gpu, cost, g_fs.fit_run, g_fs.since, g_fs.hold, g_fs.trial, g_fs.late_run, g_fs.screen); }
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     atomic_store(&g_fs_k, g_fs.k);
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
@@ -2131,7 +2161,7 @@ static void fstep_tick(const win_t *o, int c) {
     if (k0 && g_fs.k != k0 && nlog < 40) {
         char why[160], held[48] = ""; int w = snprintf(why, sizeof why, "probe");
         if (cslow) w += snprintf(why + w, sizeof why - w, ", CPU %d%% on performance cores", g_fs_pshare);
-        if (gslow) w += snprintf(why + w, sizeof why - w, ", GPU %.2f× its time at hold %d", g_fg.cur / g_fg.ref, kmin);
+        if (gslow) w += snprintf(why + w, sizeof why - w, ", GPU %.2f× its time at hold %d (%.2f)", g_fg.cur / g_fg.ref, kmin, g_fg.ref);
         if (nvn_fstep_same(&g_fs)) snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
         if (g_fs.k > k0 && g_fs.cref > 0) snprintf(held, sizeof held, "; hold %d held at %.2f", kmin, g_fs.cref);   // what a probe compares the longer hold's cost with
         LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,

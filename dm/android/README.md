@@ -174,7 +174,7 @@ python3 scripts/bench_android.py <NSP folder> [<NSP folder> ...] [-s <serial> ..
   2. copies the route's save into a folder of the run's own under the app's external files (`files/bench_runs/`), with `DM_SAVE` pointing there, so the device's own saves aren't touched
   3. writes `env.txt` (per-frame timing goes through `DM_NVN_TSV`)
   4. starts the game from the launcher
-  5. takes screenshots at the window's start and end (of the main screen, on a phone with a cover screen too)
+  5. takes screenshots at the window's start and end (on a phone with a cover screen too, of the screen that's on: the cover screen of a folded Galaxy Z Fold 8)
   6. puts `env.txt` back as it was
 - **Making a save:** `--keep-save <folder>` copies the save a run ended with back to the computer, for a route that starts from it. `--shot-every N` adds a screenshot every N seconds, for working a route out.
 - **Keeping devices awake:** every 45 s each device gets `KEYCODE_WAKEUP`, and the lock screen is dismissed before each start. A PIN or pattern lock can't be dismissed over adb, so set test devices to None or Swipe.
