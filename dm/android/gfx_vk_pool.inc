@@ -11,8 +11,14 @@
 // - The set is never written while a chunk that bound it may still run: a change goes to a version no chunk in flight holds (POOL_VERS of them at most), brought up to
 //   date with the elements changed since it was last written (pool_bind). When every version is in flight, the newest serves as it is if it only lacks views made since
 //   (those reads give 0 for one more chunk); one that names a view since replaced or dropped (g_prm: the replaced view may be destroyed later) is waited for.
-// - Started by the first shader that has a pool array (sh_get), not by every game's first shader.
-// DM_VK_POOL=0 (env.txt): off, and the draws of such shaders are dropped as before (gfx_vk_draw.inc ds_fits)
+// - Started by the first shader that has a pool array (sh_get), not by every game's first shader. A Switch 2 game starts it with its first shader instead (pool_base).
+// - Where it is bound: DeathKhan's nx2android fork found its Adreno driver copying a descriptor set into the command buffer's memory at every bind (12 MB a bind for a
+//   24,576-descriptor set), and a 2 MB set bound for each draw would cost that much a draw. The Galaxy Z Fold 8's Adreno 840 driver showed no such cost (docs/reference/
+//   rendering.md); other drivers are not measured. The pool set goes at set 0 for a Switch 2 game, with each stage's own set moved up one (pool_base, spv_pool_fit): every pipeline
+//   layout made after it holds the same set 0 and no push constants, and binding a stage's set leaves set 0 bound, so pool_bind binds it once per command buffer and bind
+//   point, and again only after something else bound set 0 there (pool_disturb). Other games keep it at set 4, bound for each pool draw: their layouts stay as they were
+//   for a set they may never use. The idea is DeathKhan's nx2android fork's (github.com/DeathKhan/nx2android, 4c5049b), written anew here.
+// DM_VK_POOL=0 (env.txt): off, and the draws of such shaders are dropped as before (gfx_vk_draw.inc ds_fits). DM_VK_POOL_SET0=0: at set 4 for a Switch 2 game too
 enum { POOL_SET = 4, POOL_B_IMG = 0, POOL_B_SMP = 1, POOL_B_CMP = 2, POOL_B_SEEN = 3, POOL_NSMP = 4096, POOL_VERS = 3 };
 static _Atomic int g_pool_state;   // 0 not decided yet, 1 on, -1 off (pool_on)
 static pthread_mutex_t g_tpool_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -26,7 +32,10 @@ static VkSampler g_psmp[2][POOL_NSMP]; static uint64_t g_psmp_chg[POOL_NSMP];
 static uint64_t g_ppos = 1, g_prm;   // changes so far (from 1: a version's pos 0 is one never written); the last that replaced or dropped a view (a version short of it may name one that is gone)
 static uint64_t g_psync_seq, g_pbind_seq, g_psreg_seen; static VkDescriptorSet g_pbind_set; static int g_ptex_base = -1, g_psamp_base = -1;   // the chunk last synced / bound, the set it binds, the pools synced
 static int g_psmp_ok;   // every sampler element filled (the first sync)
-static uint64_t g_pool_draws;   // draws and dispatches that bound the pool set
+static uint32_t g_sbase;   // 1: every stage's own set one above the number res.json gives it, the pool set at 0 (pool_base). Decided before the first module
+#define POOL_AT (g_sbase ? 0u : (uint32_t)POOL_SET)   // the pool set's number
+static uint64_t g_pool_draws, g_pool_binds;   // draws and dispatches that read the pool set; its binds
+static struct { uint64_t seq; VkCommandBuffer cb; } g_pbound[2];   // with g_sbase: the chunk and command buffer the pool set is bound in, per bind point (graphics, compute); seq 0: not bound
 static uint64_t g_pool_gone;   // reads of a registration whose storage is in no mapped pool
 static uint64_t g_pool_syncs, g_pool_ns, g_pool_views, g_pool_newver, g_pool_stale, g_pool_waits, g_pool_shaders, g_pool_refused, g_pool_early, g_pool_loopmark;
 static VkDescriptorImageInfo *g_pii; static VkWriteDescriptorSet *g_pwr; static size_t g_pii_cap, g_pwr_cap;   // pool_apply's scratch
@@ -72,20 +81,45 @@ static int pool_on(void) {
     pthread_mutex_unlock(&g_tpool_mu);
     return s > 0;
 }
-// The module with its pool arrays moved into the pool set (spv_pool.h), in *out (to free); 0 when it has none. t_pool_info gathers what was done
+// A Switch 2 game, whose shaders are the ones that read the pool, starts it before its first module and pipeline are made, so every module and layout agrees on where the
+// sets are (g_sbase cannot change once one is made). n is then the game's texture pools when it first draws, not when its first pool shader comes
+static pthread_once_t g_sbase_once = PTHREAD_ONCE_INIT;
+static void pool_base_init(void) {
+    const char *e = getenv("DM_VK_POOL_SET0");
+    if (!dm_sdk_ounce() || (e && *e == '0')) return;
+    if (pool_on()) { g_sbase = 1; LOG("[vk] texture pool by ID at set 0, the stage sets moved up one: bound once per command buffer (DM_VK_POOL_SET0=0: at set 4, bound for each draw)"); }
+}
+static void pool_base(void) { pthread_once(&g_sbase_once, pool_base_init); }
+// Something other than pool_bind bound set 0 at this bind point (gfx_vk_dscopy.inc): the pool set is bound again at the next pool draw
+static void pool_disturb(VkPipelineBindPoint bp) { g_pbound[bp == VK_PIPELINE_BIND_POINT_COMPUTE].seq = 0; }
+// pipe_make's layout for the pool set at 0: the stages' sets, which its loop put at their own numbers, one up, and the pool set at 0 in every layout (the loop put it at
+// POOL_SET for a pool shader). sets: POOL_SET + 1 of them; empty: the layout of the sets no stage has
+static void pool_layout_up(VkDescriptorSetLayout *sets, uint32_t *nset, VkDescriptorSetLayout empty) {
+    uint32_t top = 0;
+    for (uint32_t i = 0; i < POOL_SET; i++) if (sets[i] != empty) top = i + 1;
+    for (uint32_t i = POOL_SET; i > 0; i--) sets[i] = sets[i - 1];
+    sets[0] = g_pool_dsl; *nset = top + 1;
+}
+// The module with its pool arrays moved into the pool set (spv_pool.h), in *out (to free); 0 when it has none. With the pool set at 0 every module comes out, its own
+// sets one up (spv_set_up). t_pool_info gathers what was done
 static size_t spv_pool_fit(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     *out = NULL;
     if (atomic_load(&g_pool_state) <= 0 || nw < 5) return 0;   // started by sh_get at the first shader with a pool array
-    struct spv_pool_cfg cfg = {g_pool_n, POOL_SET, POOL_B_IMG, POOL_B_SMP, POOL_B_CMP, POOL_B_SEEN, 1, g_vk_feat.vertexPipelineStoresAndAtomics};
-    uint32_t *s = malloc((size_t)SPV_POOL_SCRATCH * code[3] * 4); if (!s) return 0;
+    uint32_t *up = NULL;
+    if (g_sbase) {
+        if (!(up = malloc(nw * 4))) { LOG("[RED] [vk] %s: no memory to move its sets up: made as it is, and its draws read the wrong sets", what); return 0; }
+        memcpy(up, code, nw * 4); spv_set_up(up, nw); code = up;
+    }
+    struct spv_pool_cfg cfg = {g_pool_n, POOL_AT, POOL_B_IMG, POOL_B_SMP, POOL_B_CMP, POOL_B_SEEN, 1, g_vk_feat.vertexPipelineStoresAndAtomics};
+    uint32_t *s = malloc((size_t)SPV_POOL_SCRATCH * code[3] * 4); if (!s) { *out = up; return up ? nw : 0; }
     size_t need = 0, k = 0; int info = 0; uint32_t *o = NULL;
     k = spv_pool(code, nw, &cfg, s, NULL, 0, &need, &info);
     if (need && (o = malloc(need * 4))) k = spv_pool(code, nw, &cfg, s, o, need, &need, &info);
     free(s);
     t_pool_info |= info;
     if (info & SPV_POOL_FAIL) { static int nl; if (nl++ < 8) LOG("[RED] [vk] %s reads the texture pool by ID in a way spv_pool does not rewrite: its draws are dropped", what); }
-    if (!k) { free(o); return 0; }
-    *out = o; return k;
+    if (!k) { free(o); *out = up; return up ? nw : 0; }   // no pool arrays (or one left as it is): the module with its sets moved up, if they are
+    free(up); *out = o; return k;
 }
 static void pool_note_shader(vshader *s, int info) {   // sh_get, with what spv_pool did to the shader's modules
     if (info & SPV_POOL_FAIL) { g_pool_refused++; return; }
@@ -177,8 +211,8 @@ static void pool_sync(void) {
     uint64_t dt = clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0; g_pool_syncs++; g_pool_ns += dt;
     static int nlog; static uint32_t next = 100;   // the first reads as they come, then every 100 IDs more: the periodic line comes every 300 frames, minutes apart in a slow scene
     if (g_nplist > was && (nlog < 8 || g_nplist >= next)) { nlog++; if (g_nplist >= next) next = g_nplist + 100;
-        LOG("[vk] texture pool by ID: %u IDs read (%u new), %llu views made; this sync %.2f ms, %llu syncs (%.3f ms each), %llu draws bound the set", g_nplist, g_nplist - was, (unsigned long long)g_pool_views, dt / 1e6,
-            (unsigned long long)g_pool_syncs, g_pool_ns / 1e6 / (double)g_pool_syncs, (unsigned long long)g_pool_draws); }
+        LOG("[vk] texture pool by ID: %u IDs read (%u new), %llu views made; this sync %.2f ms, %llu syncs (%.3f ms each), %llu draws read the set, %llu binds of it", g_nplist, g_nplist - was, (unsigned long long)g_pool_views, dt / 1e6,
+            (unsigned long long)g_pool_syncs, g_pool_ns / 1e6 / (double)g_pool_syncs, (unsigned long long)g_pool_draws, (unsigned long long)g_pool_binds); }
 }
 // Version v brought up to the changes so far: the elements changed since it was last written, every element of a new one; contiguous changed elements go in one write
 static int pool_apply(pool_ver *v) {
@@ -206,7 +240,8 @@ static int pool_apply(pool_ver *v) {
     v->pos = g_ppos;
     return 1;
 }
-// Under g_bk, after the draw's or dispatch's own sets are bound: the pool set at POOL_SET, the version this chunk binds (chosen at its first pool draw). 0: none to bind
+// Under g_bk: the pool set at POOL_AT, the version this chunk binds (chosen at its first pool draw). 0: none to bind. At set 4, after the draw's or dispatch's own sets are
+// bound (binding a lower set with a layout another draw's sets were bound with may disturb it); at set 0, before them (binding set 0 for the first time disturbs the sets above)
 static int pool_bind(VkCommandBuffer c, VkPipelineBindPoint bp, VkPipelineLayout pl) {
     if (!C) return 0;
     if (g_pbind_seq != C->seq) {
@@ -233,12 +268,16 @@ static int pool_bind(VkCommandBuffer c, VkPipelineBindPoint bp, VkPipelineLayout
     bound:
         v->used = C->seq; g_pbind_seq = C->seq; g_pbind_set = v->set;
     }
-    vkCmdBindDescriptorSets(c, bp, pl, POOL_SET, 1, &g_pbind_set, 0, NULL); g_pool_draws++;
+    g_pool_draws++;
+    int b = bp == VK_PIPELINE_BIND_POINT_COMPUTE;
+    if (g_sbase && g_pbound[b].seq == C->seq && g_pbound[b].cb == c) return 1;   // still bound: the version is the chunk's, and the stage sets' binds leave set 0
+    vkCmdBindDescriptorSets(c, bp, pl, POOL_AT, 1, &g_pbind_set, 0, NULL); g_pool_binds++;
+    if (g_sbase) { g_pbound[b].seq = C->seq; g_pbound[b].cb = c; }
     return 1;
 }
 static void pool_stats(void) {
     if (atomic_load(&g_pool_state) <= 0) return;
-    LOG("[vk] texture pool by ID: %llu shaders read it (%llu refused, %llu with early depth tests added, %llu with a mark in a loop header), %u IDs read, %llu views made, %llu reads of registrations whose storage is gone, %llu draws bound the set, %llu syncs (%.3f ms each), %d versions of the set, %llu chunks bound one short of new views, %llu waits for one (cumulative)",
+    LOG("[vk] texture pool by ID: %llu shaders read it (%llu refused, %llu with early depth tests added, %llu with a mark in a loop header), %u IDs read, %llu views made, %llu reads of registrations whose storage is gone, %llu draws read the set (set %u, %llu binds), %llu syncs (%.3f ms each), %d versions of the set, %llu chunks bound one short of new views, %llu waits for one (cumulative)",
         (unsigned long long)g_pool_shaders, (unsigned long long)g_pool_refused, (unsigned long long)g_pool_early, (unsigned long long)g_pool_loopmark, g_nplist, (unsigned long long)g_pool_views,
-        (unsigned long long)g_pool_gone, (unsigned long long)g_pool_draws, (unsigned long long)g_pool_syncs, g_pool_syncs ? g_pool_ns / 1e6 / (double)g_pool_syncs : 0.0, g_npv, (unsigned long long)g_pool_stale, (unsigned long long)g_pool_waits);
+        (unsigned long long)g_pool_gone, (unsigned long long)g_pool_draws, POOL_AT, (unsigned long long)g_pool_binds, (unsigned long long)g_pool_syncs, g_pool_syncs ? g_pool_ns / 1e6 / (double)g_pool_syncs : 0.0, g_npv, (unsigned long long)g_pool_stale, (unsigned long long)g_pool_waits);
 }

@@ -162,8 +162,9 @@ class SpvPool(unittest.TestCase):
         src = cls.tmp / 'p.c'
         export = '__declspec(dllexport)' if os.name == 'nt' else '__attribute__((visibility("default")))'
         src.write_text('#include "spv_pool.h"\n'
-                       f'{export} size_t run(const uint32_t *w, size_t n, uint32_t nn, int mark, uint32_t *s, uint32_t *o, size_t cap, size_t *need, int *info) {{\n'
-                       '    struct spv_pool_cfg c = {nn, 4, 0, 1, 2, 3, mark, 1}; return spv_pool(w, n, &c, s, o, cap, need, info); }\n')
+                       f'{export} size_t run(const uint32_t *w, size_t n, uint32_t nn, int mark, uint32_t set, uint32_t *s, uint32_t *o, size_t cap, size_t *need, int *info) {{\n'
+                       '    struct spv_pool_cfg c = {nn, set, 0, 1, 2, 3, mark, 1}; return spv_pool(w, n, &c, s, o, cap, need, info); }\n'
+                       f'{export} size_t up(uint32_t *w, size_t n) {{ return spv_set_up(w, n); }}\n')
         env = dict(os.environ, MSYS_NO_PATHCONV='1')
         if os.name == 'nt':   # no C library: a DLL linked by lld alone
             subprocess.run([bin_ / 'clang.exe', '--target=x86_64-pc-windows-msvc', '-ffreestanding', '-nostdlib', '-O1', '-Wall', '-I', REPO / 'dm/android', '-c', src, '-o', cls.tmp / 'p.obj'], check=True)
@@ -174,16 +175,18 @@ class SpvPool(unittest.TestCase):
             subprocess.run([*cc, '-shared', '-fPIC', '-O1', '-Wall', '-Wextra', '-Werror', '-I', REPO / 'dm/android', src, '-o', cls.tmp / 'p.so'], check=True)
             cls.lib = ctypes.CDLL(str(cls.tmp / 'p.so'))
         u32p = ctypes.POINTER(ctypes.c_uint32)   # every argument typed: a size_t passed as an untyped Python int is a 32-bit int, its register's upper half garbage on x86-64 Linux
-        cls.lib.run.argtypes = [u32p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int, u32p, u32p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_int)]
+        cls.lib.run.argtypes = [u32p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32, u32p, u32p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_int)]
         cls.lib.run.restype = ctypes.c_size_t
+        cls.lib.up.argtypes = [u32p, ctypes.c_size_t]; cls.lib.up.restype = ctypes.c_size_t
 
-    def run_on(self, data, mark=1):
+    def run_on(self, data, mark=1, at0=False):   # at0: the stage's sets moved up one and the pool set at 0 (gfx_vk_pool.inc pool_base), else at 4
         n = len(data) // 4; w = (ctypes.c_uint32 * n).from_buffer_copy(data); bound = w[3]
-        s = (ctypes.c_uint32 * (9 * bound))(); need = ctypes.c_size_t(); info = ctypes.c_int()
-        k = self.lib.run(w, n, N, mark, s, None, 0, ctypes.byref(need), ctypes.byref(info))   # the size it asks for, then the rewrite
+        if at0: self.lib.up(w, n)
+        s = (ctypes.c_uint32 * (9 * bound))(); need = ctypes.c_size_t(); info = ctypes.c_int(); ps = 0 if at0 else 4
+        k = self.lib.run(w, n, N, mark, ps, s, None, 0, ctypes.byref(need), ctypes.byref(info))   # the size it asks for, then the rewrite
         if not need.value: return None, info.value
         o = (ctypes.c_uint32 * need.value)()
-        k = self.lib.run(w, n, N, mark, s, o, need.value, ctypes.byref(need), ctypes.byref(info))
+        k = self.lib.run(w, n, N, mark, ps, s, o, need.value, ctypes.byref(need), ctypes.byref(info))
         return (bytes(o)[:4 * k] if k else None), info.value
 
     def val(self, data, name):
@@ -218,6 +221,15 @@ class SpvPool(unittest.TestCase):
         lens = {ins[3] for op, ins in instrs(out) if op == 43 and ins[3] in (N, N - 1)}
         self.assertEqual(lens, {N, N - 1})
 
+    def test_pool_set_at_0(self):   # a Switch 2 game's: the stage's own resources one set up, the pool's at 0
+        src = FS.replace('%KILL%\n', '').replace('OpDecorate %out Location 0\n', 'OpDecorate %out Location 0\nOpDecorate %cbs Block\nOpMemberDecorate %cbs 0 Offset 0\nOpDecorate %cb DescriptorSet 1\nOpDecorate %cb Binding 0\n')
+        src = src.replace('%out = OpVariable %pout Output\n', '%out = OpVariable %pout Output\n%cbs = OpTypeStruct %v4\n%pcb = OpTypePointer Uniform %cbs\n%cb = OpVariable %pcb Uniform\n')
+        out, info = self.run_on(self.asm(src, 'fs0'), at0=True)
+        self.assertIsNotNone(out); self.assertEqual(info & 64, 0)
+        self.val(out, 'fs0_out.spv')
+        sets = {(v[34], v[33]) for v in self.decor(out).values() if 34 in v and 33 in v}
+        self.assertEqual(sets, {(0, 0), (0, 1), (0, 2), (0, 3), (2, 0)}, 'the pool at set 0, the constant buffer from set 1 to 2')
+
     def test_discard_keeps_late_tests(self):
         out, info = self.run_on(self.asm(FS.replace('%KILL%\nOpBranch %l2\n', 'OpKill\n').replace('%r = OpPhi %v4 %r1 %l0 %r3 %l1', '%r = OpCopyObject %v4 %r1'), 'fsk'))
         self.assertIsNotNone(out); self.assertEqual(info & 16, 0); self.assertTrue(info & 8)
@@ -250,6 +262,10 @@ class SpvPool(unittest.TestCase):
                 if not out: fail += 1; refused.append(sp.name); continue
                 ok += 1; early += bool(info & 16); loop += bool(info & 32)
                 with self.subTest(module=sp.name): self.val(out, 'game.spv')
+                out0, _ = self.run_on(sp.read_bytes(), at0=True)   # with the pool set at 0: nothing of the stage's own left there
+                with self.subTest(module=sp.name, at0=True):
+                    self.assertIsNotNone(out0); self.val(out0, 'game0.spv')
+                    self.assertFalse({(v[34], v.get(33)) for v in self.decor(out0).values() if v.get(34) == 0} - {(0, 0), (0, 1), (0, 2), (0, 3)})
             if cap and n >= cap: break
         print(f'{n} modules with pool arrays: {ok} rewritten ({early} with early tests added, {loop} with a mark in a loop header), {fail} left: {refused[:8]}')
         self.assertTrue(n); self.assertEqual(fail, 0)

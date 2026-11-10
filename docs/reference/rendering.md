@@ -1989,7 +1989,7 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 
 - **Symptom:** Android, an NVN2 game: `[RED] [vk] shader …: one descriptor set of its layout is larger than a whole pool (an array of 1048576 elements): its draws are dropped`, and what those shaders draw is missing.
 - **Cause:** a texture handle the translator cannot trace to one slot indexes arrays sized to the whole ID ranges ([Texture handles from game memory index the pools](shaders.md#texture-handles-from-game-memory-index-the-pools)): 2^20 images per image type and 4,096 samplers. The replay made a descriptor set per shader and stage, and a set that size fits no descriptor pool, so `ds_fits` dropped those draws.
-- **Fix:** one descriptor set, at set 4, serves every such shader (`gfx_vk_pool.inc`). `spv_pool.h` rewrites each module when it is made.
+- **Fix:** one descriptor set serves every such shader (`gfx_vk_pool.inc`). `spv_pool.h` rewrites each module when it is made.
   - The set holds four bindings:
     - 0: the texture pool's IDs as sampled images, as many as the game's texture pools have (33,792 for Ocarina of Time, about 2 MB of descriptors). Every image type of the shaders aliases this binding, and each element holds the view the reads asked for.
     - 1: the sampler pool.
@@ -2004,12 +2004,22 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - The set is never written while a chunk that bound it may run. A change goes to a version no chunk in flight holds (3 at most), brought up to date with the elements changed since it was last written. When every version is in flight, the newest serves as it is only if it lacks nothing but new views. If a view was replaced or dropped since, the oldest version's chunk is waited for, since the replaced view may be destroyed later.
   - A fragment shader whose result the mark's store cannot change keeps its depth test before it runs (`EarlyFragmentTests`), as `dmsh_build.py` does on the Mac.
   - The first shader that has a pool array starts the pool set, so a game without one never makes it. Room is left for the stages' own descriptors, and `maxPerStageResources` is checked too.
-  - `DM_VK_POOL=0` turns it off; `DM_VK_POOL_LOG=1` logs each ID as it is first read.
+  - **Where it's bound.** DeathKhan's nx2android fork found its Adreno driver copying a descriptor set into the command buffer's memory each time it's bound: 12 MB a bind for a 24,576-descriptor set, 2-3 GB a scene (`4c5049b`). A 2 MB set bound for each draw would cost that much per draw. The Galaxy Z Fold 8's driver showed no such cost (Check, below).
+    - A Switch 2 game has the pool set at set 0, and every stage's own set moves up one (`spv_set_up`, applied to each module when it's made). The pool starts with the game's first shader, so every module and layout agrees on where the sets are.
+    - Every graphics and compute layout holds the pool set at 0 and no push constants. Binding a stage's set then leaves set 0 bound, so the pool set is bound once per command buffer and bind point (`pool_bind`), and again only after another set 0 is bound there (`pool_disturb`, the depth/stencil copy's).
+    - Other games keep it at set 4, bound for each draw that reads it. Their layouts stay as they were for a set they may never use.
+  - `DM_VK_POOL=0` turns it off; `DM_VK_POOL_SET0=0` keeps a Switch 2 game's at set 4; `DM_VK_POOL_LOG=1` logs each ID as it is first read.
 - **Check:** `dm/tools/tests/test_spv_pool.py`; with `DM_SPV_DIR`, all 4,892 of Ocarina of Time's modules with pool arrays are rewritten and pass `spirv-val`, 3,759 of them with early depth tests added. Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8 (`bench_android.tsv` route `kokiri`, two runs each, `DM_VK_POOL=0` against on):
   - before, the run's 103 pool shaders were refused and 49,592 of their draws dropped in its first minute in the forest; after, none refused or dropped, and 6,031 draws bound the set;
   - the forest's draws read 12-15 IDs (the distant scenery's texture sets), and each chunk's sync took 0.33 ms on average;
   - 1.6 → 1.7 fps, frame p50 640-650 → 593-611 ms, GPU p50 138.6-138.8 → 119.4-128.2 ms;
   - the picture did not change there: the forest stays black for another cause, see the game's note.
+- **Check of the set at 0:** with `DM_VK_POOL`, all 4,892 modules are rewritten with the pool set at 0 too, and none keeps a set of its own there. Kokiri Forest on the Galaxy Z Fold 8 (Adreno 840, Qualcomm's driver), five launches each of `DM_VK_POOL_SET0=0` and the default, alternated, after a warm-up each:
+  - binds: about 590 a frame at set 4 (one per pool draw), about 14 at set 0 (one per chunk; 866 for 36,941 pool draws);
+  - no cost found: launches fall into two bands by the scene's draws (about 2,190 or 2,290 a frame), with either setting. Within a band, frame p50 is 594-614 against 608-611 ms and submit CPU 502-512 against 507-508 ms (fast band, set 0 against set 4), and 676 against 688-693 ms (slow band). GPU p50 is 120-129 ms throughout;
+  - `DM_VK_MEMREPORT`: 4.1 MB of command-buffer memory with either.
+
+  A per-bind cost on this driver is below about 0.02 ms. Other drivers (the Adreno 830's, Turnip, Mali, Xclipse) are not measured.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2).
 
 ### A render pass with colour slot 0 empty hangs a later pass on the Adreno 830 (Android)

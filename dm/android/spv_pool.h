@@ -25,6 +25,18 @@ enum { SPV_POOL_IMG = 1, SPV_POOL_SMP = 2, SPV_POOL_CMP = 4, SPV_POOL_MARK = 8, 
 struct spv_pool_cfg { uint32_t n, set, b_img, b_smp, b_cmp, b_seen; int mark, mark_vtx; };
 #define SPV_POOL_SCRATCH 9   // scratch words per id of the module's bound (w[3])
 
+// Every OpDecorate DescriptorSet one higher, in place → how many: a stage's own set above a pool set at 0, which spv_pool then gives the pool arrays (gfx_vk_pool.inc
+// pool_base: the pool set at 0 stays bound across draws). The module keeps its size and every id
+static size_t spv_set_up(uint32_t *w, size_t n) {
+    size_t hit = 0;
+    for (size_t i = 5; i < n; ) {
+        uint32_t len = w[i] >> 16;
+        if (!len || i + len > n) break;
+        if ((w[i] & 0xffff) == 71 && len == 4 && w[i + 2] == 34) { w[i + 3]++; hit++; }   // OpDecorate target DescriptorSet set
+        i += len;
+    }
+    return hit;
+}
 static size_t spv_pool_put(uint32_t *o, size_t k, uint32_t op, const uint32_t *a, uint32_t na) { o[k++] = (na + 1) << 16 | op; for (uint32_t q = 0; q < na; q++) o[k++] = a[q]; return k; }
 #define SPV_POOL_PUT(op, ...) do { const uint32_t a_[] = {__VA_ARGS__}; k = spv_pool_put(o, k, (op), a_, (uint32_t)(sizeof a_ / sizeof *a_)); } while (0)
 static size_t spv_pool_str(uint32_t *o, size_t k, uint32_t op, const char *s) {   // an instruction of one string operand (OpExtension)

@@ -110,7 +110,7 @@ static int ds_copy_draw(vtex *s, vtex *d, unsigned sl, unsigned sz, unsigned dl,
     VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = {{x0, y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}};
     vkCmdBeginRenderPass(cbuf, &bi, VK_SUBPASS_CONTENTS_INLINE); bf_reset();   // its pipeline and dynamic state are set behind the bind filter (bf_*)
     vkCmdBindPipeline(cbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    vkCmdBindDescriptorSets(cbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, g_dsc_pl, 0, 1, &set, 0, NULL);
+    vkCmdBindDescriptorSets(cbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, g_dsc_pl, 0, 1, &set, 0, NULL); pool_disturb(VK_PIPELINE_BIND_POINT_GRAPHICS);   // its set 0 takes the pool set's place
     VkViewport v = {(float)x0, (float)y0, (float)(x1 - x0), (float)(y1 - y0), 0, 1}; VkRect2D sc = {{x0, y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}};
     vkCmdSetViewport(cbuf, 0, 1, &v); vkCmdSetScissor(cbuf, 0, 1, &sc);
     vkCmdSetStencilWriteMask(cbuf, VK_STENCIL_FACE_FRONT_AND_BACK, dsn ? 0xff : 0); vkCmdSetStencilReference(cbuf, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
