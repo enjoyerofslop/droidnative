@@ -1,5 +1,5 @@
-# Game profile of Persona 3 Portable (Switch, update 1.0.2). On Android it plays at 60 fps (as on the Switch) from a new game through the opening and
-# the first two school days, with saves and Continue working, in Console mode (a Galaxy S25 Edge, see README.md); the Mac has not run it yet
+# Game profile of Persona 3 Portable (Switch, update 1.0.2). On Android it plays at 60 fps (as on the Switch) from a new game through the first school days
+# to the first battle on April 9, with saves and Continue working, in Console mode (a Galaxy S25 Edge, see README.md); the Mac has not run it yet
 # Format: see dm/games/README.md
 # Atlus's in-house engine with CRI middleware (P4G's), NVN, SDK 14.3.0. The provisional profile the survey made (dm/games/profile_guess.py),
 # unchanged but for these comments. Shaders: 30 BNSH entries under sysdat.cpk, which the split's "other" packages hold (see README.md)
