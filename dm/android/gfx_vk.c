@@ -1829,9 +1829,25 @@ static int g_rc_skip;   // a render-enable block evaluated false is active
 static uint64_t g_rc_skipped;   // clears and draws dropped by it (the first is logged)
 #define RC_PEND 256
 static struct { uint64_t addr; int kind; } g_rc_pend[RC_PEND]; static int g_rc_npend;   // reports replayed in this submission: kind 1 = timestamp (counter 0), 2 = another counter (unknown)
-static uint64_t g_rc_occ[4096];   // addresses ever written by a non-timestamp report (open addressing): conditions on them keep drawing
-static void rc_occ_add(uint64_t a) { for (uint32_t i = (uint32_t)(a >> 4) & 4095, k = 0; k < 4096; k++, i = (i + 1) & 4095) { if (g_rc_occ[i] == a) return; if (!g_rc_occ[i]) { g_rc_occ[i] = a; return; } } }
-static int rc_occ_has(uint64_t a) { for (uint32_t i = (uint32_t)(a >> 4) & 4095, k = 0; k < 4096; k++, i = (i + 1) & 4095) { if (g_rc_occ[i] == a) return 1; if (!g_rc_occ[i]) return 0; } return 0; }
+// Addresses ever written by a non-timestamp report: conditions on them keep drawing. An open-addressing set grown at half full. It was a fixed 4,096 slots, which Ocarina of
+// Time's Kokiri Forest filled (its counter reports go to ever new addresses), and once full every report and every condition probed all 4,096: 37% of the replay thread
+// on a Galaxy Z Fold 8. Past RC_OCC_MAX slots it is emptied and filled again (logged): a condition on an address forgotten so reads the report's memory
+enum { RC_OCC_MIN = 4096, RC_OCC_MAX = 1u << 21 };
+static uint64_t *g_rc_occ; static uint32_t g_rc_cap, g_rc_n;   // the replay's thread alone (mtl_exec)
+static uint32_t rc_occ_slot(const uint64_t *t, uint32_t cap, uint64_t a) { uint32_t i = (uint32_t)((a >> 4) * 0x9E3779B1u) & (cap - 1); while (t[i] && t[i] != a) i = (i + 1) & (cap - 1); return i; }
+static void rc_occ_add(uint64_t a) {
+    if (!a) return;   // (0 is an empty slot)
+    if (2 * (g_rc_n + 1) > g_rc_cap) {
+        uint32_t nc = g_rc_cap ? 2 * g_rc_cap : RC_OCC_MIN; int clear = nc > RC_OCC_MAX; if (clear) nc = g_rc_cap;
+        uint64_t *nt = calloc(nc, sizeof *nt); if (!nt) return;
+        if (clear) { static int nl; if (nl++ < 4) LOG("[vk] conditional rendering: %u counter report addresses kept, the most it keeps: emptied", g_rc_n); g_rc_n = 0; }
+        else { for (uint32_t i = 0; i < g_rc_cap; i++) if (g_rc_occ[i]) nt[rc_occ_slot(nt, nc, g_rc_occ[i])] = g_rc_occ[i];
+               if (nc >= 65536) LOG("[vk] conditional rendering: %u counter report addresses kept, room for %u now", g_rc_n, nc / 2); }
+        free(g_rc_occ); g_rc_occ = nt; g_rc_cap = nc;
+    }
+    uint32_t i = rc_occ_slot(g_rc_occ, g_rc_cap, a); if (!g_rc_occ[i]) { g_rc_occ[i] = a; g_rc_n++; }
+}
+static int rc_occ_has(uint64_t a) { return g_rc_cap && a && g_rc_occ[rc_occ_slot(g_rc_occ, g_rc_cap, a)] == a; }
 static void rc_note(uint64_t a, int kind) {
     if (kind == 2) rc_occ_add(a);
     for (int i = 0; i < g_rc_npend; i++) if (g_rc_pend[i].addr == a) { g_rc_pend[i].kind = kind; return; }
