@@ -1,6 +1,6 @@
 # The Legend of Zelda: Skyward Sword HD (`01002DA013484000`)
 
-Update 1.0.1 (v65536) over the base game, SDK 11.4.0. Nintendo's Wii-era engine, ported by Tantalus, on NVN. Modules `main`, `subsdk0` (GLSLC, NVN's runtime shader compiler), `subsdk1` (NintendoSDK_movie) and `sdk`. Tested on the Mac from a new game through the opening to Skyloft: 60 fps, about 1.8 GB resident, no red lines. On Android, Skyloft from a downloaded save ([Android baselines](../../android/baselines.md)). Combat, the Sailcloth, flight, the dungeons and the iPhone are not tested here; the reporter of issue #928 played on through the Sailcloth tutorial on 1.0.0 and 1.0.1.
+Update 1.0.1 (v65536) over the base game, SDK 11.4.0. Nintendo's Wii-era engine, ported by Tantalus, on NVN. Modules `main`, `subsdk0` (GLSLC, NVN's runtime shader compiler), `subsdk1` (NintendoSDK_movie) and `sdk`. Tested on the Mac only, from a new game through the opening to Skyloft: 60 fps, about 1.8 GB resident, no red lines. Combat, the Sailcloth, flight, the dungeons and the iPhone are not tested here; the reporter of issue #928 played on through the Sailcloth tutorial on 1.0.0 and 1.0.1.
 
 ## What it needs
 
