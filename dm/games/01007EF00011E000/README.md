@@ -185,6 +185,24 @@ Measured 2026-11-10 on a OnePlus Pad 3 (Snapdragon 8 Elite, Adreno 830, driver 0
   - With #108's defaults: 29.9 fps (at 30 the end of loading falls inside the window), frame p50 33.2 ms / p95 36.2-36.6 ms, replay 16.7-16.9 ms, GPU 14.3 ms, 89% of descriptor sets bound again. Past loading (frames 2200-3350), no frame over 40 ms.
   - With main's defaults (no set reuse, no recorder, the 60 target): 30.0-30.5 fps, frame p95 37.5-38.2 ms, replay 24.9-25.1 ms, GPU 13.2-15.3 ms. The frame step tries 60 and fails 3 and 10 times a run, and 16-19 frames past loading take over 40 ms.
   - Set reuse and the recorder at the 60 target: the step still tries 60 and fails ten times a run, so about 190 frames in 1,150 come at 60 among the 30s.
+- **Open: orange speckle in the Shrine on a Pixel 9 Pro XL (Mali-G715, driver 0xd803000), 2026-11-10.**
+  - **Where:** the floor and the walls' carvings show blocky, high-contrast orange speckle that the Adreno phones and the Galaxy Z Flip 7 (Xclipse 950) don't. It's in the rendered frame, not the presentation: at frame 2600 of the `outdoors` route (frame dumps, `DM_VK_DUMP=2600`) the Pixel's final picture has about 50% more high-frequency luma than the Flip's (0.39/0.99/1.79 against 0.26/0.63/1.17 in the upper, middle and floor regions), and the Flip's equals the OnePlus Pad 3's within 0.83/255.
+  - **First pass that differs:** the G-buffer, the linear depth and the shadow cascades match the Flip's. The first output that differs is a half-resolution (640x360) indirect-lighting pass.
+    - It has four full-screen draws that select regions with depth tests; the main fragment shader is `2cf39271f4d646f8`.
+    - Its colour slot 2 (`_76`), R11G11B10F, is posterized and brighter on the Pixel: 13% of texels above 0.3 against none.
+    - Slot 1 of the same draws is byte-identical, so the regions and most inputs are the same.
+    - The full-resolution deferred lighting upsamples that target, which gives the 2-pixel blocks.
+  - **Ruled out**, each on the device:
+    - Depth-compare reference clamping: the Mali-G715, Xclipse 950 and Adreno 830 all clamp D16 references to [0, 1] alike.
+    - 8-bit UNORM precision: Mali returns k/255 exactly, and `trunc(x * 255)` gives back every k.
+    - R32F bilinear filtering precision: exact.
+    - RelaxedPrecision or half floats: none in these shaders.
+    - Layered cascade rendering, and different depth formats.
+    - The point-sampled reads of the full-res G-buffer at half-res pixel centres. These sit exactly on texel boundaries, and Mali picks the neighbouring texel for 1-2.5% of pixels where the Xclipse and the Adreno 650 always pick the same one. But nudging those reads a quarter texel in the pass's three shaders left the speckle unchanged in the game (0.40/1.00/1.83 against 0.40/0.99/1.79 with the same shaders recompiled unnudged).
+  - **Still different, cause unknown:**
+    - The 12x1 parameter table (R11G11B10F) that slot 2's computation reads (e.g. 0.139 against 0.0435 in one element). It's built from a chain of small passes that diverges step by step.
+    - An earlier sun-visibility pass whose red channel is 0 everywhere on the Pixel, where the Flip has 1.2% of texels lit.
+    - Either may be the cause; neither is shown to be.
 - **60 fps** needs the frame's cost at or under 14.2 ms. At 30 fps the replay takes 17 ms and the GPU 16 ms, so both have to come down. Next leads, in order:
   - the replay's host work (`stage_set` 38% of the thread with the recorder on: constant buffer compares, hash lookups, dirty-page checks);
   - Turnip, which needs a driver build for the Adreno 830;
