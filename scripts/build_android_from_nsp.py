@@ -56,10 +56,12 @@ BUILD_TOOLS, PLATFORM = '36.0.0', 'android-35'   # build_apk.py's defaults
 # libadrenotools and its hooks (dm/android/CMakeLists.txt), in every APK: DM_VK_DRIVER opens a Vulkan driver of the player's through them (dm/android/vk_driver.c), so trying
 # one needs no other build. Built beside the loader, and kept with it in the library
 VK_DRIVER_LIBS = ('libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so')
-# Games played on an Android device: the rows of the README's Game Status with a profile, kept in step with it. The desktop app shows the others as not played
-# there yet. It held only Super Mario Bros. Wonder, so the app called every other game in that table untested, Brilliant Diamond at 60 fps on an Odin 2 among
-# them. Mario Kart World is left out: it boots and draws, but doesn't play yet
+# Games played on an Android device: the rows of the README's Game Status whose tier is Playable or In-game from a run on current code, with a profile, kept in
+# step with that table. The desktop app shows the others as not played there yet. Left out: In-game, blocked (Frostpunk, Ocarina of Time) and Menus (Mario Kart
+# World), and the rows from before the nxnative merge (†: Super Mario Bros. Wonder, Super Mario 3D World + Bowser's Fury), which current code hasn't run
 ANDROID_TESTED = {
+    '01008DB008C2C000',   # Pokémon Shield (Playable through Postwick)
+    '010027400CDC6000',   # Divinity: Original Sin 2 - Definitive Edition (Playable through the cabin deck)
     '0100000011D90000',   # Pokémon Brilliant Diamond
     '01006F8002326000',   # Animal Crossing: New Horizons
     '0100000000010000',   # Super Mario Odyssey
@@ -67,8 +69,8 @@ ANDROID_TESTED = {
     '01006BB00C6F0000',   # The Legend of Zelda: Link's Awakening
     '01002DA013484000',   # The Legend of Zelda: Skyward Sword HD
     '01007EF00011E000',   # The Legend of Zelda: Breath of the Wild
-    '010015100B514000',   # Super Mario Bros. Wonder
-    '010028600EBDA000',   # Super Mario 3D World + Bowser's Fury
+    '0100606026F12000',   # Final Fantasy Resonance
+    '010069C01AB82000',   # SHIN MEGAMI TENSEI V: Vengeance (a contributor's report)
 }
 
 

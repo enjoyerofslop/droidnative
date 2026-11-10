@@ -50,6 +50,18 @@ def sh(serial, cmd, timeout=60) -> str:
     return adb(serial, 'shell', cmd, timeout=timeout)
 
 
+_displays: dict[str, list[str]] = {}
+
+
+def screenshot(serial) -> bytes:
+    # A phone with a second screen (the Galaxy Z Flip 7's cover screen) needs screencap's -d: without it screencap writes a warning ahead of the PNG, which leaves an
+    # unreadable file, and takes whichever display it finds first. SurfaceFlinger's HWC display 0 is the internal screen the game opens on; one screen, no -d, as before
+    if serial not in _displays:
+        ids = re.findall(r'^Display (\d+) \(HWC display (\d+)\)', sh(serial, 'dumpsys SurfaceFlinger --display-id'), re.M)
+        _displays[serial] = [d for d, hwc in ids if hwc == '0'] if len(ids) > 1 else []
+    return adb_bytes(serial, 'exec-out', 'screencap', '-p', *(['-d', _displays[serial][0]] if _displays[serial] else []))
+
+
 def ready_devices():
     out = subprocess.run([ADB, 'devices'], capture_output=True, text=True).stdout.splitlines()[1:]
     return [line.split()[0] for line in out if len(line.split()) > 1 and line.split()[1] == 'device']
@@ -210,7 +222,7 @@ def run_one(serial, folder, gid, route, n, out, args):
         while time.time() - t0 < end:
             time.sleep(1); el = time.time() - t0
             for at, name in list(shots.items()):
-                if el >= at: (d / f'shot_{name}.png').write_bytes(adb_bytes(serial, 'exec-out', 'screencap', '-p')); del shots[at]
+                if el >= at: (d / f'shot_{name}.png').write_bytes(screenshot(serial)); del shots[at]
             if pss is None and el >= route['start'] + route['length'] - 2:
                 m = re.search(r'TOTAL PSS:\s+(\d+)|TOTAL\s+(\d+)', sh(serial, f'dumpsys meminfo {GAME_PROC}')); pss = int(m.group(1) or m.group(2)) // 1024 if m else None
             if el > 15 and not sh(serial, f'pidof {GAME_PROC}').strip(): died = round(el, 1); break

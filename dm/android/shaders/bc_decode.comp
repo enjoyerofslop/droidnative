@@ -1,0 +1,60 @@
+#version 450
+// BC4 and BC5 blocks decoded on the GPU (gfx_vk_bcdec.inc): the blocks a GPU block encoder drew into a BC texture that the replay holds decoded, because the GPU has no
+// BC textures. One invocation decodes one block into the bytes bcdec's precise decoder (BCDEC_BC4BC5_PRECISE, the CPU decode of uploads; the host is built with
+// -fsigned-char, so its signed endpoints are signed too) writes. Blocks in: bw x bh, rows of blocks packed. Texels out: rows of bw * 4 texels, bh * 4 rows, one byte a channel
+// (R8 for BC4, RG8 for BC5): each block's rows are whole words, so blocks never share a word, and the copy into the image clips the edge blocks
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, set = 0, binding = 0) readonly buffer Blocks { uint w[]; } src;
+layout(std430, set = 0, binding = 1) writeonly buffer Texels { uint w[]; } dst;
+layout(push_constant) uniform Pc { uint bw, bh, kind; } pc;   // kind: 0 BC4, 1 BC4 signed, 2 BC5, 3 BC5 signed
+
+// one channel's 8-byte block (lo, hi) → its 16 values, one byte each, packed four to a row (texel x of row y in byte x of rows[y])
+void channel(uint lo, uint hi, bool sgn, out uint rows[4]) {
+    int a0, a1;
+    if (sgn) { a0 = max(bitfieldExtract(int(lo), 0, 8), -127); a1 = max(bitfieldExtract(int(lo), 8, 8), -127); }   // -128 reads as -127, as in bcdec
+    else { a0 = int(lo & 0xffu); a1 = int((lo >> 8) & 0xffu); }
+    int v[8];
+    v[0] = a0; v[1] = a1;
+    if (a0 > a1) {   // six values between the endpoints: bcdec's 16-bit weights, rounded
+        v[2] = (56173 * a0 + 9363 * a1 + 32768) >> 16;
+        v[3] = (46812 * a0 + 18724 * a1 + 32768) >> 16;
+        v[4] = (37450 * a0 + 28086 * a1 + 32768) >> 16;
+        v[5] = (28086 * a0 + 37450 * a1 + 32768) >> 16;
+        v[6] = (18724 * a0 + 46812 * a1 + 32768) >> 16;
+        v[7] = (9363 * a0 + 56173 * a1 + 32768) >> 16;
+    } else {   // four between them, then the format's minimum and maximum
+        v[2] = (52429 * a0 + 13107 * a1 + 32768) >> 16;
+        v[3] = (39321 * a0 + 26215 * a1 + 32768) >> 16;
+        v[4] = (26215 * a0 + 39321 * a1 + 32768) >> 16;
+        v[5] = (13107 * a0 + 52429 * a1 + 32768) >> 16;
+        v[6] = sgn ? -127 : 0;
+        v[7] = sgn ? 127 : 255;
+    }
+    for (int r = 0; r < 4; r++) rows[r] = 0u;
+    for (uint i = 0u; i < 16u; i++) {   // texel i's 3-bit index at bit 16 + 3i of the 64-bit block; the one at bit 46 spans both words
+        uint p = 16u + 3u * i, k;
+        if (p + 3u <= 32u) k = (lo >> p) & 7u;
+        else if (p >= 32u) k = (hi >> (p - 32u)) & 7u;
+        else k = ((lo >> p) | (hi << (32u - p))) & 7u;
+        rows[i >> 2] |= (uint(v[k]) & 0xffu) << (8u * (i & 3u));
+    }
+}
+
+void main() {
+    uint bx = gl_GlobalInvocationID.x, by = gl_GlobalInvocationID.y;
+    if (bx >= pc.bw || by >= pc.bh) return;
+    bool sgn = (pc.kind & 1u) != 0u, two = pc.kind >= 2u;
+    uint b = (by * pc.bw + bx) * (two ? 4u : 2u);
+    uint r0[4], r1[4];
+    channel(src.w[b], src.w[b + 1u], sgn, r0);
+    if (!two) {
+        for (uint y = 0u; y < 4u; y++) dst.w[(by * 4u + y) * pc.bw + bx] = r0[y];
+        return;
+    }
+    channel(src.w[b + 2u], src.w[b + 3u], sgn, r1);
+    for (uint y = 0u; y < 4u; y++) {   // RG8: red from the first half of the block, green from the second, two texels a word
+        uint o = (by * 4u + y) * pc.bw * 2u + bx * 2u, r = r0[y], g = r1[y];
+        dst.w[o] = (r & 0xffu) | (g & 0xffu) << 8 | (r >> 8 & 0xffu) << 16 | (g >> 8 & 0xffu) << 24;
+        dst.w[o + 1u] = (r >> 16 & 0xffu) | (g >> 16 & 0xffu) << 8 | (r >> 24) << 16 | (g >> 24) << 24;
+    }
+}

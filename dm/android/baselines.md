@@ -5,7 +5,11 @@ The first baselines of DroidPlay Core (then droidnative) on more than one device
 with PR #1 (the present's vsync sleep outside the submission lock) and PR #3 (the game window keeps the screen on); The Legend of Zelda: Link's Awakening
 and Skyward Sword HD the same evening on `main` at `ee18169a`. Each game was packed by `build_android_from_nsp.py`. They are a starting point for fixes,
 not a verdict: every known problem below that is not marked fixed is open. The Samsung Galaxy S25 Edge's column and Final Fantasy Resonance's rows were
-added 2026-11-10, measured the same way on `main` at `cf42941d` (Brilliant Diamond not yet on the S25 Edge).
+added 2026-11-10, measured the same way on `main` at `cf42941d`; Brilliant Diamond's Eterna City on it the same day, in the eight runs that checked [a fix for the
+Adreno 830](../../docs/reference/rendering.md#uniform-bound-tests-in-a-vertex-shader-lose-the-device-on-the-adreno-830). The Retroid Pocket 5's rows for Odyssey,
+Brilliant Diamond, Animal Crossing and Link's Awakening were measured again 2026-11-10 on `main` at `54e21235`, which turns on a cached copy of storage-buffer
+write-backs on that device's driver for every game (problem 13); with the copy off (`DM_VK_WB_READBACK=0`) only Brilliant Diamond's Eterna City changes. Super Smash
+Bros. Ultimate's Retroid Pocket 5 rows were measured again the same day on `main` at `3b07c5cf` (problem 16).
 
 ## Devices
 
@@ -15,8 +19,11 @@ added 2026-11-10, measured the same way on `main` at `cf42941d` (Brilliant Diamo
 | OnePlus Pad 3 | SM8750P (Snapdragon 8 Elite) | Adreno 830, V@0800.74, 1.3.284 | 16 | 12 GB |
 | Retroid Pocket 5 | SM8250 (Snapdragon 865) | Adreno 650, V@0746.0, 1.1.128 | 13 | 8 GB |
 | Samsung Galaxy S25 Edge | SM8750 (Snapdragon 8 Elite for Galaxy) | Adreno 830, V@0800.40.1, 1.3.284 | 16 | 12 GB |
+| Google Pixel 9 Pro XL ([Mali](#mali-super-mario-odyssey-on-a-pixel-9-pro-xl)) | Tensor G4 | Mali-G715, Arm's driver 0xd803000, 1.4.343 | 17 | 16 GB |
+| Samsung Galaxy Z Flip 7 ([Xclipse](#xclipse-brilliant-diamond-on-a-galaxy-z-flip-7)) | Exynos 2500 | Xclipse 950, Samsung's driver 24.0.533 (0x6000215), 1.3.279 | 16 | 12 GB |
 
-All four use 4 KB pages. The Odin 2 and the Retroid Pocket 5 have built-in controls; the Pad 3 and the S25 Edge show the on-screen controls over the game.
+All six use 4 KB pages. The Odin 2 and the Retroid Pocket 5 have built-in controls; the Pad 3, the S25 Edge, the Pixel 9 Pro XL and the Z Flip 7 show the on-screen controls over the game.
+The Pixel 9 Pro XL, the first GPU outside Adreno, is not in the Results table: it has [a section of its own](#mali-super-mario-odyssey-on-a-pixel-9-pro-xl).
 
 The RAM column is the device's installed capacity, not a measurement of how much memory a game uses. These baselines report frame rates and frame
 times, not per-game peak memory use or a matched memory-use comparison with an emulator. A result on the 8 GB Retroid Pocket 5 does not establish
@@ -29,26 +36,28 @@ median GPU time per frame. Animal Crossing runs at 30 fps on the Switch too.
 
 | Game, scene | Odin 2 | Pad 3 | Retroid Pocket 5 | Galaxy S25 Edge |
 |---|---|---|---|---|
-| **Super Mario Odyssey 1.4.1**, Start menu (a fresh save) | 60 · 16.7 / 17.6–18.7 | 60 · 16.6 / 18.0 | 60 · 16.6 / 17.5–17.9 | 60 · 16.7 / 17.6–17.7 · GPU 2.2 |
-| Super Mario Odyssey, the opening cutscene (Start pressed on a fresh save) | 59.9 · 16.7 / 18.4 · GPU 5.5 (one run crashed at boot) | 59.9 · 16.7 / 18.9 · GPU 9.3 | **38** · 25.9 / 30.6–31.5 · GPU 12.9 | 60 · 16.6 / 19.3–19.4 · GPU 9.9 |
+| **Super Mario Odyssey 1.4.1**, Start menu (a fresh save) | 60 · 16.7 / 17.6–18.7 | 60 · 16.6 / 18.0 | 60 · 16.7 / 17.6–17.8 · GPU 1.4–1.5 (2026-11-10, `main` 54e21235) | 60 · 16.7 / 17.6–17.7 · GPU 2.2 |
+| Super Mario Odyssey, the opening cutscene (Start pressed on a fresh save) | 59.9 · 16.7 / 18.4 · GPU 5.5 (one run crashed at boot) | 59.9 · 16.7 / 18.9 · GPU 9.3 | 59.3–59.4 · 16.6 / 18.7–18.9 · GPU 12.3–12.4 (2026-11-10, `main` 54e21235; 38 on 2026-11-08, problem 6, fixed) | 60 · 16.6 / 19.3–19.4 · GPU 9.9 |
 | Super Mario Odyssey, play (the Cap Kingdom, at the Look Around hint) | 60 · 16.7 / 18.5 · GPU 4.5 (one run, 15 s; it crashed at the hint video before the fix in problem 1) | not run | not run | not run |
-| **Pokémon Brilliant Diamond 1.3.0**, language menu (a fresh save) | 60 · 16.7 / 19.2–19.4 | 60 · 16.6–16.7 / 18.5–18.8 | 60 · 16.6–16.7 / 18.1–19.4 (2026-11-10, after problem 2's fix) | not run |
-| Pokémon Brilliant Diamond, Eterna City (a save) | 60 · 16.6 / 18.1–18.2 · GPU 8.1 | 58.9–59.7 · 16.6–16.8 / 18.8–19.7 · GPU 10.7 | 54.6–60.0 · 16.6–18.2 / 18.5–21.3 · GPU 13.5–15.0 (2026-11-10, after problem 13's fix; 24.0–24.6 before) | not run |
-| **Animal Crossing: New Horizons 3.0.3**, the new game's airport (a fresh save) | 30 · 33.3 / 34.7–35.4 · GPU 5.3 | 30 · 33.3 / 35.7–35.8 · GPU 7.1 | 30 · 33.4 / 36.5–36.7 · GPU 15.8 | 30 · 33.4 / 35.8–35.9 · GPU 15.8 |
-| Animal Crossing, outside the player's house (a save) | 30 · 33.3–33.4 / 35.7–35.8 · GPU 9.4–9.7 | 29.9 · 33.3–33.4 / 38.0–38.1 · GPU 15.5–15.9 | 30.0 · 33.3 / 36.3–36.5 · GPU 21.8–22.3 (2026-11-10, after the save fix below) | 30 · 33.2–33.4 / 35.6–36.3 · GPU 22.7–23.1 |
+| **Pokémon Brilliant Diamond 1.3.0**, language menu (a fresh save) | 60 · 16.7 / 19.2–19.4 | 60 · 16.6–16.7 / 18.5–18.8 | 60 · 16.7 / 17.4–19.1 · GPU 1.0 (2026-11-10, `main` 54e21235) | not run |
+| Pokémon Brilliant Diamond, Eterna City (a save) | 60 · 16.6 / 18.1–18.2 · GPU 8.1 | 58.9–59.7 · 16.6–16.8 / 18.8–19.7 · GPU 10.7 | 59.0–59.6 · 16.6 / 26.6–26.9 · GPU 13.0 (2026-11-10, `main` 54e21235, after problem 13's fix; 21.0 with `DM_VK_WB_READBACK=0`, 24.0–24.6 before the fix) | 60 · p95 19.5 · GPU 10.6–10.7 (eight runs, 2026-11-10) |
+| **Animal Crossing: New Horizons 3.0.3**, the new game's airport (a fresh save) | 30 · 33.3 / 34.7–35.4 · GPU 5.3 | 30 · 33.3 / 35.7–35.8 · GPU 7.1 | 30 · 33.2–33.3 / 35.7–36.0 · GPU 12.3–12.4 (2026-11-10, `main` 54e21235) | 30 · 33.4 / 35.8–35.9 · GPU 15.8 |
+| Animal Crossing, outside the player's house (a save) | 30 · 33.3–33.4 / 35.7–35.8 · GPU 9.4–9.7 | 29.9 · 33.3–33.4 / 38.0–38.1 · GPU 15.5–15.9 | 30.0 · 33.3 / 36.3–36.5 · GPU 21.8–22.3 (2026-11-10, after the save fix below; 30.0 again on `main` 32302b99, and with `DM_VK_WB_READBACK=0`) | 30 · 33.2–33.4 / 35.6–36.3 · GPU 22.7–23.1 |
 | **Super Smash Bros. Ultimate 13.0.5**, boot with Android's Roboto as the shared font (fixed: problem 3) | **Crashes** 2–4 s in | **Crashes** | **Crashes** | not run (fixed before) |
-| Smash, the opening movie (with a hinted shared font, now packed with the game) | 60 · 12.0 / 33.9 | 59.9 · 13.1–13.4 / 34.7–35.1 | 59.7 · 13.5–13.9 / 35.5–36.0 | 60 · 9.8–12.4 / 33.5–33.7 · GPU 1.9–2.1 |
-| Smash, a battle (a fuller shared font; stage and CPU fighter vary) | 39.7–59.3 fps | 16.8–29.7 fps, frames up to 215 ms | 13.4–19.3 fps, frames up to 368 ms | 59.9 fps, frames up to 52 ms · GPU 6.3–6.6 |
-| **The Legend of Zelda: Link's Awakening 1.1.0**, the opening movie (a fresh save) | 59.8–59.9 · 16.7 / 17.6–17.7 · GPU 2.3–2.4 | 59.7 · 16.7 / 16.8 · GPU 4.5 (the other run crashed at boot) | 57.4–58.9 · 16.7 / 17.0–18.6 · GPU 5.6–6.4 (10 runs, 2026-11-10, after problem 9's fix) | 60 · 16.7 / 16.8 · GPU 4.9 |
-| Link's Awakening, the overworld at the Ancient Ruins (a save) | 59.9–60 · 16.7 / 17.2–17.3 · GPU 4.1 | 31.3 · 33.2 / 34.7 · GPU 12.0 (the other run crashed at boot) | 34.7–36.0 · 32.8–33.0 / 34.5 · GPU 12.8 (2026-11-10, after problem 9's fix; the game falls to its 30 fps interval, problem 12) | 38.1–44.6 · 16.8–32.5 / 33.8–34.1 · GPU 13.0–13.7 |
+| Smash, the opening movie (with a hinted shared font, now packed with the game) | 60 · 12.0 / 33.9 | 59.9 · 13.1–13.4 / 34.7–35.1 | 59.8–59.9 · 11.9–13.9 / 35.8–36.2 · GPU 2.0 (2026-11-10, `main` 3b07c5cf; 59.7 on 2026-11-08) | 60 · 9.8–12.4 / 33.5–33.7 · GPU 1.9–2.1 |
+| Smash, a battle (a fuller shared font; stage and CPU fighter vary) | 39.7–59.3 fps | 52.3–59.9 · 16.6–18.9 / 20.5–25.0 · GPU 8.2–8.9 (2026-11-09, `main` 8edd2b38 with #72 and #73, both since merged, as droidplay-core#72 reports; 38.2–50.3 on `main` 54711866 that morning; 16.8–29.7 and frames up to 215 ms on 2026-11-08) | 57.0–58.8 · 16.8–17.1 / 22.0–24.4 · GPU 8.5–9.5, frames up to 112–119 ms (2026-11-10, `main` 3b07c5cf: both runs on Fountain of Dreams, the warm-up 56.9 on another stage; from an empty pipeline cache 59.4 on Mushroom Kingdom; 13.4–19.3 fps and frames up to 368 ms on 2026-11-08; problem 16) | 59.9 fps, frames up to 52 ms · GPU 6.3–6.6 |
+| **The Legend of Zelda: Link's Awakening 1.1.0**, the opening movie (a fresh save) | 59.8–59.9 · 16.7 / 17.6–17.7 · GPU 2.3–2.4 | 59.7 · 16.7 / 16.8 · GPU 4.5 (the other run crashed at boot) | 58.8–59.1 · 16.7 / 17.0–17.4 · GPU 5.3–5.7 (2026-11-10, `main` 54e21235) | 60 · 16.7 / 16.8 · GPU 4.9 |
+| Link's Awakening, the overworld at the Ancient Ruins (a save) | 59.9–60.0 · 16.7 / 17.0 · GPU 5.8–5.9 (2026-11-09, `main` 54711866; GPU 4.1 on 2026-11-08 with the world black, problem 8) | 33.3 · 33.2 / 34.1–34.4 · GPU 10.8 (2026-11-09, `main` 54711866, one run crashed at boot; 31.3 · GPU 12.0 on 2026-11-08 with the world black, problem 8) | 32.3–32.4 · 33.1–33.2 / 34.6–34.8 · GPU 12.9 (2026-11-10, `main` 54e21235; 34.7–36.0 on an earlier `main`; the game falls to its 30 fps interval, problem 12) | 38.1–44.6 · 16.8–32.5 / 33.8–34.1 · GPU 13.0–13.7 |
 | **The Legend of Zelda: Skyward Sword HD 1.0.1**, the opening movie (a fresh save) | 55.2–55.9 · 18.1–18.3 / 36.6–37.7 · GPU 2.3–2.4 | 59.9–60 · 16.7 / 24.5–25.1 · GPU 2.8 | 41.1–41.4 · 24.4–24.6 / 49.1–49.8 · GPU 3.7 | 60 · 16.6 / 18.0–18.1 · GPU 2.5 |
-| Skyward Sword HD, Skyloft's plaza (a save) | 30.0–30.5 · 33.3 / 36.6–46.8 · GPU 4.8–4.9 | 30.0–34.0 · 30.6–32.9 / 44.4–46.5 · GPU 12.6–12.8 | 43.2–43.3 · 17.7 / 34.9–35.2 · GPU 8.5 (2026-11-10, after the save fix below; terrain and sky in colour) | 60 · 16.6–16.7 / 20.6–20.7 · GPU 9.8–9.9 |
+| Skyward Sword HD, Skyloft's plaza (a save) | 60.0 · 16.7 / 17.9 · GPU 3.7–3.8 (2026-11-09, `main` 54711866; 30.0–30.5 on 2026-11-08, problem 11, fixed) | 60.0 · 16.7 / 19.7–19.9 · GPU 6.8 (2026-11-09, `main` 54711866; 30.0–34.0 on 2026-11-08, problem 11, fixed) | 43.2–43.3 · 17.7 / 34.9–35.2 · GPU 8.5 (2026-11-10, after the save fix below; terrain and sky in colour). An average of two rates: the game switches between 60 and 30 within a run (problem 11's interval drop), 58.8, 53.5 and 30.0 fps in three runs on `main` 648a3758 | 60 · 16.6–16.7 / 20.6–20.7 · GPU 9.8–9.9 |
 | **Final Fantasy Resonance 1.0.1**, the Lancarse logo and the Brightness screen (a fresh save) | 59.6–59.7 · 16.8 / 18.7 · GPU 1.8 | not measured here | not run | 59.6 · 16.8 / 21.3–21.5 · GPU 5.8 |
 | Final Fantasy Resonance, the first field (a save made by its `tofield` route) | 42.2–42.6 · 23.3–23.6 / 27.1–27.4 · GPU 12.5–12.7 | not measured here | not run | 30.1–33.3 · 29.7–33.0 / 40.9–42.8 · GPU 20.2–22.7 |
 | **The Legend of Zelda: Breath of the Wild 1.9.0**, the Shrine of Resurrection (the `outdoors` save, a 40 s window) | no GPU hang: 30.0–30.5 · 33.0–33.3 / 37.5–38.2 · GPU 13.2–15.3 on main (the frame step tries 60 and fails), **29.9 · 33.2 / 36.2–36.6 · GPU 14.3** with droidplay-core#108 | **30.0 · 33.2–33.3 / 37.9–38.4 · GPU 16.5–16.7** on main with BotW's defaults and the empty slot 0 filled (problem 14, fixed; the picture is still dark, problem 15). Before that fix the GPU was lost at the first frame in the field; with the hanging draw skipped: 20.0 · 48.6–49.2 / 68–71 · GPU 22.3 on main | not run | **29.9 · 33.2 / 38.8–39.0 · GPU 20.5** on main 54e21235 with BotW's defaults and the duplicate colour slots attached once (problem 15, fixed); 29.9 · 33.2–33.3 / 38.7–39.6 · GPU 21.4 and the Shrine dark without that fix. No GPU hang (problem 14's fix is on for its Adreno 830) |
 
-Link's Awakening's numbers are for a wrong picture (problem 8): the 3D world never reaches the screen, so the overworld's frame rate leaves out part of
-its real work. Skyward Sword HD's Skyloft is drawn with grey terrain (problem 10); on the Galaxy S25 Edge its terrain has its colours.
+Link's Awakening's opening movie on the Odin 2 and the Pad 3 was measured on 2026-11-08, before problem 8's fix, with its colours wrong; its other cells
+are from after the fix, with the picture right. Skyward Sword HD's Skyloft had grey terrain on the Odin 2 and the Pad 3 until problem 10's fix; it is in
+colour on all four. The cells dated 2026-11-09 on `main` 54711866 are that day's regression pass of `main`, reported in droidplay-core#72 beside the
+PR's own runs.
 
 Time from launch to the first frame, warm: about 1.3 s (Odyssey), 3.2–4.3 s (Brilliant Diamond, a Unity game), 1.5 s (Animal Crossing), 2.0–3.0 s (Smash),
 0.4–0.6 s (Link's Awakening), 1.3–2.1 s (Skyward Sword HD). The first launch after an install is slower while the driver builds its pipelines: Brilliant
@@ -64,10 +73,87 @@ two runs without a warm-up (the pipeline cache warm from earlier runs; Kokiri Fo
 | Game, scene | Galaxy Z Fold 8 |
 |---|---|
 | **Ocarina of Time v131072**, the title and its menu (a fresh save) | 29.6-31.1 · 33.2-33.3 / 35.1-48.2 · GPU 26.7 |
-| Ocarina of Time, Kokiri Forest (a Mac save, route `kokiri`) | 1.7 fps · frame p50 593-611 / p95 683-691 · GPU 119.4-128.2, PSS 8.5 GB; the forest black (not the texture pool, whose draws run now; 1.6 fps and GPU 138.7 with `DM_VK_POOL=0`) |
+| Ocarina of Time, Kokiri Forest (a Mac save, route `kokiri`) | 1.7 fps · frame p50 593-611 / p95 683-691 · GPU 119.4-128.2, PSS 8.5 GB; the forest black: the replay has no raw global memory (the pool table in slot 0xFF that 2,247 of the game's shaders read through); 1.6 fps and GPU 138.7 with `DM_VK_POOL=0` |
 
-The title's GPU frame is nn::ndve's last convolution (36.8 ms in a `prof_now` frame). Kokiri Forest's memory (`DM_VK_MEMREPORT`, #95), its black picture and what is open: the game's note,
+The title's GPU frame is nn::ndve's last convolution (36.8 ms in a `prof_now` frame). Kokiri Forest's memory (`DM_VK_MEMREPORT`, #95), its black picture (no raw global memory on Vulkan) and what is open: the game's note,
 [Android](../games/0400486024DEC000/README.md#android).
+
+## Mali: Super Mario Odyssey on a Pixel 9 Pro XL
+
+The first GPU outside Adreno (2026-11-10): a Google Pixel 9 Pro XL (Tensor G4, Mali-G715, Arm's driver 0xd803000, Vulkan 1.4.343, Android 17, 16 GB of RAM). Odyssey was
+packed from `main` at 648a3758 by `build_android_from_nsp.py`, then run from Odyssey-only APKs with #133 (`build_apk.py`). `scripts/bench_android.py`, two runs each, the
+pipeline cache warm from earlier runs:
+
+| Game, scene | Pixel 9 Pro XL |
+|---|---|
+| **Super Mario Odyssey 1.4.1**, Start menu (a fresh save) | 59.6–60.0 · 16.6–16.7 / 18.1–18.3 · GPU 0.9 |
+| Super Mario Odyssey, the opening cutscene (Start pressed on a fresh save) | 59.8 · 16.6–16.7 / 19.0–19.6 · GPU 9.4–9.5 |
+
+The picture is as on the Adreno (the Start menu, Bowser's airship). The first frame comes at 1.4–1.5 s, the Start menu at 11.4–11.5 s. The cutscene's first run, with none of its
+pipelines cached, made 398 graphics pipelines in 9.5 s and measured 57.1 fps, with one 5.1 s frame as its scene loaded. Where this GPU differs from every Adreno above:
+
+- **No BC textures** (`textureCompressionBC` false; the device line says `BC decoded on the CPU`). The replay has decoded BC on the CPU since the port began (`bcdec`, as for the
+  original port's Adreno 619), and Odyssey draws right with it. #133 fixes its one red line, a BC view of a decoded texture (its entry in `docs/reference/rendering.md`: "BC textures decoded on the CPU, viewed in their BC formats").
+  - **Time:** the cutscene's scene load decoded 265 textures (233 MB of texels) in 211 ms.
+  - **Memory:** 2.2 GB resident in the cutscene, against 1.64 GB on the Odin 2 and the S25 Edge, where BC stays compressed. Re-encoding into formats of the same size that the
+    GPU has (BC1, BC4 and BC5 to ETC2 and EAC; BC3 and BC7 to ASTC 4×4) would win that back. Open.
+  - **Fixed:** a GPU block encoder writing into a decoded BC texture (Breath of the Wild's BC4 encoder) draws into a block shadow, and the shadow is decoded into the image
+    on the GPU after the pass ([A GPU block encoder's blocks decoded on the GPU into a texture the CPU decoded](../../docs/reference/rendering.md#a-gpu-block-encoders-blocks-decoded-on-the-gpu-into-a-texture-the-cpu-decoded-android)).
+    BC4 and BC5 only; an encoder of another BC format keeps the old path, with a red line.
+- **16-lane subgroups** in fragment and compute shaders (`minSubgroupSize` = `maxSubgroupSize` = 16, so `VK_EXT_subgroup_size_control` cannot ask for a 32-lane warp).
+  - **Odyssey** uses no subgroup operations.
+  - **Quad shuffles** (Maxwell's fwidth, `c = 0x1c03`) read the right lanes: `t_quad_shuffle` passes on the Pixel as translated and as `spv_wide` and `spv_limits` rewrite them (#134). Those are all the
+    shuffles in Brilliant Diamond (23 fragment shaders), Link's Awakening (5) and Animal Crossing (1).
+  - **Warp-aggregated atomics** stay right in 16-lane groups: a ballot, a leader lane, one atomic, then a shuffle from the leader (most of Final Fantasy Resonance's compute
+    shaders). The lane ID, the masks, the ballot and the shuffle's source all stay within one subgroup.
+  - **Fixed: a shuffle from 16 or more lanes away has no lane to read.** Final Fantasy Resonance reduces over the whole warp with shuffles of 1, 2, 4, 8 and 16 lanes (clamp
+    31) in 309 compute shaders. On this GPU the last step gave the lane's own value, which counted each subgroup's sum twice (`t_warp_reduce`). Each subgroup is now a warp of
+    its own (`spv_narrow`: [rendering.md](../../docs/reference/rendering.md#maxwells-32-lane-warps-in-a-narrower-subgroup)). Mario Kart World has 3 such shaders, and 1,333
+    of its shuffles take their source lane at run time (one past the subgroup reads the lane's own value). Final Fantasy Resonance's opening runs at 30 fps on the Pixel, GPU 23 ms.
+  - **Not examined:** Animal Crossing's 499 fragment shaders with a ballot.
+- **No `VK_EXT_vertex_attribute_divisor`, but `VK_KHR_vertex_attribute_divisor`** (core in Vulkan 1.4, `supportsNonZeroFirstInstance` false). The replay looks only for the EXT, so
+  a vertex stream that stepped once every N > 1 instances stepped every instance, with red line 87. Fixed: the KHR one is enabled, and a draw with such a stream at a
+  non-zero base instance starts at instance 0 with the base instance in its stream offsets, since this driver reads element `instance / N` there, base instance and all
+  (`dm/android/tests/t_divisor.c`: 101 102 102 102 … at base instance 5, against NVN's 105 105 105 106 …). Neither Odyssey nor Final Fantasy Resonance has such a stream.
+- **No `VK_EXT_shader_stencil_export`:** depth-stencil copies that a blit cannot make are drawn a stencil bit at a time, as on the Adreno 650. Odyssey made none on these routes.
+- **"draws not made: pipeline N"** in the stats line counts the draws left out while pipelines met for the first time are built in the background (`DM_VK_ASYNC_PIPE`:
+  [rendering.md](../../docs/reference/rendering.md#pipelines-met-for-the-first-time-built-in-the-background)), not pipelines that failed (`0 failed`, no red line). It was 718 in
+  the cutscene's first run, and 9 and 0 in the warm ones.
+
+## Xclipse: Brilliant Diamond on a Galaxy Z Flip 7
+
+The first Samsung Xclipse GPU (2026-11-10): a Galaxy Z Flip 7 (SM-F766U1, Exynos 2500, Xclipse 950, an AMD RDNA design; Samsung's driver 24.0.533, 0x6000215; Vulkan 1.3.279,
+Android 16, 12 GB of RAM), open, on its inner screen. Brilliant Diamond was packed from `main` at 648a3758 by `build_android_from_nsp.py`, the first DroidPlay install on this
+phone, and boots with no change: the picture is right (the language menu, Eterna City's buildings, paving, cloud shadows and people), and the log has no red line.
+`scripts/bench_android.py`, two runs each, the pipeline cache warm from earlier runs:
+
+| Game, scene | Galaxy Z Flip 7 |
+|---|---|
+| **Pokémon Brilliant Diamond 1.3.0**, language menu (a fresh save) | 53.3–59.6 · 16.7 / 18.1–18.2 · GPU 0.5–0.6 (the first run's window caught the game's load, its first frame at 17.9 s); 60.0 · 16.7 / 17.9–18.0 with #144 |
+| Pokémon Brilliant Diamond, Eterna City (a save) | 60.0 · 16.6 / 18.7–19.5 · GPU 10.8, the route's presses 7 s later (below); 59.6–60.0 · 16.5–16.6 / 19.2–20.6 · GPU 10.5–10.6 with #144 on the route as it is |
+
+Where this GPU differs from the Adreno above:
+
+- **Start-up:** the first frame comes at 9.7–17.9 s with a warm cache (3.2–4.3 s on the Pad 3), and at 99.4 s on the first launch after the install (33 s on the Pad 3).
+  - **Warm:** Samsung's driver does a compile's work in `vkCreateShaderModule` (0.8–0.9 ms a module, about 0.1 on the Adreno 830), which its pipeline cache does not keep. The game's
+    8,844 modules took 6.1–9.6 s of every start, its 2,982 pipelines 0.2–0.4 s. #144 makes a module only for a pipeline the cache lacks (`VK_EXT_shader_module_identifier`):
+    the first frame at 3.2–3.3 s.
+  - **First launch:** the pipelines' compile is 74.5–74.8 s (25 ms a pipeline) either way; with #144, 79.7 s, since only 5,672 of the modules are ever made.
+  - **The `eterna` route:** its A presses at 16–25 s come during the game's 10–11 s load after the first frame (a 9.6 s frame on the Pad 3 too), so on `main` the game stays
+    at the title. The table's runs used a local copy of the route with the presses at 23 s and the window at 42–72 s. With #144 the route as it is reaches Eterna City at 27.7 s.
+- **Memory:** PSS 2.6 GB at the language menu and 3.4 GB in Eterna City, measured near each window's end. The driver keeps what it made of every module: with #144,
+  1.4 and 2.1 GB.
+- **No BC textures** (`BC decoded on the CPU`), as on the Pixel: Brilliant Diamond draws right, without either of the symptoms #133 fixes.
+- **64-lane subgroups in every stage** (stages 0x3d3f, sizes 32 to 64, a required size in compute only): `spv_wide` rewrote Brilliant Diamond's 23 `fwidth` fragment shaders.
+  No vertex shader of the nine games packed for Android on the Mac uses subgroup operations. Compute shaders in Final Fantasy Resonance (1,199) and Mario Kart World (184) do, and stay as
+  translated, with `spv_wide`'s red line; neither game has run on this phone.
+- **The cover screen:** folding the phone while the game plays puts it in the background (focus states 2 and 3, audio suspended) and shows Samsung's own cover home on the cover
+  screen. The game process keeps running, and nothing crashes. Opening the phone brings back its lock screen first. Not seen:
+  - the game's return after unlocking (the next install stopped it);
+  - the game on the cover screen, Samsung's per-app setting, with the window size change it would bring (`sc_follow_window`).
+
+  The fold was simulated with `cmd device_state`, which locks a phone that has a secure screen lock.
+- **The benchmark's screenshots:** `screencap` needs a display on a phone with two screens; without one, every shot was unreadable before #132.
 
 ## Known problems
 
@@ -110,9 +196,16 @@ Numbered in the order they were found, so links to a number stay right:
    battles on the Pad 3 afterwards: 32.3 and 34.0 fps, frame p95 37.7 and 38.6 ms (16.8 to 29.7 fps and 73 to 81 ms before; the stage differs from run to run). Pipelines met for the first time are now built in the background, their draws left out for a few frames: from an empty
    cache, two battles at 40.0 and 40.2 fps against 27.9 and 26.5, frame p95 33 and 35 ms against 96 and 85: [Pipelines met for the first time built in the
    background](../../docs/reference/rendering.md#pipelines-met-for-the-first-time-built-in-the-background).
-6. **The Retroid Pocket 5 cannot hold 60 fps in Odyssey's opening cutscene** (38 fps, GPU 12.9 ms a frame).
-7. **The Pad 3's H.264 decoder takes no input** in `dm/android/tests/t_media` (`[RED] movie: the AVC decoder took no input for 2 s`), before and
-   after the fix in problem 1. Not yet tried in a game: an H.264 movie there may show black.
+6. **Fixed: the Retroid Pocket 5 could not hold 60 fps in Odyssey's opening cutscene** (38 fps, GPU 12.9 ms a frame, on 2026-11-08). The regression pass of
+   `main` at `54711866` (2026-11-09) measured 59.4–59.5 fps there, and `main` at `54e21235` runs it at 59.3–59.4 (frame p95 18.7–18.9 ms, GPU 12.3–12.4 ms),
+   the same with `DM_VK_WB_READBACK=0`, so problem 13's fix plays no part. Most likely fixed by droidplay-core#28 (queued NVN commands grow by doubling),
+   which `54711866` holds; not measured on its own.
+7. **Not seen in a game: the Pad 3's H.264 decoder took no input** in `dm/android/tests/t_media` (`[RED] movie: the AVC decoder took no input for 2 s`), before
+   and after the fix in problem 1.
+   - **In a game it decodes (2026-11-10, no build):** Super Mario Odyssey's first hint video (`MovieData/PlayGuideMovieRStick.mp4`, H.264 High, 480×272) played in
+     the Look Around hint box on the Pad 3, with DroidPlay 0.7.0-1-g4743c9da and the SMO it held (`make_save` route). The log has `[movie] AVC: MediaCodec decoding,
+     profile 100` and 19 pictures of 195,840 bytes (NV12) before the route answers the hint, with no red line and no crash.
+   - `t_media` was not run again, so why it saw no input there is still unknown.
 8. **Fixed: Link's Awakening drew wrongly on all three devices.** Its movies and two of its HUD icons came out in ring-banded colours, and in play the 3D
    world was black behind the HUD, without ambient occlusion. Pass dumps (`dump_now`) of the overworld on the Odin 2 showed where:
    - **Fixed: the colours, a raw copy between two formats.** The frame's last target (`s4`, R11G11B10F) holds the right colours; the game then copies it
@@ -137,10 +230,15 @@ Numbered in the order they were found, so links to a number stay right:
    host mapped each module where `mmap` put it, and on Android what lay past main depended on what other mappings had filled the gap by then. The modules
    are now mapped back to back: [Modules back to back, as Horizon maps them](../../docs/reference/memory.md#modules-back-to-back-as-horizon-maps-them-android).
    On the Retroid Pocket 5 0 of 11 boots crashed after it, and 6 of 6 on the same build with `DM_MODULE_PACK=0` (the old placement), each at `main+0x214c889`.
-10. **Skyward Sword HD draws Skyloft's terrain and sky flat grey** on the Odin 2 and the Pad 3, with no red line. A pass dump on the Pad 3 shows the terrain
-    grey in the first pass that draws it, while Link and the bird statue, drawn next with the same ASTC 6×6 textures, have their colours. The terrain's draws
-    also sample 64×64 textures the game renders earlier in the frame, which come out black from the game's own constants; whether that is right also needs
-    a Mac dump to compare. The opening movie is right.
+10. **Fixed, cause not bisected: Skyward Sword HD drew Skyloft's terrain and sky flat grey** on the Odin 2 and the Pad 3, with no red line. A pass dump on the
+    Pad 3 showed the terrain grey in the first pass that draws it, while Link and the bird statue, drawn next with the same ASTC 6×6 textures, had their colours.
+    The terrain's draws also sample 64×64 textures the game renders earlier in the frame, which came out black. The opening movie was right.
+    - **Check (2026-11-10, no build):** Skyloft is in colour on both. Each ran the `skyloft` route with the SSHD it held. On the Odin 2 that was SSHD's code and
+      shaders from `cf42941d` (chain 4) and a host from the RP5 save-fix branch of that morning (#123, since merged): three runs, 56–60 fps. On the Pad 3 it was
+      DroidPlay 0.7.0-1-g4743c9da with SSHD's files from 2026-11-09 22:08 (chain 4): two runs, 60 fps, GPU 6.8 ms.
+    - Grey was last recorded on `main` at `ee18169a` (2026-11-08). The wide-subgroup rewrite (`DM_SPV_WIDE=0`) and layered targets (SSHD makes no layered pass) are not
+      what fixed it. Candidates, not tested: the replay's copy fixes of 2026-11-08, texture copies between formats converting (`97fce01c`) and depth-stencil copies a
+      blit cannot make drawn (`b86d5505`).
 11. **Fixed for Skyward Sword HD: it played at 30 fps** on the Odin 2 and the Pad 3 (the Mac runs Skyloft at 60): the game drops its present interval
     to 2 when frames come late. Its long frames showed the replay writing a 1920×1080 RGBA8 render target back to guest memory after its pass (`[vk]
     linear render target s19 1920x1080 (format 0x25) written back to guest memory`) and uploading it again (`texture uploads 0 first + 2 re-uploads,
@@ -153,7 +251,8 @@ Numbered in the order they were found, so links to a number stay right:
     likewise falls to 31 fps on the Pad 3: the game switched interval 175 times in one run there, against 4 on the Odin 2. On the Galaxy S25 Edge, the
     other Adreno 830 here, it plays at 38.1–44.6 fps over the Ancient Ruins window (frame p50 16.8–32.5 ms, GPU 13.0–13.7 ms).
 12. **Link's Awakening's overworld plays at 30 fps on the Retroid Pocket 5** (34.7–36.0 fps over the Ancient Ruins window, frame p50 33 ms, p95 34.5 ms, the
-    picture right). The game sets its present interval from the vsyncs its last frame took (`main+0xca44`–`0xcb24`, applied at `main+0x1144c18`), and frames
+    picture right; 32.3–32.4 on `main` at `54e21235`, and 32.3–32.7 there with `DM_VK_WB_READBACK=0`: its two write-backs a frame, 34 KB, take under 0.1 ms
+    through problem 13's copy and 0.4 ms without it). The game sets its present interval from the vsyncs its last frame took (`main+0xca44`–`0xcb24`, applied at `main+0x1144c18`), and frames
     there take two even at interval 1, so it switches between 1 and 2 about 350 times a run. Per frame in that window: the game's own CPU 5.3 ms, the
     replay's recording of about 616 draws 9.7 ms on the game's thread (`@nvn_ms`), a 9.0 ms `nvnSyncWait` on the GPU (`@sync_ms`), GPU 12.9 ms at 490
     MHz, the floor this device keeps (`min_pwrlevel` 3; 670 MHz at most), 44% busy. The wait and the work after it are in series, so a frame's work takes about
@@ -165,6 +264,10 @@ Numbered in the order they were found, so links to a number stay right:
     transfer-destination buffer (type 2, `0xb`) at each submission's end and the completion thread reads them from there, 1.7 ms a frame: Eterna City at 54.6–60.0 fps
     (60.0 in three runs of four; frame p50 16.6–18.2 ms, GPU 13.5–15.0 ms) in runs alternating with `main`'s, the picture the same. [Storage buffer write-backs read from
     memory the CPU maps uncached](../../docs/reference/rendering.md#storage-buffer-write-backs-read-from-memory-the-cpu-maps-uncached).
+    - **On `main`** at `54e21235` (2026-11-10): Eterna City at 59.0–59.6 fps, 21.0 with `DM_VK_WB_READBACK=0`. At that hour the scene had 1,100 draws and seven write-backs
+      of 637 KB a frame (1,068 and six of 494 KB in the runs above), frame p95 26.6–26.9 ms; landing them took 2.3–3.0 ms a frame through the copy, 34 ms from the arena.
+    - **Other games.** The timing check turns the copy on for every game on this driver. Odyssey's opening, Link's Awakening's Ancient Ruins and Animal Crossing's
+      airport and island run at the same rates with it off: they land 0–12 write-backs a frame, at most 34 KB in all.
 
 14. **Fixed: Breath of the Wild lost the GPU on the Pad 3** at its first frame in the field. Then `vkQueueSubmit` gave -4 (`VK_ERROR_DEVICE_LOST`), the loading screen stayed up for good, and the GPU time read 0.
     - **What hangs.** One draw a frame hangs the GPU: vertex `2decd3e894b3736a`, fragment `26ae1640f3448ba4`, a fullscreen triangle sampling one 640×360 RGBA8 texture into another, the vertical pass of a blur whose horizontal pass runs fine just before it. The driver recovers each hang about 250 ms in (the chunk's fence signals, its end timestamp never written) until one runs past 3 s. `VK_EXT_device_fault` gives no address and no vendor record.
@@ -191,6 +294,20 @@ Numbered in the order they were found, so links to a number stay right:
     - **Fix.** A render pass attaches each image once, on every GPU, and leaves its other slots unused (`DM_VK_DUP_SLOTS`, [rendering.md](../../docs/reference/rendering.md#one-image-in-two-colour-slots-of-a-pass-is-drawn-wrong-on-the-adreno-830-android)). About 18 passes a frame in the Shrine.
     - **Check** (S25 Edge, main 54e21235 with the fix and BotW's defaults, a warm-up and 2 runs each way): the Shrine is drawn as on the Odin 2, with no write lost. 29.9 fps, GPU 20.5 ms, against 21.4 ms without the fix. With `DM_VK_DUP_SLOTS=0` it is dark as before. On the Pad 3 only a local test of the same idea has run so far, and it drew the room right.
     - **Not on the Adreno 840.** A Galaxy Z Fold 8 (Qualcomm's driver 0x8034a013, folded) draws the Shrine right either way: 23.7–23.9 fps, frame p95 47.8–48.1 ms, GPU 29.6 ms with the fix, against 23.1–23.3 fps, p95 48.2–48.3 ms, GPU 30.3 ms without it, no write lost.
+16. **Smash's battles on the Retroid Pocket 5 stay just under 60 fps on the heavier stages** (57.0–58.8 fps on `main` at `3b07c5cf`, 2026-11-10; 13.4–19.3 in the
+    first baselines, when its pipelines were built during play: problem 5). Pipelines no longer hold it: from an empty pipeline cache a battle ran at 59.4 fps while
+    560 pipelines were built in the background (about 52 ms each on this driver, 11,656 draws left out meanwhile), and warm runs build almost none. Nor does the GPU,
+    at 5–10 ms a frame. The replay's CPU time does, because it runs in series with the game's own frame: the game's thread waits in `SyncWait` for the frame the
+    replay is still turning into Vulkan, so a frame takes about the replay's wall time plus 5.5 ms. The frames over 20 ms are those with 500–600 draws (330–390 in the
+    60 fps ones), where the replay took 13–18 ms of CPU.
+    - **The replay's cost.** About 27 µs a draw on the phone's Cortex-A77, on the three 2.42 GHz cores and never the 2.84 GHz one (`DM_VK_PLACE_LOG=1`); the power
+      HAL has no performance hint sessions, so nothing raises its clock (`[hint] no performance hint session`). In a profile half of the replay thread was `memcmp`
+      and `memcpy` and about an eighth the driver itself. Most of the copying was read-only storage buffers copied into every chunk and compared at every draw,
+      2.1–2.2 MB a frame of the same bytes: kept on the GPU, the replay takes 22 µs a draw instead of 29 (droidplay-core#162). The completion thread took 1.1–4.0 ms
+      a frame landing 1.1–1.8 MB of storage-buffer write-backs a byte at a time, before the chunk's NVN fence; a word at a time it is about twice as fast
+      (droidplay-core#161).
+    - **Rare long frames** of 90–120 ms remain in warm battles: a few pipelines the background builder leaves to the replay thread (a target drawn for the first
+      time), about 48 ms each, and an 84 ms submission with none, not explained yet.
 
 ## Reading the numbers
 
