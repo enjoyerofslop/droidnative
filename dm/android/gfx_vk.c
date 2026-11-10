@@ -26,6 +26,7 @@
 #include "nvn_fmt_mtl.h"
 #include "gfx_vk.h"
 #include "spv_readonly.h"
+#include "spv_alpha.h"
 #include "spv_limits.h"
 #include "spv_pool.h"
 #include "spv_wide.h"

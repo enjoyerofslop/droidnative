@@ -127,6 +127,7 @@ typedef struct {
     struct { uint32_t miss; struct lmod *m; } var[4]; int nvar;   // fragment shaders: variants with unwritten inputs made constants (ps_variant)
     int b0;   // a module of its set (.spv, .z.spv, .tf.spv; ps_variant only makes inputs private) reads binding 0, the support buffer (spv_b0_used): stage_set writes it only then
     int wlayer;   // a vertex, tessellation or geometry shader that writes the layer (spv_layer_out): its draws get every layer of their targets (rp_prepare)
+    struct { uint32_t miss; struct lmod *m; } avar[4]; int navar;   // alpha-test variants (ps_alpha_mod, spv_alpha.h) by the inputs variant; a NULL module: the transform does not apply
     ds_list *dsf;   // its descriptor sets kept by each chunk, [2 chunk + tf] (dsl, dsl_tf): made at its first set (ds_get), never freed (as the shader)
     uint32_t ndesc;   // descriptors in dsl, an array's counted up to 1024 (what stage_set writes of it): DM_VK_SET_STATS=1 checks each stage_set writes them all
     uint8_t dsbig;   // bit tf: one set of its layout (dsl, dsl_tf) does not fit an empty pool (sh_get ds_fits, else ds_alloc_n, RED 93): ds_get gives none for it, without making another pool
@@ -704,7 +705,7 @@ static struct {
     int tex_base, samp_base; uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][6]; int has_vp; float dr[2]; int depth_clamp; float blend_color[4]; p_prim_restart restart;
     p_tf_bind tf[4]; uint64_t tf_off[4]; int tf_on, rast_discard;
-    uint8_t push[2][DMSH_PUSH_SIZE]; float alpha_ref;   // NVN2 push constants, graphics and compute blocks (read as c[DMSH_PUSH_BANK]); the alpha test's reference (no alpha test here yet)
+    uint8_t push[2][DMSH_PUSH_SIZE]; float alpha_ref;   // NVN2 push constants, graphics and compute blocks (read as c[DMSH_PUSH_BANK]); the alpha test's reference (spv_alpha.h)
 } D;
 static int g_d_init;
 // The pipeline key's state (vk_draw_) as the key takes it from D: the fields a blend or depth / stencil object sets, over zeroed bits (the bits they leave over are whatever
@@ -772,7 +773,7 @@ static int draw_state_op(uint32_t op, const void *a) {
                 int ch = 0;                                         // fields but alpha-to-coverage are not in the key)
                 switch (b->kind) {
                     case 0: { blend_st n, o; memcpy(&bs, b->bytes, sizeof bs); memset(&n, 0, sizeof n); memset(&o, 0, sizeof o); blend_k(&n, &bs); blend_k(&o, &D.blend[bs.target & 7]); ch = memcmp(&n, &o, sizeof n) != 0; break; }
-                    case 1: { color_st c; memcpy(&c, b->bytes, sizeof c); ch = c.blend_en != D.color.blend_en || c.logic_op != D.color.logic_op; break; }
+                    case 1: { color_st c; memcpy(&c, b->bytes, sizeof c); ch = c.blend_en != D.color.blend_en || c.logic_op != D.color.logic_op || c.alpha_func != D.color.alpha_func; break; }
                     case 2: ch = memcmp(&D.chmask, b->bytes, sizeof D.chmask) != 0; break;
                     case 3: { ms_st m; memcpy(&m, b->bytes, sizeof m); ch = m.a2c != D.ms.a2c; break; }
                     case 4: { poly_st p; memcpy(&p, b->bytes, sizeof p); ch = p.cull != D.poly.cull || p.front != D.poly.front || p.mode != D.poly.mode || p.offset_en != D.poly.offset_en; break; }
@@ -817,7 +818,7 @@ static int draw_state_op(uint32_t op, const void *a) {
             if (b->offset < DMSH_PUSH_SIZE && b->size <= DMSH_PUSH_SIZE - b->offset) memcpy(D.push[b->compute ? 1 : 0] + b->offset, b->data, b->size);
             else RED_ONCE(132, "push constants at %u, %u bytes, past the %u-byte block: dropped", b->offset, b->size, (unsigned)DMSH_PUSH_SIZE);
             return 1; }
-        case OP_ALPHA_REF: D.alpha_ref = ((const p_alpha_ref *)a)->ref; return 1;   // kept for an alpha test the replay does not do yet (the key's alpha_func is dropped too)
+        case OP_ALPHA_REF: D.alpha_ref = ((const p_alpha_ref *)a)->ref; return 1;   // the alpha test's reference: a push constant set at each draw (spv_alpha.h), not part of the key
         default: return 0;
     }
 }
@@ -1449,8 +1450,41 @@ static const struct { const char *n; size_t o, s; } PK_F[] = {{"z", offsetof(pip
     {"topo", offsetof(pipe_key, topo), 1}, {"restart", offsetof(pipe_key, restart), 1}, {"depth_clamp", offsetof(pipe_key, depth_clamp), 1}, {"ll", offsetof(pipe_key, ll), 1},
     {"color", offsetof(pipe_key, color), sizeof(color_st)}, {"chmask", offsetof(pipe_key, chmask), sizeof(chmask_st)}, {"blend", offsetof(pipe_key, blend), sizeof(((pipe_key *)0)->blend)},
     {"ms", offsetof(pipe_key, ms), sizeof(ms_st)}, {"poly", offsetof(pipe_key, poly), sizeof(poly_st)}, {"ds", offsetof(pipe_key, ds), sizeof(ds_st)}};
-typedef struct { VkPipeline p; VkPipelineLayout pl; } pipe_t;
+typedef struct { VkPipeline p; VkPipelineLayout pl; int alpha; } pipe_t;   // alpha: the fragment module is spv_alpha.h's, and the draw sets its reference (a push constant)
 static nvn_hmap g_pipes = {.klen = sizeof(pipe_key)};
+static int is_int_fmt(VkFormat f);   // below: an integer colour format, which takes no alpha test (as in OpenGL)
+// Whether this draw runs NVN's alpha test: a fragment shader, a function other than ALWAYS, and no integer colour 0. A depth-only pass runs it too (shadow maps of
+// foliage rely on it, as on Metal): the test reads what the shader writes to colour 0 whether or not the pass keeps it
+static int alpha_test_on(const pipe_key *k) {
+    return k->sh[1] && !k->tf && k->color.alpha_func && k->color.alpha_func != NVN_ALPHA_FUNC_ALWAYS && !(k->ncolor && is_int_fmt(k->rk.color[0]));
+}
+// The fragment shader's module with the alpha test in it (spv_alpha.h): one per shader and inputs variant, its function set at each pipeline (VkSpecializationInfo,
+// SpecId 0) and the reference a push constant set at each alpha-tested draw, so one module serves every function and reference. A shader whose earlier stage
+// leaves inputs unwritten is transformed first (spv_drop_inputs), then the alpha test (lm_code). NULL: the transform does not apply (colour 0 is no vec4 of
+// float), the draw keeps the shader as it is, and that is remembered so no pipeline retries it
+static pthread_mutex_t g_alpha_mu = PTHREAD_MUTEX_INITIALIZER;   // one variant per shader and inputs variant, made here and in the prewarm thread (pipe_prep) outside the replay's lock
+static lmod *ps_alpha_mod_locked(vshader *s, uint32_t miss) {
+    for (int i = 0; i < s->navar; i++) if (s->avar[i].miss == miss) return s->avar[i].m;
+    char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
+    lmod *m = lm_new_a(p, miss, 1, NULL);   // the code goes through spv_alpha.h (lm_code), and its identifier is of the test in it
+    if (s->navar < 4) { s->avar[s->navar].miss = miss; s->avar[s->navar++].m = m; }
+    if (m) { static int nl; if (nl++ < 8) LOG("[vk] fragment shader %s: alpha-test variant (its function a specialization constant, the reference a push constant)", s->key); }
+    return m;
+}
+static lmod *ps_alpha_mod(vshader *s, uint32_t miss) {   // the cache and the module are one thread's at a time (pipeline creation, the prewarm thread)
+    pthread_mutex_lock(&g_alpha_mu);
+    lmod *m = ps_alpha_mod_locked(s, miss);
+    pthread_mutex_unlock(&g_alpha_mu);
+    return m;
+}
+// The fragment shader's module: the alpha-test variant (spv_alpha.h), and a variant when the earlier stage leaves inputs unwritten (spv_drop_inputs). *alpha is 1
+// when the alpha variant is the one returned; the caller sets the function's specialization then
+static lmod *pipe_ps_mod(const pipe_key *k, vshader *s, int *alpha) {
+    const vshader *pv = k->sh[2] ? k->sh[2] : k->sh[0]; uint32_t miss = pv ? s->io_in & ~pv->io_out : 0;
+    *alpha = 0;
+    if (alpha_test_on(k)) { lmod *m = ps_alpha_mod(s, miss); if (m) { *alpha = 1; return m; } }
+    return miss ? ps_variant(s, miss) : s->mod;
+}
 // ---- Pipelines made again at start ----
 // Creating a pipeline costs the Adreno driver about 2 ms (a shader compile; less when its pipeline cache has the binary): Super Mario Bros. Wonder made 122 in one
 // frame entering a level (222 ms) and a few every time a new effect showed up. Every pipeline made is appended to <DM_PIPELINE_CACHE>.keys (its shaders' keys, the
@@ -1573,16 +1607,23 @@ static void pb_dump(void) {   // crash.c, on the crashing thread, after its back
 static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t *onva, VkPrimitiveTopology *otp) {
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &g_empty_dsl); }
     VkDescriptorSetLayout sets[POOL_SET + 1] = {g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl}; uint32_t nset = 1;
-    VkPipelineShaderStageCreateInfo st[4]; lmod *lms[4]; uint32_t ns = 0;
+    VkPipelineShaderStageCreateInfo st[4]; lmod *lms[4]; uint32_t ns = 0; VkSpecializationInfo psi; memset(&psi, 0, sizeof psi);
+    VkSpecializationMapEntry pme[1]; uint32_t psv = 0; const vshader *pspec = NULL;
     for (int i = 0; i < 4; i++) { vshader *s = k->sh[i]; if (!s) continue;
         sets[s->set & 3] = k->tf ? s->dsl_tf : s->dsl; if ((uint32_t)(s->set & 3) + 1 > nset) nset = (uint32_t)(s->set & 3) + 1;
         lmod *mod = k->tf ? s->modtf : s->stage == SH_VS && k->z && s->modz ? s->modz : s->mod;
-        if (s->stage == SH_PS) { const vshader *pv = k->sh[2] ? k->sh[2] : k->sh[0]; uint32_t miss = pv ? s->io_in & ~pv->io_out : 0; if (miss) mod = ps_variant(s, miss); }   // see spv_drop_inputs
+        if (s->stage == SH_PS) { int alpha = 0; mod = pipe_ps_mod(k, s, &alpha);   // the alpha test (spv_alpha.h) and unwritten inputs (spv_drop_inputs)
+            if (alpha) {   // the variant's function, by SpecId (spv_alpha.h decorates it 0); the reference arrives in a push constant
+                pme[0] = (VkSpecializationMapEntry){0, 0, 4}; psv = k->color.alpha_func; psi = (VkSpecializationInfo){1, pme, 4, &psv}; pspec = s; } }
         if (!mod) return VK_ERROR_INITIALIZATION_FAILED;
-        lms[ns] = mod; st[ns++] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = s->vkstage, .pName = "main"};   // its module: lm_pipeline
+        lms[ns] = mod; st[ns] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = s->vkstage, .pName = "main"};
+        if (s->stage == SH_PS && pspec == s) st[ns].pSpecializationInfo = &psi;
+        ns++;
         if (s->pool) { sets[POOL_SET] = g_pool_dsl; nset = POOL_SET + 1; } }
-    VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nset, .pSetLayouts = sets};
+    VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};   // the alpha test's reference (spv_alpha.h); unused by shaders that do not declare it
+    VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nset, .pSetLayouts = sets, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &pp->pl) != VK_SUCCESS) return VK_ERROR_INITIALIZATION_FAILED;
+    pp->alpha = pspec != NULL;
     VkVertexInputBindingDescription vb[32]; VkVertexInputAttributeDescription va[16]; VkVertexInputBindingDivisorDescriptionEXT vd[32]; uint32_t nvd = 0; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
     for (int i = 0; i < 16; i++) {
         va_st a; memcpy(&a, &k->attr[i], 4);
@@ -1648,13 +1689,9 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     *ons = ns; *onva = nva; *otp = tp;
     return pr;
 }
-static lmod *pipe_ps_mod(const pipe_key *k, vshader *s) {   // the fragment shader's module: a variant when the earlier stage leaves inputs unwritten (spv_drop_inputs)
-    const vshader *pv = k->sh[2] ? k->sh[2] : k->sh[0]; uint32_t miss = pv ? s->io_in & ~pv->io_out : 0;
-    return miss ? ps_variant(s, miss) : s->mod;
-}
 static void pipe_prep(const pipe_key *k) {   // under the lock: what pipe_make would otherwise create in shared state
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &g_empty_dsl); }
-    for (int i = 0; i < 4; i++) if (k->sh[i] && k->sh[i]->stage == SH_PS && !k->tf) pipe_ps_mod(k, k->sh[i]);
+    for (int i = 0; i < 4; i++) if (k->sh[i] && k->sh[i]->stage == SH_PS && !k->tf) { int a; pipe_ps_mod(k, k->sh[i], &a); }
 }
 // ---------------- Pipelines met for the first time, built in the background ----------------
 // A pipeline met for the first time cost the driver's compile on the replay thread, which the game's frame waits for: 20 to 35 ms a graphics pipeline on an Adreno 830, and the
@@ -2718,7 +2755,9 @@ static void pipe_key_build(pipe_key *k, int prim) {
       for (int s = 0; s < 16; s++) if (!(streams >> s & 1)) k->stream[s] = (vs_st){0, 0};
       for (uint32_t i = 0; i < 8; i++) if (i >= k->ncolor || !(k->color.blend_en >> i & 1)) memset(&k->blend[i], 0, sizeof k->blend[i]);
       if (k->ncolor < 8) k->chmask.mask &= (1u << (4 * k->ncolor)) - 1;
-      k->color.alpha_func = 0;
+      // the alpha test's function stays in the key while a test runs (a fragment shader and a float colour 0): its pipeline's fragment module is the
+      // alpha-test variant, made by the function and the reference (ps_alpha_mod, VkSpecializationInfo)
+      if (!(k->sh[1] && !k->tf && k->color.alpha_func && k->color.alpha_func != NVN_ALPHA_FUNC_ALWAYS && !(k->ncolor && is_int_fmt(k->rk.color[0])))) k->color.alpha_func = 0;
       if (k->ncolor < 8) k->color.blend_en &= (1u << k->ncolor) - 1;   // enables of targets the pass does not have, and which of the three polygon offsets is on (the pipeline
       k->poly.offset_en = k->poly.offset_en != 0;                       // takes one depth-bias switch): 186,825 keys listed after a few sessions of Super Mario Bros. Wonder
       if (k->color.logic_op != NVN_LOGIC_OP_COPY && !g_vk_feat.logicOp) k->color.logic_op = NVN_LOGIC_OP_COPY;   // drawn as copy anyway (pipe_make)
@@ -2793,6 +2832,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     VkCommandBuffer c = C->cb;
     occl_begin();
     bf_pipeline(c, pp->p);   // binds the command buffer already holds are left out (bf_*)
+    if (pp->alpha) vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof D.alpha_ref, &D.alpha_ref);   // the alpha test's reference, data rather than a key (spv_alpha.h)
     for (int i = 0; i < 4; i++) if (k.sh[i]) vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, (uint32_t)(k.sh[i]->set & 3), 1, &sets[i], k.sh[i]->ndyn, dyn[i]);
     if (pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { g_drop[3]++; return 0; }
     // dynamic state: the viewport (see the file header for the origin), the scissor, stencil, blend constants, depth bias
