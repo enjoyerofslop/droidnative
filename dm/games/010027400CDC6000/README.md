@@ -2,7 +2,7 @@
 
 Update 1.0.3.1 (v196608) over the base game, SDK 8.2.0. Larian Studios' Divinity Engine (`FW3.5/Gold/Stable` in its asserts' paths), NVN, Wwise sound, RakNet 15.03.26. Modules `main`, `subsdk0` and `sdk`: `subsdk0` and `sdk` are one build (`3ae34e68…`), the SDK twice. The RomFS is 48 files, 10.74 GB: Larian's LSPK packages (`Data/*.pak`, version 13), the voice and localization packages beside them.
 
-Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The title, the main menu, a new game (Classic mode), character creation, the opening cinematic and the first area (the Merryweather's hold, Magister Siwan's first dialogue) in play, at the game's 30 fps. Not yet played further than that; see [Open](#open).
+Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The title, the main menu, a new game (Classic mode), character creation, the opening cinematic and the first area (the Merryweather's hold, Magister Siwan's first dialogue) in play, at the game's 30 fps, and on a OnePlus Pad 3 the cabin deck after it ([First area](#first-area)). Not yet played further than that; see [Open](#open).
 
 ## What it needs
 
@@ -74,4 +74,4 @@ Measured on a OnePlus Pad 3 (Adreno 830, Android 16; its 144 Hz panel runs Divin
 
 - On a cold pipeline cache, 25 draws of a new game's first minutes are left out while their pipelines build in the background (`[vk] draws not made: … pipeline 25`, `pipeline built in the background … draws left out meanwhile`); with the cache warm, `hold` leaves out none.
 - `[nvn] [RED] SetRenderEnableConditional: the host draws anyway for now`, from the title on.
-- Further into the game (Fort Joy, the first fights, saving and loading) is not played yet.
+- Further into the game (the top deck, the first fights, Fort Joy) is not played yet.

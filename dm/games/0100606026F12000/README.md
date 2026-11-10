@@ -71,6 +71,7 @@ General host changes first needed here; each applies to every game:
 - **Buffer texture views below the 16-byte alignment read through an aligned copy** (`tbuf_shadow`): [Buffer textures at offsets below 16 bytes](../../../docs/reference/rendering.md#buffer-textures-at-offsets-below-16-bytes).
 - **Android Vulkan replay:** buffer textures and images synced by their own range, and buffers a dispatch wrote read on the GPU by later shaders (`buf_fwd`): [Buffer textures synced by their range, and dispatch outputs read on the GPU](../../../docs/reference/rendering.md#buffer-textures-synced-by-their-range-and-dispatch-outputs-read-on-the-gpu). The real-time opening went from 15.9 to 40.6 fps on an Ayn Odin 2 and from 10.3 to 41.0 on a OnePlus Pad 3.
 - **Android Vulkan replay:** a draw whose geometry shader writes the layer gets every slice of its 3D target (`rp_prepare_`): [Layered draws get every layer of their targets](../../../docs/reference/rendering.md#layered-draws-get-every-layer-of-their-targets). Without it the colour-grading LUT kept 31 of its 32 slices unwritten, and the first field was white specks on black.
+- **Android Vulkan replay:** on a GPU with 16-lane subgroups (the Pixel 9 Pro XL's Mali-G715), each subgroup is a warp of its own, so the 309 compute shaders that reduce over the whole warp no longer count each subgroup's sum twice (`spv_narrow`): [Maxwell's 32-lane warps in a narrower subgroup](../../../docs/reference/rendering.md#maxwells-32-lane-warps-in-a-narrower-subgroup).
 
 ## Open
 
