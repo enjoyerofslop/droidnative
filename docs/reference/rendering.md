@@ -1880,7 +1880,9 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   equal to a byte scan's. Landing took 0.79 to 2.25 ms per MB on `main` (seven battles, median 1.44; 1.1 to 4.0 ms a frame) and 0.71 and 0.72 ms per MB with the fix
   (two battles; 1.0 and 1.1 ms a frame), on the stages the route picked at random. A test build that turned it on and off every 600 presents, in two battles (each
   on one stage): 0.39 to 0.70 ms per MB with it against 0.78 to 1.57 without (means 0.64 against 1.36 in one battle, 0.47 against 0.83 in the other). The frame rate
-  stayed within the stages' spread: 59.2 and 57.9 fps with the fix, 56.9 to 59.8 on `main`.
+  stayed within the stages' spread: 59.2 and 57.9 fps with the fix, 56.9 to 59.8 on `main`. On a Galaxy S25 Edge (Adreno 830, which reads the arena directly), the
+  same on-and-off build in one battle: 0.44 to 0.96 ms per MB with it against 1.17 to 1.82 without (means 0.84 and 1.60); battles at 59.8 and 60.0 fps with it and
+  59.9 and 59.9 without, no fault, the picture the same.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) ([Android baselines](../../dm/android/baselines.md)).
 
 ### Linear render targets written back to guest memory
