@@ -93,9 +93,9 @@ pipelines cached, made 398 graphics pipelines in 9.5 s and measured 57.1 fps, wi
   - **Time:** the cutscene's scene load decoded 265 textures (233 MB of texels) in 211 ms.
   - **Memory:** 2.2 GB resident in the cutscene, against 1.64 GB on the Odin 2 and the S25 Edge, where BC stays compressed. Re-encoding into formats of the same size that the
     GPU has (BC1, BC4 and BC5 to ETC2 and EAC; BC3 and BC7 to ASTC 4×4) would win that back. Open.
-  - **Open:** a GPU block encoder writing into a decoded BC texture (Breath of the Wild's BC4 encoder: [Compressed render targets through an uncompressed shadow on
-    Vulkan](../../docs/reference/rendering.md#compressed-render-targets-through-an-uncompressed-shadow-on-vulkan)) has no path. `bcrt_shadow` skips decoded images, so the
-    pass draws into the decoded image in the image's own format, with a red line. Its blocks would have to be decoded on the GPU.
+  - **Fixed:** a GPU block encoder writing into a decoded BC texture (Breath of the Wild's BC4 encoder) draws into a block shadow, and the shadow is decoded into the image
+    on the GPU after the pass ([A GPU block encoder's blocks decoded on the GPU into a texture the CPU decoded](../../docs/reference/rendering.md#a-gpu-block-encoders-blocks-decoded-on-the-gpu-into-a-texture-the-cpu-decoded-android)).
+    BC4 and BC5 only; an encoder of another BC format keeps the old path, with a red line.
 - **16-lane subgroups** in fragment and compute shaders (`minSubgroupSize` = `maxSubgroupSize` = 16, so `VK_EXT_subgroup_size_control` cannot ask for a 32-lane warp).
   - **Odyssey** uses no subgroup operations.
   - **Quad shuffles** (Maxwell's fwidth, `c = 0x1c03`) read the right lanes: `t_quad_shuffle` passes on the Pixel as translated and as `spv_wide` and `spv_limits` rewrite them (#134). Those are all the

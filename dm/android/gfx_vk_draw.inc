@@ -1064,8 +1064,11 @@ static void prof_write(void) {
 // (one depth plane of a 32×32×32 BC4 texture per pass). Vulkan has no such attachment: the BC image itself was attached, and every submission holding that pass stopped the
 // Adreno 740's command processor ("CP opcode error", three at every Breath of the Wild start, in the kernel log), and the kernel driver dropped each such submission whole,
 // with everything else recorded in it (uploads, other passes). The pass draws into a shadow of blocks × blocks in the view's
-// format instead; the level's (layer's or depth plane's) blocks are copied into it before the pass and back after it (vkCmdCopyImage: a block and a texel of one size)
+// format instead; the level's (layer's or depth plane's) blocks are copied into it before the pass and back after it (vkCmdCopyImage: a block and a texel of one size).
+// A BC texture the CPU decoded (no BC textures on the GPU) is shadowed too, for BC4 and BC5: the shadow keeps its blocks between passes, and after each pass they are
+// decoded into the image on the GPU (gfx_vk_bcdec.inc bcd_decode) instead of copied back
 typedef struct { VkImage base; uint32_t lv, ly; VkFormat f; } bcrt_key;
+static int bcd_takes(const vtex *b); static int bcd_decode(vtex *b, vtex *s, uint32_t lv, uint32_t ly);   // gfx_vk_bcdec.inc
 static nvn_hmap g_bcrt = {.klen = sizeof(bcrt_key)};
 static struct { vtex *base, *sh; uint32_t lv, ly; } g_bcrt_pend[8];   // the pass's shadowed attachments: copied back at rp_end
 static uint64_t g_bcrt_n;
@@ -1079,9 +1082,9 @@ static VkImageSubresourceLayers bcrt_sub(const vtex *b, uint32_t lv, uint32_t ly
 static VkOffset3D bcrt_off(const vtex *b, uint32_t ly) { return (VkOffset3D){0, 0, b->type == VK_IMAGE_TYPE_3D ? (int32_t)ly : 0}; }
 // the shadow of base's level lv, layer (or depth plane) ly, for an attachment view of NVN format nf: NULL when base is not BC or the view is not one block per texel
 static vtex *bcrt_shadow(vtex *b, uint32_t nf, uint32_t lv, uint32_t ly) {
-    int bb = bc_block_bytes(b->fmt); uint32_t m = 0; uint8_t sw[4];
-    if (!bb || b->conv || !nvn_fmt_to_mtl(nf, &m, sw) || !m) return NULL;
-    VkFormat f = vk_of_mtl(m); if (!f || fmt_bytes(f) != bb) return NULL;
+    int bb = bc_block_bytes(b->conv ? b->nvfmt : b->fmt); uint32_t m = 0; uint8_t sw[4];   // a decoded image's blocks: its NVN format's
+    if (!bb || !nvn_fmt_to_mtl(nf, &m, sw) || !m) return NULL;
+    VkFormat f = vk_of_mtl(m); if (!f || fmt_bytes(f) != bb || (b->conv && !bcd_takes(b))) return NULL;
     bcrt_key k; memset(&k, 0, sizeof k); k.base = b->img; k.lv = lv; k.ly = ly; k.f = f;
     vtex *s = nvn_hm_get(&g_bcrt, &k); if (s) return s;
     uint32_t lw = b->w >> lv ? b->w >> lv : 1, lh = b->h >> lv ? b->h >> lv : 1;
@@ -1158,7 +1161,10 @@ static void lin_writeback(int i) {   // attachment i of the pass that ends
 static void rp_end(void) {
     if (!P.active) return;
     occl_end(); prof_pass_end(); vkCmdEndRenderPass(C->cb); P.active = 0; if (dump_on()) dump_pass_end();
-    for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) { bcrt_copy(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly, 1); g_bcrt_pend[i].sh = NULL; }
+    for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) {
+        if (g_bcrt_pend[i].base->conv) bcd_decode(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly);   // decoded on the GPU into the image the game samples
+        else bcrt_copy(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly, 1);
+        g_bcrt_pend[i].sh = NULL; }
     if (linwb_on()) for (int i = 0; i < 8; i++) if (P.cv[i]) lin_writeback(i);
     lsnap_drop_all();   // what no write-back took
 }
@@ -1256,7 +1262,7 @@ static int rp_prepare_(int layered) {
         vtex *sh = cv && cv->set_format ? bcrt_shadow(v, cv->format, lv, ly) : NULL;   // a BC texture written through a one-block-per-texel view (bcrt_shadow)
         if (sh) {
             VkCommandBuffer c = cb(); if (!c) continue;
-            bcrt_copy(v, sh, lv, ly, 0);
+            if (!v->conv) bcrt_copy(v, sh, lv, ly, 0);   // a decoded image holds texels, not blocks: its shadow keeps the blocks its last pass drew
             VkImageView iv = view_get(sh, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, NULL); if (!iv) continue;
             k.color[i] = sh->fmt; k.samples = sh->samples; cvw[i] = iv; nv++; P.cv[i] = sh; P.clv[i] = 0; P.cly[i] = 0; rt_note(sh);
             g_bcrt_pend[i].base = v; g_bcrt_pend[i].sh = sh; g_bcrt_pend[i].lv = lv; g_bcrt_pend[i].ly = ly;
@@ -1323,8 +1329,8 @@ static void ds_chunk_done(chunk *c);
 static void draw_chunk_reset(chunk *c) {
     for (int i = 0; i < c->nar; i++) c->ar[i].used = 0; c->ar_cur = 0;
     if (ds_recycle()) ds_chunk_done(c);
-    else { for (int i = 0; i < c->ndp; i++) vkResetDescriptorPool(g_vk.dev, c->dp[i], 0); c->dp_cur = 0; c->ndsc = 0; }   // the reset freed the copies' sets too
-    c->dsc_used = 0;   // the depth-stencil copies' sets (gfx_vk_dscopy.inc), free again
+    else { for (int i = 0; i < c->ndp; i++) vkResetDescriptorPool(g_vk.dev, c->dp[i], 0); c->dp_cur = 0; c->ndsc = 0; c->nbcd = 0; }   // the reset freed the copies' and decodes' sets too
+    c->dsc_used = 0; c->bcd_used = 0;   // the depth-stencil copies' sets (gfx_vk_dscopy.inc) and the BC decodes' (gfx_vk_bcdec.inc), free again
     for (int i = 0; i < c->nbv; i++) vkDestroyBufferView(g_vk.dev, c->bv[i], NULL); c->nbv = 0;
 }
 

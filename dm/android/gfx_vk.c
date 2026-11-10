@@ -240,6 +240,7 @@ typedef struct chunk {
     stg_t rb;   // its arena write-backs' GPU copies, read by the completion thread (gfx_vk_readback.inc): kept and grown, used the bytes copied in its last recording
     VkDescriptorPool *dp; int ndp, cdp, dp_cur; VkBufferView *bv; int nbv, cbv;
     VkDescriptorSet *dsc; int ndsc, cdsc, dsc_used;   // the depth-stencil copies' sets (gfx_vk_dscopy.inc dsc_set): made from its pools, handed out again once it completes
+    VkDescriptorSet *bcd; int nbcd, cbcd, bcd_used;   // the GPU BC decodes' sets (gfx_vk_bcdec.inc bcd_set), the same way
     uint64_t rq_ticket;   // its submission's ticket with the recorder on (gfx_vk_rec.inc rec_submit), 0 when submitted by the replay
     ds_list **dl; int ndl, cdl; ds_list **dt; int ndt, cdt; int nds;   // recycled descriptor sets (gfx_vk_draw.inc ds_get): the lists holding sets, those handed out from in this recording, the sets held
     struct { const char *a, *b; uint32_t n, m; char kind; } cr[CR_MAX]; int ncr;   // what it recorded, the last CR_MAX of ncr (crumb): named when the GPU hangs or is lost in it (gpu_slow)
@@ -1677,6 +1678,7 @@ static void clear_tex(const p_clear_tex *ct) {
 static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip);   // below (the pass dump's PNGs)
 #include "gfx_vk_draw.inc"
 #include "gfx_vk_dscopy.inc"
+#include "gfx_vk_bcdec.inc"   // a GPU block encoder's blocks decoded into a BC texture the CPU decoded (bcd_decode)
 #include "gfx_vk_readback.inc"   // arena write-backs read through a cached copy where the arena reads slowly (DM_VK_WB_READBACK)
 #include "gfx_vk_shadow.inc"   // DM_VK_SKIP_SHADOWS: a game's shadow map passes left out (vk_shadow_rt)
 
