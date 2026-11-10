@@ -149,9 +149,9 @@ static void gm_device_made(void) {   // the device has the extensions: their ent
 // ---- Placing a pool: when the game first takes a buffer address in it (mtl_pool_addressed), as the Mac lists only such pools ----
 // Placing every pool at Initialize committed 4.9 GB in Ocarina of Time, and the low-memory killer ended it at Kokiri Forest. The pools the game took a buffer address in are 1.8 GB;
 // the others (3.4 GB, one of them 2.4 GB) no raw pointer can reach: a pointer the game stores is a buffer's address. A pool is placed at its first buffer address, before the
-// game has the address. That is after Initialize, so the swap is made with the GPU idle and the replay held (g_bk: no copy from the pool and no write-back into it meanwhile), and
-// inside nvn_dirty_open / nvn_dirty_close: the dirty tracker's protected pages of the pool are opened and hashed, and protected again on the placed map afterwards (a page whose
-// bytes changed counts as written). Another guest thread writing the pool during the swap (between the copy and the placed map) would lose its write; a pool's first buffer
+// game has the address. That is after Initialize, so the swap is made with the replay held (g_bk: no copy from the pool meanwhile), the GPU waited for when a write still to land
+// overlaps the pool (gm_pending), and inside nvn_dirty_open / nvn_dirty_close: the dirty tracker's protected pages of the pool are opened and hashed, and protected again
+// on the placed map afterwards (a page whose bytes changed counts as written). Another guest thread writing the pool during the swap (between the copy and the placed map) would lose its write; a pool's first buffer
 // is normally made by the thread that made the pool, before anything else uses it. Nothing is logged inside the window: a thread holding the log's lock may be waiting for
 // the tracker (Banana Native: Pokemon Pokopia stopped there). A pool made again at an address that had a buffer address is placed at its Initialize (the game's address
 // cache, hle_nvn.c pool_mark_addressed, does not ask again for the same storage)
@@ -367,7 +367,7 @@ static void gm_unplace(const void *mem) {
 // are placed, and each new one's vkAllocateMemory was 8.6% of the replay thread on the Fold
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; uint64_t gen, seq; } gm_tab;   // seq: kept until that chunk completed
 static void gm_selftest(void);   // DM_VK_RAW_GMEM_TEST (gfx_vk_gmem_check.inc)
-static gm_tab g_gt, g_gt_free[8]; static int g_ngt_free; static uint64_t g_gm_tab_new;
+static gm_tab g_gt, g_gt_free[8]; static int g_ngt_free; static uint64_t g_gm_tab_new; static uint64_t g_gm_rd_seq;   // g_gm_rd_seq: gfx_vk_gmem_inplace.inc
 static int gm_tab_new(gm_tab *t) {   // a new table buffer, host-visible and mapped
     VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GM_TAB_BYTES, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
     if (vkCreateBuffer(g_vk.dev, &bc, NULL, &t->b) != VK_SUCCESS) return 0;
@@ -404,7 +404,7 @@ static int gm_table(void) {
 // A raw-memory binding of shader s (cb_offset 0 the table, DMSH_GMEM_LOG_CB_OFFSET the write log): the buffer, offset and range to bind
 static int gm_bind(int cb_off, VkBuffer *b, VkDeviceSize *off, VkDeviceSize *range) {
     if (!gm_table()) return 0;
-    if (cb_off != DMSH_GMEM_LOG_CB_OFFSET) { *b = g_gt.b; *off = 0; *range = GM_TAB_BYTES; g_gm_draws++; return 1; }
+    if (cb_off != DMSH_GMEM_LOG_CB_OFFSET) { *b = g_gt.b; *off = 0; *range = GM_TAB_BYTES; g_gm_draws++; g_gm_rd_seq = C->seq; return 1; }
     uint8_t *d = ar_alloc(GM_LOG_BYTES, b, off); if (!d) return 0;
     memset(d, 0, GM_LOG_BYTES); *range = GM_LOG_BYTES;
     if (C->ngml == C->cgml) { C->cgml = C->cgml ? 2 * C->cgml : 16; C->gml = realloc(C->gml, (size_t)C->cgml * sizeof *C->gml); if (!C->gml) die("raw global memory: the write log list"); }

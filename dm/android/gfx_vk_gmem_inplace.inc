@@ -10,8 +10,8 @@
 //   and a write by the replay to such a page waits for that chunk first (gm_ip_write: the chunk being recorded is submitted and waited for, one in flight waited for).
 //   Write-backs, linear render targets' and large copies land in guest memory when their chunk completes, after everything recorded before them has run; a draw recorded
 //   after them lands them first when it reads their range (draw_view), and a dispatch's pending write is bound on the GPU instead (sb_fwd), as before.
-// - Not in place: a buffer in no placed piece (raw global memory off, a pool the game never took a buffer address in), one that crosses two pieces, one at an offset that
-//   is not a multiple of minStorageBufferOffsetAlignment, and one the shader writes (still copied and written back when its chunk completes).
+// - Not in place: a buffer in no placed piece (raw global memory off, a pool the game never took a buffer address in), one that crosses two pieces, and one at an offset
+//   that is not a multiple of minStorageBufferOffsetAlignment. One the shader writes is in place too (gm_inplace_w, below).
 // DM_VK_INPLACE=0 (env.txt): copied as before
 static int ip_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_INPLACE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_INPLACE=0: read-only storage buffers in placed pools are copied as before"); } return v; }
 static uint64_t g_ip_binds, g_ip_bytes, g_ip_span, g_ip_unal, g_ip_wcur, g_ip_wfly, g_ip_wfree, g_ip_wnone;
@@ -67,12 +67,18 @@ static void gm_ip_done(const chunk *c, int i) {
     for (int k = 0; k < i; k++) if (c->wb[k].inpl && c->wb[k].dst == w->dst && c->wb[k].row_bytes >= w->row_bytes) { atomic_fetch_add(&g_ip_prep_dup, 1); return; }
     dm_guest_write_prepare(w->dst, w->row_bytes); atomic_fetch_add(&g_ip_prep, 1);
 }
+// DM_VK_RAW_GMEM_WSYNC=1 (env.txt; a diagnostic): a raw load may read any placed page, at the GPU's time, so the replay's write to a placed page waits for every chunk still to
+// run that bound the raw pool table, not only for those that read its pages in place (the timing hazard the reference entry lists as open)
+static int gm_wsync(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_WSYNC"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_RAW_GMEM_WSYNC=1: the replay's writes to placed pages wait for chunks that bound the raw pool table"); } return v; }
+static uint64_t g_gm_wsyncs;   // writes that waited for a chunk that bound the table (g_gm_rd_seq: its last, gm_bind)
 // The replay is about to write guest memory [lo, hi) on the CPU (mem_view): a chunk still to run that reads those pages in place runs first
 static void gm_ip_write(uintptr_t lo, uintptr_t hi) {
-    if (!g_ip_any || hi <= lo) return;
+    int ws = gm_wsync() && g_gm_rd_seq;
+    if ((!g_ip_any && !ws) || hi <= lo) return;
     uint64_t need = 0;
     pthread_mutex_lock(&g_gm_mu);
     int a = 0, z = g_ngm; while (a < z) { int m = (a + z) / 2; if (g_gm[m].hi <= lo) a = m + 1; else z = m; }   // the first piece ending past lo
+    if (ws && a < g_ngm && g_gm[a].lo < hi && g_gm_rd_seq > need) { need = g_gm_rd_seq; g_gm_wsyncs++; }
     for (int i = a; i < g_ngm && g_gm[i].lo < hi; i++) {
         const gm_seg *s = &g_gm[i]; if (!s->rd) continue;
         uintptr_t x = lo > s->lo ? lo : s->lo, y = hi < s->hi ? hi : s->hi;
@@ -86,11 +92,11 @@ static void gm_ip_write(uintptr_t lo, uintptr_t hi) {
     else { g_ip_wfly++; seq_wait(need); }
 }
 static void gm_ip_stat(void) {
-    if (!g_ip_binds && !g_ip_wbinds && !g_ip_span && !g_ip_unal) return;
+    if (!g_ip_binds && !g_ip_wbinds && !g_ip_span && !g_ip_unal && !g_gm_wsyncs) return;
     LOG("[vk] storage buffers bound in their placed pools: %llu read-only bindings (%llu MB read in place), %llu written ones (%llu MB), not in place %llu crossing two pieces, %llu at an offset not a multiple of %llu; "
         "the replay's CPU writes over pages read in place: %llu waited for the chunk being recorded, %llu for one in flight, %llu after it had run, %llu over none; written ranges prepared %llu, "
-        "again in their chunk (skipped) %llu (cumulative; gfx_vk_gmem_inplace.inc)",
+        "again in their chunk (skipped) %llu; writes over placed pages after a table binding (DM_VK_RAW_GMEM_WSYNC) %llu (cumulative; gfx_vk_gmem_inplace.inc)",
         (unsigned long long)g_ip_binds, (unsigned long long)(g_ip_bytes >> 20), (unsigned long long)g_ip_wbinds, (unsigned long long)(g_ip_wbytes >> 20), (unsigned long long)g_ip_span, (unsigned long long)g_ip_unal,
         (unsigned long long)g_vk.props.limits.minStorageBufferOffsetAlignment, (unsigned long long)g_ip_wcur, (unsigned long long)g_ip_wfly, (unsigned long long)g_ip_wfree, (unsigned long long)g_ip_wnone,
-        (unsigned long long)atomic_load(&g_ip_prep), (unsigned long long)atomic_load(&g_ip_prep_dup));
+        (unsigned long long)atomic_load(&g_ip_prep), (unsigned long long)atomic_load(&g_ip_prep_dup), (unsigned long long)g_gm_wsyncs);
 }
