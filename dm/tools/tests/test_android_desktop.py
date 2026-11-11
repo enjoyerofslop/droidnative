@@ -284,10 +284,10 @@ class Explain(unittest.TestCase):   # the messages as the script, nx_extract and
         self.assertEqual(ex.explain(cable).title, 'Your phone stopped answering')
 
     def test_a_connection_that_keeps_dropping(self):
-        wifi = ('adb -s 10.0.0.7:5555 push x y: adb lost the phone: error: closed\nadb lost the phone 7 times in this install, so the connection is too poor to finish '
+        wifi = ('adb -s 10.0.0.7:5555 push x y: adb lost the phone: error: closed\nadb lost the phone 6 times in a row with nothing copied in between, so the connection is too poor to finish '
                 'over: move the phone closer to the router (5 GHz), or use a USB cable, then install again')
         h = ex.explain(wifi, phone='OnePlus Pad 3'); self.assertEqual(h.title, 'The connection to OnePlus Pad 3 keeps dropping'); self.assertIn('closer to the router', h.body)
-        h = ex.explain('adb lost the phone 7 times in this install, so the connection is too poor to finish over: try another cable or USB port, then install again')
+        h = ex.explain('adb lost the phone 6 times in a row with nothing copied in between, so the connection is too poor to finish over: try another cable or USB port, then install again')
         self.assertIn('another cable or USB port', h.body)
 
     def test_a_wifi_phone_that_forgot_this_pc_pairs_again(self):

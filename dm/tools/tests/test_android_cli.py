@@ -470,10 +470,10 @@ class AdbErrors(unittest.TestCase):
         self.assertEqual(self.adb(popen(1, 'x\n'), 'shell', 'false', check=False), 'x\n')   # a command that failed, with check=False: its output
 
     def test_adb_losing_the_phone_is_told_apart_whatever_check(self):   # a phone that dropped off Wi-Fi, or a cable pulled: survives_drops waits for it
-        for rc, err in ((1, "adb: device 'S' not found\n"), (1, 'error: device offline\n'), (1, 'error: closed\n'), (255, ''),
+        for rc, err in ((1, "adb: device 'S' not found\n"), (1, 'error: device offline\n'), (1, 'error: closed\n'), (255, ''), (1, 'adb: error: failed to read copy response: EOF\n'),
                         (1, 'adb: error: failed to read copy response\n'), (1, 'protocol fault (couldn\'t read status): Connection reset by peer\n')):
             with self.subTest(err=err), self.assertRaises(ba.PhoneLost) as e: self.adb(popen(rc, '', err), 'shell', 'stat x', check=False)
-            self.assertTrue(e.exception.why)
+            self.assertTrue(e.exception.why); self.assertNotIn('lost the phone', e.exception.why)   # what adb said, or the exit status: not the same words twice
 
     def test_a_phone_that_stops_answering_is_lost_after_its_wait(self):   # a Wi-Fi phone gone silent held the build at one percentage until TCP gave up
         P = popen(hang=True)
@@ -513,7 +513,8 @@ class Reconnect(Base):   # a phone adb lost on the way: waited for by its ID, co
         def sleep(_):   # each wait between looks: what happens meanwhile, in turn
             if self.ticks: self.ticks.pop(0)()
         for cm in (mock.patch.object(ba, 'run_adb', run_adb), mock.patch.object(ba.time, 'sleep', sleep), mock.patch.dict(ba._now, clear=True), mock.patch.dict(ba._hint, clear=True),
-                   mock.patch.object(ba, '_drops', 0), mock.patch.object(ba, 'RECONNECT_WAIT', 30.0)):
+                   mock.patch.object(ba, '_drops', 0), mock.patch.object(ba, '_streak', 0), mock.patch.object(ba, '_progress', 0), mock.patch.object(ba, '_streak_at', -1),
+                   mock.patch.object(ba, 'RECONNECT_WAIT', 30.0)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
     def took(self, serial):   # the run took the phone on serial: its ID read then, as phone() does
@@ -585,7 +586,17 @@ class Reconnect(Base):   # a phone adb lost on the way: waited for by its ID, co
         @ba.survives_drops
         def step(serial): raise ba.PhoneLost('adb -s 192.168.1.20:37123 push x: adb lost the phone: error: closed', 'error: closed')
         with mock.patch.object(ba, 'reacquire', lambda serial, why: serial):
-            with self.assertRaisesRegex(ba.BuildError, r'lost the phone 7 times in this install.*closer to the router'): step('192.168.1.20:37123')
+            with self.assertRaisesRegex(ba.BuildError, r'lost the phone 6 times in a row with nothing copied in between.*closer to the router'): step('192.168.1.20:37123')
+
+    def test_drops_with_copying_between_them_never_stop_the_install(self):   # the Pad 3's run: a drop after every few pieces, each time a little further
+        n = []
+        @ba.survives_drops
+        def step(serial):
+            n.append(1); ba.moved()   # a piece reached the phone
+            if len(n) < 20: raise ba.PhoneLost('adb -s 192.168.1.20:37123 push x: adb lost the phone: failed to read copy response: EOF', 'failed to read copy response: EOF')
+            return 'copied'
+        with mock.patch.object(ba, 'reacquire', lambda serial, why: serial): self.assertEqual(step('192.168.1.20:37123'), 'copied')
+        self.assertEqual(ba._drops, 19)
 
     def test_a_copy_that_stops_moving_is_stopped(self):   # STALL_SECS without a byte more: the running adb is stopped and its call raises PhoneLost
         clock = [1000.0]; stopped = []
@@ -751,7 +762,7 @@ class Phone(Base):
             raise AssertionError(c)
         big = self.tmp / 'RomFS.img'; big.write_bytes(bytes(range(256)) * 9000)
         back = []
-        with mock.patch.object(ba, 'adb', adb), mock.patch.object(ba, 'CHUNK', 1 << 20), mock.patch.object(ba, '_drops', 0), \
+        with mock.patch.object(ba, 'adb', adb), mock.patch.object(ba, 'CHUNK', 1 << 20), mock.patch.object(ba, '_drops', 0), mock.patch.object(ba, '_streak', 0), \
                 mock.patch.object(ba, 'reacquire', lambda serial, why: back.append(why) or serial):
             ba.push_resumable('S', big, '/r/RomFS.img', self.tmp / 'logs' / 'p.log')
         self.assertEqual(files['/r/RomFS.img'], big.read_bytes()); self.assertEqual(back, ['error: closed'])
