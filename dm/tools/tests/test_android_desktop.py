@@ -127,6 +127,15 @@ class PhoneId(unittest.TestCase):   # one phone, one name: over USB, over Wi-Fi 
         self.assertIsNone(phone_id.mdns_serialno('adb-0123456789ABCDEF-q1w2e3._adb-tls-connect._tcp'))   # a placeholder is no one's
         self.assertIsNone(phone_id.mdns_serialno('192.168.1.20:37123'))
 
+    def test_phones_offering_a_connection_on_the_network(self):   # adb mdns services, as adb 35 and older adbs print it; pairing services are not connections
+        out = ('List of discovered mdns services\n'
+               'adb-R5CY51ZLGKH-AbCdEf\t_adb-tls-connect._tcp\t192.168.1.20:41011\n'
+               'adb-e7879cce-q1w2e3\t_adb-tls-connect._tcp.\t10.0.0.7:39999\n'
+               'adb-R5CY51ZLGKH-AbCdEf\t_adb-tls-pairing._tcp\t192.168.1.20:37000\n'
+               'adb-0123456789ABCDEF-zzzzzz\t_adb-tls-connect._tcp\t10.0.0.9:5555\n')
+        self.assertEqual(phone_id.mdns_services(out), [('R5CY51ZLGKH', '192.168.1.20:41011'), ('e7879cce', '10.0.0.7:39999')])
+        self.assertEqual(phone_id.mdns_services(''), [])
+
     def test_the_id_is_the_serial_number_or_the_android_id(self):
         self.assertEqual(phone_id.from_props('R5CY51ZLGKH\r\n9774d56d682e549c\r\n'), 'R5CY51ZLGKH')
         for placeholder in ('0123456789ABCDEF', 'unknown', ''):

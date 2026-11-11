@@ -80,6 +80,10 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 A rebuild only does what changed: the extraction, the rewritten code and the translated shaders are reused when their inputs are the same, and the RomFS image is not
 copied to the phone again when the phone already holds the same one.
 
+If the phone drops off during an install (it slept, Wi-Fi roamed, wireless debugging restarted on a new port, or the cable came out), the install waits up to
+three minutes for it to come back, finds it again by its serial number (over Wi-Fi it connects to it again by itself) and goes on: the RomFS copy carries on from
+what the phone already holds, and the other steps run again. Wake the phone, or plug it back in, while the Builds page says it is waiting.
+
 ### From source
 
 On Linux or a Mac, or on Windows without Setup, `uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the

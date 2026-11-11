@@ -448,14 +448,144 @@ class Journal(Base):
         self.assertEqual([e['done'] for e in evs if e['ev'] == 'progress' and e['name'] == 'one'][-1], 7)
 
 
+def popen(rc=0, out='', err='', hang=False):   # subprocess.Popen as run_adb uses it: one answer, or none until killed (hang)
+    class P:
+        cmds: list = []
+        def __init__(self, cmd, **k): P.cmds.append(cmd); self.returncode = None; self.killed = False
+        def communicate(self, timeout=None):
+            if hang and not self.killed: raise subprocess.TimeoutExpired('adb', timeout or 0)
+            self.returncode = -9 if self.killed else rc; return out, err
+        def kill(self): self.killed = True
+        def poll(self): return self.returncode
+    return P
+
+
 class AdbErrors(unittest.TestCase):
+    def adb(self, P, *a, **k):
+        with mock.patch.object(ba.subprocess, 'Popen', P): return ba.adb('S', *a, **k)
+
     def test_a_failure_names_its_exit_status_even_with_no_output(self):
-        r = subprocess.CompletedProcess([], 1, stdout='', stderr='')
-        with mock.patch.object(ba.subprocess, 'run', return_value=r):
-            with self.assertRaisesRegex(ba.BuildError, r'adb -s S shell true failed \(exit status 1\): no output'): ba.adb('S', 'shell', 'true')
-        r = subprocess.CompletedProcess([], 255, stdout='', stderr="adb: device 'S' not found\n")
-        with mock.patch.object(ba.subprocess, 'run', return_value=r):
-            with self.assertRaisesRegex(ba.BuildError, r"failed \(exit status 255\): adb: device 'S' not found$"): ba.adb('S', 'shell', 'true')
+        with self.assertRaisesRegex(ba.BuildError, r'adb -s S shell true failed \(exit status 1\): no output') as e: self.adb(popen(1), 'shell', 'true')
+        self.assertNotIsInstance(e.exception, ba.PhoneLost)
+        self.assertEqual(self.adb(popen(1, 'x\n'), 'shell', 'false', check=False), 'x\n')   # a command that failed, with check=False: its output
+
+    def test_adb_losing_the_phone_is_told_apart_whatever_check(self):   # a phone that dropped off Wi-Fi, or a cable pulled: survives_drops waits for it
+        for rc, err in ((1, "adb: device 'S' not found\n"), (1, 'error: device offline\n'), (1, 'error: closed\n'), (255, ''),
+                        (1, 'adb: error: failed to read copy response\n'), (1, 'protocol fault (couldn\'t read status): Connection reset by peer\n')):
+            with self.subTest(err=err), self.assertRaises(ba.PhoneLost) as e: self.adb(popen(rc, '', err), 'shell', 'stat x', check=False)
+            self.assertTrue(e.exception.why)
+
+    def test_a_phone_that_stops_answering_is_lost_after_its_wait(self):   # a Wi-Fi phone gone silent held the build at one percentage until TCP gave up
+        P = popen(hang=True)
+        with self.assertRaisesRegex(ba.PhoneLost, r'no answer from the phone in 5 s'): self.adb(P, 'shell', 'true', timeout=5)
+
+    def test_waits_follow_the_step(self):
+        f = Path(tempfile.mkdtemp()) / 'piece'; f.write_bytes(b'x' * (5 << 20)); self.addCleanup(shutil.rmtree, f.parent)
+        self.assertEqual(ba.adb_timeout(('push', str(f), '/sdcard/x')), 60 + 5 * 2)   # 5 MiB at 0.5 MiB/s
+        self.assertEqual(ba.adb_timeout(('push', '--sync', str(f.parent), '/sdcard/x/')), 70)
+        self.assertEqual(ba.adb_timeout(('shell', 'stat x')), ba.SHELL_SECS)
+
+    def test_calls_go_to_the_serial_the_phone_came_back_as(self):
+        P = popen(0, 'ok\n')
+        with mock.patch.dict(ba._now, {'S': '192.168.1.20:41011'}): self.adb(P, 'shell', 'true')
+        self.assertEqual(P.cmds[-1][:3], ['adb', '-s', '192.168.1.20:41011'])
+
+
+class Reconnect(Base):   # a phone adb lost on the way: waited for by its ID, connected to again where it can be, and the step taken again
+    S25 = 'R5CY51ZLGKH\n9774d56d682e549c\n'
+    MDNS = 'List of discovered mdns services\nadb-R5CY51ZLGKH-AbCdEf\t_adb-tls-connect._tcp\t192.168.1.20:41011\n'
+
+    def setUp(self):
+        super().setUp()
+        self.devices: dict[str, str] = {}; self.props: dict[str, str] = {}; self.mdns = ''; self.on_connect: dict[str, dict] = {}; self.stale: set[str] = set()
+        self.calls: list[list[str]] = []; self.ticks: list = []
+        def run_adb(args, log=None, check=True, timeout=None):
+            a = [str(x) for x in args]; self.calls.append(a)
+            if a == ['devices']: return 'List of devices attached\n' + ''.join(f'{s}\t{st}\n' for s, st in self.devices.items())
+            if a == ['mdns', 'services']: return self.mdns
+            if a[0] == 'connect': self.devices.update(self.on_connect.get(a[1], {})); self.stale.discard(a[1]); return ''
+            if a[0] == 'disconnect': self.devices.pop(a[1], None); return ''
+            if a[0] == '-s' and self.devices.get(a[1]) == 'device':
+                if a[2:] == ['shell', ba.phone_id.ID_CMD]: return self.props.get(a[1], '')
+                if a[2:] == ['shell', 'echo ok']: return '' if a[1] in self.stale else 'ok\n'
+                return 'done\n'
+            raise ba.PhoneLost(f"adb: device '{a[1]}' not found", 'not found')
+        def sleep(_):   # each wait between looks: what happens meanwhile, in turn
+            if self.ticks: self.ticks.pop(0)()
+        for cm in (mock.patch.object(ba, 'run_adb', run_adb), mock.patch.object(ba.time, 'sleep', sleep), mock.patch.dict(ba._now, clear=True),
+                   mock.patch.object(ba, '_drops', 0), mock.patch.object(ba, 'RECONNECT_WAIT', 30.0)):
+            cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def took(self, serial):   # the run took the phone on serial: its ID read then, as phone() does
+        self.devices[serial] = 'device'; self.props.setdefault(serial, self.S25); ba.phone_key(serial)
+
+    def test_a_new_port_is_found_by_the_phones_mdns_name(self):   # wireless debugging restarted: same phone, another port
+        self.took('192.168.1.20:37123'); del self.devices['192.168.1.20:37123']
+        self.mdns = self.MDNS; self.on_connect['192.168.1.20:41011'] = {'192.168.1.20:41011': 'device'}; self.props['192.168.1.20:41011'] = self.S25
+        self.assertEqual(ba.reacquire('192.168.1.20:37123', 'error: closed'), '192.168.1.20:41011')
+        self.assertEqual(ba.adb('192.168.1.20:37123', 'shell', 'true'), 'done\n')
+        self.assertEqual(self.calls[-1][:2], ['-s', '192.168.1.20:41011'])   # every later call goes there
+        self.assertTrue(any('back as 192.168.1.20:41011' in m for m in self.said), self.said)
+
+    def test_a_cable_plugged_back_in(self):
+        self.took('R5CY51ZLGKH'); del self.devices['R5CY51ZLGKH']
+        self.ticks = [lambda: None, lambda: self.devices.update(R5CY51ZLGKH='device')]
+        self.assertEqual(ba.reacquire('R5CY51ZLGKH', 'device offline'), 'R5CY51ZLGKH')
+        self.assertFalse(any(c[0] in ('connect', 'disconnect', 'mdns') for c in self.calls), self.calls)   # nothing of Wi-Fi's for a cable
+        self.assertTrue(any('plug it back in' in m for m in self.said), self.said)
+
+    def test_a_phone_unplugged_and_found_over_wifi(self):   # a USB phone's ID is its serial: it is still known by it on Wi-Fi
+        self.took('R5CY51ZLGKH'); del self.devices['R5CY51ZLGKH']
+        self.ticks = [lambda: self.devices.update({'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp': 'device'})]
+        self.props['adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp'] = self.S25
+        self.assertEqual(ba.reacquire('R5CY51ZLGKH', 'device offline'), 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp')
+
+    def test_a_connection_that_answers_nothing_is_made_again(self):   # adb still lists a Wi-Fi phone whose connection died silently
+        self.took('192.168.1.20:37123'); self.stale.add('192.168.1.20:37123')
+        self.on_connect['192.168.1.20:37123'] = {'192.168.1.20:37123': 'device'}
+        self.assertEqual(ba.reacquire('192.168.1.20:37123', 'the copy made no progress in 90 s'), '192.168.1.20:37123')
+        self.assertLess(self.calls.index(['disconnect', '192.168.1.20:37123']), self.calls.index(['connect', '192.168.1.20:37123']))
+
+    def test_another_phone_is_not_taken_and_the_wait_ends(self):
+        self.took('192.168.1.20:37123'); del self.devices['192.168.1.20:37123']
+        self.devices['10.0.0.7:5555'] = 'device'; self.props['10.0.0.7:5555'] = 'e7879cce\nf00dfeed12345678\n'
+        with mock.patch.object(ba, 'RECONNECT_WAIT', 0.0):
+            with self.assertRaisesRegex(ba.BuildError, r'did not come back within 0 s .*same network as this computer.*Wireless debugging.*goes on from what the phone holds'):
+                ba.reacquire('192.168.1.20:37123', 'error: closed')
+        self.assertEqual(ba._now, {})
+
+    def test_a_step_runs_again_once_the_phone_is_back(self):
+        runs = []
+        @ba.survives_drops
+        def step(serial):
+            runs.append(ba._now.get(serial, serial))
+            if len(runs) == 1: raise ba.PhoneLost('adb -s 192.168.1.20:37123 push x: adb lost the phone: error: closed', 'error: closed')
+            return 'copied'
+        self.took('192.168.1.20:37123'); del self.devices['192.168.1.20:37123']
+        self.mdns = self.MDNS; self.on_connect['192.168.1.20:41011'] = {'192.168.1.20:41011': 'device'}; self.props['192.168.1.20:41011'] = self.S25
+        self.assertEqual(step('192.168.1.20:37123'), 'copied')
+        self.assertEqual(runs, ['192.168.1.20:37123', '192.168.1.20:41011'])
+
+    def test_a_phone_lost_again_and_again_stops_the_install(self):
+        @ba.survives_drops
+        def step(serial): raise ba.PhoneLost('adb -s 192.168.1.20:37123 push x: adb lost the phone: error: closed', 'error: closed')
+        with mock.patch.object(ba, 'reacquire', lambda serial, why: serial):
+            with self.assertRaisesRegex(ba.BuildError, r'lost the phone 7 times in this install.*closer to the router'): step('192.168.1.20:37123')
+
+    def test_a_copy_that_stops_moving_is_stopped(self):   # STALL_SECS without a byte more: the running adb is stopped and its call raises PhoneLost
+        clock = [1000.0]; stopped = []
+        with mock.patch.object(ba.time, 'monotonic', lambda: clock[0]), mock.patch.object(ba, 'stop_stalled', stopped.append):
+            with ba.counting('sending', 100, 'B', lambda: 40):
+                poll = ba.bi.PROG.watch.call_args.args[0]
+                poll(); clock[0] += ba.STALL_SECS - 1; poll(); self.assertEqual(stopped, [])
+                clock[0] += 2; poll(); self.assertEqual(len(stopped), 1)
+            with ba.counting('unpacking', 100, 'files', lambda: 40):   # a count of files: one large file can take minutes
+                poll = ba.bi.PROG.watch.call_args.args[0]; poll(); clock[0] += 10 * ba.STALL_SECS; poll()
+        self.assertEqual(len(stopped), 1)
+        P = popen(hang=True)
+        p = P(['adb']); ba._running.add(p); self.addCleanup(ba._running.discard, p)
+        ba.stop_stalled('the copy made no progress in 90 s')
+        self.assertTrue(p.killed); self.assertEqual(getattr(p, 'stalled', ''), 'the copy made no progress in 90 s')
 
 
 class PickDevice(Base):   # the console's default phone: the only one ready, a phone on a cable and on Wi-Fi at once counting once
@@ -481,7 +611,7 @@ class Phone(Base):
     def setUp(self):
         super().setUp()
         self.cmds = []; self.remote: dict[str, Any] = {}   # remote path → exists ('free': the phone's free KiB for df, 'mkdirs': what the folder script prints)
-        def adb(serial, *a, log=None, check=True):
+        def adb(serial, *a, log=None, check=True, timeout=None):
             c = [str(x) for x in a]; self.cmds.append(c)
             if c == ['shell', ba.phone_id.ID_CMD]: return self.remote.get('props', {}).get(serial, '')   # the phone's ID (phone_key): '' gives none
             if c[:2] == ['shell', 'sh'] and c[2].endswith('nxnative_mkdirs.sh'):
@@ -564,7 +694,7 @@ class Phone(Base):
         import re
         files = {}; sent = []
         def q(s): return s.strip().strip("'")
-        def adb(serial, *a, log=None, check=True):
+        def adb(serial, *a, log=None, check=True, timeout=None):
             c = [str(x) for x in a]
             if c[0] == 'push':
                 if len(sent) == 1 and not getattr(adb, 'cut', False): adb.cut = True; raise ba.BuildError('no response: Broken pipe')
@@ -586,6 +716,31 @@ class Phone(Base):
         self.assertEqual(files['/r/RomFS.img'], big.read_bytes())
         self.assertEqual(len(sent), 3)   # the first piece once, then the two left
         self.assertTrue(any('going on from there' in s for s in self.said), self.said)
+
+    def test_a_large_copy_goes_on_in_the_same_install_after_a_drop(self):   # the phone lost after the first piece: the copy waits, then sends only what is left
+        files: dict[str, bytes] = {}; sent: list[str] = []
+        def q(s): return s.strip().strip("'")
+        def adb(serial, *a, log=None, check=True, timeout=None):
+            c = [str(x) for x in a]
+            if c[0] == 'push':
+                if len(sent) == 1 and not getattr(adb, 'cut', False): adb.cut = True; raise ba.PhoneLost('adb push: adb lost the phone: error: closed', 'error: closed')
+                sent.append(c[2]); files[c[2]] = Path(c[1]).read_bytes(); return ''
+            cmd = c[1]
+            if m := re.fullmatch(r"stat -c %s (.+) 2>/dev/null", cmd): p = q(m[1]); return f'{len(files[p])}\n' if p in files else ''
+            if m := re.fullmatch(r": > (.+)", cmd): files[q(m[1])] = b''; return ''
+            if m := re.fullmatch(r"dd if=(.+) bs=4096 skip=(\d+) count=(\d+) 2>/dev/null \| head -c (\d+) \| sha256sum", cmd):
+                b = files[q(m[1])][int(m[2]) * 4096:][:int(m[3]) * 4096][:int(m[4])]; return hashlib.sha256(b).hexdigest() + '  -\n'
+            if m := re.fullmatch(r"cat (.+) >> (.+) && rm (.+)", cmd): files[q(m[2])] += files.pop(q(m[1])); return ''
+            if m := re.fullmatch(r"mv -f (.+) (.+)", cmd): files[q(m[2])] = files.pop(q(m[1])); return ''
+            if cmd.startswith('df -k '): return ''
+            raise AssertionError(c)
+        big = self.tmp / 'RomFS.img'; big.write_bytes(bytes(range(256)) * 9000)
+        back = []
+        with mock.patch.object(ba, 'adb', adb), mock.patch.object(ba, 'CHUNK', 1 << 20), mock.patch.object(ba, '_drops', 0), \
+                mock.patch.object(ba, 'reacquire', lambda serial, why: back.append(why) or serial):
+            ba.push_resumable('S', big, '/r/RomFS.img', self.tmp / 'logs' / 'p.log')
+        self.assertEqual(files['/r/RomFS.img'], big.read_bytes()); self.assertEqual(back, ['error: closed'])
+        self.assertEqual(len(sent), 3)   # the first piece once, then the two left
 
     def test_folder_script_stops_at_the_first_failure_and_must_finish(self):   # droidplay-core issue #37: "nxnative_mkdirs.sh failed:" and nothing after it
         self.push()

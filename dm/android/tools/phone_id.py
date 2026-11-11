@@ -31,6 +31,14 @@ def mdns_serialno(name):   # the ro.serialno an mDNS service name carries, or No
     return m[1] if m and m[1].lower() not in PLACEHOLDERS else None
 
 
+def mdns_services(out):   # `adb mdns services` → [(a phone's serial number, 'ip:port')] for each phone offering a connection (not a pairing)
+    found = []
+    for line in (out or '').splitlines():
+        m = re.match(r'(\S+?)(?:\._adb-tls-connect\._tcp\.?)?\s+_adb-tls-connect\._tcp\.?\s+(\S+:\d+)\s*$', line.strip())
+        if m and (sn := mdns_serialno(m[1] + '._adb-tls-connect._tcp')): found.append((sn, m[2]))
+    return found
+
+
 def stable_id(serialno, android_id=''):   # → the phone's ID, or None when it gives neither a real serial number nor an Android ID
     s, a = (serialno or '').strip(), (android_id or '').strip()
     if s.lower() not in PLACEHOLDERS and safe(s) == s: return s
