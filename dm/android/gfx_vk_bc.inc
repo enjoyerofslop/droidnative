@@ -2,7 +2,7 @@
 // Why: a chunk the GPU hangs in is named by gpu_slow (its crumbs), but a chunk holds tens of passes, draws and dispatches, and the device lost after it says nothing more.
 // Mario Kart World on a Galaxy S25 Edge (Adreno 830) lost the GPU about 10 s in, each slow chunk holding the same twenty-odd items; skipping compute shaders by key to find
 // the one took a dozen runs, and VK_EXT_device_fault's addresses (1.0f's bit pattern plus an offset, null plus an offset) named no buffer. Here the GPU itself says how far
-// it got: before a dispatch it writes the dispatch's number into a host-visible ring (vkCmdFillBuffer, then a barrier so the dispatch starts after it), after it (a barrier
+// it got: before a dispatch it writes the dispatch's number into a host-visible ring (vkCmdFillBuffer, then a barrier so the dispatch starts after it and the write reaches the host), after it (a barrier
 // so the write waits for the dispatch to finish) the same number into the next word. A dispatch whose first word holds its number and whose second does not began and
 // never ended. The host keeps each number's shader, groups and bindings (stage_set's resources, as resolved: uniform buffers with their first words, storage buffers with
 // their address, size and first words, textures and images with their serial, size and format), so the report names what the dispatch read.
@@ -36,13 +36,17 @@ static uint32_t bc_begin(VkCommandBuffer c, const char *key, const uint32_t g[3]
     uint32_t id = ++g_bc_id; bc_ent *h = &g_bc_host[id % BC_HOST];
     h->id = id; h->seq = seq; h->key = key; memcpy(h->g, g, sizeof h->g); memcpy(h->desc, g_bc_desc, BC_DESC); h->desc[BC_DESC - 1] = 0;
     vkCmdFillBuffer(c, g_bc.b, (VkDeviceSize)(id % BC_N) * 8, 4, id);
-    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 0, NULL);
+    // the dispatch starts after the write, and the write is made available to the host: a word left in a GPU cache when the hang hits would read as never begun
+    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT};
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     return id;
 }
 static void bc_end(VkCommandBuffer c, uint32_t id) {
     if (!id) return;
     vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 0, NULL);
     vkCmdFillBuffer(c, g_bc.b, (VkDeviceSize)(id % BC_N) * 8 + 4, 4, id);
+    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};   // available to the host, as the begin word
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }
 static void bc_show(uint32_t id, const char *what) {
     const bc_ent *h = &g_bc_host[id % BC_HOST];
