@@ -72,6 +72,7 @@ set(DM_GFX vk CACHE STRING "NVN replay backend: vk or null")
 set(ANDROID_C
   ${CMAKE_CURRENT_SOURCE_DIR}/plat_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/guest_file_android.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/guest_zero_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/pac_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/coreaudio_aaudio.c
   ${CMAKE_CURRENT_SOURCE_DIR}/media_android.c

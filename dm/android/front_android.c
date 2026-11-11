@@ -220,6 +220,7 @@ static void start_host(void) {
         g_argv[0] = "dmhost"; g_argv[1] = strdup(buf); g_argv[2] = "main"; g_argc = 3;
         atomic_store(&g_state, ST_SELFTEST); LOG("no game in %s: running the self test", code);
     }
+    { void dm_android_guest_zero_start(void); dm_android_guest_zero_start(); }   // DM_GUEST_ZERO (guest_zero_android.c, a test): the heap's all-0 pages counted or given back
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8 << 20);
     pthread_t th; if (pthread_create(&th, &a, guest_thread, NULL)) { LOG("[RED] cannot start the guest thread"); atomic_store(&g_state, ST_FAIL); return; }
     pthread_detach(th);
