@@ -2103,7 +2103,7 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 ### Descriptor set writes on the replay thread with the recorder on (Android)
 
 - **Symptom:** with `DM_VK_RECORDER=1`, `vkUpdateDescriptorSets` is still in the replay thread's profile, as its largest call into the driver: 5.3 ms a frame of Mario
-  Kart World's race on a Galaxy S25 Edge (about 2,400 draws, 5,000 sets), 5.1 to 5.7 of Ocarina of Time's Kokiri Forest, 10.4 of the race on a OnePlus Pad 3 with raw global
+  Kart World's race on a Galaxy S25 Edge (about 2,400 draws, 5,000 sets), 2.1 of Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8, 10.4 of the race on a OnePlus Pad 3 with raw global
   memory.
 - **Cause:** the recorder took the `vkCmd*` calls and the submissions, and a set was written on the replay thread before its bind was queued.
 - **Fix:** the writes go through the ring too (`gfx_vk_rec.inc` `rec_vkUpdateDescriptorSets`, record `R_UPDDS`), packed by `rec_desc.h` (each write with its image
