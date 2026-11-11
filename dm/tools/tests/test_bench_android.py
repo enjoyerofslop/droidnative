@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # scripts/bench_android.py: which screen a run's screenshots are taken of on a phone with more than one (a Galaxy Z Fold 8 or Z Flip 7), from adb's dumpsys output;
-# that what is saved is a PNG even when screencap writes a warning ahead of it; and that a run removes its own save folder under bench_runs and no other
-import importlib.util, struct, unittest, zlib
+# that what is saved is a PNG even when screencap writes a warning ahead of it; that a run removes its own save folder under bench_runs and no other; and that an
+# empty pidof alone is never a death
+import contextlib, importlib.util, io, struct, subprocess, unittest, zlib
 from pathlib import Path
 from unittest import mock
 
@@ -139,6 +140,86 @@ class RunFolders(unittest.TestCase):
             with self.subTest(bad), mock.patch.object(ba, 'sh') as sh:
                 with self.assertRaises(ValueError): ba.remove_run('s1', bad)
                 sh.assert_not_called()
+
+
+def stat(pid, start, state='S'):   # /proc/<pid>/stat, cut down: field 22 is the start time
+    return f'{pid} (ive.android:game) {state} 1279 1279 0 0 -1 4194624 100 0 0 0 50 20 0 0 20 0 80 0 {start} 123456 789\n'
+
+
+class Device:   # answers to the liveness check's two shell calls, in turn: a string, or an exception raised
+    def __init__(self, pidof, stat=()):
+        self.pidof, self.stat, self.cmds = list(pidof), list(stat), []
+
+    def sh(self, serial, cmd, timeout=60):
+        self.cmds.append(cmd); q = self.pidof if cmd.startswith('pidof ') else self.stat if cmd.startswith('cat /proc/') else None
+        assert q is not None, cmd; a = q.pop(0)
+        if isinstance(a, Exception): raise a
+        return a
+
+
+SEEN = '8294\npidof-done\n'; EMPTY = 'pidof-done\n'; NONE = ''   # pidof found the game; ran and found none; adb gave nothing back (no marker)
+GONE = 'stat-done\n'
+DIED_AM = '  1794421090.100  2294  2763 I ActivityManager: Process org.nxnative.android:game (pid 8294) has died: fg  TOP\n'
+LAUNCHER_DIED = '  1794421085.634  2294  2763 I ActivityManager: Process org.nxnative.android (pid 8258) has died: cch CAC\n'
+ZYGOTE = '  1794421090.300  1279  1279 I Zygote  : Process 8294 exited due to signal 9 (Killed)\n'
+
+
+class GameLiveness(unittest.TestCase):
+    def watch(self, dev, logcat=''):
+        return ba.GameWatch('odin', lambda: logcat), mock.patch.object(ba, 'sh', dev.sh)
+
+    def check(self, w, el=90.0):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): state = w.check(el)
+        return state, out.getvalue()
+
+    def test_an_empty_pidof_while_the_game_lives_is_not_a_death(self):   # the Odin 2's OoT runs: pidof empty at 89 s, the game logging until the bench stopped it
+        dev = Device([SEEN, EMPTY], [stat(8294, 5000) + GONE, stat(8294, 5000) + GONE])
+        w, p = self.watch(dev)
+        with p:
+            self.assertEqual(self.check(w, 20.0)[0], 'alive')
+            state, said = self.check(w, 89.4)
+        self.assertEqual(state, 'alive'); self.assertIn('but the game (pid 8294) is alive', said)
+        self.assertEqual(w.misses, [{'t_s': 89.4, 'pidof': 'empty', 'game': 'alive', 'pid': '8294'}])
+        self.assertEqual(dev.cmds[0], 'pidof org.nxnative.android:game; echo pidof-done')
+
+    def test_no_answer_from_the_shell_is_unknown(self):
+        dev = Device([SEEN, NONE, subprocess.TimeoutExpired('adb', 20)], [stat(8294, 5000) + GONE, NONE, subprocess.TimeoutExpired('adb', 20)])
+        w, p = self.watch(dev, LAUNCHER_DIED)   # the launcher's own process dying is not the game's
+        with p:
+            self.check(w, 20.0)
+            self.assertEqual(self.check(w)[0], 'unknown'); self.assertEqual(self.check(w, 91.0)[0], 'unknown')
+        self.assertEqual([m['pidof'] for m in w.misses], ['no answer', 'no answer'])
+
+    def test_a_run_of_misses_is_said_once(self):   # a game never seen running would otherwise print a line a second
+        w, p = self.watch(Device([EMPTY, EMPTY, EMPTY]))
+        with p: said = [self.check(w, t)[1] for t in (16.0, 17.0, 18.0)]
+        self.assertEqual([bool(x) for x in said], [True, False, False]); self.assertEqual(len(w.misses), 3)
+
+    def test_a_death_the_kernel_confirms(self):
+        for after in (GONE, stat(8294, 7777) + GONE, stat(8294, 5000, 'Z') + GONE):   # no such process; the pid another process's now; a zombie
+            with self.subTest(after=after):
+                w, p = self.watch(Device([SEEN, EMPTY], [stat(8294, 5000) + GONE, after]))
+                with p:
+                    self.check(w, 20.0); self.assertEqual(self.check(w)[0], 'dead')
+                self.assertEqual(w.misses, [])
+
+    def test_logcat_confirms_a_death_when_the_shell_does_not_answer(self):
+        w, p = self.watch(Device([SEEN, NONE], [stat(8294, 5000) + GONE, NONE]), LAUNCHER_DIED + DIED_AM)
+        with p:
+            self.check(w, 20.0); self.assertEqual(self.check(w)[0], 'dead')
+
+    def test_a_game_never_seen_running(self):
+        lmkd = "  1794421090.200   596   596 I lmkd    : Kill 'org.nxnative.android:game' (8294), uid 10160, oom_score_adj 0 to free 1000kB rss\n"
+        for logcat, want in (('', 'unknown'), (ZYGOTE, 'unknown'), (lmkd, 'dead'), (DIED_AM, 'dead')):   # Zygote's line names no process: by the pid alone
+            with self.subTest(want=want, logcat=logcat[:60]):
+                w, p = self.watch(Device([EMPTY]), logcat)
+                with p: self.assertEqual(self.check(w, 16.0)[0], want)
+                self.assertIsNone(w.pid)
+
+    def test_death_lines_by_pid(self):
+        self.assertTrue(ba.died_in_logcat(ZYGOTE, '8294')); self.assertFalse(ba.died_in_logcat(ZYGOTE, '8295'))
+        self.assertFalse(ba.died_in_logcat(DIED_AM, '9000'))   # an earlier game process's death, not this one's
 
 
 if __name__ == '__main__':
