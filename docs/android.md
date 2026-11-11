@@ -170,11 +170,31 @@ python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k
     --serial <device>    the adb device, when more than one is connected
     --no-push            build the APK only (a game without a profile is first built this way)
     --push-only          install the app and copy a game built before, without building
+    --romfs-dir sd       put the game's data (its RomFS image) on the phone's SD card, not its own storage; or give a folder on the phone
+    --no-romfs           with --romfs-dir: copy no data; you copy RomFS.img there yourself
 python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
 python scripts/build_android_from_nsp.py --check       what the build needs on this computer, as JSON
 ```
 
 The first build of a game takes a while (the shader translation and, on a hard disk, the RomFS image); later builds reuse what did not change.
+
+### The game data on an SD card
+
+A game's data, its RomFS image (gigabytes), goes in the app's folder on the phone's own storage, `files/games/<title ID>/RomFS.img`. With `--romfs-dir sd`, it goes
+in the app's own folder on the SD card instead: `/storage/<card ID>/Android/data/org.nxnative.android/files/romfs/<title ID>/RomFS.img`. The app reads that folder
+with no storage permission. The rest of the game (code, shaders) stays on the phone's storage.
+
+- **How the game finds it:** the game's `defaults.txt` gets `DM_ROMFS=<that path>`, and a copy left in the game's folder by an earlier install is deleted. An
+  install with `--romfs-dir` again copies only a changed image, and goes on from where a copy cut short stopped, as before.
+- **Another folder:** `--romfs-dir <folder>` takes any folder on the phone. On Android 11 and later the app reads only its own folders (`Android/data/org.nxnative.android`
+  on the phone or the card), so the script warns about a folder outside them.
+- **Copying it yourself:** `--romfs-dir sd --no-romfs` copies no data, sets the path, and prints it. Copy the extraction's image there, for example with
+  `adb push "<NSP folder>/<title ID>_build/extract/<version>/RomFS.img" /storage/<card ID>/Android/data/org.nxnative.android/files/romfs/<title ID>/RomFS.img`, or with
+  a card reader.
+- **When the image isn't there** (the card taken out, or the image not copied yet), the game doesn't start, and the log says so: `[RED] the game's RomFS … is missing`.
+- **Going back:** an install without `--romfs-dir` copies the image to the phone's storage again and leaves the card's copy, which you delete yourself. So does an
+  install from DroidPlay for Windows or DroidPlay on a Mac, which don't pass the option yet. Removing the game leaves the card's copy too; uninstalling the app deletes
+  it, with the app's other folders.
 
 ## Games that compile their shaders while they run
 

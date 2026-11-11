@@ -25,7 +25,8 @@
 #      signed with ~/.android/nxnative-debug.jks (made on first use; every later build must use it to update the app); the button-icon font (make_ext_font.py)
 #   5. unless --no-push: install the APK with adb (an update: the app's data, saves included, stay) and copy the rewritten modules, the RomFS (the extraction's
 #      RomFS.img), any DLC and the translated shaders to files/games/<title ID>/, with its icon, control data, default game language (defaults.txt) and game.json.
-#      A one-game install of the same game (files/game, the layout before the launcher) is moved there instead of copied again, and its save is copied by the app
+#      A one-game install of the same game (files/game, the layout before the launcher) is moved there instead of copied again, and its save is copied by the app.
+#      --romfs-dir puts the RomFS image in another folder on the phone (an SD card's: sd), which defaults.txt's DM_ROMFS names; --no-romfs leaves copying it to the player
 # The picture comes from the Vulkan replay of NVN (dm/android/gfx_vk.c).
 # Needs: Python with lz4, capstone, fonttools and backports.zstd (not on Python 3.14), the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
 import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, re, shutil, struct, subprocess, sys, tarfile, tempfile, time
@@ -439,8 +440,8 @@ def write_data(dst, rom, images):   # the data file beside a game app: the RomFS
 # The game's defaults.txt: the language, then the profile's Android switches (dm/games/<id>/android_defaults.txt: KEY=VALUE per line, # comments), for a game that needs
 # a switch only some games want. The host takes them as it takes env.txt's, without overriding a key env.txt or the settings screen sets (front_android.c); a game app
 # sets them the same way (GameStart.java)
-def defaults_text(g, lang):
-    lines = [f'DM_LANG={lang}']
+def defaults_text(g, lang, romfs=None):   # romfs: the RomFS image's path on the phone when it is not in the game's folder (--romfs-dir); the launcher reads defaults.txt before it sets its own
+    lines = [f'DM_LANG={lang}'] + [f'DM_ROMFS={romfs}'] * bool(romfs)
     own = g.dir / 'android_defaults.txt'
     if own.is_file(): lines += [ln.strip() for ln in own.read_text(encoding='utf-8').splitlines() if '=' in ln and not ln.lstrip().startswith('#')]
     return ''.join(ln + '\n' for ln in lines)
@@ -812,9 +813,38 @@ def migrate_legacy(serial, gid, nacp_local=None):
     return True
 
 
+ROMFS_SD = f'Android/data/{PKG}/files/romfs'   # --romfs-dir sd: the app's own folder on the card, which Android 11 and later let it read with no storage permission
+
+
+def sd_card(serial):   # the phone's SD card, its volume ID (/storage/<ID>): a mounted public volume (sm list-volumes), else a card's folder in /storage
+    out = adb(serial, 'shell', 'sm list-volumes public 2>/dev/null', check=False)
+    ids = [w[2] for w in (ln.split() for ln in out.splitlines()) if len(w) == 3 and w[0].startswith('public:') and w[1] == 'mounted' and w[2] != 'null']
+    if not ids: ids = [n for n in adb(serial, 'shell', 'ls /storage 2>/dev/null', check=False).split() if re.fullmatch(r'[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}|[0-9A-Fa-f-]{16,}', n)]
+    if not ids: raise BuildError('--romfs-dir sd: the phone has no SD card mounted (sm list-volumes, /storage): put one in, or give --romfs-dir a folder')
+    if len(ids) > 1: raise BuildError(f'--romfs-dir sd: the phone has {len(ids)} cards ({", ".join(ids)}): give the folder, --romfs-dir /storage/<ID>/{ROMFS_SD}')
+    return ids[0]
+
+
+def romfs_path(serial, romfs_dir, gid):   # --romfs-dir → the RomFS image's path on the phone, <folder>/<title ID>/RomFS.img
+    d = f'/storage/{sd_card(serial)}/{ROMFS_SD}' if romfs_dir.lower() == 'sd' else romfs_dir.rstrip('/')
+    if not d.startswith('/') or '\n' in d: raise BuildError(f'--romfs-dir {romfs_dir}: a folder on the phone from / (such as /storage/<card ID>/{ROMFS_SD}), or sd for that one')
+    if f'/Android/data/{PKG}/' not in d + '/':
+        say(f'[RED] --romfs-dir {d} is outside the app\'s own folders (Android/data/{PKG}, on the phone or its card): Android 11 and later let the app read only those, '
+            'so the game may not start (the log says so when it can\'t read the image)')
+    return f'{d}/{gid}/RomFS.img'
+
+
+def push_image(serial, rom, remote, log):   # the RomFS image → remote, kept when the phone holds the same one
+    # there whole, the same size and the same first and last MiB: kept. Not adb push --sync, which also compares modification times: push_resumable's image is
+    # assembled on the phone (cat >>), so its time is the copy's, and --sync sent the whole image again on every install (Danganronpa V3's 6.7 GB)
+    if remote_size(serial, remote) == rom.stat().st_size and same_ends(serial, rom, remote): say(f'{remote.rsplit("/", 1)[1]}: on the phone already (same size, first and last MiB)')
+    else: push_resumable(serial, rom, remote, log)
+
+
 @says_when_phone_full
-def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, meta):
-    """The game's files → files/games/<gid>/ (the RomFS with --sync: a repeat copies only what changed)"""
+def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, meta, romfs_at=None, romfs_push=True):
+    """The game's files → files/games/<gid>/ (the RomFS with --sync: a repeat copies only what changed). romfs_at: the RomFS image's path elsewhere on the phone
+    (--romfs-dir), which defaults names; romfs_push False: the player copies it there (--no-romfs)"""
     dst = f'{REMOTE}/games/{gid}'
     # each device's copy logs, and the tar archives and RomFS pieces named after them, in a folder of its own: two installs at once (one per device) shared
     # adb_push_spv.tar, and one's cleanup removed the archive the other was sending
@@ -832,14 +862,19 @@ def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, 
     if spv: part('shaders', 'shaders (only the changed files)'); push_dir(serial, spv, dst, 'spv', logs / 'adb_push_spv.log', sync=True)
     part('RomFS', 'RomFS (a large game takes a while; only a changed image is copied again)')
     rom = bi.rfs.source(game)   # the extraction's RomFS image (RomFS.img: the host reads it as it is, hle_fs.c), or a RomFS folder from an older extraction
-    if bi.rfs.is_image(rom):   # not rom.is_file(): romfs.Path takes an image as its root folder
+    if romfs_at:   # --romfs-dir: the image in a folder of the player's choosing, an SD card's say
+        if not bi.rfs.is_image(rom): raise BuildError(f'--romfs-dir takes the RomFS as one image ({game}/RomFS.img), and this extraction has a RomFS folder: extract the game again')
+        folder = romfs_at.rsplit('/', 1)[0]
+        if romfs_push:
+            adb(serial, 'shell', f'mkdir -p {sh_quote(folder)} && rm -f {sh_quote(romfs_at + ".piece")}')
+            push_image(serial, Path(str(rom)), romfs_at, logs / 'adb_push_romfs.log'); open_tree(serial, folder)
+        else: say(f'--no-romfs: copy {rom} to {romfs_at} on the phone yourself; the game reads it from there')
+        # a copy left in the game's folder by an install before is read no more: gigabytes freed
+        adb(serial, 'shell', f'rm -rf {sh_quote(dst + "/RomFS")} {sh_quote(dst + "/RomFS.img")} {sh_quote(dst + "/RomFS.img.partial")}')
+    elif bi.rfs.is_image(rom):   # not rom.is_file(): romfs.Path takes an image as its root folder
         # a RomFS.img folder left by an earlier push would make adb fail ("Is a directory"); a RomFS.img file stays, for --sync
         adb(serial, 'shell', f"rm -rf {sh_quote(dst + '/RomFS')}; if [ -d {sh_quote(dst + '/RomFS.img')} ]; then rm -rf {sh_quote(dst + '/RomFS.img')}; fi")
-        # there whole, the same size and the same first and last MiB: kept. Not adb push --sync, which also compares modification times: push_resumable's image is
-        # assembled on the phone (cat >>), so its time is the copy's, and --sync sent the whole image again on every install (Danganronpa V3's 6.7 GB)
-        if remote_size(serial, f'{dst}/RomFS.img') == os.path.getsize(str(rom)) and same_ends(serial, Path(str(rom)), f'{dst}/RomFS.img'):
-            say('RomFS.img: on the phone already (same size, first and last MiB)')
-        else: push_resumable(serial, Path(str(rom)), f'{dst}/RomFS.img', logs / 'adb_push_romfs.log')
+        push_image(serial, Path(str(rom)), f'{dst}/RomFS.img', logs / 'adb_push_romfs.log')
     else:
         adb(serial, 'shell', 'rm', '-f', f'{dst}/RomFS.img')
         push_dir(serial, rom, dst, 'RomFS', logs / 'adb_push_romfs.log', sync=True)
@@ -1001,6 +1036,9 @@ def main(argv):
     ap.add_argument('--sdk', help='the Android SDK (default ANDROID_HOME)'); ap.add_argument('--serial', help='the adb device (default: the only one)')
     ap.add_argument('--no-push', action='store_true', help='build the APK only; do not install it or copy the game files to the phone')
     ap.add_argument('--push-only', action='store_true', help='install the app and copy a game built before to the phone, without building')
+    ap.add_argument('--romfs-dir', help="put the RomFS image in this folder on the phone, as <folder>/<title ID>/RomFS.img, not in the game's folder; "
+                                        f"sd = the app's own folder on the SD card (/storage/<card ID>/{ROMFS_SD}), which it can read with no storage permission")
+    ap.add_argument('--no-romfs', action='store_true', help='with --romfs-dir: copy no RomFS; you copy RomFS.img there yourself, and the game reads it from there')
     ap.add_argument('--wait-device', type=float, default=0, help='wait up to this many seconds for a phone a bench or another build holds (default: stop at once)')
     ap.add_argument('--update-shaders', action='store_true', help='pull the shaders a game compiled at run time on the phone, translate the new ones and copy them (no app build)')
     ap.add_argument('--apk-only', action='store_true', help='pack the app with every game host built on this computer and install it')
@@ -1024,6 +1062,9 @@ def main(argv):
     if a.game_apk:
         if a.push_only or a.update_shaders or a.apk_only or a.migrate: raise BuildError('--game-apk builds the game; it goes with none of --push-only, --update-shaders, --apk-only, --migrate')
         a.no_push = True   # a game app goes to no phone from here
+    if a.no_romfs and not a.romfs_dir: raise BuildError('--no-romfs goes with --romfs-dir: the folder on the phone you copy RomFS.img into yourself')
+    if a.romfs_dir and (a.no_push or a.apk_only or a.update_shaders or a.migrate):
+        raise BuildError('--romfs-dir is for a game copied to a phone (a build that installs it, or --push-only); a game app keeps its RomFS beside it or inside')
     bi.PROG.mode = bi.progress_mode('off' if a.check or a.info else a.progress); bi.ALLOW_DAMAGED = a.allow_damaged
     if not (a.check or a.info) and os.environ.get('NXNATIVE_JOURNAL', '1') != '0': bi.PROG = Journaled(bi.PROG.mode, argv)
     if a.check or a.info:   # stdout carries the JSON alone: messages on the way (say) go to stderr
@@ -1095,6 +1136,7 @@ def main(argv):
         try: serial = pick_device()
         except BuildError:
             if a.push_only or a.update_shaders: raise
+    romfs_at = romfs_path(serial, a.romfs_dir, g.id) if a.romfs_dir and serial else None   # now, so that a phone with no card stops the build before its shaders
     capture_dir = ex / pkg_ver / 'glslc_capture'
     if a.push_only or a.update_shaders:   # what an earlier build left: the extraction, the rewrite, the shaders, the font and the host in the library
         game, spv, font = ex / pkg_ver, work / 'spv', work / 'font'
@@ -1193,10 +1235,12 @@ def main(argv):
         bi.PROG.set(step='installing the app (an update keeps its data)'); install(serial, apk, logs)   # words that hold for a first install too, with no adb call to tell them apart
         adb(serial, 'shell', 'am', 'force-stop', PKG)
         rom = bi.rfs.source(game)
-        push_game(serial, g.id, game, patched, spv, font, work / 'aoc', defaults, work, logs,
+        romfs_at = romfs_at or (romfs_path(serial, a.romfs_dir, g.id) if a.romfs_dir else None)
+        push_game(serial, g.id, game, patched, spv, font, work / 'aoc', defaults_text(g, lang, romfs_at), work, logs,
                   {'title_id': g.id, 'name': label, 'version': pkg_ver, 'display': nacp.version(game / 'control.nacp'),
-                   'romfs_bytes': Path(rom).stat().st_size if bi.rfs.is_image(rom) else None})
+                   'romfs_bytes': Path(rom).stat().st_size if bi.rfs.is_image(rom) else None}, romfs_at=romfs_at, romfs_push=not a.no_romfs)
     bi.PROG.end(f'{REMOTE}/games/{g.id}')
+    if romfs_at: say(f'the RomFS: {romfs_at}' + (f' (copy {bi.rfs.source(game)} there before playing)' if a.no_romfs else ''))
     say(f'done: open DroidPlay on the phone and pick "{label}". Log: {REMOTE}/log.txt (adb logcat -s DroidPlay)')
 
 

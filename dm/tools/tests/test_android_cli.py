@@ -457,7 +457,7 @@ class AdbErrors(unittest.TestCase):
             with self.assertRaisesRegex(ba.BuildError, r"failed \(exit status 255\): adb: device 'S' not found$"): ba.adb('S', 'shell', 'true')
 
 
-class Phone(Base):
+class PhoneSetup(Base):   # adb as a recording stand-in, and a game to copy
     def setUp(self):
         super().setUp()
         self.cmds = []; self.remote: dict[str, Any] = {}   # remote path → exists ('free': the phone's free KiB for df, 'mkdirs': what the folder script prints)
@@ -485,6 +485,8 @@ class Phone(Base):
         ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'en-US', self.tmp, self.tmp / 'logs', {'title_id': GID})
         return [' '.join(c) for c in self.cmds]
 
+
+class Phone(PhoneSetup):
     def test_copies_to_games_folder_and_opens_it(self):
         flat = self.push(); dst = f'{ba.REMOTE}/games/{GID}'
         self.assertTrue(any(c.startswith('push') and c.endswith(f'{dst}/') for c in flat))
@@ -596,6 +598,75 @@ class Phone(Base):
         self.assertEqual(self.cmds[-1][:2], ['install', '-r'])
         self.assertFalse(any('uninstall' in ' '.join(c) for c in self.cmds))
 
+
+
+class RomfsDir(PhoneSetup):   # --romfs-dir / --no-romfs: the RomFS image in another folder on the phone (an SD card's), which defaults.txt's DM_ROMFS names
+    AT = f'/storage/6FB7-F185/{ba.ROMFS_SD}/{GID}/RomFS.img'
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.game / 'RomFS'); (self.game / 'RomFS.img').write_bytes(b'DMROMFS1' + bytes(64))
+        self.sent = []
+        cm = mock.patch.object(ba, 'push_resumable', lambda serial, local, remote, log: self.sent.append(remote)); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def push(self, at=None, copy=True):
+        ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'DM_LANG=en-US\n', self.tmp, self.tmp / 'logs', {'title_id': GID}, romfs_at=at, romfs_push=copy)
+        return [' '.join(c) for c in self.cmds]
+
+    def phone(self, answers):   # adb shell command → what the phone prints
+        def adb(serial, *a, log=None, check=True): return answers.get(a[1], '') if a[0] == 'shell' else ''
+        cm = mock.patch.object(ba, 'adb', adb); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def test_the_image_goes_to_the_folder_and_the_games_copy_goes(self):
+        flat = self.push(self.AT); folder, dst = self.AT.rsplit('/', 1)[0], f'{ba.REMOTE}/games/{GID}'
+        self.assertEqual(self.sent, [self.AT])
+        self.assertTrue(any(f"mkdir -p '{folder}'" in c for c in flat), flat)
+        self.assertTrue(any(f"chmod -R a+rwX '{folder}'" in c for c in flat), flat)   # a folder adb made on the phone's own storage is opened to the app (Android 15)
+        self.assertTrue(any(c.startswith('shell rm -rf') and f"'{dst}/RomFS.img'" in c and f"'{dst}/RomFS.img.partial'" in c for c in flat), flat)
+
+    def test_without_a_folder_the_image_goes_to_the_game(self):
+        flat = self.push(); dst = f'{ba.REMOTE}/games/{GID}'
+        self.assertEqual(self.sent, [f'{dst}/RomFS.img'])
+        self.assertFalse(any(f"'{dst}/RomFS.img.partial'" in c for c in flat), flat)   # the game's copy stays, and a part of one goes on
+
+    def test_no_romfs_copies_nothing_and_says_where(self):
+        flat = self.push(self.AT, copy=False)
+        self.assertEqual(self.sent, []); self.assertFalse(any('mkdir -p' in c and '6FB7-F185' in c for c in flat), flat)
+        self.assertTrue(any(self.AT in m and 'yourself' in m for m in self.said), self.said)
+
+    def test_a_romfs_folder_extraction_is_refused(self):   # an older extraction's RomFS folder: the host reads one image from elsewhere
+        (self.game / 'RomFS.img').unlink(); (self.game / 'RomFS').mkdir()
+        with self.assertRaisesRegex(ba.BuildError, 'one image'): self.push(self.AT)
+
+    def test_defaults_name_the_image(self):
+        g = mock.Mock(dir=self.tmp)
+        self.assertEqual(ba.defaults_text(g, 'en-US'), 'DM_LANG=en-US\n')
+        self.assertEqual(ba.defaults_text(g, 'en-US', self.AT), f'DM_LANG=en-US\nDM_ROMFS={self.AT}\n')
+
+    def test_sd_is_the_mounted_cards_app_folder(self):
+        self.phone({'sm list-volumes public 2>/dev/null': 'public:179,1 mounted 6FB7-F185\n'})
+        self.assertEqual(ba.romfs_path('S', 'sd', GID), self.AT); self.assertFalse(any('[RED]' in m for m in self.said), self.said)
+
+    def test_sd_from_storage_when_sm_says_nothing(self):   # sm refused to the shell, or another output: the card's folder in /storage
+        self.phone({'sm list-volumes public 2>/dev/null': '', 'ls /storage 2>/dev/null': 'emulated\nself\n6FB7-F185\n'})
+        self.assertEqual(ba.romfs_path('S', 'SD', GID), self.AT)
+
+    def test_sd_with_no_card_or_two_says_so(self):
+        self.phone({'sm list-volumes public 2>/dev/null': 'public:179,1 unmounted null\n', 'ls /storage 2>/dev/null': 'emulated\nself\npersist\n'})
+        with self.assertRaisesRegex(ba.BuildError, 'no SD card'): ba.romfs_path('S', 'sd', GID)
+        self.phone({'sm list-volumes public 2>/dev/null': 'public:179,1 mounted 6FB7-F185\npublic:8,1 mounted 1234-ABCD\n'})
+        with self.assertRaisesRegex(ba.BuildError, '2 cards .*6FB7-F185, 1234-ABCD'): ba.romfs_path('S', 'sd', GID)
+
+    def test_a_folder_given_is_used_and_one_outside_the_apps_is_warned(self):
+        self.assertEqual(ba.romfs_path('S', f'{ba.REMOTE}/romfs/', GID), f'{ba.REMOTE}/romfs/{GID}/RomFS.img'); self.assertFalse(self.said)
+        self.assertEqual(ba.romfs_path('S', '/sdcard/Games', GID), f'/sdcard/Games/{GID}/RomFS.img')
+        self.assertTrue(any(m.startswith('[RED]') and 'outside the app' in m for m in self.said), self.said)
+        with self.assertRaisesRegex(ba.BuildError, 'from /'): ba.romfs_path('S', 'Games', GID)
+
+    def test_options_that_dont_go_together(self):
+        for argv, msg in ((['g', '--no-romfs'], 'goes with --romfs-dir'), (['g', '--game-apk', '--romfs-dir', 'sd'], 'for a game copied to a phone'),
+                          (['g', '--no-push', '--romfs-dir', 'sd'], 'for a game copied to a phone'), (['--apk-only', '--romfs-dir', 'sd'], 'for a game copied to a phone')):
+            with self.subTest(argv=argv), self.assertRaisesRegex(ba.BuildError, msg): ba.main(argv)
 
 
 class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop app's updates: the newest release read, its Setup downloaded and checked; a local server is GitHub

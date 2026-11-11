@@ -193,6 +193,13 @@ static void start_host(void) {
     snprintf(buf, sizeof buf, "%s/main.fixups.tsv", code);
     if (exists(buf) && !getenv("DM_FORCE_SELFTEST")) {
         setenv("DM_ROOT", g_game, 0);
+        // An image somewhere else, which env.txt, launcher.txt or defaults.txt names (build_android_from_nsp.py --romfs-dir: an SD card's folder), wins over the game folder's.
+        // Said here in the player's words: the host's mount only finds no game files
+        const char *rf = getenv("DM_ROMFS");
+        if (rf && *rf && strncmp(rf, "fd:", 3) && access(rf, R_OK))
+            LOG("[RED] the game's RomFS %s (DM_ROMFS) %s: copy the game's RomFS.img there, or install the game again without --romfs-dir", rf, errno == EACCES
+                ? "can't be read by the app: Android 11 and later let it read only its own folders, Android/data/<its package> on the phone or its SD card"
+                : "is missing (the SD card taken out, or the image not copied yet)");
         snprintf(buf, sizeof buf, "%s/RomFS", g_game);   // a RomFS folder, or the packing script's RomFS image (hle_fs.c reads one as it is)
         if (!exists(buf)) snprintf(buf, sizeof buf, "%s/RomFS.img", g_game);
         if (exists(buf)) setenv("DM_ROMFS", buf, 0);
