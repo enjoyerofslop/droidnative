@@ -688,6 +688,8 @@ class BuildsPage(QWidget):
     def start(self, title, args, after=None):
         if self.busy() or self.ext: QMessageBox.warning(self, 'Busy', 'A build is running: wait for it or stop it'); return
         self.live = None; self.title = title; self.head.setText(title); self.sub.setText('starting…'); self.tree.clear(); self.items = {}; self.log.clear(); self.after = after; self.buf = ''
+        if '--serial' in args[:-1] and '--phone-id' not in args and (pid := self.win.ids.get(args[args.index('--serial') + 1])):
+            args = [*args, '--phone-id', pid]   # the script finds the phone by its ID when adb loses it on the way (a new Wi-Fi port)
         bid = uuid.uuid4().hex; self.ids.add(bid); self.fresh(args, bid); self.last = (title, args, after)
         self.proc = QProcess(self); self.proc.setProgram(PYTHON); self.proc.setArguments([str(SCRIPT), *args, '--progress', 'json'])
         env = QProcessEnvironment.systemEnvironment(); env.insert('PYTHONUTF8', '1'); env.insert('PYTHONUNBUFFERED', '1'); env.insert('NXNATIVE_BUILD_ID', bid); self.proc.setProcessEnvironment(env)
@@ -757,15 +759,21 @@ class BuildsPage(QWidget):
         after, self.after = self.after, None
         if ok and after: QTimer.singleShot(200, after)
         if h: self.win.toast(f'{h.title}: see Builds')
-    def retry(self):   # a failed build's Install again / Try again: the same build, which reuses what it made before
-        if self.last: self.start(*self.last)
+    def retry(self):   # a failed build's Install again / Try again: the same build, which reuses what it made before, on the same phone by its ID: over Wi-Fi its serial
+        # changes when wireless debugging restarts, and the old one named no device any more
+        if not self.last: return
+        title, args, after = self.last
+        if '--serial' in args[:-1]:
+            i = args.index('--serial') + 1; now = self.win.serial_of(args[i])
+            if now and now != args[i]: args = args[:i] + [now] + args[i + 1:]
+        self.start(title, args, after)
     def context(self):   # (explain()'s context, the game, the phone's serial, the stage it stopped in) of the last build, from its arguments
         a = self.args; folder = a[0] if a and not a[0].startswith('-') else ''
         g = self.win.library.games.get(folder) or next((x for x in self.win.library.games.values() if folder and Path(x.folder).resolve() == Path(folder).resolve()), None)
         serial = a[a.index('--serial') + 1] if '--serial' in a[:-1] else ''
         st = self.failed_stage or self.stage or (None, None, '')
-        return {'phone': self.win.models.get(serial, '') if serial else '', 'game': g.name if g else '', 'stage': st[2], 'setup': self.title == fr.SETUP_TITLE,
-                'folder': folder}, g, serial, st
+        return {'phone': self.win.models.get(self.win.serial_of(serial) or serial, '') if serial else '', 'game': g.name if g else '', 'stage': st[2],
+                'setup': self.title == fr.SETUP_TITLE, 'folder': folder, 'wifi': phone_id.wifi(serial) if serial else False}, g, serial, st
     def show_failure(self):
         ctx = self.context()[0]
         h = ex.explain('\n'.join(self.reds[-6:] + [self.last_line]), **ctx); self.banner.show_help(h, self.last_red or self.last_line); return h
@@ -1386,6 +1394,7 @@ class Window(QMainWindow):
         if self.pages.currentWidget() is not self.setup and (not self.setup.step('keys').done or self.library.no_games() or
                                                              not self.setup.step('phone').done and not self.st.value('serial', '')): self.go('setup')
         self.ids = {}   # serial → the phone's ID (phone_id.py), asked once per serial: its settings, backups and first-start notice are kept under it
+        self.seen = {}   # every serial → ID this session, kept after a serial goes: Install again finds the phone a build was for on the serial it has now
         for k in self.st.allKeys():   # first-start notices kept under a Wi-Fi address, before IDs: the address is gone with its port, and the notice with it
             if k.startswith('firststart/') and k.count('/') == 2 and phone_id.wifi(k.split('/')[1]): self.st.remove(k)
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh_devices); self.timer.start(5000); self.refresh_devices()
@@ -1500,6 +1509,7 @@ class Window(QMainWindow):
         s = s or self.serial()
         return self.ids.get(s) or s
     def find_phone(self, keys): return phone_id.find([self.phone.itemData(i) for i in range(self.phone.count())], keys, self.ids)
+    def serial_of(self, s): return phone_id.current(s, [d for d in self.devs or [] if d['state'] == 'device'], self.seen)   # the serial s's phone is on now, or None
     def set_serial(self, s):   # a row of the Phones page: the picker has one entry a phone, so a phone's Wi-Fi row picks its entry over the cable
         i = self.find_phone([s, self.ids.get(s)])
         if i >= 0: self.phone.setCurrentIndex(i)
@@ -1564,7 +1574,7 @@ class Window(QMainWindow):
                 if self.devs is not None: return
                 r = []
             r = r or []
-            was = self.phone_key(); self.ids = {d['serial']: d['id'] for d in r if d.get('id')}   # the picked phone's ID as the last list had it
+            was = self.phone_key(); self.ids = {d['serial']: d['id'] for d in r if d.get('id')}; self.seen.update(self.ids)   # the picked phone's ID as the last list had it
             if r == self.devs and adb == self.adb: return
             ident = lambda ds: [(d['serial'], d['state'], d.get('model'), d.get('name'), d.get('android')) for d in ds]   # noqa: E731
             same = self.devs is not None and adb == self.adb and ident(r) == ident(self.devs)
@@ -1579,9 +1589,10 @@ class Window(QMainWindow):
             for d in r:
                 if d['state'] in ('unauthorized', 'authorizing', 'offline'):
                     off = d['state'] == 'offline'
-                    self.phone.addItem(icon('phone', ERR if off else BUILD, 16), 'Plug your phone in again' if off else 'Tap Allow on your phone', None)
+                    self.phone.addItem(icon('phone', ERR if off else BUILD, 16), ('Wake your phone (Wi-Fi)' if phone_id.wifi(d['serial']) else 'Plug your phone in again') if off
+                                       else 'Tap Allow on your phone', None)
                     it = self.phone.model().item(self.phone.count() - 1); it.setEnabled(False)
-                    it.setToolTip(re.sub(r'<[^>]+>', '', ex.explain(f'device {d["state"]}', phone=d.get('model', '')).body))
+                    it.setToolTip(re.sub(r'<[^>]+>', '', ex.explain(f'device {d["state"]}', phone=d.get('model', ''), wifi=phone_id.wifi(d['serial'])).body))
             if not self.phone.count(): self.phone.addItem(icon('phone', TEXT3, 16), 'No phone connected' if adb else 'Install the tools to find phones', None)
             self.phone.setToolTip('The phone builds install to' if adb else 'DroidPlay finds phones with adb, which comes with the tools: Get started, step 2')
             i = self.find_phone(keep); self.phone.setCurrentIndex(i if i >= 0 else 0); self.phone.blockSignals(False)

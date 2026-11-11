@@ -512,7 +512,7 @@ class Reconnect(Base):   # a phone adb lost on the way: waited for by its ID, co
             raise ba.PhoneLost(f"adb: device '{a[1]}' not found", 'not found')
         def sleep(_):   # each wait between looks: what happens meanwhile, in turn
             if self.ticks: self.ticks.pop(0)()
-        for cm in (mock.patch.object(ba, 'run_adb', run_adb), mock.patch.object(ba.time, 'sleep', sleep), mock.patch.dict(ba._now, clear=True),
+        for cm in (mock.patch.object(ba, 'run_adb', run_adb), mock.patch.object(ba.time, 'sleep', sleep), mock.patch.dict(ba._now, clear=True), mock.patch.dict(ba._hint, clear=True),
                    mock.patch.object(ba, '_drops', 0), mock.patch.object(ba, 'RECONNECT_WAIT', 30.0)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
@@ -539,6 +539,21 @@ class Reconnect(Base):   # a phone adb lost on the way: waited for by its ID, co
         self.ticks = [lambda: self.devices.update({'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp': 'device'})]
         self.props['adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp'] = self.S25
         self.assertEqual(ba.reacquire('R5CY51ZLGKH', 'device offline'), 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp')
+
+    def test_a_phone_whose_port_changed_before_the_build_is_found_by_the_apps_id(self):   # Install again with a dead serial: --phone-id says whom to wait for
+        with mock.patch.dict(ba._hint, {'192.168.1.20:37123': 'R5CY51ZLGKH'}):
+            self.assertEqual(ba.phone_key('192.168.1.20:37123'), 'R5CY51ZLGKH')   # no answer from the old port: the app's ID
+            self.mdns = self.MDNS; self.on_connect['192.168.1.20:41011'] = {'192.168.1.20:41011': 'device'}; self.props['192.168.1.20:41011'] = self.S25
+            self.assertEqual(ba.reacquire('192.168.1.20:37123', "device '192.168.1.20:37123' not found"), '192.168.1.20:41011')
+
+    def test_the_phone_id_option_goes_with_a_serial(self):
+        for argv in (['--phone-id', 'R5CY51ZLGKH', '--check'], ['--phone-id', 'a/b', '--serial', 'S', '--check']):
+            with self.assertRaisesRegex(ba.BuildError, '--phone-id goes with --serial'): ba.main(argv)
+
+    def test_an_address_lent_to_another_phone_is_refused(self):
+        self.devices['10.0.0.7:5555'] = 'device'; self.props['10.0.0.7:5555'] = 'e7879cce\nf00dfeed12345678\n'
+        with mock.patch.dict(ba._hint, {'10.0.0.7:5555': 'R5CY51ZLGKH'}):
+            with self.assertRaisesRegex(ba.BuildError, r'10\.0\.0\.7:5555 is another phone now: pick the phone again'): ba.phone_key('10.0.0.7:5555')
 
     def test_a_connection_that_answers_nothing_is_made_again(self):   # adb still lists a Wi-Fi phone whose connection died silently
         self.took('192.168.1.20:37123'); self.stale.add('192.168.1.20:37123')

@@ -550,6 +550,7 @@ WAIT_DEVICE = 0.0   # --wait-device
 
 
 _keys = {}   # serial → the phone's ID, or None when it gave none: asked once a run
+_hint = {}   # serial → the ID the desktop app knew it by (--phone-id): the phone's ID while it doesn't answer (its port changed before the build began)
 
 
 def phone_key(serial):   # the phone's stable ID (dm/android/tools/phone_id.py), or its serial when it gives none: what its lock and its logs folder are named after,
@@ -557,6 +558,9 @@ def phone_key(serial):   # the phone's stable ID (dm/android/tools/phone_id.py),
     if serial not in _keys:
         try: _keys[serial] = phone_id.from_props(adb(serial, 'shell', phone_id.ID_CMD, check=False, timeout=15))
         except (OSError, BuildError): _keys[serial] = None   # no adb at all, or no phone: the step that needs it says so
+        if _hint.get(serial) and _keys[serial] and _keys[serial] != _hint[serial]:   # the address went to another phone (Wi-Fi addresses are lent out again)
+            raise BuildError(f'{serial} is another phone now: pick the phone again')
+        _keys[serial] = _keys[serial] or _hint.get(serial)
     return _keys[serial] or serial
 
 
@@ -1166,6 +1170,7 @@ def main(argv):
     ap.add_argument('--push-only', action='store_true', help='install the app and copy a game built before to the phone, without building')
     ap.add_argument('--wait-device', type=float, default=0, help='wait up to this many seconds for a phone a bench or another build holds (default: stop at once)')
     ap.add_argument('--reconnect-wait', type=float, default=180.0, help='wait up to this many seconds for a phone adb lost on the way, over Wi-Fi or USB, then go on (default 180)')
+    ap.add_argument('--phone-id', help="with --serial: the phone's ID (ro.serialno, or aid-<Android ID>), to find it by when its serial changes (a new Wi-Fi port)")
     ap.add_argument('--update-shaders', action='store_true', help='pull the shaders a game compiled at run time on the phone, translate the new ones and copy them (no app build)')
     ap.add_argument('--apk-only', action='store_true', help='pack the app with every game host built on this computer and install it')
     ap.add_argument('--migrate', action='store_true', help="move a one-game install's files/game to files/games/<--title> on the phone")
@@ -1185,6 +1190,9 @@ def main(argv):
     if a.sdk: tool_paths(a.sdk)
     global WAIT_DEVICE; WAIT_DEVICE = a.wait_device
     global RECONNECT_WAIT; RECONNECT_WAIT = a.reconnect_wait
+    if a.phone_id:
+        if not a.serial or phone_id.safe(a.phone_id) != a.phone_id: raise BuildError("--phone-id goes with --serial, and is the phone's ID (letters, digits, . _ -)")
+        _hint[a.serial] = a.phone_id
     if a.xapk: a.game_apk = True
     if a.game_apk:
         if a.push_only or a.update_shaders or a.apk_only or a.migrate: raise BuildError('--game-apk builds the game; it goes with none of --push-only, --update-shaders, --apk-only, --migrate')

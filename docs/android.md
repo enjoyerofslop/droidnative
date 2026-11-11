@@ -173,7 +173,7 @@ python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k
     --game-apk [--xapk]  the game as an app of its own (<name>.apk, plus <name>.romfs, with its DLC after the RomFS, for a game over 2 GB, or one .xapk); no device needed
     -p v0                pack the base game instead of the newest version in the folder (a version the profile does not register is packed from a derived profile)
     -l es-419            the default game language (a code or a name)
-    --serial <device>    the adb device, when more than one is connected
+    --serial <device>    the adb device, when more than one is connected (over Wi-Fi: its ip:port, or the adb-…._adb-tls-connect._tcp name adb found it by)
     --no-push            build the APK only (a game without a profile is first built this way)
     --push-only          install the app and copy a game built before, without building
 python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
