@@ -17,8 +17,23 @@ typedef struct nq_node {
     tex_t texture; double period; int crop[4];
 } nq_node;
 typedef struct nq_owned { struct nq_owned *next; unsigned kind; uint64_t data[]; } nq_owned;
-typedef struct nq_job { struct nq_job *next; nq_node *first, *last; nq_receipt *receipt; nq_owned *owned; nvn_hmap objects; uint64_t frame; } nq_job;
+typedef struct nq_job { struct nq_job *next; nq_node *first, *last; nq_receipt *receipt; nq_owned *owned; nvn_hmap objects; uint64_t frame; uint64_t seq; struct nq_job *live_prev, *live_next; } nq_job;
+// DroidPlay Core: every job from its creation to its end, in creation order, so the first-touch list (hle_nvn.c ft_del) knows when no job made before a texture's Finalize can
+// still name it. Queues are replayed round-robin and a parked one waits, so a job made later can end first: the oldest live job says it, not the one replaying. A job is
+// listed before its commands are flattened, where it copies the texture objects they name. nq_live_mu is a leaf lock: nothing else is taken while it is held
+static pthread_mutex_t nq_live_mu = PTHREAD_MUTEX_INITIALIZER; static nq_job *nq_live_first, *nq_live_last; static uint64_t nq_seq;
+static nq_job *nq_job_new(void) {
+    nq_job *j=calloc(1,sizeof *j); if(!j) return NULL;
+    pthread_mutex_lock(&nq_live_mu); j->seq=++nq_seq; j->live_prev=nq_live_last; if(nq_live_last) nq_live_last->live_next=j; else nq_live_first=j; nq_live_last=j; pthread_mutex_unlock(&nq_live_mu);
+    return j;
+}
+static uint64_t nvn_jobs_newest(void) { pthread_mutex_lock(&nq_live_mu); uint64_t s=nq_live_last?nq_seq:0; pthread_mutex_unlock(&nq_live_mu); return s; }   // 0: no job in flight
+static uint64_t nvn_jobs_oldest(void) { pthread_mutex_lock(&nq_live_mu); uint64_t s=nq_live_first?nq_live_first->seq:UINT64_MAX; pthread_mutex_unlock(&nq_live_mu); return s; }
 static void nq_job_free(nq_job *j) {
+    pthread_mutex_lock(&nq_live_mu);
+    if(j->live_prev) j->live_prev->live_next=j->live_next; else nq_live_first=j->live_next;
+    if(j->live_next) j->live_next->live_prev=j->live_prev; else nq_live_last=j->live_prev;
+    pthread_mutex_unlock(&nq_live_mu);
     for(nq_owned *o=j->owned,*next;o;o=next) { next=o->next; if(o->kind==CAP_K_PROG) mtl_prog_unpin((prog_t *)o->data); else if(o->kind==CAP_K_TEX) mtl_tex_unpin(((tex_t *)o->data)->serial); free(o); }
     free(j->objects.keys); free(j->objects.vals); free(j);
 }
@@ -162,7 +177,7 @@ static void *nq_worker(void *unused) {
             if(n->kind==NQ_COMMANDS) {
                 uint64_t handle=(uintptr_t)n->bytes;
                 nvn_cap_submit(1,&handle);
-                mtl_sub_begin(); nvn_ft_poll(); mtl_sub_index(&handle,1);
+                mtl_sub_begin(); ft_del_drain(); nvn_ft_poll(); mtl_sub_index(&handle,1);
                 mtl_exec_rest(NULL,0); mtl_exec(n->bytes); fence=mtl_sub_commit();
             } else {
                 nvn_cap_present(&n->texture,n->crop);
@@ -203,7 +218,7 @@ static void nq_flatten(nq_job *j,const uint8_t *p,unsigned depth) {
 }
 static void nq_enqueue(nq_queue *q,nq_job *j) { if(q->last) q->last->next=j; else q->first=j; q->last=j; nq_put(q->tail); q->tail=j->receipt; q->tail->refs++; pthread_cond_broadcast(&nq_cv); }
 void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
-    pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
+    pthread_once(&nq_once,nq_start); nq_job *j=nq_job_new(); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
     j->objects.klen=16; j->frame=dm_nvn_frame_count();
     // No scheduler lock while copying descriptors or resolving shader libraries.
     dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
@@ -222,7 +237,7 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
 // Only replay turns it into a physical display ticket; present never waits on the guest thread.
 uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int crop[4]) {
     nvn_cap_queue(q->serial,0);
-    pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue present allocation failed");
+    pthread_once(&nq_once,nq_start); nq_job *j=nq_job_new(); if(!j) die("queue present allocation failed");
     j->receipt=nq_new(); j->frame=dm_nvn_frame_count(); nq_node *n=nq_append(j,NQ_PRESENT);
     n->texture=*t; mtl_tex_pin(t->serial); n->period=period; if(crop) memcpy(n->crop,crop,sizeof n->crop);
     pthread_mutex_lock(&nq_mu); j->receipt->refs++; uint64_t ticket=(uintptr_t)j->receipt;
@@ -254,7 +269,7 @@ int nvn_sync_wait(const sync_t *s,uint64_t timeout) {
 }
 void nvn_queue_wait_sync(queue_t *q,const sync_t *s) {
     nvn_cap_queue(q->serial,1);
-    pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue wait allocation failed"); j->receipt=nq_new();
+    pthread_once(&nq_once,nq_start); nq_job *j=nq_job_new(); if(!j) die("queue wait allocation failed"); j->receipt=nq_new();
     pthread_mutex_lock(&nq_mu); nq_snapshot_sync(nq_append(j,NQ_SYNC),s); nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu);
 }
 void nvn_queue_finish(queue_t *q) { sync_t s={0}; nvn_queue_fence(q,&s); nvn_sync_wait(&s,UINT64_MAX); nvn_sync_release(&s);

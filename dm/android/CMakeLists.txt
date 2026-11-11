@@ -42,7 +42,7 @@ foreach(s ${DM}/host/entry.S ${DM}/gfx/nvn/nvn_entry.S ${DM}/gfx/nvn/nvn_thunks.
   list(APPEND ASM_ELF ${GEN}/asm/${n})
 endforeach()
 
-# The Vulkan replay's own shaders (shaders/*.vert, *.frag: gfx_vk_dscopy.inc's depth-stencil copies), compiled by the NDK's glslc into the SPIR-V words gfx_vk.c
+# The Vulkan replay's own shaders (shaders/*.vert, *.frag, *.comp: gfx_vk_dscopy.inc's depth-stencil copies, gfx_vk_bcdec.inc's BC decode), compiled by the NDK's glslc into the SPIR-V words gfx_vk.c
 # includes (-mfmt=c writes a C initializer)
 file(GLOB GLSLC ${ANDROID_NDK}/shader-tools/*/glslc ${ANDROID_NDK}/shader-tools/*/glslc.exe)
 if(NOT GLSLC)
@@ -51,7 +51,7 @@ endif()
 list(GET GLSLC 0 GLSLC)
 file(MAKE_DIRECTORY ${GEN}/shaders)
 set(SHADER_INC)
-foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag)
+foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag bc_decode.comp gmem_test.comp upscale_square.comp)
   add_custom_command(OUTPUT ${GEN}/shaders/${s}.inc
     COMMAND ${GLSLC} --target-env=vulkan1.1 -O -mfmt=c ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s} -o ${GEN}/shaders/${s}.inc
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s})
@@ -74,6 +74,7 @@ set(ANDROID_C
   ${CMAKE_CURRENT_SOURCE_DIR}/pac_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/coreaudio_aaudio.c
   ${CMAKE_CURRENT_SOURCE_DIR}/media_android.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/ue_dynres_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/av1_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/haptics_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/apple_stubs.c
@@ -104,7 +105,7 @@ target_compile_options(dmcore PRIVATE
 target_compile_definitions(dmcore PRIVATE DM_ANDROID=1)
 
 # no libvulkan.so: vk_driver.c opens it, or DM_VK_DRIVER's driver in its place
-set(DM_LIBS vpx log android aaudio mediandk m dl)
+set(DM_LIBS vpx log android nativewindow aaudio mediandk m dl)   # nativewindow: AHardwareBuffer (raw global memory's pools without placed maps, gfx_vk_gmem.inc)
 
 set(GLUE ${ANDROID_NDK}/sources/android/native_app_glue)
 add_library(dmhost_app SHARED $<TARGET_OBJECTS:dmcore> ${CMAKE_CURRENT_SOURCE_DIR}/front_android.c ${CMAKE_CURRENT_SOURCE_DIR}/nvn_demo.c ${GLUE}/android_native_app_glue.c)

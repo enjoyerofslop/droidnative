@@ -5,3 +5,6 @@
 boot	-	-	20	30	-	The logos and the title screen idling: no input, a fresh save
 tohold	45:A,49:B,52:A,55:A,58:A,61:A,85:A~1.0,89:PLUS,92:A,195:A,198:A,202:PLUS,205:A	-	210	20	-	A fresh save: New Game (Classic), character creation, the opening cinematic, Magister Siwan's first lines, then Quick Save in the Merryweather's hold, for --keep-save
 hold	45:A,49:B,52:Down,54:A,80:A~1.0,84:LUp~1.5,87:LLeft~1.5,90:LDown~1.5,93:LRight~1.5	saves/hold	96	30	-	The Merryweather's hold from its Quick Save (saves/hold, made by tohold): Continue, the movement tutorial closed (A held), a short walk, then idling
+long	45:A,49:B,52:Down,54:A,80:A~1.0,100:LUp~2*75/20,110:LDown~2*75/20	saves/hold	96	1500	-	The hold from its Quick Save for 25 minutes, walking up and down every 20 s: for slowdowns that build up over time
+walk	45:A,49:B,52:Down,54:A,80:A~1.0,84:LDown~1.0,95:LRight~1.0	saves/hold	92	30	-	The hold from its Quick Save: Continue, the tutorial closed, the left stick down for 1 s at 84 s and right for 1 s at 95 s, then idling (where each walk ends, in the shots at 90 and 105 s, shows whether the game moves by time or by frames)
+cc	45:A,49:B,52:A,55:A,58:A,61:A	-	85	20	-	A fresh save: New Game (Classic) into character creation (its first tutorial box left open), for profiles of the main menu and character creation

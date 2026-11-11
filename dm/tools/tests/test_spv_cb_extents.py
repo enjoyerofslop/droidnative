@@ -154,6 +154,13 @@ class CbExtents(unittest.TestCase):
         self.assertEqual(self.host(data, True), {1: 320, 2: 16})
         self.assertEqual(self.host(data, False)[1], 0)
 
+    def test_a_private_register_starts_from_its_initializer(self):
+        # a Private variable initialized with a constant: the run starts the entry point with that value as a set, as every other state value; it was a bare int, on which
+        # the first instruction that used it (or a join of states) raised, and spv_android.py stopped the build (Frostpunk: 12 of its pixel shaders)
+        head = HEAD.replace('%f0 = OpConstant %f32 0\n', '%f0 = OpConstant %f32 0\n%ppi = OpTypePointer Private %i32\n%priv = OpVariable %ppi Private %c4\n')
+        data = self.asm('%pv = OpLoad %i32 %priv\n%pidx = OpIAdd %i32 %pv %c1\n' + READ.format(n='p', idx='pidx'), head=head)
+        self.assertEqual(self.ext(data)[1], 16 * 6)   # element 4 + 1
+
     def test_do_while_counter_tested_in_the_latch(self):
         data = self.asm(DO_WHILE)
         self.assertEqual(self.ext(data)[1], 16 * 17)   # i = 2, 1: elements 16 and 12

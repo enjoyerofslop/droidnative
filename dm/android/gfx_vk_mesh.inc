@@ -129,13 +129,24 @@ done:
     free(o); free(loc); free(bb); free(sbp); free(der); free(glob); free(pst); free(ppt); free(newp);
     return res;
 }
-static VkShaderModule ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim) {
+// The variant is an lmod made at once (its module, no identifier): its code goes through the rewrites lm_code gives the file's (the pool set, the subgroup
+// rewrites, the set's binding numbers made dense), which the pipeline's other modules and the layout have
+static lmod *ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim) {
     for (int i = 0; i < s->npvar; i++) if (s->pvar[i].miss == miss && s->pvar[i].prim == prim) return s->pvar[i].m;
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
     size_t n = 0, nd = 0, on = 0; uint32_t *w = spv_read(p, &n), *d = w && miss ? spv_drop_inputs(w, n, miss, &nd) : NULL;
     uint32_t *v = w ? spv_perprim(d ? d : w, d ? nd : n, prim, &on) : NULL;
-    VkShaderModule m = v ? sh_module_code(v, on, p) : VK_NULL_HANDLE;
-    { const char *dd = getenv("DM_DUMP_DIR"); if (v && dd) { char q[700]; mkdir(dd, 0777); snprintf(q, sizeof q, "%s/pvar_%s_%x_%x.spv", dd, s->key, miss, prim); FILE *f = fopen(q, "wb"); if (f) { fwrite(v, 4, on, f); fclose(f); } } }   // for spirv-val
+    lmod *m = NULL;
+    if (v) {
+        uint32_t *code = v, *pf = NULL, *fit = NULL; size_t cn = on, pn, fn;
+        if ((pn = spv_pool_fit(code, cn, p, &pf))) { code = pf; cn = pn; }
+        if ((fn = spv_fit(code, cn, p, &fit))) { code = fit; cn = fn; }
+        if (s->bmap) spv_bind_remap(code, cn, s->bmap);
+        { const char *dd = getenv("DM_DUMP_DIR"); if (dd) { char q[700]; mkdir(dd, 0777); snprintf(q, sizeof q, "%s/pvar_%s_%x_%x.spv", dd, s->key, miss, prim); FILE *f = fopen(q, "wb"); if (f) { fwrite(code, 4, cn, f); fclose(f); } } }   // for spirv-val
+        VkShaderModule mod = lm_create(code, cn, p); free(pf); free(fit);
+        size_t pl = strlen(p) + 1;
+        if (mod && (m = calloc(1, sizeof *m + pl))) { memcpy(m->path, p, pl); m->miss = miss; m->bm = s->bmap; atomic_store(&m->m, mod); } else if (mod) vkDestroyShaderModule(g_vk.dev, mod, NULL);
+    }
     LOG("[vk] fragment shader %s: inputs at locations %#x are per-primitive outputs of a mesh shader%s: a SPIR-V 1.4 variant reads them PerPrimitiveEXT%s", s->key, prim,
         miss ? ", and some no stage writes (zero)" : "", m ? "" : " [RED] (variant failed: the pipeline keeps the shader as it is)");
     free(w); free(d); free(v);

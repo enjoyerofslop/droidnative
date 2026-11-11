@@ -201,6 +201,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** it grows in blocks of 1,024 (`nvn_dirty.c`, up to 262,144).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the phone reached 4,006 pools (found while fixing GitHub issue #9: [Deferred-release drain without an autorelease pool](memory.md#deferred-release-drain-without-an-autorelease-pool)).
 
+### A pool registered over memory an earlier pool held counts older stamps as written
+
+- **Symptom:** Android, Skyward Sword HD from a new game on a Retroid Pocket 5: once out in Skyloft, Horwell's wooden crates are one flat grey shape or missing, the area's opening shot has large flat green, grey or magenta shapes, and patches of sky are flat grey, with no red line. After a cold start and Continue the same places draw right. `DM_VK_GEOCACHE=0` (or `DM_VK_SAFE=1`) draws them right too; `DM_VK_ASYNC_PIPE=0` does not.
+- **Cause:** the geometry cache (`gfx_vk_draw.inc` `gc_get`) keeps a range of vertex or index bytes on the GPU while `nvn_dirty_since` says no page of it was written since its stamp. When the game destroys a pool, `nvn_dirty_remove_range` makes its pages writable and retires the range; the game then writes the next area's meshes into that memory with no fault, and registers a new pool over it, which reuses the slot with every page's generation back at 0. A stamp from the old pool's time then saw no newer generation and the old copy was drawn: the opening's geometry under Skyloft's draws. A cold start loads Skyloft into memory no earlier pool held.
+- **Fix:** each range keeps the clock at its registration (`born`, `nvn_dirty.c`), and `nvn_dirty_since_cached` and `nvn_dirty_since_except` count a stamp older than it as written, through a kept handle too. A content check made after the registration is unaffected.
+- **Check:** `make -C dm/gfx/tests GAME=<id> t_dirty_slots`: a pool destroyed, a write with no pool registered, and a new pool over the same memory: the older stamp is dirty through `nvn_dirty_since`, a kept handle and `nvn_dirty_since_except` (all three clean before the fix), and a stamp taken after the new registration is clean. On the Retroid Pocket 5, a new game with this change and default settings drew the crates, the ground and the sky in Skyloft's opening shot right; the geometry cache still served 3.55 million bindings, replay CPU 4.25 ms a frame (6.17 with it off).
+- **Found on:** [The Legend of Zelda: Skyward Sword HD](../../dm/games/01002DA013484000/README.md).
+
 ### Dead texture serials kept in a ghost table
 
 - **Symptom:** the serial table grows by about 10 entries a frame (276,000 after 25,000 frames).
@@ -748,6 +756,13 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): plays as before with the new values (a 6,900-frame run at 60 fps, no red line).
 - **Note:** the switch's own constants move with the SDK (API 231.30 and GPU code minor 17 in 20.5.19; 231.39 and 20 in 21.4.4), and games check them: [Splatoon Raiders](../../dm/games/0400380020056000/README.md) requires minor 39 or more and otherwise creates no graphics system (`main+0x31b86b0`). So the host reads them from the game's own `sdk` (`dm_sdk_nvn2_item`, `loader.c`), and `g_devinfo2` holds the newest seen for what it cannot read.
 
+### Separate sampler bindings per stage
+
+- **Symptom:** a SIGSEGV on the game's `Renderer` thread a few seconds into loading, before the first frame, at `main+0x1aa90ac` (Frostpunk 1.0.1): a virtual call through an object whose first words are floats (±1.0, a quad's vertices), with the slot argument 64.
+- **Cause:** `nvnDeviceGetInteger` answered 4096 for item 0x5F, `SEPARATE_SAMPLER_BINDINGS_PER_STAGE`, a guess from the sampler pool's size; the table measured on a Switch has no 0x5F. Frostpunk's renderer keeps a binding table of 32 slots per stage, takes its slot count as min(0x5E, 0x5F) (`main+0x1aa68d4`, then min(128, 4096) = 128) and clears that many slots each frame (`main+0x762f50`), so it wrote 96 slots past the table and released whatever object pointers lay there.
+- **Fix:** 0x5F answers 32 (`hle_nvn.c` `g_devinfo`): NVN2's own constant for the item is 32, the driver keeps the separate samplers' handles after the 128 separate textures' (c2 0x568 + 8 × slot), and a game written for the Switch that sizes a table of 32 to this minimum can only have seen 32 or less. `t_nvn.c` checks 0x5E and 0x5F.
+- **Found on:** [Frostpunk](../../dm/games/0100B1C0249B4000/README.md) (SDK 20.5.19, 11 bit studios' Liquid engine): Mac and Android.
+
 ### Extensions fetched by name and called unchecked
 
 - **Symptom:** a jump to pc=0 right after the NVN bootstrap loader (`lr=main+0x37fe930`, `[RED] NVN address lookup of an unknown name: nvnSetExternalDebuggerEnabledNVX`).
@@ -803,6 +818,13 @@ Games read this count as a position in their own command memory and size their h
   - `nvnWindowGetCrop`: read back every few frames; before any `SetCrop` it is the whole first window texture.
   - `nvnSamplerBuilderGetLodClamp`.
 - **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the first two), [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2: the two getters).
+
+### An acceleration structure's size query left the game's sums unset
+
+- **Symptom:** a Switch 2 game commits a memory pool of about 4 GB before its first frame, then runs out of memory in its loader a few frames later. The log has the red stub line of `nvnDeviceCalculateAccelerationStructureMemoryRequirements` before the pool.
+- **Cause:** the call writes three sizes through its pointers: the structure's, its build scratch's and its update scratch's. The game sums them into the memory pool it makes for its acceleration structures, and it does not zero them first. The red stub wrote nothing, so the sum was stack garbage: `0xffffffff + 1 + 1`, a 4 GB pool, about half of the Switch 2's application memory.
+- **Fix:** `hle_nvn.c` answers 64 KB for each, with a red line once, since the host builds no acceleration structure and traces no ray. Small sizes in the pool's 4 KB granule keep every later offset the game takes valid.
+- **Found on:** Nintendo Switch 2 Welcome Tour (`040057C02159A000`) in DeathKhan/nx2android on an Ayn Odin 3: its pool from the sum at `main+0xfc2cc` and `main+0x11bf1c`, the query at `main+0x6130cc`. With the fix it boots to its title screen.
 
 ### `nvnDeviceRegisterFastClearDepth` is a hint
 
