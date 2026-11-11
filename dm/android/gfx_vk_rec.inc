@@ -263,7 +263,8 @@ static VkResult rec_vkEndCommandBuffer(VkCommandBuffer cb) {   // the command bu
 }
 
 // A descriptor set's writes are made by the recorder as well: vkUpdateDescriptorSets was the replay thread's largest call into the driver once its copies were gone (Mario
-// Kart World's race on a OnePlus Pad 3 with raw global memory: 10.4 of the replay's 40 ms a frame, about 4,000 sets). The writes go into the ring packed (rec_desc.h), ahead of
+// Kart World's race: 10.4 of the replay's 40 ms a frame on a OnePlus Pad 3 with raw global memory; 5.3 ms on a Galaxy S25 Edge with the recorder on, about 5,000 sets, 0.6
+// packed and queued). The writes go into the ring packed (rec_desc.h), ahead of
 // the set's bind, so the recorder writes a set before it binds it, as the replay did; every other write of the replay (transform feedback's bindings, the texture pool's
 // set, the copies' and decodes' sets) takes the same road, so two writes of one set keep their order and never meet on two threads.
 //   - A set's pool is reset or the set handed out again only once its chunk completed (ds_chunk_done), after the recorder submitted it, so after every write queued for it.
