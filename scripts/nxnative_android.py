@@ -6,7 +6,7 @@
 #   Library      your games (the NSP folders you added): the picked one large, Play (on the phone picked at the top), its options and Manage; the collection below
 #   Builds       the running build: its stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console
 #                shows here too, from the journal the script writes (<data>/builds/*.jsonl)
-#   Phones       adb devices over USB and Wi-Fi (pair, connect, discover), the app and the games on each, saves backed up to the computer
+#   Phones       adb devices over USB and Wi-Fi (pair, connect, discover) with each one's GPU, the app and the games on each, saves backed up to the computer
 #   Performance  the game's log (adb logcat) with the frame time, GPU and CPU figures it prints, a frame's GPU passes
 #   Settings     your keys, and what the build needs on this computer with how to get what is missing; on Windows, Install what's missing (--setup)
 # /// script
@@ -41,6 +41,7 @@ import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]  (plain words for what went wrong, and the report for #help)
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]  (how to connect a phone, by brand; its battery and free space)
 import update as upd   # noqa: E402  # pyright: ignore[reportMissingImports]  (the newest release, and its Setup downloaded and checked)
+import phone_gpu as gpu   # noqa: E402  # pyright: ignore[reportMissingImports]  (a phone's GPU from its properties and SurfaceFlinger's GLES line)
 
 LANGUAGES = [('en-US', 'American English'), ('en-GB', 'British English'), ('ja', 'Japanese'), ('fr', 'French'), ('de', 'German'), ('es-419', 'Latin American Spanish'),
              ('es', 'Spanish'), ('it', 'Italian'), ('nl', 'Dutch'), ('fr-CA', 'Canadian French'), ('pt', 'Portuguese'), ('ru', 'Russian'), ('ko', 'Korean'),
@@ -773,18 +774,18 @@ class BuildsPage(QWidget):
                 'game_version': (g.display or g.newest) if g else '', 'phone': d.get('model') or ('a phone' if serial else ''), 'android': d.get('android', '')}, serial
     def copy_report(self):   # Markdown for #help, under Discord's 2,000 characters: the phone's GPU asked for first (adb, a second or two)
         info, serial = self.report_info(); reds, lines = list(self.reds), self.log.toPlainText().splitlines()
-        def gpu():
-            if not serial or self.gpus.get(serial): return self.gpus.get(serial, '')
-            ok, out = adb_run(serial, 'shell', 'dumpsys SurfaceFlinger | grep -m1 GLES:', timeout=6)
-            m = re.search(r'GLES:\s*[^,]*,\s*([^,]+)', out) if ok else None   # "GLES: Qualcomm, Adreno (TM) 830, OpenGL ES 3.2 …"
-            return m[1].strip() if m else ''
+        known = self.win.gles.get(serial, '') if serial else ''   # the Phones page asked already, most often
+        def ask():
+            if not serial or known or self.gpus.get(serial): return known or self.gpus.get(serial, '')
+            ok, out = adb_run(serial, 'shell', gpu.GLES_CMD, timeout=6)
+            return gpu.gles_renderer(out) if ok else ''
         def got(gp):
             info['gpu'] = self.gpus[serial] = '' if isinstance(gp, Exception) else gp
             QApplication.clipboard().setText(ex.markdown_report(info, reds, lines, str(Path.home())))
             self.win.toast('The report is copied: paste it in #help on the DroidPlay Discord')
-        bg(gpu, got)
+        bg(ask, got)
     def save_report(self):   # the whole log and where its journal is, redacted the same way
-        info, serial = self.report_info(); info['gpu'] = self.gpus.get(serial, '')   # as Copy report asked the phone, if it did
+        info, serial = self.report_info(); info['gpu'] = self.gpus.get(serial) or self.win.gles.get(serial, '')   # as Copy report or the Phones page asked the phone, if one did
         f, _ = QFileDialog.getSaveFileName(self, 'Save the full report', str(Path.home() / 'Documents' / f'DroidPlay report {time.strftime("%Y-%m-%d %H%M")}.txt'), 'Text (*.txt)')
         if not f: return
         try: Path(f).write_text(ex.full_report(info, self.log.toPlainText(), self.journal_path() or '', str(Path.home())), encoding='utf-8')
@@ -898,9 +899,9 @@ class PhonesPage(QWidget):
         lay.addWidget(label('Phones', 'h1'))
         lay.addWidget(label('Over Wi-Fi: on the phone, Developer options → Wireless debugging. "Pair device with pairing code" gives an address and a code for Pair; '
                             'the address on the Wireless debugging screen itself is the one to Connect to (its port changes when wireless debugging restarts).', 'muted', wrap=True))
-        self.table = QTableWidget(0, 7); self.table.setHorizontalHeaderLabels(['Device', 'Model', 'Android', 'Battery', 'Free', 'Connection', 'State'])
-        hh = self.table.horizontalHeader(); hh.setSectionResizeMode(QHeaderView.Stretch); hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        for i in (3, 4): hh.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        self.table = QTableWidget(0, 8); self.table.setHorizontalHeaderLabels(['Device', 'Model', 'GPU', 'Android', 'Battery', 'Free', 'Connection', 'State'])
+        hh = self.table.horizontalHeader(); hh.setSectionResizeMode(QHeaderView.Stretch)
+        for i in (2, 3, 4, 5): hh.setSectionResizeMode(i, QHeaderView.ResizeToContents)
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.table.verticalHeader().hide(); self.table.setShowGrid(False); self.table.setItemDelegate(KeepColour(self.table))
         self.table.setSelectionBehavior(QTableWidget.SelectRows); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.itemSelectionChanged.connect(self.selected)
@@ -926,10 +927,13 @@ class PhonesPage(QWidget):
             how = 'Wi-Fi' if ':' in d['serial'] or '._adb-tls' in d['serial'] else 'USB'
             bat = f'{d["battery"]}%' + (' charging' if d.get('charging') and d['battery'] < 100 else '') if d.get('battery') is not None else ''
             free = pg.size_text(d['free']) if d.get('free') is not None else ''
-            for j, v in enumerate((d.get('name') or d['serial'], d.get('model', ''), d.get('android', ''), bat, free, f'{how} · {d["serial"]}', STATES.get(d['state'], d['state']))):
+            g = d.get('gpu') or {}
+            for j, v in enumerate((d.get('name') or d['serial'], d.get('model', ''), g.get('label', ''), d.get('android', ''), bat, free, f'{how} · {d["serial"]}',
+                                   STATES.get(d['state'], d['state']))):
                 it = QTableWidgetItem(v); it.setData(Qt.UserRole, d['serial'])
-                if j == 6: it.setForeground(QColor(READY if d['state'] == 'device' else ERR))
-                if j == 3 and pg.battery_warning(d): it.setForeground(QColor(BUILD))
+                if j == 2 and d.get('gles'): it.setToolTip(d['gles'])   # the renderer as the phone names it ("Adreno (TM) 830")
+                if j == 7: it.setForeground(QColor(READY if d['state'] == 'device' else ERR))
+                if j == 4 and pg.battery_warning(d): it.setForeground(QColor(BUILD))
                 self.table.setItem(i, j, it)
         self.note.setText('' if devs else NO_PHONE if adb else NO_ADB); self.note.setVisible(not devs)
         low = next((pg.battery_warning(d) for d in devs if d['serial'] == self.win.serial()), '')
@@ -1345,6 +1349,8 @@ class Window(QMainWindow):
         super().__init__(); self.setWindowTitle('DroidPlay'); self.setWindowIcon(app_icon()); self.setMinimumSize(1000, 620)
         a = QApplication.primaryScreen().availableGeometry(); self.resize(min(1440, a.width() - 40), min(900, a.height() - 40))
         self.st = QSettings('nxnative', 'android'); self.devs = None; self.adb = True; self.phone_games = {}; self.phone_legacy = False; self.models = {}   # the old name: the settings stay
+        # each phone's GLES renderer, asked once (about a second) and kept: the Phones page's GPU column, Copy report, which Vulkan drivers fit (phone_gpu.py)
+        self.gles = {k[4:]: str(self.st.value(k) or '') for k in self.st.allKeys() if k.startswith('gpu/')}; self.gles_tried = set()
         central = QWidget(); central.setObjectName('page'); root = QVBoxLayout(central); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0); self.setCentralWidget(central)
         # the top bar: the wordmark, the pages, the phone, search, + Build game
         top = QWidget(); top.setObjectName('topbar'); top.setAttribute(Qt.WA_StyledBackground, True); tl = QHBoxLayout(top); tl.setContentsMargins(28, 14, 28, 14); tl.setSpacing(6)
@@ -1522,6 +1528,7 @@ class Window(QMainWindow):
             self.library.refresh_status(); self.phones.show_phone(pkg, games, legacy)
         bg(look, got)
     def refresh_devices(self):
+        known, tried = dict(self.gles), set(self.gles_tried)   # read on this thread: look() runs on another
         def look():
             if not shutil.which('adb'): return None   # Install what's missing brings it, with the Android SDK
             ok, out = adb_run(None, 'devices', '-l', timeout=10)
@@ -1533,17 +1540,26 @@ class Window(QMainWindow):
                 if d['state'] == 'device':   # in one call: Android's version, the model's market name where the maker sets one (devices -l has its code: OPD2415 for a OnePlus Pad 3), the phone's own name
                     # and the model as the phone spells it: devices -l turns what isn't a letter or a digit into _, so a Galaxy's SM-S937U1 came out as SM S937U1
                     # its maker (the phone guide's brand), and its battery and free space (a PC's USB port charges slowly; an install needs room)
+                    # and the GPU's: Vulkan's hardware module, the SoC and the API level (phone_gpu.PROPS)
                     got_p, p = adb_run(d['serial'], 'shell', 'getprop ro.build.version.release; getprop ro.product.marketname; getprop ro.vendor.oplus.market.name; '
-                                       'getprop ro.product.model; settings get global device_name; getprop ro.product.manufacturer; '
+                                       'getprop ro.product.model; settings get global device_name; getprop ro.product.manufacturer; ' + gpu.PROPS + '; '
                                        'dumpsys battery | grep -E "powered:|level:|status:"; df -k /sdcard | tail -n 1', timeout=8)
-                    v = [x.strip() for x in p.splitlines()] + [''] * 6 if got_p else [''] * 6
+                    v = [x.strip() for x in p.splitlines()] + [''] * 9 if got_p else [''] * 9
                     d['android'], d['model'] = v[0], v[1] or v[2] or v[3] or d['model']
                     d['name'] = v[4] if v[4] not in ('', 'null') else d['model']
-                    d['manufacturer'] = v[5]; d.update(pg.parse_status(p) if got_p else {})
+                    d['manufacturer'] = v[5]; d['vulkan'], d['soc'], d['sdk'] = v[6], v[7], v[8]; d.update(pg.parse_status(p) if got_p else {})
+                    if d['serial'] in known: d['gles'] = known[d['serial']]
+                    elif d['serial'] not in tried:   # once a run: a phone that gives no GLES line isn't asked every refresh
+                        ok_g, g = adb_run(d['serial'], 'shell', gpu.GLES_CMD, timeout=6); d['gles'] = gpu.gles_renderer(g) if ok_g else ''; d['gles_new'] = '1'
+                    d['gpu'] = gpu.classify(d.get('gles', ''), d['vulkan'], d['soc'])
                 devs.append(d)
             return devs if ok else out
         def got(r):
             if isinstance(r, Exception): return
+            for d in r if isinstance(r, list) else []:
+                if d.pop('gles_new', ''):
+                    self.gles_tried.add(d['serial'])
+                    if d.get('gles'): self.gles[d['serial']] = d['gles']; self.st.setValue(f'gpu/{d["serial"]}', d['gles'])
             adb = r is not None
             if isinstance(r, str):   # adb didn't answer: the list stays as it was, or says no phone is connected when it was never filled
                 if self.devs is not None: return
