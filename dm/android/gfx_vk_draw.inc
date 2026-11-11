@@ -65,7 +65,9 @@ static VkPipelineCache pcache(void) {
     if (g_pc_tried) return g_pc;
     g_pc_tried = 1;
     const char *env = getenv("DM_PIPELINE_CACHE"), *drv = vk_driver_name(), *path = NULL; void *data = NULL; long n = 0;
-    if (env && drv) snprintf(g_pc_path, sizeof g_pc_path, "%s.%s", env, drv); else if (env) snprintf(g_pc_path, sizeof g_pc_path, "%s", env);
+    // compiled with FPCR 0 (vk_fp_host): a cache file of its own, so the pipelines compiled under the game's flush-to-zero are not taken from the old one
+    const char *fz = vk_fp_host() ? ".fp0" : "";
+    if (env && drv) snprintf(g_pc_path, sizeof g_pc_path, "%s%s.%s", env, fz, drv); else if (env) snprintf(g_pc_path, sizeof g_pc_path, "%s%s", env, fz);
     if (env) path = g_pc_path;
     FILE *f = path ? fopen(path, "rb") : NULL;
     if (f) { fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET); data = malloc((size_t)n); if (!data || fread(data, 1, (size_t)n, f) != (size_t)n) n = 0; fclose(f); }
