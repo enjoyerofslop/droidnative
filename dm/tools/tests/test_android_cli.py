@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -73,6 +74,17 @@ class Json(unittest.TestCase):
         self.assertGreater(len(rows), 10)
         self.assertEqual([r[0] for r in rows if len(r) != 3], [])
         self.assertEqual([r[0] for r in rows if not r[2].lstrip('*').startswith(tiers)], [])
+
+    def test_playable_now_names_the_playable_rows(self):   # the README's "Playable now" lines above Game Status repeat the table for players, so a row that moves tier moves there too
+        readme = (REPO / 'README.md').read_text(encoding='utf-8')
+        table = readme.split('| Game | Device | State |\n|---|---|---|\n', 1)[1].split('\n\n', 1)[0]
+        rows = [[c.strip() for c in line[1:-1].split('|')] for line in table.splitlines()]
+        name = lambda game: re.sub(r' \(Switch 2\)$', '', game.strip('*')).rsplit(' ', 1)[0]   # the game without its version: "Persona 3 Portable 1.0.2"
+        for tier in ('Playable – minor issues', 'Playable – major issues'):
+            line = re.search(rf'^- \*\*{tier}:\*\* (.+)$', readme, re.M)
+            assert line, f'README.md: no "- **{tier}:**" line under Playable now'
+            want = sorted(name(r[0]) for r in rows if r[2].lstrip('*').startswith(tier))
+            self.assertEqual(sorted(name(r[0]) for r in rows if name(r[0]) in line.group(1)), want, f'README.md: the "{tier}" line under Playable now')
 
 
 class Windows(unittest.TestCase):
