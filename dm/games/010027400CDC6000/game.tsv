@@ -36,6 +36,12 @@ sys_resource	0x400000
 # sat in its LoadSession state while the client waited in StartServer, at the loading screen. A Switch with no network still has loopback, so the game gets it (hle_loopback.c)
 net_loopback	on
 
+# ---- Graphics ----
+# Shadow maps, for DM_VK_SKIP_SHADOWS=1 on Android (a player's choice, off by default: gfx_vk_shadow.inc). The game's sun casts into a 1536x1536 D16 map on the title screen,
+# the menus and in character creation (pass profiles on a OnePlus Pad 3, 2026-11-10), with no other square depth-only pass there; a tester's patch that left out square depth
+# passes of 512 or more ran Fort Joy faster and cooler on an Adreno 735 (issue #113). Fort Joy's maps are not measured: the log's "shadow map … set as the target" lines name them
+vk_shadow_rt	square512
+
 # ---- Shader split ----
 shader_groups	/Data/=data
 shader_note	Divinity Original Sin 2 shaders

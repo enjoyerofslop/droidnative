@@ -28,7 +28,7 @@
 #      A one-game install of the same game (files/game, the layout before the launcher) is moved there instead of copied again, and its save is copied by the app
 # The picture comes from the Vulkan replay of NVN (dm/android/gfx_vk.c).
 # Needs: Python with lz4, capstone, fonttools and backports.zstd (not on Python 3.14), the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
-import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, time
+import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, re, shutil, struct, subprocess, sys, tarfile, tempfile, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -56,19 +56,24 @@ BUILD_TOOLS, PLATFORM = '36.0.0', 'android-35'   # build_apk.py's defaults
 # libadrenotools and its hooks (dm/android/CMakeLists.txt), in every APK: DM_VK_DRIVER opens a Vulkan driver of the player's through them (dm/android/vk_driver.c), so trying
 # one needs no other build. Built beside the loader, and kept with it in the library
 VK_DRIVER_LIBS = ('libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so')
-# Games played on an Android device: the rows of the README's Game Status with a profile, kept in step with it. The desktop app shows the others as not played
-# there yet. It held only Super Mario Bros. Wonder, so the app called every other game in that table untested, Brilliant Diamond at 60 fps on an Odin 2 among
-# them. Mario Kart World is left out: it boots and draws, but doesn't play yet
+# Games played on an Android device: the rows of the README's Game Status whose tier is Playable – minor issues, Playable – major issues or In-game from a run
+# on current code, with a profile, kept in step with that table. The desktop app shows the others as not played there yet. Left out: In-game, blocked (Frostpunk,
+# Ocarina of Time) and Menus (Mario Kart World), and the rows from before the nxnative merge (†: Super Mario Bros. Wonder, Super Mario 3D World + Bowser's Fury),
+# which current code hasn't run
 ANDROID_TESTED = {
-    '0100000011D90000',   # Pokémon Brilliant Diamond
+    '01008DB008C2C000',   # Pokémon Shield (Playable – minor issues through Route 2 into Professor Magnolia's house)
+    '010027400CDC6000',   # Divinity: Original Sin 2 - Definitive Edition (Playable – major issues through the first combat)
+    '010003F003A34000',   # Pokémon: Let's Go, Pikachu! (Playable – minor issues through the rival's first battle)
+    '0100000011D90000',   # Pokémon Brilliant Diamond (Playable – minor issues through Lake Verity's first battle)
+    '0100DCD01525A000',   # Persona 3 Portable (Playable – minor issues through the first battle)
     '01006F8002326000',   # Animal Crossing: New Horizons
     '0100000000010000',   # Super Mario Odyssey
     '01006A800016E000',   # Super Smash Bros. Ultimate
     '01006BB00C6F0000',   # The Legend of Zelda: Link's Awakening
     '01002DA013484000',   # The Legend of Zelda: Skyward Sword HD
-    '01007EF00011E000',   # The Legend of Zelda: Breath of the Wild
-    '010015100B514000',   # Super Mario Bros. Wonder
-    '010028600EBDA000',   # Super Mario 3D World + Bowser's Fury
+    '01007EF00011E000',   # The Legend of Zelda: Breath of the Wild (Playable – major issues through the Shrine of Resurrection onto the Great Plateau)
+    '0100606026F12000',   # Final Fantasy Resonance
+    '010069C01AB82000',   # SHIN MEGAMI TENSEI V: Vengeance (a contributor's report)
 }
 
 
@@ -226,22 +231,36 @@ def standard_font(font):   # <font>/standard.ttf: a hinted TrueType font; withou
     if not dst.is_file() or dst.stat().st_size != Path(src).stat().st_size: shutil.copyfile(src, dst)
 
 
-def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=()):
+def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None):
     """The game's NVN shaders for the Vulkan replay: the split (build_ipa_from_nsp.py split_shaders, checked against the profile's tables), then
-    dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. None when there are none"""
-    if not sv: return None
+    dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. Returns that folder (None when there are none) and the profile.
+    A registered profile's tables may differ from the split in two ways the iPhone build accepts as well: installed DLC's own shaders, and compute kernels a newer reader decodes
+    from the registered build (compute_reader_additions). derive(reason) then makes the shader-only derived profile that the translation and the rest of the build use. Any other
+    failure of a registered profile's split stops the build: packed without shaders, AI: The Somnium Files played its sound over a black screen (droidplay-core#218)"""
+    if not sv: return None, g
     sh = work / 'shader'
-    own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
-    try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, dlc_roms=dlc_roms)   # its own stage (a DLC's shaders too)
-    except BuildError as e: bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None
+    own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional or derived profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
+    got = {}
+    def promote(reason):   # the split calls it only after its strict DLC-only or additive-compute comparison passed, and only when derive was given
+        assert derive is not None
+        got['g'] = derive(reason); return got['g']
+    dd = (lambda: promote('the installed DLC shader content differs from the registered tables')) if derive and not own else None
+    dc = (lambda: promote('the reader decoded additional compute kernels from this registered build')) if derive and not own else None
+    try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own,   # its own stage (a DLC's shaders too)
+                          dlc_roms=dlc_roms, derive_dlc=dd, derive_compute=dc)
+    except BuildError as e:
+        if not own: raise BuildError(f'{e}\nThe game is not packed: without its shaders it would play its sound over a black screen. Check that the folder holds the versions game profile '
+                                     f'{g.id} registers (its game.tsv); if it does, report this build with {logs / "shader_split.log"}') from e
+        bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None, g   # a provisional profile: shaders compiled at run time, captured later
+    g = got.get('g', g)
     bi.PROG.stage('shaders for Vulkan', step='translating')
     out = work / 'spv'
     try: bi.run([sys.executable, REPO / 'dm/android/tools/spv_build.py', sh / 'pkg', out, '--xlate', REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.dll',
                  '--facts', g.table('shader_facts.tsv')], logs / 'spv_build.log', env=env)
-    except BuildError as e: bi.PROG.end(str(e), ok=False); say(f'[RED] shader translation failed (see {logs / "spv_build.log"}): the game is packed with the shaders translated so far'); return out if out.is_dir() else None
+    except BuildError as e: bi.PROG.end(str(e), ok=False); say(f'[RED] shader translation failed (see {logs / "spv_build.log"}): the game is packed with the shaders translated so far'); return (out if out.is_dir() else None), g
     last = [l for l in (logs / 'spv_build.log').read_text(errors='replace').splitlines() if l.startswith('spv_build:')]
     bi.PROG.end(last[-1][11:] if last else str(out))
-    return out
+    return out, g
 
 
 def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game):
@@ -333,8 +352,88 @@ def stage_link(dst, src):   # a symbolic link, else the files cloned (clone): Wi
 # which the player puts anywhere on the device and picks once in the app. --xapk packs one .xapk instead (an XAPK installer's format: the APK, the RomFS as the app's OBB
 # file Android/obb/<package>/main.1.<package>.obb, icon.jpg and manifest.json), for any size; the two kinds sit side by side, each replacing only its own files. Nothing
 # goes into the library of hosts: the nxnative app stays as it was.
+# The DLC images (aoc/<index>.img) go into the APK while it can hold them; when it can't (Mario Kart 8 Deluxe's Booster Course Pass and its shaders pass 2 GiB with no
+# RomFS at all: droidplay-core issue #169), they follow the RomFS in the same data file, the .romfs beside the APK or the XAPK's OBB, so a player still picks one file and
+# an XAPK still has one expansion. GameStart copies them out of it into games/<title ID>/aoc/ once, where front_android.c points DM_AOC_DIR, so the host reads them as a
+# launcher install's (it mounts DLC by path; only the RomFS goes to it as a descriptor). The RomFS leaves the APK first: the DLC goes beside only with it.
+# The data file: the RomFS image from byte 0 (the host reads it as DM_ROMFS=fd:<descriptor>:0:<romfs_bytes>), then, at dlc_at (the RomFS's end rounded up to DLC_ALIGN),
+# the DLC pack: DLC_MAGIC, the image count and a zero (little-endian 32-bit), a record per image (32-bit index, 32-bit zero, 64-bit offset from dlc_at, 64-bit size), and
+# the images, each at a DLC_ALIGN offset. game.json gives romfs_bytes, data_bytes (the file's whole size) and dlc_at (none: no DLC in it), which GameStart checks.
 # → the files made, the APK (or XAPK) first
-GAME_APP_LIMIT = (2 << 30) - (64 << 20)   # the APK's size with the RomFS inside it, kept clear of 2 GiB for the ZIP's own records
+GAME_APP_LIMIT = (2 << 30) - (64 << 20)   # an APK's size, kept clear of 2 GiB for the ZIP's own records
+# A ZIP without ZIP64 also holds at most 65,535 entries, and a game's translated shaders are files of their own (Mario Kart 8 Deluxe's with its DLC passed that at 492 MB:
+# droidplay-core issue #169). So a game app carries them as one entry, SPV_ZIP: a stored ZIP of the spv folder (ZIP64 allowed inside it: apksigner never reads it), which
+# GameStart unpacks into games/<title ID>/spv/ at the first start with the rest, where the host reads them by path as from a launcher install. The other files are counted
+# against GAME_APP_ENTRIES, which leaves room for the APK's own entries (classes.dex, the libraries, resources, the signature)
+GAME_APP_ENTRIES = 65535 - 1024
+SPV_ZIP = 'spv.zip'
+DLC_MAGIC, DLC_ALIGN = b'DMAOCPK1', 4096
+
+
+def game_app_limit():   # NXNATIVE_GAME_APP_LIMIT=<bytes>: a smaller limit, so that a smaller game takes a big one's layout (a device check of the DLC beside the APK)
+    v = os.environ.get('NXNATIVE_GAME_APP_LIMIT', '').strip()
+    return int(v) if v.isdigit() else GAME_APP_LIMIT
+
+
+def gib(n): return f'{n / (1 << 30):.2f} GiB'
+
+
+# Where a game app's RomFS and DLC go: → (RomFS in the APK, DLC in the APK). parts: the files the APK must carry, by name (code, shaders, font, the rest), with their
+# sizes; files: how many entries each makes, dlc_files the DLC's. The RomFS leaves the APK first, then the DLC with it; what the APK must carry and can't, in bytes or in
+# entries, is a BuildError naming each part
+def game_app_plan(parts, dlc, rom, xapk, limit=GAME_APP_LIMIT, files=None, dlc_files=0, entries=GAME_APP_ENTRIES):
+    core = sum(parts.values()); n = sum((files or {}).values())
+    if n >= entries:
+        raise BuildError(f'a game app can\'t hold this game: the APK would carry {n:,} files ({", ".join(f"{k} {v:,}" for k, v in (files or {}).items())}), and an APK '
+                         f'without ZIP64, which apksigner needs, holds at most 65,535 entries ({entries:,} of them for the game). '
+                         'Install it through DroidPlay\'s library instead (without --game-apk), which has no such limit')
+    if core >= limit:
+        raise BuildError(f'a game app can\'t hold this game: the files the APK must carry are {gib(core)} ({", ".join(f"{k} {gib(v)}" for k, v in parts.items())}), and an APK '
+                         f'holds {gib(limit)} (2 GiB less room for its records); the RomFS ({gib(rom)}) and the DLC ({gib(dlc)}) could go beside it, these can\'t. '
+                         'Install it through DroidPlay\'s library instead (without --game-apk), which has no such limit')
+    dlc_fits = core + dlc < limit and n + dlc_files < entries
+    if not xapk and dlc_fits and core + dlc + rom < limit: return True, True
+    return False, dlc_fits
+
+
+def pack_spv(spv, dst):   # the spv folder → one stored ZIP (SPV_ZIP), its files named as in the folder; → how many
+    import zipfile
+    n = 0
+    with zipfile.ZipFile(dst, 'w', zipfile.ZIP_STORED, allowZip64=True) as z:   # stored: the APK deflates its entries itself
+        for r, ds, fs in os.walk(spv, followlinks=True):
+            ds.sort()
+            for f in sorted(fs): p = Path(r, f); z.write(p, p.relative_to(spv).as_posix()); n += 1
+    return n
+
+
+def dlc_images(aoc):   # → [(index, path)] of aoc/<index>.img, by index; a DLC kept as a folder (an older extraction) can't go into the pack
+    out = []
+    for p in sorted(Path(aoc).iterdir()) if aoc and Path(aoc).is_dir() else []:
+        m = re.fullmatch(r'([1-9][0-9]*)(\.img)?', p.name)
+        if not m: continue
+        if not m.group(2) or not p.is_file(): raise BuildError(f'the DLC {p} is a folder, and a game app carries its DLC beside the APK as images: extract the game again')
+        out.append((int(m.group(1)), p))
+    return sorted(out)
+
+
+def dlc_pack(images):   # → the pack's header and its records [(index, offset from the pack's start, size)], and its length
+    head = len(DLC_MAGIC) + 8 + 24 * len(images); off = -(-head // DLC_ALIGN) * DLC_ALIGN; recs = []
+    for i, p in images:
+        size = Path(p).stat().st_size; recs.append((i, off, size)); off = -(-(off + size) // DLC_ALIGN) * DLC_ALIGN
+    end = recs[-1][1] + recs[-1][2] if recs else head
+    return DLC_MAGIC + struct.pack('<II', len(recs), 0) + b''.join(struct.pack('<IIQQ', i, 0, o, n) for i, o, n in recs), recs, end
+
+
+def write_data(dst, rom, images):   # the data file beside a game app: the RomFS (an APFS clone where the volume makes one, never a hard link: the DLC is appended), then the DLC pack
+    rom_bytes = Path(rom).stat().st_size; at = -(-rom_bytes // DLC_ALIGN) * DLC_ALIGN
+    head, recs, _ = dlc_pack(images); Path(dst).unlink(missing_ok=True)
+    if not (sys.platform == 'darwin' and subprocess.run(['cp', '-c', str(rom), str(dst)], capture_output=True).returncode == 0): shutil.copyfile(rom, dst)
+    with open(dst, 'r+b') as f:
+        f.truncate(at); f.seek(at); f.write(head)
+        for (i, p), (_, off, size) in zip(images, recs):
+            f.seek(at + off)
+            with open(p, 'rb') as src: shutil.copyfileobj(src, f, 16 << 20)
+    return at
 
 
 # The game's defaults.txt: the language, then the profile's Android switches (dm/games/<id>/android_defaults.txt: KEY=VALUE per line, # comments), for a game that needs
@@ -353,17 +452,28 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
     rom = bi.rfs.source(game)
     if not bi.rfs.is_image(rom): raise BuildError(f'a game app reads the RomFS as one image ({game}/RomFS.img), and this extraction has a RomFS folder: extract the game again')
     stage = work / 'game_app'; shutil.rmtree(stage, ignore_errors=True); stage.mkdir(parents=True)
-    for name, src in (('code', patched), ('spv', spv), ('font', font), ('aoc', aoc)):
+    def walk(p): return [(Path(r, f), Path(r, f).stat().st_size) for r, _, fs in os.walk(p, followlinks=True) for f in fs] if p and Path(p).is_dir() else []
+    for name, src in (('code', patched), ('font', font)):
         if src and Path(src).is_dir(): stage_link(stage / name, Path(src).resolve())
+    if spv and Path(spv).is_dir(): bi.PROG.set(step='packing the shaders into one file'); pack_spv(spv, stage / SPV_ZIP)
     for f in ('icon.jpg', 'control.nacp'):
         if (game / f).is_file(): stage_link(stage / f, (game / f).resolve())
     (stage / 'defaults.txt').write_text(defaults, encoding='utf-8', newline='\n')   # \n on Windows too, as the phone's files are
-    (stage / 'game.json').write_text(json.dumps({**meta, 'package': pkg}, indent=1), encoding='utf-8', newline='\n')
+    staged = [(f.relative_to(stage).as_posix(), n) for f, n in walk(stage)]
+    parts = {'code': 0, 'shaders': 0, 'font': 0, 'the rest': 4096 + sum(len(f) + 1 for f, _ in staged)}   # the rest: icon, control data, defaults; game.json and files.txt
+    files = {'code': 0, 'shaders': 0, 'font': 0, 'the rest': 2}
+    for f, n in staged:
+        k = {'code': 'code', SPV_ZIP: 'shaders', 'font': 'font'}.get(f.split('/')[0], 'the rest'); parts[k] += n; files[k] += 1
+    rom_bytes = Path(str(rom)).stat().st_size; dlc_walk = walk(aoc); dlc = sum(n for _, n in dlc_walk)
+    inside, dlc_inside = game_app_plan(parts, dlc, rom_bytes, xapk, game_app_limit(), files, len(dlc_walk))
+    if dlc_inside and dlc: stage_link(stage / 'aoc', Path(aoc).resolve())
+    out_images = dlc_images(aoc) if dlc and not dlc_inside else []
+    dlc_at = -(-rom_bytes // DLC_ALIGN) * DLC_ALIGN if out_images else 0
+    data_bytes = (dlc_at + dlc_pack(out_images)[2]) if out_images else rom_bytes
+    info = {**meta, 'package': pkg, 'data_bytes': data_bytes, **({'dlc_at': dlc_at} if dlc_at else {})}
+    (stage / 'game.json').write_text(json.dumps(info, indent=1), encoding='utf-8', newline='\n')
     files = sorted(Path(r, f).relative_to(stage).as_posix() for r, _, fs in os.walk(stage, followlinks=True) for f in fs)
     (stage / 'files.txt').write_text(''.join(f + '\n' for f in files + ['files.txt']), encoding='utf-8', newline='\n')
-    rom_bytes = Path(str(rom)).stat().st_size
-    others = sum(Path(stage, f).stat().st_size for f in files)
-    inside = not xapk and others + rom_bytes < GAME_APP_LIMIT
     out_dir.mkdir(parents=True, exist_ok=True)
     base = safe_name(meta.get('name') or g.id) or g.id
     apk = (work / f'{pkg}.apk') if xapk else out_dir / f'{base}.apk'
@@ -377,7 +487,7 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
         out = out_dir / f'{base}.xapk'; obb = f'Android/obb/{pkg}/main.1.{pkg}.obb'
         manifest = {'xapk_version': 2, 'package_name': pkg, 'name': meta.get('name') or g.id, 'locales_name': {}, 'version_code': '1', 'version_name': '0.1',
                     'min_sdk_version': '29', 'target_sdk_version': '34', 'permissions': ['android.permission.VIBRATE'],
-                    'total_size': apk.stat().st_size + rom_bytes, 'expansions': [{'file': obb, 'install_location': 'EXTERNAL_STORAGE', 'install_path': obb}]}
+                    'total_size': apk.stat().st_size + data_bytes, 'expansions': [{'file': obb, 'install_location': 'EXTERNAL_STORAGE', 'install_path': obb}]}
         if icon.is_file(): manifest['icon'] = 'icon.jpg'
         tmp = out.with_suffix('.xapk.part')
         import zipfile
@@ -385,15 +495,27 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
             z.writestr('manifest.json', json.dumps(manifest, indent=1, ensure_ascii=False))
             if icon.is_file(): z.write(icon, 'icon.jpg')
             z.write(apk, f'{pkg}.apk')
-            with open(str(rom), 'rb') as src, z.open(zipfile.ZipInfo(obb, datetime.datetime.now().timetuple()[:6]), 'w', force_zip64=True) as dst:
+            with z.open(zipfile.ZipInfo(obb, datetime.datetime.now().timetuple()[:6]), 'w', force_zip64=True) as dst:   # the OBB: the RomFS, then the DLC pack when the APK can't hold it
                 done = 0
-                while chunk := src.read(16 << 20):
-                    dst.write(chunk); done += len(chunk); bi.PROG.set(step='packing the XAPK', done=done, total=rom_bytes, unit='B')
+                def put(path):
+                    nonlocal done
+                    with open(str(path), 'rb') as src:
+                        while chunk := src.read(16 << 20):
+                            dst.write(chunk); done += len(chunk); bi.PROG.set(step='packing the XAPK', done=done, total=data_bytes, unit='B')
+                put(rom)
+                if out_images:
+                    head, recs, _ = dlc_pack(out_images)
+                    dst.write(b'\0' * (dlc_at - rom_bytes)); dst.write(head); pos = len(head)
+                    for (_, p), (_, off, n) in zip(out_images, recs): dst.write(b'\0' * (off - pos)); put(p); pos = off + n
         tmp.replace(out); apk.unlink(missing_ok=True); made = [out]
-    else:   # an APK and the RomFS beside it, or an APK with it inside, whichever the game's size gave: a .romfs left from the other way goes
+    else:   # an APK and the data file beside it, or an APK with the RomFS inside, whichever the game's size gave: a .romfs left from the other way goes
         made = [apk]; romfs = out_dir / f'{base}.romfs'
         if inside: romfs.unlink(missing_ok=True)
-        else: clone(str(rom), romfs); made.append(romfs)
+        else:
+            if out_images: write_data(romfs, rom, out_images)
+            else: clone(str(rom), romfs)
+            made.append(romfs)
+    if out_images: say(f'the DLC ({len(out_images)} image{"s" * (len(out_images) != 1)}, {gib(dlc)}) is in {made[-1].name} after the RomFS: the APK can\'t hold it; the app copies it out at its first start')
     return made, inside
 
 
@@ -984,7 +1106,7 @@ def main(argv):
         bi.PROG.plan((0 if a.update_shaders else 3) + 2 * bool(new) + bool(a.update_shaders))
         if new:   # the split again with the new captures, and the new ones translated (the others are kept)
             aoc = work / 'aoc'; dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc.is_dir() else []
-            spv = build_shaders(g.words('shader_versions') or [pkg_ver], {pkg_ver: game}, work, logs, env, g, dlc_roms) or spv
+            spv = build_shaders(g.words('shader_versions') or [pkg_ver], {pkg_ver: game}, work, logs, env, g, dlc_roms)[0] or spv
         if a.update_shaders:
             if not new: say('no new run-time shaders on the phone'); bi.PROG.end(); return
             bi.PROG.stage('copy the shaders to the phone'); dst = f'{REMOTE}/games/{g.id}'
@@ -1031,7 +1153,16 @@ def main(argv):
         if sv and bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['ue_decode'][0]:   # Unreal's Oodle-compressed shaders (ue_decode)
             with phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Unreal shaders') if serial else contextlib.nullcontext():
                 ue_decode(sdirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game)
-        spv = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms)
+        def derive_shader_tables(reason):   # build_ipa_from_nsp.py main's: the registered profile with the split's shader tables, everything else as registered
+            assert g is not None   # main stopped earlier without a profile; a nested function keeps no narrowing
+            pdir = work / 'profile'
+            bi.derive_profile(g, pdir / g.id, pkg_ver, game, g.words('modules'), app, shader_only=True)
+            os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = os.pathsep.join([str(pdir)] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d and d != str(pdir)])
+            os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
+            dg = gamemod.load(g.id)
+            say(f'{reason}: using a shader-only derived profile at {dg.dir}; registered module fixes are preserved')
+            return dg
+        spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables)
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         if not a.game_apk: library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                             'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})

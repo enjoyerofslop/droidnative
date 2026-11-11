@@ -16,7 +16,7 @@
 static const uint32_t MESHLAUNCH[] = {
 #include "shaders/meshlaunch_comp.inc"
 };
-enum { ME_HDR = 16, ME_PC = 8, ME_ALIGN = 256, ME_KBIND = 100 };   // ME_KBIND: the kernels' set 1 bindings, 100 to 103 (spv_meshemu.B_TASKOUT ...)   // launch list words before its entries (spv_meshemu.HDR); push constant bytes {first, base}
+enum { ME_HDR = 16, ME_PC = 8, ME_ALIGN = 256, ME_KBIND = 100, ME_TGS_MAX = 16 << 20 };   // ME_KBIND: the kernels' set 1 bindings, 100 to 103 (spv_meshemu.B_TASKOUT ...)   // launch list words before its entries (spv_meshemu.HDR); push constant bytes {first, base}
 typedef struct memu_t { int task, pay, threads, nrec, nout, ipw, verts; VkPipeline p; VkPipelineLayout pl; int bad; vshader *pvs; } memu_t;
 static struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; int bad; } g_me;
 static vshader g_me_kset, g_me_lset;   // their layouts alone, for ds_get's sets kept by each chunk: the kernels' set 1 (four buffers), meshlaunch.comp's set (two)
@@ -48,9 +48,9 @@ static vshader *memu_pvs_get(const char *key) {
 static vshader *memu_pvs(const vshader *ms) {   // a mesh shader's pass-through vertex shader, as a vertex shader the pipelines take (pipe_get)
     vshader *v = calloc(1, sizeof *v); if (!v) return NULL;
     memu_pvs_key(ms->key, v->key); v->stage = SH_VS; v->vkstage = VK_SHADER_STAGE_VERTEX_BIT; v->set = 0; v->vid = 1;
-    char p[700]; int b0 = 0; snprintf(p, sizeof p, "%s/%s.pvs.spv", g_spv_dir, ms->key); v->mod = sh_module(p, &b0);
+    char p[700]; int b0 = 0; snprintf(p, sizeof p, "%s/%s.pvs.spv", g_spv_dir, ms->key); v->mod = sh_module(v, p, &b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw); if (w) { spv_io(w, nw, &v->io_in, &v->io_out); free(w); } }
-    snprintf(p, sizeof p, "%s/%s.pvs.z.spv", g_spv_dir, ms->key); v->modz = sh_module(p, &b0);
+    snprintf(p, sizeof p, "%s/%s.pvs.z.spv", g_spv_dir, ms->key); v->modz = sh_module(v, p, &b0);
     if (!g_me_vdsl) g_me_vdsl = memu_dsl(1, 0, VK_SHADER_STAGE_VERTEX_BIT);
     v->dsl = g_me_vdsl; v->ndesc = 1;
     if (!v->mod || !v->dsl) { RED_ONCE(181, "mesh shader %s: no pass-through vertex shader (.pvs.spv): its draws are skipped", ms->key); free(v); return NULL; }
@@ -96,9 +96,9 @@ static int memu_cpipe(vshader *s) {   // a task or mesh kernel's compute pipelin
     VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = s->pool ? POOL_SET + 1 : 2, .pSetLayouts = sl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &m->pl) != VK_SUCCESS) return 0;
     VkComputePipelineCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = m->pl,
-        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = s->mod, .pName = "main"}};
+        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .pName = "main"}};   // its module: lm_pipeline
     const char *pbk[4] = {s->key, NULL, NULL, NULL}; int pb = pb_begin('c', pbk, 0, 0, 0, 0);
-    VkResult r = vkCreateComputePipelines(g_vk.dev, pcache(), 1, &pc, NULL, &m->p); pb_end(pb);
+    VkResult r = lm_pipeline(NULL, &pc, &pc.stage, &s->mod, 1, &m->p); pb_end(pb);
     if (r != VK_SUCCESS) { m->p = VK_NULL_HANDLE; static int n; if (n++ < 8) LOG("[RED] [vk] compute form of task / mesh shader %s: pipeline failed: its draws are skipped", s->key); return 0; }
     m->bad = 0; return 1;
 }
@@ -109,9 +109,11 @@ static VkDescriptorSet memu_set(vshader *l, uint32_t n, uint32_t base, const VkD
         w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = base + i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[i]}; }
     vkUpdateDescriptorSets(g_vk.dev, n, w, 0, NULL); return set;
 }
-// one dispatch of a task or mesh kernel over the arena ranges r[4] (taskout, launch, vtx, idx): groups workgroups, or (0) the launch list header's counts at ind
-static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize r[8], uint32_t first, uint32_t groups, VkDeviceSize ind) {
+// one dispatch of a task or mesh kernel over the arena ranges r[4] (taskout, launch, vtx, idx): groups workgroups, or (0) the launch list header's counts at ind, at most
+// `most`. A kernel whose shared memory is past the GPU's limit has it in a storage buffer (spv_tgspill, s->tgs), a region a workgroup, which stage_set sizes by g_cdim
+static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize r[8], uint32_t first, uint32_t groups, VkDeviceSize ind, uint32_t most) {
     VkDescriptorSet set, es; uint32_t dyn[18]; int ok;
+    g_cdim[0] = groups ? groups : most; g_cdim[1] = g_cdim[2] = 1;
     for (int t = 0;; t++) {   // as vk_dispatch: the set taken again when a sync inside stage_set closed the chunk it came from
         g_bind_bad = 0; if (!cur()) return 0; uint64_t dseq = C->seq; int got = stage_set(s, 0, &set, dyn, pr, pst, 0, dseq); ok = got && !g_bind_bad;
         if (got || !ds_moved(dseq)) break;
@@ -126,7 +128,14 @@ static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl, 1, 1, &es, 0, NULL);
     if (s->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl)) return 0;
     vkCmdPushConstants(c, m->pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, ME_PC, pc);
+    // a profiled frame's record and the breadcrumbs, as vk_dispatch's: the kernel by its key, x its workgroups (an indirect dispatch: the most it runs, z 0)
+    uint32_t g[3] = {groups ? groups : most, 1, groups ? 1 : 0}; int pr_i = -1;
+    if (prof_on() && C->pq && C->npq + 2 <= 512 && g_nprof < 1024) { prof_rec *q = &g_prof[pr_i = g_nprof++]; memset(q, 0, sizeof *q); q->c = C; q->ncolor = -1; q->w = g[0]; q->h = g[1]; q->draws = (int)g[2]; q->seq = g_prof_seq++; q->bigfs = s->key;
+        q->s0 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->pq, (uint32_t)q->s0); }
+    uint32_t bcid = bc_on() ? bc_begin(c, s->key, g, C->seq) : 0;   // DM_VK_BC (gfx_vk_bc.inc)
     if (groups) vkCmdDispatch(c, groups, 1, 1); else vkCmdDispatchIndirect(c, g_me.b, ind);
+    bc_end(c, bcid);
+    if (pr_i >= 0) { g_prof[pr_i].s1 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->pq, (uint32_t)g_prof[pr_i].s1); }
     cb_barrier(); g_dispatches++; C->ndraw++;
     return 1;
 }
@@ -158,6 +167,7 @@ static int memu_draw(memu_t *m, vshader *fs, const prog_t *fpr, int fpst, const 
     VkCommandBuffer c = C->cb;
     occl_begin();
     bf_pipeline(c, pp->p);
+    if (pp->alpha) vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof D.alpha_ref, &D.alpha_ref);   // the alpha test's reference, as vk_draw_
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, 0, 1, &vset, 0, NULL);
     if (fs) vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, (uint32_t)(fs->set & 3), 1, &fset, fs->ndyn, dyn);
     if (fs && fs->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { g_drop[3]++; return 0; }
@@ -194,12 +204,15 @@ static int vk_memu_draw_(const p_draw *dw) {
     VkDeviceSize usable = g_me.size - 8 * ME_ALIGN, half = usable / 2;   // (the ranges' alignment)
     uint64_t room = (ts ? half : usable) / per; uint32_t cap = room < cap_max ? (uint32_t)room : cap_max; if (cap > 65535) cap = 65535;
     if (!cap) { RED_ONCE(183, "mesh shader %s: one workgroup's outputs exceed the arena (DM_VK_MESH_ARENA_MB): draw skipped", ms->key); g_me_skipped++; return 0; }
+    // shared memory in a storage buffer (memu_kernel): a part's workgroups take at most ME_TGS_MAX bytes of the chunk's arena for it
+    if (ms->tgs && ME_TGS_MAX / ms->tgs < cap) { cap = ME_TGS_MAX / ms->tgs; if (!cap) cap = 1; }
     // the arena's ranges, offsets then lengths: taskout, launch, vtx, idx
     VkDeviceSize r[8]; r[4] = ts ? 0 : ME_ALIGN; r[5] = ts ? me_up(((VkDeviceSize)ME_HDR + 2ull * cap) * 4) : ME_ALIGN;
     r[6] = (VkDeviceSize)cap * m->nrec * m->nout * 16; r[7] = (VkDeviceSize)cap * m->ipw * 4;
     uint32_t tmax = 0;
     if (ts) { VkDeviceSize left = half > r[5] ? half - r[5] : 0; uint64_t t = left / ((VkDeviceSize)ts->memu->pay * 4); tmax = t > 65535 ? 65535 : (uint32_t)t;
-        if (!tmax) { RED_ONCE(183, "task shader %s: its payloads exceed the arena (DM_VK_MESH_ARENA_MB): draw skipped", ts->key); g_me_skipped++; return 0; } }
+        if (!tmax) { RED_ONCE(183, "task shader %s: its payloads exceed the arena (DM_VK_MESH_ARENA_MB): draw skipped", ts->key); g_me_skipped++; return 0; }
+        if (ts->tgs && ME_TGS_MAX / ts->tgs < tmax) { tmax = ME_TGS_MAX / ts->tgs; if (!tmax) tmax = 1; } }
     uint32_t first = (uint32_t)dw->first, left = (uint32_t)dw->count;
     while (left) {
         uint32_t n = ts ? (left < tmax ? left : tmax) : (left < cap ? left : cap);
@@ -207,8 +220,8 @@ static int vk_memu_draw_(const p_draw *dw) {
         r[0] = 0; r[1] = me_up(r[0] + r[4]); r[2] = me_up(r[1] + r[5]); r[3] = me_up(r[2] + r[6]);
         rp_end(); tc_clear();
         if (ts) {
-            if (!memu_kernel(ts, ppr[2], pst[2], r, first, n, 0) || !memu_launch(r, n, ts->memu, m, cap) || !memu_kernel(ms, ppr[0], pst[0], r, 0, 0, r[1])) { g_me_skipped++; return 0; }
-        } else if (!memu_kernel(ms, ppr[0], pst[0], r, first, n, 0)) { g_me_skipped++; return 0; }
+            if (!memu_kernel(ts, ppr[2], pst[2], r, first, n, 0, n) || !memu_launch(r, n, ts->memu, m, cap) || !memu_kernel(ms, ppr[0], pst[0], r, 0, 0, r[1], cap)) { g_me_skipped++; return 0; }
+        } else if (!memu_kernel(ms, ppr[0], pst[0], r, first, n, 0, n)) { g_me_skipped++; return 0; }
         if (!memu_draw(m, fs, ppr[1], pst[1], r, ts ? 0 : n * (uint32_t)m->ipw)) { g_me_skipped++; return 0; }
         first += n; left -= n; g_me_parts++;
     }

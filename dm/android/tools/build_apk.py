@@ -11,7 +11,7 @@
 #   --label <name> --icon <icon.jpg>: one game in an app of its own (apk/AndroidManifest.game.xml, package game_package(<title ID>)), entered through GameStart with no
 #   launcher or loader. --game-dir is the game's folder as the launcher's games/<title ID>/ holds it, packed into assets/game/; --romfs packs the RomFS image there as a
 #   stored entry, which GameStart hands to the host where it lies in the APK. The APK stays a plain ZIP (no ZIP64, which apksigner can't read): Python's zipfile
-#   keeps it under 2 GiB, so a bigger game ships its RomFS beside the APK (build_android_from_nsp.py --game-apk).
+#   keeps it under 2 GiB, so a bigger game ships its RomFS, and its DLC if need be, beside the APK (build_android_from_nsp.py --game-apk, make_game_app).
 # The keystore is made on first use (keytool, a debug key: alias nxnative, password "android"); keep it outside the repository.
 import argparse, os, shutil, subprocess, sys, tempfile, zipfile
 from xml.sax.saxutils import quoteattr
@@ -21,6 +21,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def game_package(title_id):   # a game app's package: a name segment may not start with a digit, as a title ID does
     return 'org.nxnative.game.t' + title_id.lower()
+
+# Why a game app's ZIP stopped: zipfile raises the same LargeZipFile for each limit of a ZIP without ZIP64 ("Files count", or the bytes: "Filesize", "Zipfile size",
+# "Central directory offset" / "size" … would require ZIP64 extensions), and the message once said 2 GiB for all of them, so a game with too many files was told its RomFS was too big (droidplay-core
+# issue #169). writing: the entry being added, its size, how many entries the ZIP had and its bytes written
+def zip64_message(out, why, writing):
+    arc, size, entries, written = writing
+    if str(why).startswith('Files count'):
+        limit = f'reached {entries:,} entries, and an APK without ZIP64, which apksigner needs, holds at most 65,535'
+    else:
+        limit = f'passed 2 GiB ({written:,} bytes written), more than an APK without ZIP64, which apksigner needs, holds'
+    return (f'{out}: the game app {limit}, while {arc} ({size:,} bytes) was being added ({why}). build_android_from_nsp.py --game-apk weighs the parts and counts '
+            'their files before packing, packs the shaders into one file and puts the RomFS and the DLC beside the APK when they don\'t fit (make_game_app)')
 
 def run(*a):
     r = subprocess.run(a, capture_output=True, text=True, errors='replace')
@@ -83,29 +95,32 @@ def main():
         javas = [os.path.join(r, f) for r, _, fs in os.walk(src) for f in fs if f.endswith('.java')]
         run('javac', '-source', '8', '-target', '8', '-Xlint:-options', '-encoding', 'UTF-8', '-bootclasspath', jar, '-d', cls, *javas)
         run(os.path.join(bt, 'd8' + bat), '--lib', jar, '--min-api', '29', '--output', d, *[os.path.join(r, f) for r, _, fs in os.walk(cls) for f in fs if f.endswith('.class')])
-        # a game app's ZIP without ZIP64 (allowZip64=False: past 2 GiB zipfile raises instead of writing records apksigner can't read)
+        # a game app's ZIP without ZIP64 (allowZip64=False: past 2 GiB zipfile raises instead of writing records apksigner can't read). What was being written when it
+        # did is named: the message used to advise packing the RomFS beside the APK, which a game whose other files passed 2 GiB already did (droidplay-core issue #169)
+        writing = ['', 0, 0, 0]
+        def put(z, path, arc, **kw): writing[:] = [arc, os.path.getsize(path), len(z.filelist), z.fp.tell() if z.fp else 0]; z.write(path, arc, **kw)
         try:
             with zipfile.ZipFile(base, 'a', zipfile.ZIP_DEFLATED, allowZip64=not a.game_app) as z:
-                z.write(os.path.join(d, 'classes.dex'), 'classes.dex')
-                if a.loader: z.write(a.loader, 'lib/arm64-v8a/libnxloader.so')
-                for so in sorted(set(a.so)): z.write(so, f'lib/arm64-v8a/{os.path.basename(so)}')
-                for lib in sorted(set(a.lib), key=os.path.basename): z.write(lib, f'lib/arm64-v8a/{os.path.basename(lib)}')
+                put(z, os.path.join(d, 'classes.dex'), 'classes.dex')
+                if a.loader: put(z, a.loader, 'lib/arm64-v8a/libnxloader.so')
+                for so in sorted(set(a.so)): put(z, so, f'lib/arm64-v8a/{os.path.basename(so)}')
+                for lib in sorted(set(a.lib), key=os.path.basename): put(z, lib, f'lib/arm64-v8a/{os.path.basename(lib)}')
                 if a.selftest:
                     n = 0
                     for f in sorted(os.listdir(a.selftest)):
-                        if f.startswith('main.'): z.write(os.path.join(a.selftest, f), f'assets/selftest/{f}'); n += 1
+                        if f.startswith('main.'): put(z, os.path.join(a.selftest, f), f'assets/selftest/{f}'); n += 1
                     if not n: sys.exit(f'no self test module (main.*) in {a.selftest}')
-                for f in sorted(os.listdir(a.demo)) if a.demo else []: z.write(os.path.join(a.demo, f), f'assets/demo/{f}')
+                for f in sorted(os.listdir(a.demo)) if a.demo else []: put(z, os.path.join(a.demo, f), f'assets/demo/{f}')
                 if a.game_app:
                     # the game's files as games/<title ID>/ holds them (folders given as links are followed), then the RomFS image stored: GameStart opens it with
                     # AssetManager.openFd, which takes only an uncompressed entry, and the host reads it at its offset in the APK
                     for root, _, fs in sorted(os.walk(a.game_dir, followlinks=True)):
                         for f in sorted(fs):
                             path = os.path.join(root, f); rel = os.path.relpath(path, a.game_dir).replace(os.sep, '/')
-                            if rel != 'RomFS.img': z.write(path, f'assets/game/{rel}')
-                    if a.romfs: z.write(a.romfs, 'assets/game/RomFS.img', compress_type=zipfile.ZIP_STORED)
-        except zipfile.LargeZipFile:
-            sys.exit('the game app would be over 2 GiB, more than an APK without ZIP64 holds: pack the RomFS beside it (no --romfs)')
+                            if rel != 'RomFS.img': put(z, path, f'assets/game/{rel}')
+                    if a.romfs: put(z, a.romfs, 'assets/game/RomFS.img', compress_type=zipfile.ZIP_STORED)
+        except zipfile.LargeZipFile as why:   # (only a game app's ZIP is written without ZIP64)
+            sys.exit(zip64_message(a.out, why, writing))
         aligned = os.path.join(d, 'aligned.apk')
         run(os.path.join(bt, 'zipalign' + exe), '-f', '-P', '16', '4', base, aligned)   # stored entries (a game app's RomFS) on 4 bytes, the libraries on 16 KiB pages
         run(os.path.join(bt, 'apksigner' + bat), 'sign', '--ks', a.keystore, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', a.out, aligned)

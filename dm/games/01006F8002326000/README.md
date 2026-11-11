@@ -34,6 +34,7 @@ On the Mac: a new game through Tom Nook's counter (name entry on the game's own 
 ## Saves
 
 - A save is not reached on the Mac: the game first saves when the player sleeps at the end of the first day (the `−` menu says "You can't save right now." before that). Until then it only probes for `main.dat`, `mainHeader.dat` and `Moved/personal.dat` in its device save data.
+- Nor on Android: the run by hand on the Ayn Odin 2 (below) stopped on the first evening, before the first night, with the same "You can't save right now."
 
 ## Movies
 
@@ -62,6 +63,36 @@ Checked on a Mac (M1, macOS 27, headless, an island save) against 16:9: the 3D v
 
 - From a fresh save, `DM_KEYS="40:A*51/2,145:B*12/0.4,151:Down,152:Right*4/0.4,154.5:A,155.5:Right*4/0.4,158:A,159:Down*2/0.4,160.5:Left*2/0.4,162:A,163.5:Plus,167:A*4/2,175:Plus,178:A*146/2,179:Plus*30/4"` names the player "tom" on the keyboard, takes the defaults, watches the movie and reaches the dock at about frame 14,100 (470 s).
 
+## Android
+
+Played by hand on an Ayn Odin 2 (Snapdragon 8 Gen 2, Adreno 740 with Qualcomm's driver V@0676.32, Android 13), 2026-11-10 23:03 to 2026-11-11 00:13, about 70 minutes from a new game in an empty save folder.
+- **The build:** the host from `main` at `cfc2c254`, the game files from the build folder (shader chain 5).
+- **Input:** adb gamepad keys and stick events.
+
+- **The stretch:**
+  - Nook Inc.'s counter: the name on the game's own keyboard, the birthday, the look, the hemisphere and the island choice;
+  - the in-flight movie, and the arrival at the dock;
+  - Tom Nook's welcome with Timmy, Tommy and the two villagers;
+  - the tent, placed by the beach (a first spot refused as too close to the ledge);
+  - helping both villagers place theirs;
+  - the evening gathering at the plaza at sunset, and Tom Nook's request for 10 tree branches for the campfire.
+
+  Nothing wrong was seen in the picture, and there was no crash and no hang.
+- **Where it stopped:** at the branches, with one picked up.
+  - A branch is picked up only with the player on or facing its tile, which a slow look-and-press loop over adb mostly misses, so the run ended there.
+  - The game saves only after the first night (see Saves), so a save made on Android and Continue are not checked.
+  - A person with a controller can finish the first night in about 15 minutes; nothing in it needs quick reactions.
+- **30 fps throughout, as on the Switch:**
+  - 127 windows of 30 s over 64 minutes, median 30.0 fps; 4 windows at 29.0–29.2, each with one long frame;
+  - frame p50 33.3 ms, p95 34–46 ms;
+  - GPU p50 about 4 ms at the counter, 7–15.5 ms on the island.
+- **Sound:** `DM_AUDIO_DUMP` of a fresh launch (67 s): music and effects from about 15 s on, at −27.5 dBFS RMS on the front pair, peaks −3 dBFS. No underrun in 693 callback reports.
+- **Seen: three GPU submissions cut short at the arrival.** Three `[RED]` lines `submission N took 412–998 ms on the GPU, its end timestamp never written (the driver's hang recovery cut it short)`.
+  - **When:** 596, 608 and 618 s into the run, as the island's first frames were drawn.
+  - **What each was:** a list of 65 draws, and it made one long frame (1031, 450 and 451 ms).
+  - **After:** the game went on normally, with none in the next 54 minutes.
+  - **Not compared yet** with the Mac or another phone at the same moment.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:
@@ -79,5 +110,6 @@ General host changes first needed here; each applies to every game:
 
 - Check the island map (issue #73) with the host's alpha test.
 - `game.tsv` still describes the game as "In bring-up", while it plays on the iPhone.
-- A save on the Mac (the end of the first day) has not been reached.
+- A save on the Mac or on Android (the end of the first day) has not been reached.
+- The three GPU submissions cut short at the arrival on the Ayn Odin 2 ([Android](#android)): whether the Mac or another phone shows them.
 - The keyboard's 8 geometry shaders do not translate.

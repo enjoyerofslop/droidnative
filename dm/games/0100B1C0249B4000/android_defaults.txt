@@ -1,0 +1,5 @@
+# Switches this game gets on Android (build_android_from_nsp.py puts them in the game's defaults.txt; env.txt and the settings screen still win)
+# DM_VK_RAW_GMEM: raw global memory (gfx_vk_gmem.inc, enjoyerofslop/droidplay-core#150), on by default only for Switch 2 games. Frostpunk is a Switch 1 game, but all 1,108
+# shaders of its meshsolid and meshtranslucent techniques read their per-object data through raw global memory. Without it, every such load reads 0: the Generator, the
+# buildings and the props draw nothing (README.md, Android)
+DM_VK_RAW_GMEM=1

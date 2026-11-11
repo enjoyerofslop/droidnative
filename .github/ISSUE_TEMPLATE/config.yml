@@ -1,7 +1,7 @@
 blank_issues_enabled: true
 contact_links:
   - name: Questions and help (Discord)
-    url: https://discord.gg/4wNHX3uqSU
+    url: https://discord.gg/3r92f8wmh7
     about: "The DroidPlay Discord: #help when packing or playing goes wrong, #compatibility for how a game runs on your device. No games, keys, firmware or packed APKs."
   - name: DroidPlay, a Mac app that packs and installs games for Android
     url: https://github.com/enjoyerofslop/droidplay
