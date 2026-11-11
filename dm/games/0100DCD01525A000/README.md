@@ -2,7 +2,7 @@
 
 Update 1.0.2 (`v131072`), SDK **14.3.0** (`NintendoSdk_nnSdk-14_3_0`, `NintendoSDK_NVN-14_3_0`). Atlus's in-house engine with CRI middleware (CRIWARE), on NVN: the same engine as [Persona 4 Golden](../010062B01525C000/README.md), whose `subsdk0` and `sdk` it shares byte for byte. Modules `main`, `subsdk0` (`NintendoSDK_movie`) and `sdk`. The RomFS holds 11 CPK files in 7.09 GB.
 
-- **On Android:** plays at 60 fps (as on the Switch) from a new game through the first school days to the night of April 9 and its first battle, on a Galaxy S25 Edge, with saves and Continue working, in Android's default handheld mode as in console mode. See [Android](#android).
+- **On Android:** plays at 60 fps (as on the Switch) from a new game through the first school days to the night of April 9 and its first battle, on a Galaxy S25 Edge (Adreno) and a Galaxy Z Flip 7 (Xclipse), with saves and Continue working, in Android's default handheld mode as in console mode. See [Android](#android).
 - **On the Mac:** not run yet.
 
 ## What it needs
@@ -42,5 +42,10 @@ First run on Android, 2026-11-10: a Galaxy S25 Edge (SM-S937U1: Snapdragon 8 Eli
   - no touch or gesture reached the game in either test (a temporary log of `dm_touch_set` and the gesture history stayed empty): the on-screen buttons are a window over the game's own and arrive only as the Handheld controller's buttons.
 
   What misled the first test is the title's timing. A press while the title fades in does nothing; the menu drops back to "PRESS ANY BUTTON" after a few seconds without input; and the prompt fades into the attract movie (the logo and the opening) after about 12 s. Presses a few seconds apart kept landing in a fade or on the prompt again, so A and B seemed not to confirm NEW GAME.
+- **On Xclipse too:** a Galaxy Z Flip 7 (SM-F766U1: Exynos 2500, Xclipse 950 with Samsung's driver 0x6000215, Vulkan 1.3.279, Android 16), unfolded, 2026-11-10, `main` at `aade6451`, in handheld mode with the 2D on-screen layout (no D-pad: the left stick moves the cursor and the menus). Two launches, about 47 minutes:
+  - a new game (Normal) through the opening, the name entry, the room's Bed, April 7 at school and the dorm; a save at the Sign-In Sheet (`save commit #3`, 4/7 Evening, 0h 20m); after a restart LOAD GAME and "Load complete." into the lounge; then April 8 and 9, the attack, the rooftop, the summoning and **the first battle**, won with Attack (48 EXP, level 3, 15 of 83 HP left on Normal);
+  - 60 fps: in 541 of the 558 log windows (167,400 frames) the median frame time is 16.57–16.8 ms. Of the other 17, 16 come in a launch's first 90 s (the logos and the opening movie, up to 18.2 ms) and one, at 17.3 ms, about five minutes in. p95 median 17.0 ms, worst window 23.6 ms; GPU p50 about 3.8 ms, 8.2 ms at most (half the Adreno 830's); 1.42 GB PSS on April 9;
+  - sound: the game opens 6 channels, played as stereo on AAudio; a `DM_AUDIO_DUMP` has sound on the front pair from 5 s in. One underrun in the first launch, none in the second;
+  - the same single `[RED]` as on the Adreno, once per launch, and nothing wrong seen in the picture, except perhaps one frame of the opening movie covered in a fine dot grid (an 8-pixel period), which may be the movie's own look: the frames around it were clean, and that moment wasn't compared on the Adreno.
 - **Driving it over adb:** the on-screen buttons need a held touch (`input swipe x y x y 150`). In the point-and-click areas, the D-pad moves the cursor (holding it moves it fast), a hotspot names itself at the bottom right when the cursor is on it, and Y lists the area's exits. At the title, press as soon as "PRESS ANY BUTTON" shows, then pick from the menu within a few seconds.
-- **Not tried:** past the first battle (Tartarus and the following days), the female protagonist, the other devices and the Mac.
+- **Not tried:** past the first battle (Tartarus and the following days), the female protagonist, Mali (the Pixel 9 Pro XL), the other devices and the Mac.
