@@ -96,7 +96,10 @@ own words (`device '…' not found`, `device offline`, `error: closed`, exit sta
 60 s plus the bytes at 0.5 MB/s for a copy) or a copy whose byte count stood still for 90 s (`counting`). The install, the folder copies, the RomFS copy and the
 game's copy as a whole then wait up to `--reconnect-wait` seconds (180) for the phone by its ID (`reacquire`): its serial again, or another serial with its ID,
 connecting over Wi-Fi to its old address and to the address `adb mdns services` gives for its serial number; every later call goes to the serial it came back
-as. Each step can run again, and the RomFS copy goes on from `RomFS.img.partial`. More than six losses in one run stop it.
+as. Each step can run again, and the large copies go on from what the phone holds: the RomFS image from `RomFS.img.partial` (256 MiB pieces appended, the last
+MiB hashed on both sides), a DLC image over 256 MiB the same way, and a shader folder of more than 200 files in tar archives of about 256 MiB, each named in the
+folder's `.nxnative_manifest` once the phone has unpacked it (one archive of every file was 8.4 GB for Final Fantasy Resonance, and needed twice that free on the
+phone). More than six losses in one run stop it.
 
 ### A game app
 

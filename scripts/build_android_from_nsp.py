@@ -773,9 +773,20 @@ TAR_FILES = 200   # a folder with more files than this goes over as one tar arch
 MANIFEST = '.nxnative_manifest'   # in a folder copied as a tar: each file's size and modification time, for the next copy to send only what changed
 
 
+def tar_pieces(local, rels, most):   # rels (sorted) → lists of them of about most bytes each, in order; a larger file alone
+    out, cur, n = [], [], 0
+    for r in rels:
+        size = (local / r).stat().st_size
+        if cur and n + size > most: out.append(cur); cur, n = [], 0
+        cur.append(r); n += size
+    return out + [cur] if cur else out
+
+
 def push_tar(serial, local, parent, name, files, log, sync):
     # adb push sends a folder file by file: Super Mario Bros. Wonder's 37,393 shader files took over 20 minutes to a phone that had none (about 30 files a second).
-    # One tar archive, unpacked by the phone's tar, takes a minute or two. With sync, the manifest a copy left in the folder keeps it incremental, as push --sync was
+    # Tar archives, unpacked by the phone's tar, take a minute or two. With sync, the manifest a copy left in the folder keeps it incremental, as push --sync was.
+    # The files go in archives of about CHUNK bytes, each named in the manifest once the phone has unpacked it: one archive of every file (8.4 GB for Final Fantasy
+    # Resonance) started again from nothing after a drop over Wi-Fi, needed twice its size free on the phone and as much again on this computer
     dst = f'{parent}/{name}'
     rows = {f.relative_to(local).as_posix(): f'{f.stat().st_size} {f.stat().st_mtime_ns}' for f in files}
     old = {}
@@ -783,30 +794,35 @@ def push_tar(serial, local, parent, name, files, log, sync):
         for line in adb(serial, 'shell', f'cat {sh_quote(dst + "/" + MANIFEST)} 2>/dev/null', check=False).splitlines():
             meta, _, rel = line.rstrip('\r').partition('\t')
             if rel: old[rel] = meta
-    send = [r for r in rows if old.get(r) != rows[r]]
+    send = sorted(r for r in rows if old.get(r) != rows[r])   # sorted: the same pieces on every try, so a piece the phone has is not sent again
+    kept = {r: m for r, m in rows.items() if old.get(r) == m}   # on the phone already, as its manifest says
     adb(serial, 'shell', 'mkdir', '-p', dst)
-    if send:
-        tar = log.with_suffix('.tar')
-        bi.PROG.set(done=0, total=len(send), unit='files', note='packing')
+    pieces, total = tar_pieces(local, send, CHUNK), sum((local / r).stat().st_size for r in send)
+    if send: need_room(serial, dst, total + min(CHUNK, total) + (1 << 20) * len(pieces), f'{name} ({len(send):,} files, sent in archives of up to {size_text(CHUNK)})')
+    man, remote, tar, done = log.with_suffix('.manifest'), f'{parent}/.{name}.tar', log.with_suffix('.tar'), 0
+    def manifest():   # what the phone holds now, for the next copy to send only the rest
+        man.write_text(''.join(f'{v}\t{k}\n' for k, v in sorted(kept.items())), encoding='utf-8', newline='\n')
+        adb(serial, 'push', man, f'{dst}/{MANIFEST}')
+    for i, piece in enumerate(pieces, 1):
+        bi.PROG.set(done=done, total=total, unit='B', note='packing' + (f' archive {i} of {len(pieces)}' if len(pieces) > 1 else ''))
         with tarfile.open(tar, 'w', format=tarfile.USTAR_FORMAT) as t:
-            for i, r in enumerate(send, 1):
+            for r in piece:
                 ti = t.gettarinfo(local / r, arcname=r); ti.mode = 0o666; ti.uid = ti.gid = 0; ti.uname = ti.gname = ''
                 with open(local / r, 'rb') as fh: t.addfile(ti, fh)
-                bi.PROG.set(done=i)
-        remote = f'{parent}/.{name}.tar'
         try:
-            need_room(serial, dst, 2 * tar.stat().st_size, f'{name} ({len(send):,} files in one archive, unpacked beside itself)')
-            with counting('sending', tar.stat().st_size, 'B', lambda: remote_size(serial, remote)):
+            with counting('sending' + (f' archive {i} of {len(pieces)}' if len(pieces) > 1 else ''), total, 'B',
+                          lambda base=done: (lambda n: None if n is None else base + n)(remote_size(serial, remote))):
                 adb(serial, 'push', tar, remote, log=log)
-            have = len(rows) - len(send)   # the files kept from an earlier copy are counted by the phone too
-            with counting('unpacking on the phone', len(send), 'files', lambda: (lambda n: None if n is None else max(n - have, 0))(remote_files(serial, dst))):
-                adb(serial, 'shell', f'tar -xf {sh_quote(remote)} -C {sh_quote(dst)}', timeout=SHELL_SECS + tar.stat().st_size / (10 << 20))
+            bi.PROG.set(note='unpacking on the phone')
+            adb(serial, 'shell', f'tar -xf {sh_quote(remote)} -C {sh_quote(dst)}', timeout=SHELL_SECS + tar.stat().st_size / (10 << 20))
         finally:
             with contextlib.suppress(BuildError): adb(serial, 'shell', 'rm', '-f', remote, check=False, timeout=15)   # a lost phone's: the next install removes it
             tar.unlink(missing_ok=True)
-    man = log.with_suffix('.manifest'); man.write_text(''.join(f'{v}\t{k}\n' for k, v in sorted(rows.items())), encoding='utf-8', newline='\n')
-    adb(serial, 'push', man, f'{dst}/{MANIFEST}')
-    say(f'{name}: {len(send):,} of {len(rows):,} files sent in one archive' + ('' if len(send) == len(rows) else ' (the others were on the phone already)'))
+        done += sum((local / r).stat().st_size for r in piece); kept.update((r, rows[r]) for r in piece)
+        if i < len(pieces): manifest()
+    manifest()   # the last one too when nothing was sent: files gone from this computer leave it
+    say(f'{name}: {len(send):,} of {len(rows):,} files sent in ' + (f'{len(pieces)} archives' if len(pieces) > 1 else 'one archive') +
+        ('' if len(send) == len(rows) else ' (the others were on the phone already)'))
 
 
 CHUNK = 256 << 20   # push_resumable's piece
@@ -877,10 +893,22 @@ def push_dir(serial, local, parent, name, log, sync=False):
     out = adb(serial, 'shell', 'sh', '/data/local/tmp/nxnative_mkdirs.sh')
     if MKDIRS_DONE not in out:
         raise BuildError(f'the folders for {name} were not made on the phone: the folder script stopped early, ' + (f'printing {out.strip()[-300:]}' if out.strip() else 'printing nothing'))
-    with counting('sending', len(files), 'files', lambda: remote_files(serial, dirs[0])):
-        adb(serial, 'push', *(['--sync'] if sync else []), local, f'{parent}/', log=log)
+    if any(f.stat().st_size > CHUNK for f in files): push_files(serial, local, dirs[0], files, log, sync)   # DLC images (gigabytes): adb push started a file cut short
+        # again from zero, so those go through the RomFS image's resumable copy
+    else:
+        with counting('sending', len(files), 'files', lambda: remote_files(serial, dirs[0])):
+            adb(serial, 'push', *(['--sync'] if sync else []), local, f'{parent}/', log=log)
     if local.name != name:
         adb(serial, 'shell', 'rm', '-rf', f'{parent}/{name}'); adb(serial, 'shell', 'mv', f'{parent}/{local.name}', f'{parent}/{name}')
+
+
+def push_files(serial, local, dst, files, log, sync):   # a folder's files one by one into dst (made already): those over CHUNK through push_resumable, kept when the
+    # phone has the same (size, first and last MiB), the others by adb push (--sync with sync)
+    for f in sorted(files):
+        remote = f'{dst}/{f.relative_to(local).as_posix()}'
+        if f.stat().st_size <= CHUNK: adb(serial, 'push', *(['--sync'] if sync else []), f, remote, log=log); continue
+        if sync and remote_size(serial, remote) == f.stat().st_size and same_ends(serial, f, remote): say(f'{f.name}: on the phone already (same size, first and last MiB)'); continue
+        push_resumable(serial, f, remote, log.with_name(f'{log.stem}.{f.name}.log'))
 
 
 # Shaders a game compiles at run time with its own GLSLC: the app saves each new one on the phone (front_android.c DM_GLSLC_CAPTURE: games/<title ID>/glslc_capture, or
@@ -961,7 +989,7 @@ def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, 
     adb(serial, 'shell', 'rm', '-rf', f'{dst}/code', f'{dst}/font', f'{dst}/{patched.name}'); adb(serial, 'shell', 'mkdir', '-p', dst)
     # an install cut short (the phone full, the cable out) can leave a folder's archive (push_tar) or a RomFS piece (push_resumable) behind: gigabytes that kept the
     # phone full, and that no install reuses. RomFS.img.partial stays, as the next copy goes on from it
-    adb(serial, 'shell', f'rm -f {sh_quote(dst)}/.*.tar {sh_quote(dst + "/RomFS.img.piece")}', check=False)
+    adb(serial, 'shell', f'rm -f {sh_quote(dst)}/.*.tar {sh_quote(dst + "/RomFS.img.piece")} {sh_quote(dst + "/aoc")}/*.piece', check=False)
     part('font'); push_dir(serial, font, dst, 'font', logs / 'adb_push_font.log')
     part('code'); push_dir(serial, patched, dst, 'code', logs / 'adb_push_code.log')
     if spv: part('shaders', 'shaders (only the changed files)'); push_dir(serial, spv, dst, 'spv', logs / 'adb_push_spv.log', sync=True)
