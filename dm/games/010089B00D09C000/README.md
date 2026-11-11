@@ -33,7 +33,7 @@ No `patches.py`, and `dm/tools/sdk_patches.py` has no cut for its `sdk` build (`
 ## Files and shaders
 
 - The shaders are Shader objects in the AssetBundles of `StreamingAssets` (read by `shader_split.py` through `unityfs.py`, Cuphead's Unity 2017.4 layout) and in `main`: 13,057 (6,572 vertex, 6,482 pixel, 3 geometry). All build for Mac and iOS.
-- The ComputeShader objects of `Data/resources.assets` have no type tree (a red line in the split, as in Cuphead); no dispatch has missed one so far.
+- The ComputeShader objects of `Data/resources.assets` had no type tree when these tables were split (a red line, as in Cuphead); no dispatch has missed one so far. The newer 2017.4 reader decodes 15 kernels from 1.0.1 (a player's split, droidplay-core#218); the NSP scripts take them through a shader-only derived profile.
 - `romfs_marker` is `Data/StreamingAssets/AssetBundles/Switch/audio`.
 
 ### Geometry shaders
@@ -63,6 +63,7 @@ The three geometry shaders were the test case of the general geometry-shader com
 
 General host changes first needed here; each applies to every game:
 
+- [An Android build packs a registered game without shaders after a split error, and succeeds](../../../docs/reference/packing.md#an-android-build-packs-a-registered-game-without-shaders-after-a-split-error-and-succeeds): a player's Android build of 1.0.1 found 15 compute kernels the tables lack (the newer Unity 2017.4 `ComputeShader` reader) and packed the game without shaders: sound over a black screen ([droidplay-core#218](https://github.com/enjoyerofslop/droidplay-core/issues/218)).
 - **H.264 drain on a released output slot** (`ReleaseOutputBufferIndex` goes on with the drain; the end-of-stream output takes the first queued picture, `jflush`, `hle_movie.c`): [H.264 drain at the end of a stream goes on with released slots](../../../docs/reference/movies.md#h264-drain-at-the-end-of-a-stream-goes-on-with-released-slots).
 - **Per-stage composite taken again after a replay state restore** (`prog_resolve` in `nvn_mtl.m`, after `pso_predict_rest`, the fusion probe and the deferred-draw replay): [Composite program taken again after a replay state restore](../../../docs/reference/rendering.md#composite-program-taken-again-after-a-replay-state-restore).
 - **Geometry shaders as compute** (native VS capture, GS dispatch, output-reader vertex function; `t_geometry`): [geometry support and limits](../../../docs/geometry-metal-research.md).
