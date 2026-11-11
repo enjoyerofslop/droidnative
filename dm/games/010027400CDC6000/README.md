@@ -2,7 +2,7 @@
 
 Update 1.0.3.1 (v196608) over the base game, SDK 8.2.0. Larian Studios' Divinity Engine (`FW3.5/Gold/Stable` in its asserts' paths), NVN, Wwise sound, RakNet 15.03.26. Modules `main`, `subsdk0` and `sdk`: `subsdk0` and `sdk` are one build (`3ae34e68…`), the SDK twice. The RomFS is 48 files, 10.74 GB: Larian's LSPK packages (`Data/*.pak`, version 13), the voice and localization packages beside them.
 
-Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The title, the main menu, a new game (Classic mode), character creation, the opening cinematic and the first area (the Merryweather's hold, Magister Siwan's first dialogue) in play, at the game's 30 fps, and on a OnePlus Pad 3 the cabin deck after it ([First area](#first-area)). Not yet played further than that; see [Open](#open).
+Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The title, the main menu, a new game (Classic mode), character creation, the opening cinematic and the first area (the Merryweather's hold, Magister Siwan's first dialogue) in play, at the game's 30 fps, and on a OnePlus Pad 3 the cabin deck after it ([First area](#first-area)); from there, on the Odin 2 by hand, the burning hold, the top deck and its first fight, won ([To the first combat](#to-the-first-combat)). Not yet played further than that; see [Open](#open).
 
 ## What it needs
 
@@ -36,8 +36,21 @@ Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The ti
 - `DM_KEYS=32:A,36:B,39:A,42:A,45:A,48:A,51:A,70:A~1.0,76:PLUS,82:A` reaches it in about 2 minutes 30 s; the `tohold` route below does the same from a fresh save.
 - Quick Save (Plus, then A) writes `Save0000/Save0000.lsv` and its thumbnail; Continue loads it again (`hold` below). The game autosaves on its own a few seconds into play.
 
-- Walked by hand (2026-11-10, adb joystick events): the left stick moves the character with the camera following; the stairs at the hold's west end lead up a level to a doorway blocked by a toppled crate, the tutorial's Move puzzle (X on the crate opens the Action Menu: Pick Up, Open, Move, Attack, Examine; Pick Up clears it). The ladder in the room below asks whether to leave the Tutorial Deck; Yes loads the next level in about 25 s: the cabin deck, where Magister Siwan's dialogue moves the quest on (narrator lines, ambient remarks). 30 fps there too: frame time p50 33.3 / p95 33.8 ms, GPU 8.7 ms, 798 draws, submit 13.8 ms of CPU a frame. Not yet past its corridor to the top deck and its first fight. Holding the left stick in (L3) for 1 s on a tutorial box hides tutorials for the profile.
+- Walked by hand (2026-11-10, adb joystick events): the left stick moves the character with the camera following; the stairs at the hold's west end lead up a level to a doorway blocked by a toppled crate, the tutorial's Move puzzle (X on the crate opens the Action Menu: Pick Up, Open, Move, Attack, Examine; Pick Up clears it). The ladder in the room below asks whether to leave the Tutorial Deck; Yes loads the next level in about 25 s: the cabin deck, where Magister Siwan's dialogue moves the quest on (narrator lines, ambient remarks). 30 fps there too: frame time p50 33.3 / p95 33.8 ms, GPU 8.7 ms, 798 draws, submit 13.8 ms of CPU a frame. The way on from there to the top deck and its first fight is in [To the first combat](#to-the-first-combat). Holding the left stick in (L3) for 1 s on a tutorial box hides tutorials for the profile.
 - Sound plays: Wwise mixes into AudioOut #0 (6 channels, `main+0x1bd3050`), which carries signal throughout (`DM_AUDIO_DUMP`); the audio renderer the game also opens (`main+0x162c988`) is nearly silent (436 of 24,000 frames), which is expected of it here.
+
+## To the first combat
+
+Played by hand on the Ayn Odin 2 from `saves/cabin` (2026-11-10, adb joystick and button events, tutorials hidden):
+
+- Magister Payde's dialogue ("Here to register…") unlocks the stern room. Below it the Windego scene starts a turn-based fight that the scene itself ends on the enemies' turn, with no move of the player's. After it the hold burns, and the stern room's stairs come up to a deck of fires.
+- The fires set whoever stands in them Burning, a few points a turn; walking into them killed the Red Prince twice (Game Over, then Load Game). Water barrels (X, then Attack) and the Water Balloon on the hotbar put them out, and Wet keeps Burning off for two turns.
+- The Skull-Marked Door is not the way. Its key is on Magister Priest Medwyn's body, at the foot of the stairs up to Fane, and the door warns of Deathfog inside: its dialogue offers to pull it open or let go. Fane talks but leads nowhere further.
+- The way on: from the main deck's port railing, step down onto the lower walkway beside it (a gap among fallen planks, near minimap x:41 y:-191). Walk it forward to the stairs that climb through the arch left of the Skull-Marked Door (an autosave fires there), then use the Stairs at the top (A). The top deck loads and the first fight starts at once.
+- The fight: two Viscous Voidlings, turn-based, the Red Prince first. Dragon's Blaze (Y for the hotbar, the stick to aim its cone) set both of them and the deck's poison alight. Decaying Touch (R cycles its target) and plain attacks finished them in four rounds, with Restoration healing him once. The turn order, action points, targeting, damage numbers and surfaces all worked.
+- 30 fps throughout, the fight included. Over the whole session (514 windows of 300 frames, about 85 minutes) the median frame time stayed between 33.1 and 33.5 ms, with a p95 median of 35.8 ms. On the top deck: GPU p50 about 16 ms, 1,677 draws and 24.5 ms of submit CPU a frame. The longest frames (125–380 ms) came at level loads and saves. In all, 1,420 draws were left out while the new areas' pipelines built in the background (`[vk] draws not made: … pipeline 1420`).
+- Quick Save on the top deck after the fight (`QuickSave_1`, in-game Day 1 14:55), then Main Menu and Load: the pause menu's Load, or Story → Load campaign. It loads again where it was. Continue loaded an older save instead ([Open](#open)).
+- Sound: a 4-minute `DM_AUDIO_DUMP` from the title through loading that save. L and R about −35 dBFS, centre and LFE silent, the rear pair about −70 dBFS, no clipping, spectra like music (flatness 0.00–0.02, peaks on notes), and 0 underruns.
 
 ## Routes
 
@@ -48,7 +61,8 @@ Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The ti
 - `long`: the hold from the same save for 25 minutes, walking up and down every 20 s, for slowdowns that build up over time.
 - `walk`: the hold from the same save, the left stick down for 1 s at 84 s (and right at 95 s, which a camera tutorial box stops); where the first walk ends, in the shot at 90 s, shows whether the game moves by time or by frames.
 - `cc`: a fresh save into character creation, for profiles of the title screen, the main menu and character creation.
-- `saves/cabin` (not a route yet): a Quick Save on the cabin deck next to the murder room, past Magister Siwan's second dialogue, made by hand on the Pad 3; the way to the top deck from there is not found yet.
+- `saves/cabin` (not a route yet): a Quick Save on the cabin deck next to the murder room, past Magister Siwan's second dialogue, made by hand on the Pad 3; the way to the top deck from there is in [To the first combat](#to-the-first-combat).
+- `saves/combat` (not a route yet): the save folder from the Odin 2 after the first fight. Load `QuickSave_1` by name for the top deck beside the two Voidlings; Continue picks another save.
 
 ## Frame rate
 
@@ -74,4 +88,6 @@ Measured on a OnePlus Pad 3 (Adreno 830, Android 16; its 144 Hz panel runs Divin
 
 - On a cold pipeline cache, 25 draws of a new game's first minutes are left out while their pipelines build in the background (`[vk] draws not made: … pipeline 25`, `pipeline built in the background … draws left out meanwhile`); with the cache warm, `hold` leaves out none.
 - `[nvn] [RED] SetRenderEnableConditional: the host draws anyway for now`, from the title on.
-- Further into the game (the top deck, the first fights, Fort Joy) is not played yet.
+- Every save's time reads 18:00:02 31/12/1969, so the game can't tell which is newest. With several saves, Continue loads one that isn't (an older autosave, after a Quick Save on the top deck), and the Load list isn't in order. The host's user clock is `time()` (`hle_time.c`) and its network clock answers unavailable (`hle_sdk16.c`); which clock the game stamps saves with has not been looked into.
+- In the `DM_AUDIO_DUMP`, every 1024-frame block of Wwise's mix is followed by 240–480 frames of zeros, a quarter of all samples, while the AAudio side reports no underruns. 247 s were dumped in about 190 s of play. Not listened for yet: whether those zeros reach the speaker is open.
+- Further into the game (past the first fight, Fort Joy) is not played yet.
