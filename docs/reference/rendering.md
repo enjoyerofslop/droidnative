@@ -2161,7 +2161,10 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - **Which dispatches:** only one whose input is E5B9G9R9 and whose output is a larger B10G11R11 image (`upsq_run`). E5B9G9R9 is the networks' square-root input; a B10G11R11 input is linear (BananaNative), and the square would be wrong for it. Any other dispatch of those shaders runs as the game made it.
   - **What:** it samples the input at each output texel's centre, writes `x * |x|` into an RGBA16F intermediate and blits that into the output.
   - `DM_VK_UPSCALER_SQUARE=0` (or `DM_VK_UPSCALER_SQUARE_CS=0`) runs the network. A GPU that can't filter, store or blit those formats runs it too, with a red line (129).
-- **Check:** OnePlus Pad 3 (Adreno 830), Kokiri Forest with raw global memory on (#150): replaced, the frame goes from 103 to 62 ms (10.4 to 15.8 fps), with `nvnSyncWait` from 21 to 1 ms (stream C, q99). The picture against the network's is in the PR.
+- **Check:** Kokiri Forest with raw global memory on (#150).
+  - OnePlus Pad 3 (Adreno 830): replaced, the frame goes from 103 to 62 ms (10.4 to 15.8 fps), and `nvnSyncWait` from 21 to 1 ms (stream C, q99).
+  - Galaxy Z Fold 8 (Adreno 840), on Ocarina of Time's opt-in tree (#217): the network 11.0 fps (frame p50 88 ms, GPU 73 ms); replaced 17.8 and 16.0 fps over two launches (frame p50 54 and 63 ms, GPU 41 and 48 ms). The log names `fa3033d05c0a41d6`, "replaced (by its interface)".
+  - The picture: the same scene, lit and coloured alike (mean difference 6.4 / 255 at the route's end, within the 7.0 between two replaced launches, which differ by falling leaves and Navi), and softer: the network adds detail the bilinear scale does not (mean gradient 8.5 against 4.5–4.7).
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2).
 
 ### A render pass with colour slot 0 empty hangs a later pass on the Adreno 830 (Android)
