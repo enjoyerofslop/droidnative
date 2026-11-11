@@ -108,9 +108,37 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   `DM_PAD_INSET` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
   shakes the controller. The **≡** button at the top (left of −) goes back to the launcher while the game keeps running behind it: **Play** on the same game resumes
   it, and picking another game asks before closing the running one.
-- **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; the desktop app backs them up to the computer. The log is
+- **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; each game's screen exports, imports and puts back its save
+  ([Saves](#saves)), and the desktop app backs them all up to the computer. The log is
   `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`). The start before's is kept as `log.prev.txt`, so a game the system closed
   for memory and that opened again still leaves its last log.
+
+## Saves
+
+At the bottom of a game's screen in the app, under **Save**:
+
+- **Export save** writes the game's save as a zip wherever you pick: Downloads, a cloud drive, an SD card. Inside, `saves/<title ID>/` is the save as the game
+  sees it (with `saves/<title ID>_device/` beside it for a game that also keeps a device save). For an emulator, copy the files inside that folder into its save folder for the game.
+- **Import save** takes a save from a zip or a folder you pick and puts it in place of the game's save. It recognises:
+  - an export or backup from DroidPlay;
+  - a yuzu-family emulator's save folder (yuzu, Citron, Eden, Sudachi…: `nand/user/save/0000000000000000/<user>/<title ID>/`) and Ryujinx's (`bis/user/save/<number>/`);
+    pick the game's folder, or one higher up: when it holds several users' saves, you pick one;
+  - JKSV, EdiZon and Checkpoint backups;
+  - any folder that is the save itself, such as UltraTears' `userdata/save/<user ID>/`, or a save site's zip.
+
+  It shows what it found and asks first. It warns when the files say they're another game's, or share no file names with the save the game has on the phone.
+  RAR and 7z archives, and zips that Windows packed with Deflate64 (it does for big ones), can't be opened on a phone: unpack them with a file manager app or on a
+  computer, then import the folder.
+- **Earlier saves** puts back a save kept before an import, or one from **Back up saves** on the games list.
+
+Before an import or a restore, the game's save is kept in `Android/data/org.nxnative.android/files/backups/<time>-<title ID>/`, which DroidPlay for Windows' **Back up
+saves to this computer** copies too. The game must not be running; the app offers to close it, and progress it hasn't saved is lost. Uninstalling the app deletes
+those backups along with the saves, so export the saves you care about first.
+
+- **Play the game once before importing**, until it saves. The import then checks the new files against that save, and finds the save's folder by its file names
+  when a zip holds it deeper down or inside a folder of its own. Without a save to compare with, it goes down through folders that hold nothing but one folder, and takes the first that holds more.
+- **A save from a later update of the game** than the one on the phone may not load (the game may say it's damaged, or start afresh). Your previous save is kept.
+- **A game with several save slots** keeps them all in its one save, so an import replaces every slot at once.
 
 ## Game apps
 

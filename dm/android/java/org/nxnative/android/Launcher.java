@@ -10,7 +10,8 @@
 //   Saves: internal storage, saves/<title ID> (front_android.c). The one-game installs kept theirs in internal files/save: the packing script's --migrate moves the game
 //   folder into games/<title ID> and leaves a legacy_save marker there, and this launcher then backs every save up to <external files>/backups/<time>/ and copies
 //   files/save into saves/<title ID> (files/save itself is left as it was). Back up saves does the same backup on demand; a folder pushed to backups/restore/ is copied
-//   back into internal storage at the next start (after a backup of what is there).
+//   back into internal storage at the next start (after a backup of what is there), a game at a time. A game's settings screen also exports, imports and puts back
+//   that game's save (its Save rows: LauncherSaves.java).
 package org.nxnative.android;
 
 import android.app.Activity;
@@ -83,6 +84,7 @@ public class Launcher extends Activity {
     File ext, games, internal; SharedPreferences app, prefs; Map<String, String> envFile, defaults;
     Game game;   // the one whose settings are shown
     final List<Setting> settings = new ArrayList<>();
+    LauncherSaves saves;
     final Map<String, String> chosen = new HashMap<>();
     LinearLayout list; float dp;
     final Handler ui = new Handler(Looper.getMainLooper());
@@ -90,7 +92,7 @@ public class Launcher extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         ext = getExternalFilesDir(null); if (ext == null) ext = getFilesDir();
-        games = new File(ext, "games"); internal = getFilesDir();
+        games = new File(ext, "games"); internal = getFilesDir(); saves = new LauncherSaves(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         dp = getResources().getDisplayMetrics().density;
         app = getSharedPreferences("app", MODE_PRIVATE);
@@ -111,6 +113,7 @@ public class Launcher extends Activity {
     }
 
     @Override public void onBackPressed() { if (game != null) showGames(); else super.onBackPressed(); }
+    @Override protected void onActivityResult(int req, int res, Intent data) { if (!saves.result(req, res, data)) super.onActivityResult(req, res, data); }
 
     // ---------------- The games ----------------
     List<Game> scan() {
@@ -283,6 +286,7 @@ public class Launcher extends Activity {
         reset.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { prefs.edit().clear().apply(); for (Setting s : settings) chosen.put(s.key, s.def); fill(); } });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, px(44)); lp.topMargin = px(12);
         list.addView(reset, lp);
+        list.addView(saves.rows(game));
     }
 
     View row(final Setting s) {
@@ -348,6 +352,7 @@ public class Launcher extends Activity {
     // desktop: the desktop app's Play started it (it said the first start takes a while before it did), so a first start gets a toast here, not a dialog to tap
     void play(final boolean desktop) {
         final Game g = game;
+        if (saves.busy) { toast("Wait for the save to finish copying, then press Play"); return; }
         StringBuilder sb = new StringBuilder("# written by the settings screen (Launcher.java); env.txt wins over these\n");
         for (Setting s : settings) if (!envFile.containsKey(s.key)) sb.append(s.key).append('=').append(chosen.get(s.key)).append('\n');
         try (FileOutputStream o = new FileOutputStream(new File(g.dir, "launcher.txt"))) { o.write(sb.toString().getBytes(StandardCharsets.UTF_8)); } catch (IOException e) { Log.w(TAG, "launcher.txt: " + e); }
@@ -434,7 +439,8 @@ public class Launcher extends Activity {
         Log.i(TAG, "saves backed up to " + to);
         return to.getPath();
     }
-    // A folder pushed to <external files>/backups/restore/ (a backup) goes back into internal storage, over the folders of the same names, after a backup of those
+    // A folder pushed to <external files>/backups/restore/ (a backup) goes back into internal storage, over the folders of the same names, after a backup of those.
+    // saves/ goes back a game at a time, so a game the backup has no save of keeps its own (a one-game backup from an import or an export holds saves/<title ID> alone)
     String restore() {
         File r = new File(ext, "backups/restore"); if (!r.isDirectory()) return null;
         if (gameProcess() != null) return "A game is running: the backup in backups/restore is restored at the next start";
@@ -444,13 +450,18 @@ public class Launcher extends Activity {
         try {
             for (File f : fs) {
                 if (!f.isDirectory() || !f.getName().startsWith("save")) continue;
-                File dst = new File(internal, f.getName()); File tmp = new File(internal, f.getName() + ".restoring");
-                deleteTree(tmp); copyTree(f, tmp, null, null); applyXattrs(tmp, f.getName(), xa);
-                deleteTree(dst); if (!tmp.renameTo(dst)) throw new IOException("rename " + tmp + " failed");
+                if (!f.getName().equals("saves")) { restoreTree(f, new File(internal, f.getName()), f.getName(), xa); continue; }
+                File[] gs = f.listFiles(); if (gs != null) for (File g : gs)
+                    if (g.isDirectory() && Saves.TITLE.matcher(g.getName()).matches()) restoreTree(g, new File(internal, "saves/" + g.getName()), "saves/" + g.getName(), xa);
             }
         } catch (IOException e) { Log.w(TAG, "restore: " + e); return "Restore failed: " + e.getMessage(); }
         r.renameTo(new File(ext, "backups/restored-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date())));
         return "Saves restored" + (before != null ? " (the ones before are in " + before + ")" : "");
+    }
+    static void restoreTree(File src, File dst, String top, Map<String, String[]> xa) throws IOException {
+        File tmp = new File(dst.getPath() + ".restoring");
+        deleteTree(tmp); dst.getParentFile().mkdirs(); copyTree(src, tmp, null, null); applyXattrs(tmp, top, xa);
+        deleteTree(dst); if (!tmp.renameTo(dst)) throw new IOException("rename " + tmp + " failed");
     }
     // The one-game installs kept their save in internal files/save (and save_device beside it); --migrate leaves games/<id>/legacy_save on the game they belonged to.
     // That save is copied to saves/<id> (through a temporary folder, so a copy cut short is made again next time), after a backup of everything; files/save stays as it was
@@ -515,9 +526,9 @@ public class Launcher extends Activity {
         for (String line : new String(b, StandardCharsets.UTF_8).split("\n")) { String[] c = line.split("\t"); if (c.length == 3) m.put(c[0] + "\u0000" + (i++), c); }
         return m;
     }
-    static void applyXattrs(File root, String top, Map<String, String[]> xa) {
+    static void applyXattrs(File root, String top, Map<String, String[]> xa) {   // the user namespace alone: a backup's security.selinux rows are its phone's labels
         for (String[] c : xa.values()) {
-            if (!c[0].equals(top) && !c[0].startsWith(top + "/")) continue;
+            if (!c[1].startsWith("user.") || !c[0].equals(top) && !c[0].startsWith(top + "/")) continue;
             File f = new File(root, c[0].substring(top.length()));
             try { Os.setxattr(f.getPath(), c[1], unhex(c[2]), 0); } catch (Exception e) { Log.w(TAG, "xattr " + f + ": " + e); }
         }
