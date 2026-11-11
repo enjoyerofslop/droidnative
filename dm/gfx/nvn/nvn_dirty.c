@@ -62,13 +62,57 @@ static int busy_wait(range_t *r, uintptr_t p) {
     return 1;
 }
 static int live_at(int i) { return atomic_load_explicit(&rg(i)->live, memory_order_acquire); }
+// The range index: the live ranges sorted by base, each with the largest end of it and every range before it, for the lookups by address (a fault, a host write, a span, an open).
+// Those walked every slot in use: one pass over every tracked pool for each guest write fault and each host pre-write, thousands of pools in Ocarina of Time, where the Android
+// replay's completion thread spent 98% of its time in prep_write. A lookup bisects to the last range starting before the address's end and walks back only while an earlier range
+// can still reach it (the running end), so ranges sharing a page are all found. An index is never changed: adding or removing a range (under g_slot_mu) publishes a new one.
+// A reader, the page-fault path among them, counts itself in g_ix_readers while it holds one, and a replaced index is freed once a writer sees no reader counted after the
+// replacement (a reader counted later loads the new one). A reader checks each candidate's slot as before (live, its current bounds), so a stale index can only skip a range
+// just removed; a range just added has no protected page yet
+typedef struct { uintptr_t base, end, maxend; int slot; } ix_ent;
+typedef struct ix { int n; struct ix *next; ix_ent e[]; } ix_t;   // next: the list of replaced ones (g_slot_mu)
+static _Atomic(ix_t *) g_ix;
+static _Atomic int g_ix_readers;
+static ix_t *g_ix_old;
+static ix_t *ix_get(void) { atomic_fetch_add(&g_ix_readers, 1); return atomic_load(&g_ix); }
+static void ix_put(void) { atomic_fetch_sub(&g_ix_readers, 1); }
+static int ix_upper(const ix_t *x, uintptr_t e) { int lo = 0, hi = x->n; while (lo < hi) { int m = (lo + hi) / 2; if (x->e[m].base < e) lo = m + 1; else hi = m; } return lo; }   // entries [0, k) start below e
+// Index entries I of index X whose range overlaps [A, Z), from the last starting below Z back while an earlier one can still reach A (its slot then checked by the caller)
+#define IX_EACH(X, A, Z, I) for (int I = ix_upper((X), (Z)) - 1; I >= 0 && (X)->e[I].maxend > (A); I--) if ((X)->e[I].end > (A))
+static void ix_publish(ix_t *x) {   // g_slot_mu held
+    for (int i = 0; i < x->n; i++) x->e[i].maxend = i && x->e[i - 1].maxend > x->e[i].end ? x->e[i - 1].maxend : x->e[i].end;
+    ix_t *old = atomic_exchange(&g_ix, x);
+    if (old) { old->next = g_ix_old; g_ix_old = old; }
+    if (!atomic_load(&g_ix_readers)) while (g_ix_old) { ix_t *k = g_ix_old; g_ix_old = k->next; free(k); }
+}
+static void ix_add(int slot, uintptr_t base, uintptr_t end) {   // g_slot_mu held
+    ix_t *o = atomic_load(&g_ix); int n = o ? o->n : 0, k = o ? ix_upper(o, base) : 0;
+    ix_t *x = malloc(sizeof *x + (size_t)(n + 1) * sizeof x->e[0]); if (!x) die("dirty-page tracking: out of memory for the range index (%d ranges)", n + 1);
+    x->n = n + 1; x->next = NULL;
+    if (k) memcpy(x->e, o->e, (size_t)k * sizeof x->e[0]);
+    x->e[k] = (ix_ent){base, end, end, slot};
+    if (n > k) memcpy(x->e + k + 1, o->e + k, (size_t)(n - k) * sizeof x->e[0]);
+    ix_publish(x);
+}
+static void ix_remove(int slot) {   // g_slot_mu held
+    ix_t *o = atomic_load(&g_ix); if (!o) return;
+    int k = 0; while (k < o->n && o->e[k].slot != slot) k++;
+    if (k == o->n) return;
+    ix_t *x = malloc(sizeof *x + (size_t)(o->n > 1 ? o->n - 1 : 1) * sizeof x->e[0]); if (!x) die("dirty-page tracking: out of memory for the range index (%d ranges)", o->n - 1);
+    x->n = o->n - 1; x->next = NULL;
+    memcpy(x->e, o->e, (size_t)k * sizeof x->e[0]); memcpy(x->e + k, o->e + k + 1, (size_t)(o->n - k - 1) * sizeof x->e[0]);
+    ix_publish(x);
+}
 // The registered range that holds all of [a, a+len) (used for a texture's tracking / protection / dirty check)
 static _Atomic int g_span_last;   // the last range found: looks come in runs over one pool, and a scan of Mario Kart World's 5,000 pools per look took a quarter of its submit thread's time
 static range_t *find_span(uintptr_t a, size_t len) {
     int n = atomic_load(&g_nr), k = atomic_load_explicit(&g_span_last, memory_order_relaxed);
     if (k < n) { range_t *r = rg(k); if (live_at(k) && a >= r->base && a + len <= r->end) return r; }
-    for (int i = 0; i < n; i++) { range_t *r = rg(i); if (live_at(i) && a >= r->base && a + len <= r->end) { atomic_store_explicit(&g_span_last, i, memory_order_relaxed); return r; } }
-    return NULL;
+    int best = -1; ix_t *x = ix_get();
+    if (x) IX_EACH(x, a, a + len, i) { int s = x->e[i].slot; range_t *r = rg(s); if ((best < 0 || s < best) && live_at(s) && a >= r->base && a + len <= r->end) best = s; }   // the lowest slot, as the walk found
+    ix_put();
+    if (best < 0) return NULL;
+    atomic_store_explicit(&g_span_last, best, memory_order_relaxed); return rg(best);
 }
 static void stamp_page(range_t *r, uintptr_t p) {
     atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
@@ -102,9 +146,10 @@ static int release_page(range_t *r, uintptr_t p, _Atomic uint64_t *count) {
 static int on_fault(void *addr, int is_write, void *uc) {
     (void)uc;
     if (!is_write) return 0;
-    uintptr_t a = (uintptr_t)addr; int ours = 0, n = atomic_load(&g_nr);
-    for (int i = 0; i < n; i++)   // Every range sharing the page must be released: releasing only one leaves the other range's state at "protected", and later writes no longer fault and are missed
-        { range_t *r = rg(i); if (live_at(i) && a >= r->base && a < r->end) ours |= release_page(r, (a - r->base) >> g_shift, &g_faults); }
+    uintptr_t a = (uintptr_t)addr; int ours = 0; ix_t *x = ix_get();
+    if (x) IX_EACH(x, a, a + 1, i)   // Every range sharing the page must be released: releasing only one leaves the other range's state at "protected", and later writes no longer fault and are missed
+        { int s = x->e[i].slot; range_t *r = rg(s); if (live_at(s) && a >= r->base && a < r->end) ours |= release_page(r, (a - r->base) >> g_shift, &g_faults); }
+    ix_put();
     return ours;
 }
 // Unprotect pages p..q of a range with one mprotect per run of protected pages (a host write over a whole texture, e.g. WriteTexels, used to make one system call per 16 KB page:
@@ -124,14 +169,16 @@ static void release_pages(range_t *r, uintptr_t p, uintptr_t q, _Atomic uint64_t
     }
 }
 static void prep_write(void *addr, size_t len) {
-    uintptr_t a = (uintptr_t)addr, e = a + len; int n = atomic_load(&g_nr);
+    uintptr_t a = (uintptr_t)addr, e = a + len;
     if (!len) return;
-    for (int i = 0; i < n; i++) {
-        range_t *r = rg(i);
-        if (!live_at(i) || e <= r->base || a >= r->end) continue;
+    ix_t *x = ix_get();
+    if (x) IX_EACH(x, a, e, i) {
+        int s = x->e[i].slot; range_t *r = rg(s);
+        if (!live_at(s) || e <= r->base || a >= r->end) continue;
         uintptr_t lo = a > r->base ? a : r->base, hi = e < r->end ? e : r->end;
         release_pages(r, (lo - r->base) >> g_shift, (hi - 1 - r->base) >> g_shift, &g_preps);
     }
+    ix_put();
 }
 
 void nvn_dirty_add_range(const void *mem, size_t size) {
@@ -173,14 +220,15 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     r->base = base; r->end = end; r->mem = (uintptr_t)mem; r->state = state; r->gen = gen;
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
+    ix_add(slot, base, end);
     pthread_mutex_unlock(&g_slot_mu);
 }
 // Pool destruction: first restore still-protected pages to writable (the pool memory may be reused for something else once returned to the game), then mark invalid
 void nvn_dirty_remove_range(const void *mem) {
     pthread_mutex_lock(&g_slot_mu);
-    range_t *r = NULL; int n = atomic_load(&g_nr);
-    for (int i = 0; i < n && !r; i++) if (live_at(i) && rg(i)->mem == (uintptr_t)mem) r = rg(i);   // Match by the pool's exact start: an adjacent pool sharing a page may have the same rounded base
-    if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }
+    range_t *r = NULL; int n = atomic_load(&g_nr), slot = -1;
+    for (int i = 0; i < n && !r; i++) if (live_at(i) && rg(i)->mem == (uintptr_t)mem) { r = rg(i); slot = i; }   // Match by the pool's exact start: an adjacent pool sharing a page may have the same rounded base
+    if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); ix_remove(slot); }
     pthread_mutex_unlock(&g_slot_mu);
 }
 // A zero-copy Metal buffer made while any of its pages is read-only drops every GPU write through it, with no error, even to pages never protected and even once its pages are writable again;
@@ -214,9 +262,9 @@ static void open_add(range_t *r, uintptr_t p, uint64_t h) {
 void nvn_dirty_open(const void *addr, size_t len) {
     pthread_mutex_lock(&g_slot_mu);
     g_nopen = 0;
-    uintptr_t a = (uintptr_t)addr, e = a + len; int n = atomic_load(&g_nr);
-    for (int k = 0; len && k < n; k++) {
-        range_t *r = rg(k);
+    uintptr_t a = (uintptr_t)addr, e = a + len; ix_t *x = len ? ix_get() : NULL;
+    if (x) IX_EACH(x, a, e, ii) {
+        int k = x->e[ii].slot; range_t *r = rg(k);
         if (!live_at(k) || e <= r->base || a >= r->end) continue;
         uintptr_t lo = a > r->base ? a : r->base, hi = e < r->end ? e : r->end, p = (lo - r->base) >> g_shift, q = (hi - 1 - r->base) >> g_shift, run = 0; int open = 0;
         for (uintptr_t i = p; i <= q + 1; i++) {
@@ -235,6 +283,7 @@ void nvn_dirty_open(const void *addr, size_t len) {
             if (st == PG_BUSY) busy_wait(r, i);   // being unprotected: writable once it is done (with g_slot_mu held nothing protects it), and the buffer must not be made before
         }
     }
+    if (x) ix_put();
     atomic_fetch_add(&g_opened, g_nopen);
 }
 void nvn_dirty_close(void) {
