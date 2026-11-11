@@ -471,8 +471,10 @@ class Phone(Base):
                 return f"/dev/fuse 233000000 120000000 {self.remote['free']} 51% /storage/emulated\n" if 'free' in self.remote else ''
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('[ -e '):
                 path = c[1].split("'")[1]; return 'yes\n' if self.remote.get(path) else ''
+            if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('sha256sum ') and 'vk_drivers/' in c[1]: return self.remote.get('vk_sha', '')
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('sha256sum '): return self.remote.get('sha', '') + '  x\n'
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('cat ') and ba.MANIFEST in c[1]: return self.remote.get('manifest', '')
+            if c == ['shell', 'getprop ro.build.version.sdk']: return self.remote.get('sdk', '')
             return ''
         cm = mock.patch.object(ba, 'adb', adb); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
         self.game = self.tmp / 'v1'; (self.game / 'RomFS').mkdir(parents=True); (self.game / 'RomFS/a.bin').write_bytes(b'a')
@@ -596,6 +598,131 @@ class Phone(Base):
         self.assertEqual(self.cmds[-1][:2], ['install', '-r'])
         self.assertFalse(any('uninstall' in ' '.join(c) for c in self.cmds))
 
+
+
+def elf(needed=('libc.so', 'libdl.so', 'liblog.so'), export='HMI', machine=183, etype=3, sections=True, pad=0):
+    """A minimal Android-style shared object: what vk_driver_pkg.check_elf reads (program headers, PT_DYNAMIC, DT_NEEDED, a dynamic symbol), nothing that runs"""
+    names = [n.encode() for n in needed] + [export.encode()]
+    strtab = b'\0'; offs = []
+    for n in names: offs.append(len(strtab)); strtab += n + b'\0'
+    SYM, STR, DYN, SH = 0x100, 0x200, 0x300, 0x400   # .dynsym before .dynstr, as linkers lay them out
+    sym = bytes(24) + struct.pack('<IBBHQQ', offs[-1], (1 << 4) | 1, 0, 1, 0, 0)   # null, then a global object in section 1
+    dyn = b''.join(struct.pack('<qQ', 1, o) for o in offs[:-1]) + struct.pack('<qQqQqQqQ', 5, STR, 6, SYM, 10, len(strtab), 0, 0)
+    end = SH + (3 * 64 if sections else 0) + pad
+    ph = struct.pack('<IIQQQQQQ', 1, 5, 0, 0, 0, end, end, 0x1000) + struct.pack('<IIQQQQQQ', 2, 6, DYN, DYN, DYN, len(dyn), len(dyn), 8)
+    eh = b'\x7fELF' + bytes([2, 1, 1, 0]) + bytes(8) + struct.pack('<HHIQQQIHHHHHH', etype, machine, 1, 0, 64, SH if sections else 0, 0, 64, 56, 2, 64, 3 if sections else 0, 0)
+    out = bytearray(end); out[:64] = eh; out[64:64 + len(ph)] = ph; out[STR:STR + len(strtab)] = strtab; out[SYM:SYM + len(sym)] = sym; out[DYN:DYN + len(dyn)] = dyn
+    if sections:
+        sh = bytes(64) + struct.pack('<IIQQQQIIQQ', 0, 11, 2, SYM, SYM, len(sym), 2, 1, 8, 24) + struct.pack('<IIQQQQIIQQ', 0, 3, 2, STR, STR, len(strtab), 0, 0, 1, 0)
+        out[SH:SH + len(sh)] = sh
+    return bytes(out)
+
+
+def vkpkg():
+    sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg   # pyright: ignore[reportMissingImports]
+    return vk_driver_pkg
+
+
+def make_pkg(tmp, name='turnip.adpkg.zip', lib='vulkan.purple.so', data=None, meta: Any = True, extra=()):   # an AdrenoTools package around elf()
+    import zipfile
+    p = tmp / name
+    with zipfile.ZipFile(p, 'w') as z:
+        if meta: z.writestr('meta.json', json.dumps({'schemaVersion': 1, 'name': 'T', 'description': '', 'author': 'A', 'packageVersion': '1', 'vendor': 'Mesa',
+                                                    'driverVersion': '26.3.0', 'minApi': 30, 'libraryName': lib} if meta is True else meta))
+        z.writestr(lib, data if data is not None else elf())
+        for n, d in extra: z.writestr(n, d)
+    return p
+
+
+class VkDriver(Base):   # --vk-driver (dm/android/tools/vk_driver_pkg.py): a driver package checked without running it, then copied and named in defaults.txt
+    def pkg(self, *a, **k): return make_pkg(self.tmp, *a, **k)
+
+    def test_an_android_driver_passes(self):
+        self.assertEqual(vkpkg().check_elf(elf()), [])
+        self.assertEqual(vkpkg().check_elf(elf(sections=False)), [])   # no section headers: the symbol table is counted from the dynamic tags
+
+    def test_what_isnt_an_android_driver_says_why(self):
+        v = vkpkg()
+        self.assertIn('glibc', ' '.join(v.check_elf(elf(needed=('libc.so.6', 'ld-linux-aarch64.so.1')))))   # a Linux build (Banners' "Linux" zips, container builds)
+        self.assertIn('HMI', ' '.join(v.check_elf(elf(export='vkGetInstanceProcAddr'))))
+        self.assertIn('arm64', ' '.join(v.check_elf(elf(machine=62))))
+        self.assertIn('shared object', ' '.join(v.check_elf(elf(etype=2))))
+        self.assertEqual(v.check_elf(b'MZ' + bytes(100)), ['not an ELF file'])
+
+    def test_a_package_is_read_and_named_by_its_hash(self):
+        d = vkpkg().read(self.pkg())
+        self.assertEqual((d.library, d.min_api, d.meta['author']), ('vulkan.purple.so', 30, 'A'))
+        self.assertEqual(d.sha256, hashlib.sha256(elf()).hexdigest())
+        self.assertEqual(d.name, f'vulkan.purple-{d.sha256[:8]}.so')
+        self.assertEqual(vkpkg().installed_name(d.name, d.sha256), d.name)   # a name made once stays
+        so = self.tmp / 'x.so'; so.write_bytes(elf())
+        self.assertEqual(vkpkg().read(so).library, 'x.so')   # a bare .so
+        self.assertEqual(vkpkg().read(self.pkg('plain.zip', 'libvulkan_freedreno.so', meta=False)).library, 'libvulkan_freedreno.so')   # a zip without meta.json, one .so
+
+    def test_a_bad_package_says_why(self):
+        v = vkpkg()
+        cases = [(self.pkg('a.zip', extra=[('../evil.so', b'x')]), 'outside the package'),
+                 (self.pkg('b.zip', extra=[(f'f{i}', b'') for i in range(40)]), 'at most'),
+                 (self.pkg('c.zip', meta={'schemaVersion': 1, 'libraryName': 'x.so'}), 'lacks'),
+                 (self.pkg('d.zip', lib='sub/v.so', meta={'schemaVersion': 1, 'name': '', 'description': '', 'author': '', 'packageVersion': '', 'vendor': '', 'driverVersion': '',
+                                                           'minApi': 28, 'libraryName': 'sub/v.so'}), "package's root"),
+                 (self.pkg('e.zip', data=elf(needed=('libc.so.6',))), 'glibc'),
+                 (self.pkg('f.zip', meta=False, extra=[('two.so', elf())]), 'which is the driver')]
+        for p, why in cases:
+            with self.assertRaises(v.PackageError, msg=p.name) as e: v.read(p)
+            self.assertIn(why, str(e.exception), p.name)
+
+    def test_a_malformed_package_is_a_package_error(self):   # never a traceback: the CLI and the desktop app's Add your own say why
+        v = vkpkg()
+        cut = self.tmp / 'cut.so'; cut.write_bytes(elf()[:300])   # the dynamic section and the tables past the file's end
+        b = bytearray(elf(sections=False)); i = b.find(struct.pack('<q', 10), 0x300)   # DT_STRSZ's entry (unread) becomes a DT_HASH 4 bytes before the file's end
+        b[i:i + 16] = struct.pack('<qQ', 4, len(b) - 4)
+        self.assertEqual(v.check_elf(bytes(b)), [])   # read without struct.error: the table past the end is passed over, the symbols counted another way
+        z = make_pkg(self.tmp, 'odd.zip')   # an entry with a compression method zipfile lacks (99, AE-x encryption's)
+        raw = bytearray(z.read_bytes())
+        for sig in (b'PK\x03\x04', b'PK\x01\x02'):
+            i = -1
+            while (i := raw.find(sig, i + 1)) >= 0: raw[i + (8 if sig == b'PK\x03\x04' else 10):i + (10 if sig == b'PK\x03\x04' else 12)] = struct.pack('<H', 99)
+        odd = self.tmp / 'odd2.zip'; odd.write_bytes(bytes(raw))
+        for p in (cut, odd):
+            with self.assertRaises(v.PackageError, msg=p.name): v.read(p)
+
+    def test_only_mesas_switches_go_beside_a_driver(self):
+        v = vkpkg()
+        self.assertEqual(v.parse_env(['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1']), ['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1'])
+        with self.assertRaises(v.PackageError): v.parse_env(['DM_VK_RAW_GMEM=1'])
+        a = mock.Mock(vk_driver='system', vk_driver_env=None); self.assertEqual(ba.vk_driver_arg(a), (None, []))
+        with self.assertRaises(ba.BuildError): ba.vk_driver_arg(mock.Mock(vk_driver=None, vk_driver_env=['TU_DEBUG=sysmem']))
+        with self.assertRaises(ba.BuildError): ba.vk_driver_arg(mock.Mock(vk_driver=str(self.tmp / 'missing.zip'), vk_driver_env=None))
+
+
+class VkDriverPush(Phone):
+    def push_vk(self, env=()):
+        vk = vkpkg().read(make_pkg(self.tmp))
+        ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'DM_LANG=en-US\n', self.tmp, self.tmp / 'logs', {'title_id': GID}, vk, list(env))
+        return vk, [' '.join(c) for c in self.cmds], (self.tmp / 'android_defaults.txt').read_text()
+
+    def test_copied_to_vk_drivers_and_named_with_its_hash(self):
+        self.remote['/dev/kgsl-3d0'] = True; self.remote['sdk'] = '33'
+        vk, flat, defaults = self.push_vk(['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1'])
+        d = f'{ba.REMOTE}/vk_drivers'
+        self.assertTrue(any(c.startswith('push') and c.endswith(f'{d}/{vk.name}') for c in flat), flat)
+        self.assertTrue(any(f"chmod -R a+rwX '{d}'" in c for c in flat), flat)
+        self.assertEqual(defaults, f'DM_LANG=en-US\nDM_VK_DRIVER=vk_drivers/{vk.name}\nDM_VK_DRIVER_SHA256={vk.sha256}\nFD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1\n')
+
+    def test_not_copied_again_when_the_phone_has_it(self):
+        self.remote['/dev/kgsl-3d0'] = True; self.remote['vk_sha'] = hashlib.sha256(elf()).hexdigest() + '  x'
+        vk, flat, defaults = self.push_vk()
+        self.assertFalse(any(c.startswith('push') and 'vk_drivers/' in c for c in flat), flat)
+        self.assertIn(f'DM_VK_DRIVER_SHA256={vk.sha256}', defaults)
+
+    def test_left_out_on_a_phone_without_an_adreno_gpu_or_too_old(self):
+        _, flat, defaults = self.push_vk()   # no /dev/kgsl-3d0 (a Mali or Xclipse phone)
+        self.assertNotIn('DM_VK_DRIVER', defaults); self.assertFalse(any('vk_drivers' in c for c in flat), flat)
+        self.assertTrue(any('no Adreno GPU' in m for m in self.said), self.said)
+        self.cmds.clear(); self.said.clear(); self.remote['/dev/kgsl-3d0'] = True; self.remote['sdk'] = '29'   # the package says minApi 30
+        _, flat, defaults = self.push_vk()
+        self.assertNotIn('DM_VK_DRIVER', defaults); self.assertTrue(any('needs Android API 30' in m for m in self.said), self.said)
 
 
 class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop app's updates: the newest release read, its Setup downloaded and checked; a local server is GitHub
