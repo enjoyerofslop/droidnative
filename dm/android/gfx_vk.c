@@ -950,6 +950,7 @@ static int wb_apply(const wb_t *w, const uint8_t *s) {
 static void post_apply(const post_op *o);   // with the submission code below
 static void gm_ip_done(const chunk *c, int i);   // gfx_vk_gmem_inplace.inc
 static void gm_chunk_done(chunk *c);   // gfx_vk_gmem.inc
+typedef struct ralloc ralloc; static void ra_release(ralloc *a);   // gfx_vk_rtalias.inc: dead kind 6
 static void prof_collect(chunk *c);   // gfx_vk_draw.inc
 static void chunk_done(chunk *c) {
     for (int i = 0; i < c->ncop; i++) {   // queued before any write-back of the chunk (a copy is queued only once the GPU's writes before it have landed)
@@ -991,7 +992,7 @@ static void chunk_done(chunk *c) {
         uint64_t h = c->dead[i].h;
         switch (c->dead[i].kind) { case 1: vkDestroyImageView(g_vk.dev, (VkImageView)h, NULL); break; case 2: vkDestroyFramebuffer(g_vk.dev, (VkFramebuffer)h, NULL); break;
                                    case 3: vkDestroyImage(g_vk.dev, (VkImage)h, NULL); break; case 4: vkFreeMemory(g_vk.dev, (VkDeviceMemory)h, NULL); break;
-                                   case 5: vkDestroyBuffer(g_vk.dev, (VkBuffer)h, NULL); break; }
+                                   case 5: vkDestroyBuffer(g_vk.dev, (VkBuffer)h, NULL); break; case 6: ra_release((ralloc *)(uintptr_t)h); break; }
     }
     draw_chunk_reset(c);
     vkResetCommandPool(g_vk.dev, c->pool, 0); vkResetFences(g_vk.dev, 1, &c->fence);
@@ -1247,7 +1248,7 @@ typedef struct {
     uint64_t rt_last; uint32_t rt_runs;   // the last present (+1) that drew into it as a pass's target, and in how many presents in a row up to it (gfx_vk_draw.inc rt_note)
     int refs, shared, mutable_, fixed_fmt; uint64_t used;   // mutable_: views in another format of the same texel size (a texture view's format); fixed_fmt: only its format and its sRGB twin (vt_create)   // texture objects (serials) resolving to it; in the sharing table; g_fence at its last lookup
     uint64_t mem_bytes, last_present, last_w; uint8_t gpu_w, filled, pool_read, evict;   // eviction (gfx_vk_evict.inc): its memory's size, the presents of its last lookup and its last write by the GPU, written by the GPU since it was made, filled from its storage, read through the texture pool by ID, chosen
-    VkImageUsageFlags usage; int ext_store;   // its usage; ext_store: STORAGE for views of another format only (EXTENDED_USAGE, vt_storage_up), so each view takes the usage its format has (view_get)
+    VkImageUsageFlags usage; int ext_store; void *ra;   // ra: the shared allocation it is bound to (gfx_vk_rtalias.inc), else NULL: v->mem is its own   // its usage; ext_store: STORAGE for views of another format only (EXTENDED_USAGE, vt_storage_up), so each view takes the usage its format has (view_get)
 } vtex;
 static nvn_hmap g_tex = {.klen = 8}, g_cpuw = {.klen = 8};   // serial → vtex; serials the CPU wrote (WriteTexels). Keyed by the 8-byte serial
 static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_edge_skips, g_up_bytes, g_draws_skipped;
@@ -1272,21 +1273,24 @@ void vkb_frame_forget(uint64_t serial);
 static uint64_t g_vt_gen = 1;
 static uint64_t g_im_live, g_im_n;   // the textures' image memory alive and their count (under g_bk; the periodic line reads them as they are)
 static void im_in(vtex *v, uint64_t b) { v->mem_bytes = b; g_im_live += b; g_im_n++; }
-static void im_out(vtex *v) { if (v->mem_bytes) { g_im_live -= v->mem_bytes; g_im_n--; v->mem_bytes = 0; } }
+static void im_out(vtex *v) { if (v->mem_bytes || v->ra) { g_im_live -= v->mem_bytes; g_im_n--; v->mem_bytes = 0; } }   // (an image on a shared allocation counts no bytes of its own)
+#include "gfx_vk_rtalias.inc"   // render targets over one storage start share one allocation (DM_VK_RTALIAS)
 static void vt_destroy(vtex *v) {   // with the replay's lock held; the front end may be drawing the image: it is taken off the presented frame first (vkb_frame_forget waits for that)
     if (!v) return;
     g_vt_gen++;
     vkb_frame_forget(v->serial);
     if (v->img) views_drop(v->img);   // the image, its views and framebuffers go when the current chunk completes: recorded and submitted commands may use them
-    dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem); im_out(v);
+    dead_add(3, (uint64_t)v->img); vt_mem_drop(v);
     free(v->edge[0]); free(v->edge[1]); free(v);
 }
-static void vt_clear_new(vtex *v) {   // fresh Switch memory reads as 0
+static void vt_clear_new(vtex *v, int clear) {   // fresh Switch memory reads as 0; clear 0: only out of UNDEFINED (an image joining a shared allocation, gfx_vk_rtalias.inc)
     VkCommandBuffer c = cb(); if (!c) return;
     VkImageMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = v->img,
         .subresourceRange = {v->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
-    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    if (!clear) b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;   // its memory may be an older image's that earlier commands still write: after them
+    vkCmdPipelineBarrier(c, clear ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    if (!clear) { cb_barrier(); return; }
     VkImageSubresourceRange rg = {v->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
     if (v->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
         VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, v->fmt, &fp);
@@ -1382,11 +1386,14 @@ static vtex *vt_create(const tex_t *t) {
                                         t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ? ", in a virtual pool" : "", mr.size / 1048576.0, refuse ? ": over the image limit (DM_VK_IMAGE_MAX_MB, DM_VK_SPARSE_MAX_MB in a virtual pool), not made (the texture reads as missing)" : "");
         if (refuse) { nvn_hm_put(&g_img_refused, &t->serial, (void *)1); vkDestroyImage(g_vk.dev, v->img, NULL); free(v); return NULL; }
     }
-    uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt == UINT32_MAX ? vkb_mem_type(mr.memoryTypeBits, 0) : mt};
-    if (vkAllocateMemory(g_vk.dev, &ma, NULL, &v->mem) != VK_SUCCESS) { RED_ONCE(16, "image memory of %llu bytes failed", (unsigned long long)mr.size); vkDestroyImage(g_vk.dev, v->img, NULL); free(v); return NULL; }
-    vkBindImageMemory(g_vk.dev, v->img, v->mem, 0); im_in(v, mr.size);
-    vt_clear_new(v);
+    int ra = ra_bind(v, t, &mr, u);   // 0: its own memory, as before
+    if (!ra) {
+        uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt == UINT32_MAX ? vkb_mem_type(mr.memoryTypeBits, 0) : mt};
+        if (vkAllocateMemory(g_vk.dev, &ma, NULL, &v->mem) != VK_SUCCESS) { RED_ONCE(16, "image memory of %llu bytes failed", (unsigned long long)mr.size); vkDestroyImage(g_vk.dev, v->img, NULL); free(v); return NULL; }
+        vkBindImageMemory(g_vk.dev, v->img, v->mem, 0); im_in(v, mr.size);
+    }
+    vt_clear_new(v, ra != 1);
     return v;
 }
 // A texture bound to an image slot that was made without storage use, as nvn_mtl.m's image_prepare upgrades one (tex_upgrade): the game left NVN's image flag out of its
@@ -1442,7 +1449,7 @@ static int vt_storage_up(vtex *v) {
     vkCmdCopyImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, nr, r);
     cb_barrier();
     vkb_frame_forget(v->serial);
-    views_drop(v->img); dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem); im_out(v);
+    views_drop(v->img); dead_add(3, (uint64_t)v->img); vt_mem_drop(v);   // (an image on a shared allocation takes memory of its own from here)
     v->img = img; v->mem = mem; v->usage = u; v->ext_store = ext; v->mutable_ = 1; v->fixed_fmt = 0; g_vt_gen++; im_in(v, mr.size);
     if (g_st_up++ < 8) LOG("[vk] texture ser=%llu %ux%u format %d bound to an image slot without storage use: made again with it%s (%llu so far)", (unsigned long long)v->serial, v->w, v->h, f,
                            ext ? (f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 ? ", stored through an R32_UINT view, RGB9E5 packed by the shader" : ", stored through its UNORM twin") : "", (unsigned long long)g_st_up);
@@ -1686,6 +1693,7 @@ void vt_drop_pool(const void *pool) {
         share_key k; memcpy(&k, g_share.keys + (size_t)i * g_share.klen, sizeof k); nvn_hm_del(&g_share, &k); v->shared = 0; if (v->refs <= 0) vt_destroy(v);
         i = (uint32_t)-1;
     }
+    ra_drop_pool(pool);
     pthread_mutex_unlock(&g_bk);
 }
 #include "gfx_vk_evict.inc"   // images no draw has used for a while, evicted when their content is still in guest memory (vt_evict)
@@ -2376,6 +2384,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     pthread_mutex_lock(&g_bk);
     vtex *v = vt_get(t); flush(); rec_drain();   // the frame's chunks on the queue before the front end's blit of it (rec_submit)
     vt_evict();   // images no draw has used for a while (gfx_vk_evict.inc)
+    ra_sweep(atomic_load(&g_presents));   // shared allocations nobody holds (gfx_vk_rtalias.inc)
     dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents));
     if (prof_on()) { all_wait(); prof_write(); }
     if (atomic_load(&g_presents) == 30) prewarm_start();   // the pipelines of earlier sessions (gfx_vk_draw.inc), once the game draws
@@ -2482,7 +2491,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     frame, mb, g_tex.n, (unsigned long long)g_pkg_uploads, (unsigned long long)g_pkg_reuploads, (unsigned long long)(g_up_bytes >> 20), (unsigned long long)g_lsnap, (unsigned long long)g_lsnap_stale,
     (unsigned long long)atomic_load(&g_lwb_whole), (unsigned long long)atomic_load(&g_lwb_diff), (unsigned long long)(atomic_load(&g_lwb_bytes) >> 10), (unsigned long long)atomic_load(&g_lwb_same),
     atomic_load(&g_lwb_ns) / 1e6, (unsigned long long)atomic_load(&g_ab_taken), (unsigned long long)atomic_load(&g_ab_noted), (unsigned long long)atomic_load(&g_ab_clean), (unsigned long long)atomic_load(&g_ab_differ), (unsigned long long)atomic_load(&g_ab_refused));
-    ev_stat();
+    ev_stat(); ra_stat();
     if (wb_revert_on()) rv_stat(frame);
     {   static unsigned long long f0; static uint64_t n0, b0, r0, t0;   // since the last line, a frame on average
         uint64_t n = atomic_load(&g_awb_n), b = atomic_load(&g_awb_bytes), r = atomic_load(&g_awb_rb), t = atomic_load(&g_wb_ns); double fr = frame > f0 ? (double)(frame - f0) : 1;
