@@ -1297,12 +1297,16 @@ static uint32_t rt_layers(const vtex *v, const view_t *cv, uint32_t lv, uint32_t
 // frame in the field. One pass binds a 640x360 target in slot 5 alone (slots 0-4 VK_ATTACHMENT_UNUSED); the pass itself runs, but a later pass drawing into that target as
 // slot 0 then hung the GPU every frame (the driver's recovery about 250 ms in) until one hang ran past its 3 s and the device was lost (dm/android/baselines.md problem 14).
 // Skipping the first pass's draws did not help (its clear still begins it); a scratch target in slot 0 alone stops it, slots 1-4 left empty, and an empty slot 6 below a
-// used slot 7 needs nothing. The Odin 2's Adreno 740 runs the same frames without it. One RGBA8 image serves every such pass (an attachment may be larger than the
-// framebuffer), made again larger when a pass is larger; the earlier ones are kept, as cached framebuffers name their views. DM_VK_SLOT0_FILL: 1 on any GPU, 0 off
+// used slot 7 needs nothing. The Odin 2's Adreno 740 runs the same frames without it. On a Moto Razr Plus 2023 (Adreno 730, Qualcomm's driver V@0615.98) Mario Kart 8
+// Deluxe crashed at every course load (SIGSEGV at address 4 in vulkan.adreno.so, in vkCmdEndRenderPass): a one-draw pass with slots 0-2 empty and an A2B10G10R10 target in
+// slot 3; with slot 0 filled it runs. So it is on for every Adreno on Qualcomm's driver ("Adreno (TM) ...", not Turnip's "Turnip Adreno"). One RGBA8 image serves every
+// such pass (an attachment may be larger than the framebuffer), made again larger when a pass is larger; the earlier ones are kept, as cached framebuffers name their views.
+// Its sides are rounded up to 512: Mario Kart 8 Deluxe's dynamic resolution grows that pass a few texels at a time (480x270, 484x272, 493x277...), which used up the 8
+// sizes in seconds and left a larger pass's slot 0 empty again. DM_VK_SLOT0_FILL: 1 on any GPU, 0 off
 static uint64_t g_slot0_fills;
 static int slot0_fill_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_VK_SLOT0_FILL"); v = e ? *e == '1' : g_vk.props.vendorID == 0x5143 && !strncmp(g_vk.props.deviceName, "Adreno (TM) 8", 13);
+    if (v < 0) { const char *e = getenv("DM_VK_SLOT0_FILL"); v = e ? *e == '1' : g_vk.props.vendorID == 0x5143 && !strncmp(g_vk.props.deviceName, "Adreno (TM) ", 12);
                  LOG("[vk] a render pass with colour slot 0 empty below a used slot: %s", v ? "a scratch target in slot 0 (DM_VK_SLOT0_FILL)" : "slot 0 left empty"); }
     return v;
 }
@@ -1312,7 +1316,8 @@ static vtex *slot0_scratch(uint32_t w, uint32_t h) {
     if (v && v->w >= w && v->h >= h) return v;
     if (n == 8) { RED_ONCE(152, "the scratch target for an empty colour slot 0 was made larger 8 times: passes larger than %ux%u keep slot 0 empty", v->w, v->h); return NULL; }
     tex_t t; memset(&t, 0, sizeof t); t.magic = MAGIC('T', 'E', 'X', 0); t.serial = ~0ull - 1 - (uint64_t)n; t.d.target = NVN_TEXTURE_TARGET_2D; t.d.format = NVN_FORMAT_RGBA8;
-    t.d.width = v && v->w > w ? v->w : w; t.d.height = v && v->h > h ? v->h : h; t.d.depth = 1; t.d.levels = 1;
+    uint32_t nw = v && v->w > w ? v->w : w, nh = v && v->h > h ? v->h : h;
+    t.d.width = (nw + 511) & ~511u; t.d.height = (nh + 511) & ~511u; t.d.depth = 1; t.d.levels = 1;
     if (!(v = vt_create(&t))) return NULL;
     LOG("[vk] scratch target for an empty colour slot 0: %ux%u", v->w, v->h);
     return sv[n++] = v;
