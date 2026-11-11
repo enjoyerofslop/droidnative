@@ -15,13 +15,15 @@
 // How either goes: as a pool's Finalize does it (vt_drop_pool): its objects stop resolving to it and the sharing table forgets it, so the next lookup goes the way
 // a first one does (vt_create, then vt_upload or tex_init_fill); vt_destroy frees it when the chunks that may still use it have completed (dead_add), and g_vt_gen
 // tells the draws' caches.
-// DM_VK_IMAGE_EVICT=0 (env.txt): images stay until their storage is taken over or their pool goes, as before
+// DM_VK_IMAGE_EVICT=0 (env.txt): images stay until their storage is taken over or their pool goes, as before. DM_VK_IMAGE_EVICT_LOG=1: a line at every scan (the memory
+// line comes every 300 frames, and a scene's targets come and go in less)
 #define EV_AGE 1800
 #define EV_ALIAS_AGE 120
 #define EV_EVERY 30
 static int ev_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IMAGE_EVICT"); v = !(e && *e == '0'); } return v; }
 static uint64_t ev_env(const char *name, long def) { const char *e = getenv(name); return (uint64_t)(e && atol(e) > 0 ? atol(e) : def); }
 static uint64_t ev_age(void) { static uint64_t a; if (!a) a = ev_env("DM_VK_IMAGE_EVICT_AGE", EV_AGE); return a; }
+static int ev_log(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IMAGE_EVICT_LOG"); v = e && *e == '1'; } return v; }
 static uint64_t ev_alias_age(void) { static uint64_t a; if (!a) a = ev_env("DM_VK_IMAGE_EVICT_ALIAS_AGE", EV_ALIAS_AGE); return a; }
 static uint64_t g_ev_n[2], g_ev_bytes[2], g_ev_back;   // images evicted and their bytes (clean, overwritten), evicted storage made again (cumulative)
 static nvn_hmap g_ev_store = {.klen = 8};   // the storage of evicted images not made again yet: the lookup that makes one again counts it (ev_made)
@@ -42,10 +44,11 @@ static void ev_overwritten(uint64_t now) {
         nvn_texlayout L; nvn_tex_layout(&k.d, &L); e[n++] = (ev_ent){k.pool, k.off, k.off + (int64_t)(L.size ? L.size : 1), v};
     }
     qsort(e, n, sizeof *e, ev_cmp);
+    // only an overlap of at least half the image counts: layouts are padded, and an image another one only clips at its edge kept its content on the console
     for (uint32_t i = 0; i < n; i++) for (uint32_t j = i + 1; j < n && e[j].pool == e[i].pool && e[j].lo < e[i].hi; j++) {
-        vtex *a = e[i].v, *b = e[j].v;
-        if (b->last_w > a->last_present && now - a->last_present >= ev_alias_age() && !a->evict) a->evict = 3;
-        if (a->last_w > b->last_present && now - b->last_present >= ev_alias_age() && !b->evict) b->evict = 3;
+        vtex *a = e[i].v, *b = e[j].v; int64_t ov = (e[j].hi < e[i].hi ? e[j].hi : e[i].hi) - e[j].lo;
+        if (b->last_w > a->last_present && now - a->last_present >= ev_alias_age() && !a->evict && 2 * ov >= e[i].hi - e[i].lo) a->evict = 3;
+        if (a->last_w > b->last_present && now - b->last_present >= ev_alias_age() && !b->evict && 2 * ov >= e[j].hi - e[j].lo) b->evict = 3;
     }
     free(e);
 }
@@ -59,6 +62,8 @@ static void vt_evict(void) {   // under g_bk, at a present
     size_t nt = 0, ns = 0;
     for (uint32_t i = 0; i < g_tex.cap; i++) { vtex *v = g_tex.vals[i]; if (v && v->evict) nt++; }
     for (uint32_t i = 0; i < g_share.cap; i++) { vtex *v = g_share.vals[i]; if (v && v->evict) ns++; }
+    if (ev_log()) LOG("[vk] image eviction at present %llu: %llu images, %.0f MB alive before it, %zu objects' and %zu shared entries chosen; %llu evicted so far", (unsigned long long)now, (unsigned long long)g_im_n,
+                      g_im_live / 1048576.0, nt, ns, (unsigned long long)(g_ev_n[0] + g_ev_n[1]));
     if (!nt && !ns) return;
     // the keys first, then the deletions: a deletion moves later entries of its probe chain (nvn_hm_del), so the tables are not walked while they change
     uint64_t *tk = nt ? malloc(nt * sizeof *tk) : NULL; share_key *sk = ns ? malloc(ns * sizeof *sk) : NULL;
