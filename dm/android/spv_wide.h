@@ -7,6 +7,7 @@
 // in HelperFunctionManager, InstEmitMove, InstEmitWarp), each 32 lanes of the subgroup one warp:
 // - the lane ID: lane & 31, the lane within its warp;
 // - OpGroupNonUniformShuffle: the index | (lane & ~31), the lane of its own warp;
+// - OpGroupNonUniformShuffleXor (spv_xor's form of the butterfly): as it is, since the lane ^ a mask under 32 is in its own warp;
 // - a ballot's first component and a mask's component 0: its warp's component, lane >> 5;
 // - All, Any and AllEqual (of a predicate): from its warp's ballot, as Ryujinx's EmitVote;
 // - the subgroup size: 32.
@@ -95,6 +96,7 @@ static size_t spv_wide(const uint32_t *w, size_t n, uint32_t sg_stages, uint32_t
             used = 1; sites++;
             int ok = 0;
             if (op == 345) ok = len == 6;   // Shuffle: type result scope value id
+            else if (op == 346) ok = len == 6;   // ShuffleXor (spv_xor's, before this): by a mask under 32 it stays within the lane's 32-lane warp, kept as it is
             else if (op == 339) { ok = len == 5 && tv4u && x[1] == tv4u && ID(x[2]); if (ok) kind[x[2]] = SWK_BALLOT; }   // Ballot: type result scope predicate
             else if (op >= 334 && op <= 336) { ok = len == 5 && tb && x[1] == tb && ID(x[4]) && (kind[x[4]] & SWK_BOOL); votes++; }   // All, Any, AllEqual of a predicate
             if (!ok) bad = 1;
