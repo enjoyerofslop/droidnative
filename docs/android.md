@@ -147,7 +147,9 @@ caught. The app keeps each driver's last start in `files/vk_driver_state/<driver
 `files/games/<title ID>/vk_driver_result.txt`, which DroidPlay for Windows can read. Remove the line from `env.txt`
 (or start it with `#`) to go back. To give one game a driver from the command line instead, `--vk-driver <package>` with its install or `--push-only` checks the package
 (an Android arm64 build that exports the Vulkan hardware module, not a Linux one), copies the driver to `files/vk_drivers/` under a name made from its hash, and names it
-in that game's `defaults.txt` with its SHA-256; `env.txt` still wins over it. The next install without `--vk-driver` names none again. Each driver keeps its own pipeline cache, so the first start on a new driver compiles the game's pipelines again (it can take a
+in that game's `defaults.txt` with its SHA-256; `env.txt` still wins over it. The next install without `--vk-driver` names none again.
+`--set-vk-driver <package> --title <title ID>` changes the driver of a game already on the phone in a few seconds, with no build or keys (`system` takes it out); the
+game's next install writes `defaults.txt` again, so give that `--vk-driver` too to keep it. Each driver keeps its own pipeline cache, so the first start on a new driver compiles the game's pipelines again (it can take a
 minute to the first frame, and it stutters until they are built), and the system driver's cache is still there afterwards.
 
 Whether a driver helps depends on the game and the device. With Mr. Purple's T30, Super Mario Odyssey's opening runs at 60 fps on an Odin 2 (as on its own driver)
@@ -175,6 +177,7 @@ python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k
     --push-only          install the app and copy a game built before, without building
     --vk-driver <file>   with an install or --push-only: the game runs on that Vulkan driver (a Turnip .adpkg.zip or .so; Adreno phones only; `system`: the phone's own)
 python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
+python scripts/build_android_from_nsp.py --set-vk-driver <file | system> --title <title ID>    change an installed game's Vulkan driver, no build
 python scripts/build_android_from_nsp.py --check       what the build needs on this computer, as JSON
 ```
 
