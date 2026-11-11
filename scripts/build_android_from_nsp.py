@@ -124,7 +124,7 @@ def sdk_dir(arg):   # --sdk, the environment, then where Android Studio puts it:
     raise BuildError('Android SDK not found: give --sdk or set ANDROID_HOME')
 
 
-sys.path.append(str(REPO / 'dm/android/tools')); import host_setup   # noqa: E402  # pyright: ignore[reportMissingImports]  (--setup; dm/android/tools, put on the path here)
+sys.path.append(str(REPO / 'dm/android/tools')); import host_setup, phone_id   # noqa: E401, E402  # pyright: ignore[reportMissingImports]  (--setup, a phone's name in folder names; dm/android/tools, put on the path here)
 NDK, CMAKE = '28.2.13676358', '3.22.1'   # what --setup installs, and the CI builds with; a build takes the newest NDK and CMake the SDK has
 
 
@@ -817,8 +817,9 @@ def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, 
     """The game's files → files/games/<gid>/ (the RomFS with --sync: a repeat copies only what changed)"""
     dst = f'{REMOTE}/games/{gid}'
     # each device's copy logs, and the tar archives and RomFS pieces named after them, in a folder of its own: two installs at once (one per device) shared
-    # adb_push_spv.tar, and one's cleanup removed the archive the other was sending
-    logs = logs / f'push_{serial}'; logs.mkdir(parents=True, exist_ok=True)
+    # adb_push_spv.tar, and one's cleanup removed the archive the other was sending. Named by phone_id.safe: a Wi-Fi phone's serial, 192.168.1.20:37123, made a
+    # folder Windows refuses, and every install over Wi-Fi from the desktop app stopped there
+    logs = logs / f'push_{phone_id.safe(serial)}'; logs.mkdir(parents=True, exist_ok=True)
     parts = ['the one-game install', 'font', 'code'] + ['shaders'] * bool(spv) + ['RomFS'] + ['DLC'] * aoc.is_dir() + ['launcher files', 'permissions']
     def part(name, step=None):   # the part in the step's name; the count is the part's files or bytes (counting), or the parts when it has none
         bi.PROG.set(step=f'{step or name} · part {parts.index(name) + 1} of {len(parts)}'); bi.PROG.set(done=parts.index(name), total=len(parts), unit='parts')

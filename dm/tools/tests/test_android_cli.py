@@ -481,9 +481,18 @@ class Phone(Base):
         self.font = self.tmp / 'font'; self.font.mkdir(); (self.font / 'f.ttf').write_bytes(b'f')
         (self.tmp / 'logs').mkdir()
 
-    def push(self):
-        ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'en-US', self.tmp, self.tmp / 'logs', {'title_id': GID})
+    def push(self, serial='S'):
+        ba.push_game(serial, GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'en-US', self.tmp, self.tmp / 'logs', {'title_id': GID})
         return [' '.join(c) for c in self.cmds]
+
+    def test_a_wifi_serial_makes_folders_windows_takes(self):   # after the desktop app's Connect, a phone's serial is ip:port; after adb's own, its mDNS name
+        for serial in ('192.168.1.20:37123', 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp', '[fe80::1%wlan0]:5555'):
+            self.cmds.clear(); self.push(serial)   # on Windows, push_<ip:port> raised WinError 123 here, before anything was copied
+            made = [p.relative_to(self.tmp / 'logs') for p in (self.tmp / 'logs').rglob('*')]
+            self.assertTrue(made)
+            for p in made:
+                for part in p.parts: self.assertFalse(set(part) & set('<>:"/\\|?*') or part.endswith(('.', ' ')), (serial, p))
+            self.assertTrue(any(c[0] == 'push' for c in self.cmds), serial)
 
     def test_copies_to_games_folder_and_opens_it(self):
         flat = self.push(); dst = f'{ba.REMOTE}/games/{GID}'

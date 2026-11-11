@@ -82,6 +82,8 @@ class Lock(unittest.TestCase):
     def test_a_wifi_serial_gets_a_file_of_its_own(self):
         dl.acquire('192.168.50.20:5555', 'over Wi-Fi')
         self.assertTrue((self.tmp / '192.168.50.20_5555.lock').exists())
+        dl.acquire('adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp.', 'found by adb on the network')   # no dot at the end: Windows drops it
+        self.assertTrue((self.tmp / 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp.lock').exists())
 
     def test_the_build_script_stops_with_a_build_error(self):
         spec = importlib.util.spec_from_file_location('build_android_from_nsp', REPO / 'scripts/build_android_from_nsp.py')

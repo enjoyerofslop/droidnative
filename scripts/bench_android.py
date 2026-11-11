@@ -24,7 +24,7 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / 'dm/android/tools'))
-import device_lock   # noqa: E402  # pyright: ignore[reportMissingImports]   (dm/android/tools, put on the path above)
+import device_lock, phone_id   # noqa: E401, E402  # pyright: ignore[reportMissingImports]   (dm/android/tools, put on the path above)
 PKG = 'org.nxnative.android'
 EXT = f'/storage/emulated/0/Android/data/{PKG}/files'
 GAME_PROC = PKG + ':game'
@@ -32,6 +32,10 @@ RUNS = f'{EXT}/bench_runs'   # the runs' save folders (run_folder)
 TSV = f'{EXT}/bench_frames.tsv'   # the per-frame timing (DM_NVN_TSV)
 ADB = shutil.which('adb') or str(Path(os.environ.get('ANDROID_HOME', Path.home() / 'Library/Android/sdk')) / 'platform-tools/adb')
 TIMING = ('@t_s', '@frame_ms', '@gpu_ms', '@work_ms', '@draws')
+
+
+def device_folder(d):   # a device's runs under <out>: <model>_<serial>, safe on Windows too (a Wi-Fi device's serial has a ':', phone_id.py)
+    return phone_id.safe(f"{d['model'].replace(' ', '_')}_{d['serial']}")
 
 
 def data_dir():   # build_android_from_nsp.py's: the library of game hosts, its builds journal, and these results
@@ -443,7 +447,7 @@ def main():
                     subprocess.run([sys.executable, str(REPO / 'scripts/build_android_from_nsp.py'), folder, '-k', args.keys, '--push-only', '--serial', d['serial'], '--progress', 'lines'], check=True)
                 for n in range(0 if args.warmup else 1, args.runs + 1):   # run 0: the warm-up, the first launch after an install (pipelines built, files cached)
                     print(f"{g.get('name', gid)} ({route['name']}) on {d['model']}, {'warm-up' if n == 0 else f'run {n}'}", flush=True)
-                    r = run_one(d['serial'], folder, gid, route, n, out / f"{d['model'].replace(' ', '_')}_{d['serial']}", args); results.append(r)
+                    r = run_one(d['serial'], folder, gid, route, n, out / device_folder(d), args); results.append(r)
                     print(f"  first frame {r['first_frame_s']} s, ready {r['ready_s']} s, {r['fps']} fps, frame p50 {r['frame_p50']} / p95 {r['frame_p95']} ms, "
                           f"GPU p50 {r['gpu_p50']} ms, {r['exit'] or 'ran'}", flush=True)
                     report(out, devices, results)
