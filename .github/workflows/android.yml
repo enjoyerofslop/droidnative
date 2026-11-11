@@ -60,6 +60,7 @@ jobs:
         # dm/android/gmem_table.h, the raw pool table, and checks its lookups; test_ds_texels builds dm/android/ds_texels.h, the depth / stencil readback's NVN layouts (#156); test_pk_guard builds dm/android/pk_guard.h, the start-up list's marker and skip list;
         # test_img_evict builds dm/android/img_evict.h, the image eviction rules (gfx_vk_evict.inc);
         # test_img_spare builds dm/android/img_spare.h, which spare image memory a new image takes (gfx_vk_spare.inc);
+        # test_pool_fileback builds dm/android/pool_fileback.h, which memory pools are backed by a file and how placed ranges leave it (gfx_vk_fileback.inc);
         # test_spv_tgspill builds dm/android/spv_tgspill.h, compute shared memory past the GPU's limit moved into a storage buffer
         run: |
           mkdir -p "$RUNNER_TEMP/cc" && ln -sf "$(command -v clang)" "$RUNNER_TEMP/cc/cc"
