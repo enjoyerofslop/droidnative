@@ -77,3 +77,17 @@ First run on Android, 2026-11-10: a Samsung Galaxy S25 Edge (SM-S937U1: Snapdrag
 - **Sound:** an audio dump of the title and the house: the front pair at −22 / −23 dBFS RMS, peaks to −2 dBFS; no underrun in 266,000 callbacks.
 - **`[RED]`:** the same single line.
 - **Not tried:** outside the house, the Bag, a battle.
+
+**Past the first battle on the Z Flip 7**, the same day (job q78): main's Shield host at `5736949c` (the files were unchanged from the run above), the same phone and controls. Played by hand with adb input, 43 minutes from a new game, along the Retroid Pocket 5's route:
+
+- **The stretch:**
+  - Postwick, Route 1, Wedgehurst station and Leon's starters (Scorbunny);
+  - **Hop's battle**: Wooloo, then Grookey, finished with Ember. Won; Scorbunny went up to Lv 7;
+  - the next part of the story: Hop hears the Wooloo break through the gate, and the two follow it into the **Slumbering Weald**, where a wild Skwovet (Lv 2) is beaten in the fog.
+
+  The Weald's paths through the fog kept the walk to its first stretch: blind stick moves kept meeting trees and rocks, so the Weald's event and Route 2 were not reached.
+- **Saves and Continue:** four commits (manual saves and an autosave), the last in the Weald (play time 0:38). A cold start's title and Continue loaded it there.
+- **30 fps throughout:** 257 windows of 300 frames, frame p50 33.0–33.9 ms (median 33.4), p95 median 37.3 ms. GPU p50 median 14.2 ms, the most 22.1.
+- **First start:** the longest frame was 6.4 s at the first step outside. 245 pipelines and 298 libraries were made in that frame (5.7 s), on Samsung's slow first-time shader creation. 1.2–1.3 s frames came at two later loads. With the pipeline cache (6.5 MB), the Continue start's longest frame was 118 ms.
+- **Sound:** `DM_AUDIO_DUMP` over the Continue start (95 s): the title music, then the Weald's, in the front pair. No underrun in 647 reports during play and 22 after the restart.
+- **`[RED]`:** the same single line; no crash, no hang, nothing wrong seen in the picture (the battle scenes, the Weald's fog).

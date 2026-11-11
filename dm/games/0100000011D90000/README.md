@@ -61,7 +61,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
   - **60 fps:** 55.8–60.0 fps in every 30 s of the 19-minute launch after the first (frame p50 16.6–17.1 ms), GPU p50 11.3–14.0 ms; the battle 59.8 fps, frame p95 18.9 ms, GPU 12.9 ms. The starter screen didn't slow down here (58.8–59.8 fps).
   - **Saves:** the manual save and the game's autosaves committed (`save commit #4` the last), and Continue after a cold start loaded the save.
   - **Sound:** an audio dump over the cold start has sound from the title on, at −30 to −38 dBFS RMS, peaks −13 dBFS; no underrun in 22 reports.
-  - No `[RED]` line, no crash. The driver's subgroups have 64 lanes, so the 23 `fwidth` shaders run as rewritten; #183's ShuffleXor rewrite, on for this driver, finds no butterfly shuffle in BD's shaders. Twinleaf's pond is calm water, as on the Pixel 9 Pro XL, so the grid of white dashes the Z Flip 7 showed there is the Xclipse's alone.
+  - No `[RED]` line, no crash. The driver's subgroups have 64 lanes, so the 23 `fwidth` shaders run as rewritten; #183's ShuffleXor rewrite, on for this driver, finds no butterfly shuffle in BD's shaders. Twinleaf's pond is calm water, as on the Pixel 9 Pro XL, so the grid of white dashes the Z Flip 7 showed there is the Xclipse's alone. (Its cause: [16-bit normalized textures a GPU cannot filter](../../../docs/reference/rendering.md#16-bit-normalized-textures-a-gpu-cannot-filter).)
 
 
 ## Found on this game
@@ -83,6 +83,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 - [Maxwell's 32-lane warps in a wider subgroup](../../../docs/reference/rendering.md#maxwells-32-lane-warps-in-a-wider-subgroup): on the Adreno 830's 64-lane subgroups the same 23 `fwidth` shaders read other quads' values in lanes 32-63 as translated; rewritten so that each 32 lanes are one warp (not yet compared in a frame).
 - [Shader modules made only for pipelines the driver's cache lacks](../../../docs/reference/rendering.md#shader-modules-made-only-for-pipelines-the-drivers-cache-lacks): on a Galaxy Z Flip 7 (Xclipse 950) its 8,844 modules took 6.1–9.6 s of every start; the first frame at 3.3 s after, 9.7–17.9 before.
 - [Layer output from vertex shaders on a GPU that has none](../../../docs/reference/rendering.md#layer-output-from-vertex-shaders-on-a-gpu-that-has-none): the crash at every boot in the Moto Razr Plus 2023's Adreno 730 driver (V@0615.98) compiler, from 12 vertex shaders that write the layer.
+- [16-bit normalized textures a GPU cannot filter](../../../docs/reference/rendering.md#16-bit-normalized-textures-a-gpu-cannot-filter): on a Galaxy Z Flip 7 (Xclipse 950) Twinleaf's pond was a grid of white dashes, its R16G16_UNORM water simulation point sampled; calm water once that texture is made as R16G16_SFLOAT.
 
 ## Open
 

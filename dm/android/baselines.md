@@ -148,6 +148,7 @@ Where this GPU differs from the Adreno above:
 - **64-lane subgroups in every stage** (stages 0x3d3f, sizes 32 to 64, a required size in compute only): `spv_wide` rewrote Brilliant Diamond's 23 `fwidth` fragment shaders.
   No vertex shader of the nine games packed for Android on the Mac uses subgroup operations. Compute shaders in Final Fantasy Resonance (1,199) and Mario Kart World (184) do, and stay as
   translated, with `spv_wide`'s red line; neither game has run on this phone.
+- **16-bit normalized formats it cannot filter:** R16_UNORM, R16G16_UNORM, R16G16B16A16_UNORM and their SNORM forms are sampled without linear filtering on this GPU. Brilliant Diamond's water simulation needs it, and drew Twinleaf's pond as a grid of white dashes until such textures were made in the 16-bit float formats ([16-bit normalized textures a GPU cannot filter](../../docs/reference/rendering.md#16-bit-normalized-textures-a-gpu-cannot-filter)).
 - **The cover screen:** folding the phone while the game plays puts it in the background (focus states 2 and 3, audio suspended) and shows Samsung's own cover home on the cover
   screen. The game process keeps running, and nothing crashes. Opening the phone brings back its lock screen first. Not seen:
   - the game's return after unlocking (the next install stopped it);

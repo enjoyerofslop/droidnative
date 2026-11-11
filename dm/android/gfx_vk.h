@@ -37,6 +37,7 @@ void vk_driver_dirs(const char *ext, const char *internal);
 int vk_driver_load(void);
 void vk_driver_instance(VkInstance inst);
 const char *vk_driver_name(void);
+int vk_fp_host(void);   // vk_driver.c: the driver's compiles run with FPCR 0 (DM_VK_FP_HOST); the pipeline cache's file is named for it
 
 typedef struct {
     VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; uint32_t qf;

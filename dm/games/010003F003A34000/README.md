@@ -2,7 +2,7 @@
 
 The base game 1.0.0 (v0, no update), SDK **5.4.150** (`nnSdk-5_4_150`, `NintendoSDK_NVN-5_4_150`). Game Freak's engine before Sword and Shield's, on NVN, with Wwise sound and NEX networking. Modules `main`, `subsdk0` (GLSLC), `subsdk1` (`NintendoSDK_movie`) and `sdk`. The RomFS holds 27,818 files in 4.1 GB.
 
-- **On Android:** plays at 30 fps (as on the Switch) on a Galaxy Z Fold 8, from a new game through Pallet Town and Professor Oak's lab to Route 1, with Pikachu and the first catches made with buttons. Saves and Continue work. No trainer battle reached yet. See [Android](#android).
+- **On Android:** plays at 30 fps (as on the Switch) on a Galaxy Z Fold 8, a Pixel 9 Pro XL and a Galaxy Z Flip 7, from a new game through Pallet Town and Professor Oak's lab to Route 1, with Pikachu and the first catches made with buttons, then on the Pixel through Route 1 to Viridian City, Oak's Parcel and the rival's first battle. Saves and Continue work. Route 2 and Viridian Forest not reached yet. See [Android](#android).
 - **On the Mac:** not run yet.
 
 ## What it needs
@@ -61,7 +61,7 @@ First run on Android, 2026-11-10: a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Eli
   - `more than 16 font engines with a small work buffer: this one keeps the game's`, 5 times. The game makes 21 `nn::fontll` engines with small work buffers, and `hle_sdk16.c` gives host memory to 16. Every text seen drew.
   - `a second NVN queue submits: the Vulkan replay shares one state between queues`, as in Pokémon Shield. Nothing in the picture showed it.
 - **Driving it over adb:** the on-screen buttons need a held touch (`input swipe x y x y 150`), since a plain `input tap` is shorter than one 30 fps frame and is sometimes missed. In the X menu, the ▶ cursor is moved onto SAVE with the stick; SAVE's highlight alone doesn't select it. A wild Pokémon that walks into the player starts an encounter, which B and then Yes leave.
-- **Not tried:** a trainer battle (the first one comes later in the story), aiming with motion, docked mode, the other devices and the Mac.
+- **Not tried:** a trainer battle (the first, the rival's in Oak's lab once Oak's Parcel is delivered, was reached on the Pixel 9 Pro XL below), aiming with motion, docked mode, the other devices and the Mac.
 
 **On a Google Pixel 9 Pro XL**, 2026-11-10: Tensor G4, Mali-G715 with Arm's driver 0xd803000 and Vulkan 1.4.343, Android 17. The hosts from `main` at `898ac92f`, the game files from the same build folder; handheld, the on-screen controls, played by hand with adb input:
 
@@ -72,6 +72,17 @@ First run on Android, 2026-11-10: a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Eli
 - **Sound:** an audio dump from the Continue start (47 s): silent on the controller screen, as on the Z Fold 8, then the confirm sound and the music from about 20 s at −21 to −24 dBFS RMS on the front pair.
 - **`[RED]`:** the same two kinds.
 - **Not tried:** Route 1 from a save made on this phone, trainer battles, aiming with motion.
+
+**Past Route 1, on the Pixel 9 Pro XL**, later on 2026-11-10: Let's Go's host from `main` at `5736949c`, the same game files; played by hand with adb input from the Z Fold 8's Route 1 save (Pokédex 3, play time 0:34), in one 35-minute launch:
+
+- **The stretch:** north through Route 1's terraces and grass to Viridian City. The Poké Mart's clerk, outside his shop, hands over Oak's Parcel and offers to send the player straight back to the lab. Professor Oak takes the parcel, and the rival joins him.
+- **The first trainer battle:** the rival stops the player at the lab's door ("You are challenged by Pokémon Trainer Red!", the name `DM_KBD` gave him on the Z Fold 8). His Eevee (Lv 6) against Pikachu (Lv 6), turn by turn with FIGHT and Thunder Shock; won with Pikachu at 15/23 HP, then the prize money (₽3,120 after it) and Exp. Points.
+- **Catches on Route 1:** wild Oddish and Pidgey caught with the buttons (Pokédex 3 to 4), and wild Rattata and Pidgey that walked into the player run from. Route 1's wild Pokémon walk into a player standing at the grass's edge again and again, which made the walk back north slow by adb.
+- **30 fps, as on the Switch:** every minute of the 35-minute launch at 29.6–30.0 fps; frame p50 33.3 / p95 41.5 ms over the launch, GPU p50 15.7 / p95 25.1 ms (per minute 13.9–16.9 ms). 290 frames over 50 ms, at scene changes, encounters and loads.
+- **Saves:** the X menu's SAVE in the lab after the battle (`save commit #1`) and again on Route 1 (`save commit #2`, play time 1:08). After a cold start the title showed Route 1, Pokédex 4 and 1:08, and "Continue your adventure" loaded the player where the save was made.
+- **Sound:** an audio dump of the cold start (113 s): the title music at −21 to −25 dBFS RMS on the front pair, silence on the Continue menu, then Route 1's music at −21 to −24 dBFS. No underrun in 1,108,000 callbacks over both launches.
+- **`[RED]`:** the same two kinds, once each per boot; no crash.
+- **Not tried:** the Pokémon Center and the Mart inside, Route 2, Viridian Forest and its trainers, Pewter City.
 
 **On a Samsung Galaxy Z Flip 7**, 2026-11-10: Exynos 2500, Xclipse 950 with Samsung's driver 0x6000215 and Vulkan 1.3.279, Android 16, open, on its inner screen. The hosts from `main` at `898ac92f`, the game files from the same build folder; the on-screen controls, played by hand with adb input from a new game:
 
