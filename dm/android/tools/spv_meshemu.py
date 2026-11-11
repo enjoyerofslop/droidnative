@@ -23,7 +23,11 @@ from spv_mesh import (OP_ACCESSCHAIN, OP_BITCAST, OP_CAPABILITY, OP_COMPOSITECON
                       DEC_BUILTIN, DEC_INVARIANT, DEC_LOCATION, DEC_OFFSET, BI_POSITION, BI_POINTSIZE, BI_WORKGROUPID, BI_LOCALINDEX, BLOCK, GLSL_UMIN)
 
 MESH_SET = 1   # the emulation's buffers' descriptor set in a kernel's compute pipeline: the kernel's own bindings are set 0 (gfx_vk_meshemu.inc me_cpipe)
-B_TASKOUT, B_LAUNCH, B_VTX, B_IDX = 0, 1, 2, 3   # their bindings (the same in every kernel, unused ones included)
+B_TASKOUT, B_LAUNCH, B_VTX, B_IDX = 100, 101, 102, 103   # their bindings (the same in every kernel, unused ones included): past any the translator gives, as the
+# transform feedback buffers are (spv_android.tf_variant). At 0 to 3 they shared numbers with the kernel's own set 0, and the passes that find a binding by its number
+# alone took them for it: cbsize_strip took the index buffer for a size table at binding 3 and left the table in, which the layout (from res.json) no longer had, and
+# Qualcomm's driver refused 8 of Ocarina of Time's kernels (VK_ERROR_UNKNOWN, OnePlus Pad 3)
+VERSION = 2   # res.json mesh_emu 'v': spv_build.py translates again a task / mesh output whose compute form is of another version
 HDR = 16   # launch list words before its entries: 0-2 the mesh dispatch's counts, 4-8 the indexed draw's arguments, 9 the launches past the list's capacity (meshlaunch.comp)
 PC_BYTES = 8   # push constant {first, base}
 OP_TYPESTRUCT, OP_TYPERUNTIMEARRAY, OP_UDIV, OP_SELECT, OP_SOURCE = 30, 29, 134, 169, 3
@@ -53,9 +57,9 @@ def layout(info):
 
 def facts(info):   # res.json mesh_emu: what the host sizes buffers and dispatches by
     pay = info['payload'] + 3 >> 2
-    if info['kind'] == 'ts': return {'kind': 'ts', 'pay': max(pay, 1), 'threads': info['threads']}
+    if info['kind'] == 'ts': return {'kind': 'ts', 'v': VERSION, 'pay': max(pay, 1), 'threads': info['threads']}
     rec, nrec, nout, ipw, corners = layout(info)[:5]
-    return {'kind': 'ms', 'pay': max(pay, 1), 'threads': info['threads'], 'task': int(bool(info.get('task'))), 'nrec': nrec, 'nout': nout, 'ipw': ipw,
+    return {'kind': 'ms', 'v': VERSION, 'pay': max(pay, 1), 'threads': info['threads'], 'task': int(bool(info.get('task'))), 'nrec': nrec, 'nout': nout, 'ipw': ipw,
             'verts': info.get('verts', 3), 'locs': sum(1 << n for n, _, _ in rec if isinstance(n, int))}
 
 

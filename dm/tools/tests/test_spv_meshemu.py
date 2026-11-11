@@ -46,6 +46,8 @@ class SpvMeshEmu(unittest.TestCase):
         self.assertEqual(sorted(binds[v] for v in keep), [me.B_TASKOUT, me.B_LAUNCH, me.B_VTX, me.B_IDX])
         self.assertTrue(all(sets[v] == me.MESH_SET for v in keep), 'the emulation\'s buffers stay at MESH_SET')
         self.assertTrue(all(s == 0 for v, s in sets.items() if v not in keep), 'the kernel\'s own bindings go to set 0')
+        own = {binds[v] for v in binds if v not in keep}
+        self.assertFalse(own & {binds[v] for v in keep}, 'no binding number of the emulation\'s is one of the kernel\'s: passes that find a binding by its number alone (cbsize_strip) took one for the other')
         self.assertEqual(sum(x[0] == sm.OP_VARIABLE and x[3] == sm.SC_PUSHCONSTANT for x in ins), 1)
         modes = [x for x in ins if x[0] == sm.OP_EXECMODE]
         self.assertTrue(modes and all(x[1] == ent[0][2] for x in modes), 'the kernel\'s local size moves to the new entry point')
@@ -74,7 +76,7 @@ class SpvMeshEmu(unittest.TestCase):
         info = {'kind': 'ts', 'threads': 32, 'payload': 256}
         data, lay = kernel(info)
         self.computed(data, info, lay)
-        self.assertEqual(me.facts(info), {'kind': 'ts', 'pay': 64, 'threads': 32})
+        self.assertEqual(me.facts(info), {'kind': 'ts', 'v': me.VERSION, 'pay': 64, 'threads': 32})
 
     def test_vertex(self):
         for prim in (False, True):

@@ -16,7 +16,7 @@
 static const uint32_t MESHLAUNCH[] = {
 #include "shaders/meshlaunch_comp.inc"
 };
-enum { ME_HDR = 16, ME_PC = 8, ME_ALIGN = 256 };   // launch list words before its entries (spv_meshemu.HDR); push constant bytes {first, base}
+enum { ME_HDR = 16, ME_PC = 8, ME_ALIGN = 256, ME_KBIND = 100 };   // ME_KBIND: the kernels' set 1 bindings, 100 to 103 (spv_meshemu.B_TASKOUT ...)   // launch list words before its entries (spv_meshemu.HDR); push constant bytes {first, base}
 typedef struct memu_t { int task, pay, threads, nrec, nout, ipw, verts; VkPipeline p; VkPipelineLayout pl; int bad; vshader *pvs; } memu_t;
 static struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; int bad; } g_me;
 static vshader g_me_kset, g_me_lset;   // their layouts alone, for ds_get's sets kept by each chunk: the kernels' set 1 (four buffers), meshlaunch.comp's set (two)
@@ -32,8 +32,8 @@ static int memu_facts(vshader *s, const jv *e) {   // res.json mesh_emu (null: s
     if (s->stage == SH_MS && (m->nrec <= 0 || m->nout <= 0 || m->ipw <= 0)) { free(m); return 0; }
     s->memu = m; return 1;
 }
-static VkDescriptorSetLayout memu_dsl(uint32_t n, VkShaderStageFlags st) {   // n storage buffers at bindings 0 to n - 1
-    VkDescriptorSetLayoutBinding b[4]; for (uint32_t i = 0; i < n; i++) b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, st, NULL};
+static VkDescriptorSetLayout memu_dsl(uint32_t n, uint32_t base, VkShaderStageFlags st) {   // n storage buffers at bindings base to base + n - 1
+    VkDescriptorSetLayoutBinding b[4]; for (uint32_t i = 0; i < n; i++) b[i] = (VkDescriptorSetLayoutBinding){base + i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, st, NULL};
     VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = n, .pBindings = b}; VkDescriptorSetLayout l;
     return vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &l) == VK_SUCCESS ? l : VK_NULL_HANDLE;
 }
@@ -51,7 +51,7 @@ static vshader *memu_pvs(const vshader *ms) {   // a mesh shader's pass-through 
     char p[700]; int b0 = 0; snprintf(p, sizeof p, "%s/%s.pvs.spv", g_spv_dir, ms->key); v->mod = sh_module(p, &b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw); if (w) { spv_io(w, nw, &v->io_in, &v->io_out); free(w); } }
     snprintf(p, sizeof p, "%s/%s.pvs.z.spv", g_spv_dir, ms->key); v->modz = sh_module(p, &b0);
-    if (!g_me_vdsl) g_me_vdsl = memu_dsl(1, VK_SHADER_STAGE_VERTEX_BIT);
+    if (!g_me_vdsl) g_me_vdsl = memu_dsl(1, 0, VK_SHADER_STAGE_VERTEX_BIT);
     v->dsl = g_me_vdsl; v->ndesc = 1;
     if (!v->mod || !v->dsl) { RED_ONCE(181, "mesh shader %s: no pass-through vertex shader (.pvs.spv): its draws are skipped", ms->key); free(v); return NULL; }
     v->ok = 1; return v;
@@ -74,8 +74,8 @@ static int memu_arena(void) {
 static int memu_kernels(void) {   // the emulation's set layouts and meshlaunch.comp
     if (g_me_launch || g_me_kbad) return !g_me_kbad;
     g_me_kbad = 1;
-    g_me_kset.dsl = memu_dsl(4, VK_SHADER_STAGE_COMPUTE_BIT); g_me_kset.ndesc = 4; g_me_kset.ok = 1; memcpy(g_me_kset.key, "mesh-emu-kernel", 16);
-    g_me_lset.dsl = memu_dsl(2, VK_SHADER_STAGE_COMPUTE_BIT); g_me_lset.ndesc = 2; g_me_lset.ok = 1; memcpy(g_me_lset.key, "mesh-emu-launch", 16);
+    g_me_kset.dsl = memu_dsl(4, ME_KBIND, VK_SHADER_STAGE_COMPUTE_BIT); g_me_kset.ndesc = 4; g_me_kset.ok = 1; memcpy(g_me_kset.key, "mesh-emu-kernel", 16);
+    g_me_lset.dsl = memu_dsl(2, 0, VK_SHADER_STAGE_COMPUTE_BIT); g_me_lset.ndesc = 2; g_me_lset.ok = 1; memcpy(g_me_lset.key, "mesh-emu-launch", 16);
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo ec = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &ec, NULL, &g_empty_dsl); }
     if (!g_me_kset.dsl || !g_me_lset.dsl || !g_empty_dsl) return 0;
     VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
@@ -102,11 +102,11 @@ static int memu_cpipe(vshader *s) {   // a task or mesh kernel's compute pipelin
     if (r != VK_SUCCESS) { m->p = VK_NULL_HANDLE; static int n; if (n++ < 8) LOG("[RED] [vk] compute form of task / mesh shader %s: pipeline failed: its draws are skipped", s->key); return 0; }
     m->bad = 0; return 1;
 }
-static VkDescriptorSet memu_set(vshader *l, uint32_t n, const VkDeviceSize *off, const VkDeviceSize *len) {   // a set of l's layout over n arena ranges, from the current chunk
+static VkDescriptorSet memu_set(vshader *l, uint32_t n, uint32_t base, const VkDeviceSize *off, const VkDeviceSize *len) {   // a set of l's layout over n arena ranges at bindings base on, from the current chunk
     VkDescriptorSet set = ds_get(l, 0); if (!set) return VK_NULL_HANDLE;
     VkDescriptorBufferInfo bi[4]; VkWriteDescriptorSet w[4];
     for (uint32_t i = 0; i < n; i++) { bi[i] = (VkDescriptorBufferInfo){g_me.b, off[i], len[i]};
-        w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[i]}; }
+        w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = base + i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[i]}; }
     vkUpdateDescriptorSets(g_vk.dev, n, w, 0, NULL); return set;
 }
 // one dispatch of a task or mesh kernel over the arena ranges r[4] (taskout, launch, vtx, idx): groups workgroups, or (0) the launch list header's counts at ind
@@ -117,7 +117,7 @@ static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize
         if (got || !ds_moved(dseq)) break;
         if (ds_again(t, 2)) return 0;
     }
-    if (!ok || !(es = memu_set(&g_me_kset, 4, r, r + 4))) return 0;
+    if (!ok || !(es = memu_set(&g_me_kset, 4, ME_KBIND, r, r + 4))) return 0;
     VkCommandBuffer c = cb(); if (!c) return 0;
     cb_barrier();
     memu_t *m = s->memu; uint32_t pc[2] = {first, 0};
@@ -132,7 +132,7 @@ static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize
 }
 static int memu_launch(const VkDeviceSize r[8], uint32_t ntask, const memu_t *ts, const memu_t *ms, uint32_t cap) {   // meshlaunch.comp over taskout and launch
     if (!cur()) return 0;
-    VkDescriptorSet set = memu_set(&g_me_lset, 2, r, r + 4); VkCommandBuffer c = cb(); if (!set || !c) return 0;
+    VkDescriptorSet set = memu_set(&g_me_lset, 2, 0, r, r + 4); VkCommandBuffer c = cb(); if (!set || !c) return 0;
     uint32_t pc[4] = {ntask, (uint32_t)ts->pay, cap, (uint32_t)ms->ipw};
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_me_launch); vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_me_lpl, 0, 1, &set, 0, NULL);
     vkCmdPushConstants(c, g_me_lpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, pc); vkCmdDispatch(c, 1, 1, 1); cb_barrier(); g_dispatches++;
@@ -153,7 +153,7 @@ static int memu_draw(memu_t *m, vshader *fs, const prog_t *fpr, int fpst, const 
         if (!ds_moved(dseq) || ds_again(t, 0)) { g_drop[3]++; return 0; }
     }
     if (g_bind_bad) { g_drop[4]++; return 0; }
-    if (!(vset = memu_set(m->pvs, 1, r + 2, r + 6))) { g_drop[3]++; return 0; }
+    if (!(vset = memu_set(m->pvs, 1, 0, r + 2, r + 6))) { g_drop[3]++; return 0; }
     if (!rp_start()) { g_drop[5]++; return 0; }
     VkCommandBuffer c = C->cb;
     occl_begin();
