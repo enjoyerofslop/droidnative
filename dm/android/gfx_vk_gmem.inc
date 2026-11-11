@@ -344,40 +344,53 @@ static void gm_place(const void *mem, uint64_t size, int live) {   // live: the 
 }
 
 // ---- Giving a pool back (mtl_pool_del, nvnMemoryPoolFinalize) ----
+// One placed piece back to anonymous pages at its range, the bytes kept (zero pages left untouched, so uncommitted). The GPU must be done with it. Logs nothing (it runs inside a
+// lazy pool's merge window too). → 0 when no room was found: the piece stays placed, its allocation kept
+static int gm_seg_giveback(const gm_seg *s) {
+    size_t len = s->hi - s->lo;
+    uint8_t *t = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (t == MAP_FAILED) { g_gm_kept++; return 0; }
+    for (uintptr_t a = s->lo; a < s->hi; a += 4096) {
+        const uint64_t *w = (const uint64_t *)a; uint64_t o = 0; for (int j = 0; j < 512 && !o; j++) o |= w[j];
+        if (o) memcpy(t + (a - s->lo), (const void *)a, 4096); }
+    if (!s->ahb) {   // a placed map: the free takes the range down, so it comes before the pages move in
+        VkMemoryUnmapInfoKHR ui = {.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .flags = g_gm_mpq.memoryUnmapReserve ? VK_MEMORY_UNMAP_RESERVE_BIT_EXT : 0, .memory = s->m};
+        g_gm_unmap2(g_vk.dev, &ui);
+        vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); }
+    if (mremap(t, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)s->lo) != (void *)s->lo) {
+        void *a = mmap((void *)s->lo, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (a != (void *)s->lo) die("raw global memory: pool memory %#lx+%#zx could not be given back (errno %d)", (unsigned long)s->lo, len, errno);
+        memcpy(a, t, len); munmap(t, len); }
+    if (s->ahb) { vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); AHardwareBuffer_release(s->ahb); }   // the mapping is ours: the pages replaced it first
+    free(s->rd);
+    g_gm_given++;
+    return 1;
+}
+// The pool's pieces out of the list (g_gm_mu taken here): into *got (grown), → how many. A chunked pool has one per run of chunks placed together
+static int gm_seg_take(const void *mem, uintptr_t lo, uintptr_t hi, gm_seg **got, int *cap) {
+    int n = 0;
+    pthread_mutex_lock(&g_gm_mu);
+    for (int i = 0; i < g_ngm;) if (g_gm[i].pool == mem && g_gm[i].lo >= lo && g_gm[i].hi <= hi) {
+        if (n == *cap) { *cap = *cap ? 2 * *cap : 64; *got = realloc(*got, (size_t)*cap * sizeof **got); if (!*got) die("raw global memory: the pieces given back"); }
+        (*got)[n++] = g_gm[i]; g_gm_bytes -= g_gm[i].hi - g_gm[i].lo; memmove(g_gm + i, g_gm + i + 1, (size_t)(--g_ngm - i) * sizeof *g_gm); } else i++;
+    if (n) atomic_fetch_add(&g_gm_gen, 1);   // a draw recorded from here takes a table without them
+    pthread_mutex_unlock(&g_gm_mu);
+    return n;
+}
 static void gm_unplace(const void *mem) {
     if (!gm_on() && !g_ngm) return;
     pthread_mutex_lock(&g_gm_pl);
-    gm_seg got[64]; int n = 0;
-    pthread_mutex_lock(&g_gm_mu);
-    for (int i = 0; i < g_ngm;) if (g_gm[i].pool == mem && n < 64) { got[n++] = g_gm[i]; g_gm_bytes -= g_gm[i].hi - g_gm[i].lo; memmove(g_gm + i, g_gm + i + 1, (size_t)(--g_ngm - i) * sizeof *g_gm); } else i++;
-    if (n) atomic_fetch_add(&g_gm_gen, 1);   // a draw recorded from here takes a table without it
-    pthread_mutex_unlock(&g_gm_mu);
+    static gm_seg *got; static int cap;   // (g_gm_pl)
+    int n = gm_seg_take(mem, 0, UINTPTR_MAX, &got, &cap);
     gm_lazy_drop(mem);
     if (!n) { pthread_mutex_unlock(&g_gm_pl); return; }
     // The GPU first: a chunk recorded or in flight may still read through the old table (the game finalizes a pool once its own GPU work is done, so this is short)
     uint64_t t0 = gm_now();
     { BK_LOCK(); all_wait(); BK_UNLOCK(); }
-    for (int k = 0; k < n; k++) {
-        const gm_seg *s = &got[k]; size_t len = s->hi - s->lo;
-        uint8_t *t = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (t == MAP_FAILED) { g_gm_kept++; LOG("[RED] [vk] raw global memory: no room to give pool memory %#lx+%#zx back: it stays placed (its allocation is kept)", (unsigned long)s->lo, len); continue; }
-        for (uintptr_t a = s->lo; a < s->hi; a += 4096) {   // zero pages stay untouched, so uncommitted
-            const uint64_t *w = (const uint64_t *)a; uint64_t o = 0; for (int j = 0; j < 512 && !o; j++) o |= w[j];
-            if (o) memcpy(t + (a - s->lo), (const void *)a, 4096); }
-        if (!s->ahb) {   // a placed map: the free takes the range down, so it comes before the pages move in
-            VkMemoryUnmapInfoKHR ui = {.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .flags = g_gm_mpq.memoryUnmapReserve ? VK_MEMORY_UNMAP_RESERVE_BIT_EXT : 0, .memory = s->m};
-            g_gm_unmap2(g_vk.dev, &ui);
-            vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); }
-        if (mremap(t, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)s->lo) != (void *)s->lo) {
-            void *a = mmap((void *)s->lo, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-            if (a != (void *)s->lo) die("raw global memory: pool memory %#lx+%#zx could not be given back (errno %d)", (unsigned long)s->lo, len, errno);
-            memcpy(a, t, len); munmap(t, len); }
-        if (s->ahb) { vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); AHardwareBuffer_release(s->ahb); }   // the mapping is ours: the pages replaced it first
-        free(s->rd);
-        g_gm_given++;
-    }
+    int kept = 0; for (int k = 0; k < n; k++) kept += !gm_seg_giveback(&got[k]);
     g_gm_give_ns += gm_now() - t0;
     pthread_mutex_unlock(&g_gm_pl);
+    if (kept) LOG("[RED] [vk] raw global memory: no room to give %d pieces of pool %p back: they stay placed (their allocations are kept)", kept, mem);
     static int nl; if (nl++ < 4) LOG("[vk] raw global memory: memory pool %p given back as anonymous memory (%d pieces, %.1f MiB still placed)", mem, n, g_gm_bytes / 1048576.0);
 }
 

@@ -35,7 +35,7 @@ static int gm_inplace(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *off, V
         pthread_mutex_lock(&g_gm_mu);
         if ((i = gm_seg_at((uintptr_t)addr)) < 0) { pthread_mutex_unlock(&g_gm_mu); return 0; } }
     const gm_seg *s = &g_gm[i]; VkDeviceSize o = (VkDeviceSize)(addr - s->lo);
-    if (addr + n > s->hi) { pthread_mutex_unlock(&g_gm_mu); g_ip_span++; return 0; }
+    if (addr + n > s->hi) { pthread_mutex_unlock(&g_gm_mu); g_ip_span++; gm_lazy_cross(addr); return 0; }   // (a chunked pool: made one allocation at the next submission, gfx_vk_gmem_lazy.inc)
     if (o % al) { pthread_mutex_unlock(&g_gm_mu); g_ip_unal++; return 0; }
     if (s->rd && !(memo[h].a == addr && memo[h].n == n && memo[h].seq == C->seq)) {
         uint64_t sq = C->seq; for (size_t p = (size_t)(o >> 12), e = (size_t)((o + n - 1) >> 12); p <= e; p++) s->rd[p] = sq;
