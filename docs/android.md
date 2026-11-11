@@ -122,7 +122,8 @@ without the DroidPlay app or a connection to your computer: copy the file over a
 - **The command line:** `--game-apk`, or `--game-apk --xapk` ([Packing from the command line](#packing-from-the-command-line)).
 
 A game whose data is more than an APK holds (2 GB) gets it beside the APK, as `<name>.romfs`: copy that file anywhere on the device or its SD card, and pick it
-once when the game first starts. An XAPK carries the data as the app's OBB file instead, for an XAPK installer app. A game app is for your own devices only: it
+once when the game first starts. On the command line, `--romfs-beside` does this for a smaller game too, so the APK stays small and the data can live on the SD card
+(DLC that fits stays in the APK). An XAPK carries the data as the app's OBB file instead, for an XAPK installer app. A game app is for your own devices only: it
 carries the game, so never share it. How it is packed: [A game app](../dm/android/README.md#a-game-app).
 
 ## Another Vulkan driver (Turnip)
@@ -165,6 +166,7 @@ which Python on Windows does by default only from 3.15, and lz4 has no Windows b
 python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k "<your prod.keys>"    build, install, copy the game
                          (a Switch 2 game: the folder with its .nup or dump, or the .nup itself; no keys needed)
     --game-apk [--xapk]  the game as an app of its own (<name>.apk, plus <name>.romfs, with its DLC after the RomFS, for a game over 2 GB, or one .xapk); no device needed
+    --romfs-beside       with --game-apk: <name>.romfs beside the APK whatever the game's size, so the APK stays small
     -p v0                pack the base game instead of the newest version in the folder (a version the profile does not register is packed from a derived profile)
     -l es-419            the default game language (a code or a name)
     --serial <device>    the adb device, when more than one is connected

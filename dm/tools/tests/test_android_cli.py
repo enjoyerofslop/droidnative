@@ -164,6 +164,16 @@ class GameApp(Base):   # droidplay-core issue #169: a game app whose DLC doesn't
         self.assertEqual(ba.game_app_plan(mk8, 1600 * MB, 11 << 30, False, L), (False, False))
         self.assertEqual(ba.game_app_plan(mk8, 1600 * MB, 11 << 30, True, L), (False, False))
 
+    def test_romfs_beside_keeps_any_romfs_out_and_dlc_that_fits_in(self):   # --romfs-beside: a small APK, the RomFS stored anywhere
+        parts = {'code': 100, 'shaders': 100, 'font': 10, 'the rest': 10}
+        self.assertEqual(ba.game_app_plan(parts, 50, 1000, False, limit=10_000), (True, True))
+        self.assertEqual(ba.game_app_plan(parts, 50, 1000, False, limit=10_000, beside=True), (False, True))
+        self.assertEqual(ba.game_app_plan(parts, 9_900, 1000, False, limit=10_000, beside=True), (False, False))   # DLC the APK can't hold follows the RomFS, as before
+
+    def test_romfs_beside_needs_a_game_apk_and_no_xapk(self):
+        for argv in (['g', '--romfs-beside'], ['g', '--game-apk', '--xapk', '--romfs-beside'], ['g', '--xapk', '--romfs-beside']):
+            with self.subTest(argv=argv), self.assertRaisesRegex(ba.BuildError, '--romfs-beside goes with --game-apk'): ba.main(argv)
+
     def test_what_cant_go_beside_is_named(self):
         with self.assertRaises(ba.BuildError) as e:
             ba.game_app_plan({'code': 90 * MB, 'shaders': 2100 * MB, 'font': 22 * MB, 'the rest': MB}, 1600 * MB, 11 << 30, False)

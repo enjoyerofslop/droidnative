@@ -349,7 +349,7 @@ def stage_link(dst, src):   # a symbolic link, else the files cloned (clone): Wi
 # A game app (--game-apk): the game in an app of its own, org.nxnative.game.t<title ID> with its name and icon, entered through dm/android/java GameStart with no launcher
 # (apk/AndroidManifest.game.xml). The APK carries the game's host and its files as push_game lays them out on the phone (assets/game/, unpacked by GameStart at the first
 # start), and the RomFS image as a stored entry when the APK stays under 2 GiB (build_apk.py: a ZIP without ZIP64). A bigger game's RomFS goes beside it, <name>.romfs,
-# which the player puts anywhere on the device and picks once in the app. --xapk packs one .xapk instead (an XAPK installer's format: the APK, the RomFS as the app's OBB
+# which the player puts anywhere on the device and picks once in the app; --romfs-beside puts any game's there, so the APK stays small. --xapk packs one .xapk instead (an XAPK installer's format: the APK, the RomFS as the app's OBB
 # file Android/obb/<package>/main.1.<package>.obb, icon.jpg and manifest.json), for any size; the two kinds sit side by side, each replacing only its own files. Nothing
 # goes into the library of hosts: the nxnative app stays as it was.
 # The DLC images (aoc/<index>.img) go into the APK while it can hold them; when it can't (Mario Kart 8 Deluxe's Booster Course Pass and its shaders pass 2 GiB with no
@@ -381,7 +381,7 @@ def gib(n): return f'{n / (1 << 30):.2f} GiB'
 # Where a game app's RomFS and DLC go: → (RomFS in the APK, DLC in the APK). parts: the files the APK must carry, by name (code, shaders, font, the rest), with their
 # sizes; files: how many entries each makes, dlc_files the DLC's. The RomFS leaves the APK first, then the DLC with it; what the APK must carry and can't, in bytes or in
 # entries, is a BuildError naming each part
-def game_app_plan(parts, dlc, rom, xapk, limit=GAME_APP_LIMIT, files=None, dlc_files=0, entries=GAME_APP_ENTRIES):
+def game_app_plan(parts, dlc, rom, xapk, limit=GAME_APP_LIMIT, files=None, dlc_files=0, entries=GAME_APP_ENTRIES, beside=False):   # beside: the RomFS out whatever its size
     core = sum(parts.values()); n = sum((files or {}).values())
     if n >= entries:
         raise BuildError(f'a game app can\'t hold this game: the APK would carry {n:,} files ({", ".join(f"{k} {v:,}" for k, v in (files or {}).items())}), and an APK '
@@ -392,7 +392,7 @@ def game_app_plan(parts, dlc, rom, xapk, limit=GAME_APP_LIMIT, files=None, dlc_f
                          f'holds {gib(limit)} (2 GiB less room for its records); the RomFS ({gib(rom)}) and the DLC ({gib(dlc)}) could go beside it, these can\'t. '
                          'Install it through DroidPlay\'s library instead (without --game-apk), which has no such limit')
     dlc_fits = core + dlc < limit and n + dlc_files < entries
-    if not xapk and dlc_fits and core + dlc + rom < limit: return True, True
+    if not xapk and not beside and dlc_fits and core + dlc + rom < limit: return True, True
     return False, dlc_fits
 
 
@@ -446,7 +446,7 @@ def defaults_text(g, lang):
     return ''.join(ln + '\n' for ln in lines)
 
 
-def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, work, logs, env, out_dir, xapk):
+def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, work, logs, env, out_dir, xapk, beside=False):
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import build_apk   # pyright: ignore[reportMissingImports]  # dm/android/tools, put on the path here
     pkg = build_apk.game_package(g.id)
     rom = bi.rfs.source(game)
@@ -465,7 +465,7 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
     for f, n in staged:
         k = {'code': 'code', SPV_ZIP: 'shaders', 'font': 'font'}.get(f.split('/')[0], 'the rest'); parts[k] += n; files[k] += 1
     rom_bytes = Path(str(rom)).stat().st_size; dlc_walk = walk(aoc); dlc = sum(n for _, n in dlc_walk)
-    inside, dlc_inside = game_app_plan(parts, dlc, rom_bytes, xapk, game_app_limit(), files, len(dlc_walk))
+    inside, dlc_inside = game_app_plan(parts, dlc, rom_bytes, xapk, game_app_limit(), files, len(dlc_walk), beside=beside)
     if dlc_inside and dlc: stage_link(stage / 'aoc', Path(aoc).resolve())
     out_images = dlc_images(aoc) if dlc and not dlc_inside else []
     dlc_at = -(-rom_bytes // DLC_ALIGN) * DLC_ALIGN if out_images else 0
@@ -1012,6 +1012,8 @@ def main(argv):
     ap.add_argument('--allow-damaged', action='store_true', help='pack files that fail the NCA hash check as read')
     ap.add_argument('--game-apk', action='store_true', help='the game in an app of its own, to install on any device (no phone needed; the DroidPlay app is left as it is)')
     ap.add_argument('--xapk', action='store_true', help='with --game-apk: one .xapk (the APK with the RomFS as its OBB file) for an XAPK installer')
+    ap.add_argument('--romfs-beside', action='store_true', help="with --game-apk: the RomFS beside the APK as <name>.romfs whatever the game's size, "
+                                                                 'so the APK stays small; the player puts it anywhere on the device and picks it once')
     ap.add_argument('--out', help='with --game-apk: the folder for the app (default: the NSP folder)')
     ap.add_argument('--setup', action='store_true', help='install what --check finds missing (Windows: the JDK, the .NET SDK and the Android SDK)')
     ap.add_argument('--accept-android-licenses', action='store_true', help="with --setup: you accept the Android SDK License (https://developer.android.com/studio/terms)")
@@ -1020,6 +1022,8 @@ def main(argv):
     # ANDROID_HOME and no adb on PATH, --sdk built the app and then stopped at its install with "No such file or directory: 'adb'"
     if a.sdk: tool_paths(a.sdk)
     global WAIT_DEVICE; WAIT_DEVICE = a.wait_device
+    if a.romfs_beside and (a.xapk or not a.game_apk):
+        raise BuildError('--romfs-beside goes with --game-apk, without --xapk (an XAPK carries the RomFS as its OBB file)')
     if a.xapk: a.game_apk = True
     if a.game_apk:
         if a.push_only or a.update_shaders or a.apk_only or a.migrate: raise BuildError('--game-apk builds the game; it goes with none of --push-only, --update-shaders, --apk-only, --migrate')
@@ -1178,7 +1182,7 @@ def main(argv):
                 'romfs_bytes': Path(rom).stat().st_size if bi.rfs.is_image(rom) else None}
         bi.PROG.stage('game app')
         made, inside = make_game_app(sdk, g, game, patched, spv, font, work / 'aoc', defaults, so, meta, work, logs, env,
-                                     Path(a.out).expanduser().resolve() if a.out else nsp_dir, a.xapk)
+                                     Path(a.out).expanduser().resolve() if a.out else nsp_dir, a.xapk, a.romfs_beside)
         bi.PROG.end(str(made[0]))
         if a.xapk: say(f'done: {made[0]}. Install it with an XAPK installer on the device; it puts the game data in Android/obb. Or unzip it, install the APK and copy Android/obb/ to the device')
         elif inside: say(f'done: {made[0]}, the game with its data inside. Install it on any Android device (arm64, Vulkan)')
