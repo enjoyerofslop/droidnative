@@ -23,6 +23,7 @@ class Ent(ctypes.Structure):   # ie_ent
 class ImageEviction(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        assert CC is not None   # (skipped without one; pyright doesn't follow skipIf)
         cls.tmp = Path(tempfile.mkdtemp())
         src = cls.tmp / 'e.c'
         src.write_text('#include "img_evict.h"\n'
