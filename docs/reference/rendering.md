@@ -2492,6 +2492,35 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   (Adreno 830), the same on-and-off build in one battle: 27.8 to 31.3 µs a draw with it against 32.0 to 41.1 without (means 29.6 and 36.2); battles at 59.8 and
   60.0 fps with it and 59.9 and 59.9 without, no fault, the picture the same.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) ([Android baselines](../../dm/android/baselines.md)).
+
+### Read-only storage buffers compared at every bind
+
+- **Symptom:** Android only: the replay thread spends most of its time in `memcmp` under `ucopy`, called from `stage_set`'s read-only storage buffer line, and the
+  `constant and storage buffer copies` line counts hundreds of megabytes a frame copied to the arena and as many to the shadows.
+- **Cause:** a read-only storage buffer that [`sb_keep`](#read-only-storage-buffers-copied-into-every-chunk) does not keep (past 8 MB, or written every frame by the game
+  or a write-back) and that no placed pool holds went to `ucopy`. It was copied into the arena once per chunk, with a host shadow, and compared whole with that shadow
+  at every later bind in the chunk. Mario Kart World binds one 9.56 MB buffer about 370 times a frame in a race: on a OnePlus Pad 3 (Adreno 830) those compares were
+  228 ms of the replay thread's 280 ms a frame (81%), about 3.5 to 4.5 GB a frame, and the two copies 29 ms more.
+- **Fix:** `sb_copy` (`gfx_vk_sbcopy.inc`, its reuse table in `sb_reuse.h`) takes the dirty-page tracker's word instead. The copy is stamped and its pages protected
+  before it is made, and a later bind in the same chunk takes it while no page of it has a generation past the stamp:
+  - the game's writes fault and move a page's generation;
+  - so do the replay's own writes while it records (uniform buffer updates, small copies and fills), which fault the same way;
+  - write-backs and linear render targets landing on the completion thread go through `dm_guest_write_prepare`, which moves it too;
+  - a dispatch's write still on the GPU is bound there first (`sb_fwd`), as before.
+
+  Memory no tracked pool holds whole is copied and compared as before. No shadow is kept. The `[vk] read-only storage buffers outside placed pools` line counts
+  binds that took their chunk's copy, copies made and those made after a write. `DM_VK_SB_DIRTY=0` (env.txt): compared at every bind, as before.
+  `DM_VK_SB_CHECK=1` keeps the shadow as well and compares every bind the tracker let through, logging any difference.
+- **Check:** `dm/tools/tests/test_sb_reuse.py` drives the reuse table with a fake tracker that stamps a page only on a write while it is protected, as `nvn_dirty.c`
+  does. It checks that a second bind in the chunk takes the copy, that the copy protects every page it read, that a write since the copy makes a new one (and the one
+  after it reuses that), that a write elsewhere, a new chunk, another size and untracked memory each do what they should.
+  - Mario Kart World on a OnePlus Pad 3 (Adreno 830), one build, `DM_VK_SB_DIRTY=0` against the default:
+    - the race went from frames of 216–312 ms (the replay's CPU 200–294 ms at 1,625–2,443 draws) to 47–65 ms (36–52 ms at 1,017–1,889 draws);
+    - the attract drive and title from 181–220 ms to 41–47 ms;
+    - `DM_VK_SB_CHECK=1` over the attract drive, the menus and a race compared 1,840,757 binds with the shadow and found none different.
+  - Super Mario Odyssey's opening (from the library, on a host with the change) ran 16.6–16.7 ms a frame either way, the picture the same.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md).
+
 ### Texture and sampler banks packed in one `cbuf_slot`
 
 - **Symptom:** Android only: a black picture while the game runs at full rate with no draw dropped; every render target of a pass dump is all zero, and the dump's binding lines show `tid 0 sid 0 -> none` for every texture.

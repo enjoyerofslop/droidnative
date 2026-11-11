@@ -117,6 +117,18 @@ Packed for Android as its own game app (`--game-apk`, the 21.9 GB RomFS as the d
   - The 168 modules were rewritten as they were made, `a8310cf7c7acd0fe` first, with no red line from the rewrite.
   - Frame times: the attract drive 178–209 ms a frame (the GPU 28–31 ms), the menus 26–37 ms, the race 236–303 ms (the GPU 32–38 ms). The replay's CPU holds the 3D scenes, as on Turnip.
   - With the rewrite off (`DM_SPV_TGSPILL=0`) the same build lost the GPU 17 s in, after three submissions cut short, each with `2a89b6d4df731b8d` among its dispatches.
+- **The replay's CPU on the Pad 3, 2026-11-11** ([Read-only storage buffers compared at every bind](../../../docs/reference/rendering.md#read-only-storage-buffers-compared-at-every-bind)):
+  - A CPU sampler on the replay thread (simpleperf is denied there) put 92% of it in 3D under `ucopy`: a 9.56 MB read-only storage buffer, past `sb_keep`'s 8 MB and rewritten every frame, bound about 370 times a frame and compared whole with a shadow at each bind (228 of 280 ms a frame). Qualcomm's driver was 3%.
+  - With that compare replaced by the dirty tracker, in the same build (`DM_VK_SB_DIRTY=0` for the old way):
+
+    | Scene | Old compare: frame / replay CPU | Dirty tracker: frame / replay CPU |
+    |---|---|---|
+    | Attract drive / title | 181–220 ms | 41–47 ms / 32–37 ms |
+    | Race | 216–312 ms / 200–294 ms (1,625–2,443 draws) | 47–65 ms / 36–52 ms (1,017–1,889 draws), the GPU 20–28 ms |
+
+  - With the replay this fast, the real title ("Press L + R to start") shows; the slow replay ran the attract demo first, which takes no input until it hands back to the title (about frame 1,600).
+  - `DM_VK_SB_CHECK=1` over the attract drive, the menus and a race: 1,840,757 binds compared with the shadow, none different; 218 copies were made again after a write the tracker saw.
+  - Memory is tight in the fast runs: 0.5–0.7 GB available in the race, 4 GB of the game swapped. One of the two dirty-tracker runs crashed in the menus, in Qualcomm's driver at a chunk's submit (SIGSEGV in `vulkan.adreno.so`, `mtl_sub_commit`) right after the driver failed to link a pipeline being built on another thread; the next run and the check run went on into the race.
 - **Frame times on Turnip:** menus and the movie 28–41 ms a frame; 3D scenes, the race included, 300–500 ms, of which the GPU is 21–45 ms and the replay's submit and present the rest. The track's surface is untextured (15 sparse images over the image limit), roadside bushes are missing (mesh draws skipped), and "virtual pool remap … failed" is logged several thousand times a run (Android cannot alias the private memory a virtual pool maps).
 
 ## Open
