@@ -165,6 +165,25 @@ def check_elf(data):
     return out
 
 
+def notice(d):
+    """The NOTICE a game app carries beside a driver it packs: what it is, who built it, and Mesa's licence terms (a copy the player makes for their own devices,
+    which still carries them)"""
+    m = d.meta or {}
+    who = ', '.join(f'{k}: {m[k]}' for k in ('name', 'author', 'driverVersion', 'packageVersion', 'vendor') if m.get(k))
+    return (f'This app carries a Vulkan driver the player chose: {d.library} (SHA-256 {d.sha256}){" — " + who if who else ""}.\n'
+            'It is not part of DroidPlay. Turnip is part of Mesa (https://mesa3d.org); a build like this one is made and published by its builder, whose release page\n'
+            'has its source and patches, if any. Mesa is free software: its core is under the MIT licence, and some of its files carry other free licences\n'
+            '(https://docs.mesa3d.org/license.html). The MIT licence\'s terms, which apply to this copy:\n\n'
+            'Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"),\n'
+            'to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,\n'
+            'and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\n'
+            'The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\n'
+            'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n'
+            'FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n'
+            'LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS\n'
+            'IN THE SOFTWARE.\n')
+
+
 def parse_env(items):
     """--vk-driver-env K=V items → the lines, only Mesa's switches in ENV_ALLOWED"""
     out = []

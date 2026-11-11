@@ -133,7 +133,8 @@ open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666
 
 1. Unzip the driver package (`turnip_mrpurple_T30-toasted.adpkg.zip`, say). It holds a `.so` (`vulkan.purple.so`) and a `meta.json` that names it.
 2. Copy the `.so` into `Android/data/org.nxnative.android/files/`, beside `env.txt`: `adb push vulkan.purple.so /sdcard/Android/data/org.nxnative.android/files/`.
-   A game app reads its own folder, `Android/data/org.nxnative.game.t<title ID>/files/`.
+   A game app reads its own folder, `Android/data/org.nxnative.game.t<title ID>/files/`, or carries the driver itself: build it with `--game-apk --vk-driver <package>`.
+   It is then used on Adreno phones and left out on others; build the app again to change it.
 3. Add `DM_VK_DRIVER=vulkan.purple.so` to `env.txt` there (a path relative to that folder, or an absolute one), then start the game.
 
 The app copies the driver into its internal storage at start, since Android loads no code from shared storage, and copies it again when the file changes. The log
