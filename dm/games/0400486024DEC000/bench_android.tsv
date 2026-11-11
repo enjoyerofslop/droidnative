@@ -1,4 +1,4 @@
 # Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description [<TAB> KEY=VALUE;KEY=VALUE]
 # ready (title): the title movie's AV1 decoder gives its first picture (MediaCodec, av1_android.c)
-title	-	-	40	30	AV1 decoder 1: first picture	a fresh save: the boot, then the title and its menu over the AV1 movie (nn::ndve's U-Net left out on Vulkan); no input
+title	-	-	40	30	AV1 decoder 1: first picture	a fresh save: the boot, then the title and its menu over the AV1 movie (nn::ndve's movie network left out on Vulkan); no input
 kokiri	40:A,47:A,52:A	saves/mac_20261105	95	45	-	the Mac save of 2026-11-05 in Kokiri Forest: A at the title, Continue and the file, then Link standing in front of his house; slow on Android (about 2 fps), so the window holds about 90 frames

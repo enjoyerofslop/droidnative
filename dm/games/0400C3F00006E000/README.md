@@ -86,6 +86,51 @@ The work folder `0400C3F00006E000-work` beside the dump has `rewrite.sh`, `rebui
 
 Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported it, and its facts (not its code) went into the host for this profile: the packing of a version with a `subsdk1`, and the Switch 2 services 1.8.0 calls at boot, which the base game does not import (the Nmouse pointer, GameChat's room event and camera storage, the camera context, the graphics system check, the HDR Bezier metadata and its clears; [services.md](../../../docs/reference/services.md#the-camera-through-the-graphics-system)). The NSP script packs it from a profile derived from this one, with its own shader tables. None of it has been run on 1.8.0.
 
+## Android
+
+Packed for Android as its own game app (`--game-apk`, the 21.9 GB RomFS as the data file beside it), from the 1.8.0 update.
+
+- **Ayn Odin 2 (Adreno 740), 2026-11-08:** the world map at about 55 fps, then the attract drive at about 3.4 fps, with no input given; the terrain untextured.
+- **Galaxy S25 Edge (Adreno 830, Qualcomm's driver), 2026-11-10 to 11, `main` 5736949c and later:**
+  - About 10 s after the world map, as the 3D scene starts, three submissions in a row run about 250 ms each until the driver's hang recovery cuts them short, then the device is lost. Fault addresses look like floats (`0x3f80…`, 1.0f's bit pattern plus an offset) or null plus an offset.
+  - GPU breadcrumbs (`DM_VK_BC`, pull request [#212](https://github.com/enjoyerofslop/droidplay-core/pull/212)) name compute shader `2a89b6d4df731b8d` every time, begun and never ended. It animates a 24-bone skeleton:
+    - one workgroup of 64 invocations, 4 of them past an early return;
+    - three counted loops to 24;
+    - its inputs sound: a valid parent tree, identity matrices, a 24×636 RGBA16F animation texture with 3 layers.
+  - With it skipped (a local test switch), `e2a5bd13907993e3`, of the same kind, hangs next. `04dedc705a7ef88b` is a third of them.
+  - **Not the cause:** #191, raw global memory, robust buffer and image access, the texture pool by ID, compute `spv_wide` (#189; these shaders have no warp operations).
+  - **Rewrites of the three that still hang:** the loop bound loaded once, the early return made an `if`, both, a constant bound of 24, while loops tested at the top, for loops with an unroll hint, and the module re-emitted by glslang unchanged.
+- **Galaxy Z Flip 7 (Xclipse 950), 2026-11-10:** the same module ends. The 3D desert highway draws with Mario's kart animated, at about 2.5 fps, the GPU 26–29 ms a frame.
+- **Galaxy S25 Edge with Mr. Purple's Turnip T30 (`DM_VK_DRIVER`), 2026-11-11:**
+  - The same module ends there too.
+  - The title ("Press L + R to start") on a fresh save. L+R opens the main menu.
+  - Single Player → Grand Prix → Mario → Standard Kart → Mushroom Cup → 50cc → OK, then the cup's VP9 movie (1,423 pictures).
+  - A race at Mario Bros. Circuit: A held through the countdown (a rocket start), then driving, steered with the on-screen stick.
+- **The cause, 2026-11-11 (q171): compute shared memory past the driver's limit.**
+  - `2a89b6d4df731b8d` declares `shared uint _44[12288]`, 48 KB of workgroup memory. So do 167 more of the game's 728 compute modules: the same `DrivePassShaderDefault` kernels the Mac moves to device memory ([Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb)).
+  - Qualcomm's driver on the Adreno 830 reports `maxComputeSharedMemorySize` 32,768. Vulkan doesn't allow a module more, and the Android path has no such move.
+  - Run alone in a standalone test with that dispatch's captured inputs (uniform and storage buffers at their bound sizes, its 24×636 texture, the replay's memory types and image flags), it finished in 0.2 ms, even 64 workgroups at once. In the game it never ends.
+  - With the three shaders' arrays declared at 32 KB (they use about 4.5 KB for a 24-bone skeleton), Qualcomm's driver ran 150 s with no GPU loss. The next dispatch to stop was `a8310cf7c7acd0fe`, another of the 168.
+  - Turnip and the Xclipse 950 run them as they are, so presumably with a higher limit (not read there).
+- **OnePlus Pad 3 (Adreno 830, Qualcomm's driver 0x8032004a), 2026-11-11, with shared memory past the limit taken from a storage buffer** ([Compute shared memory past the GPU's limit on Vulkan](../../../docs/reference/shaders.md#compute-shared-memory-past-the-gpus-limit-on-vulkan)):
+  - No slow submission and no GPU loss in about 11 minutes, through the world map, the attract drive on the desert highway, L+R to the main menu, Single Player → Grand Prix → Mario → Standard Kart → Mushroom Cup → 50cc → OK, and a race at Mario Bros. Circuit: A held through the countdown (a rocket start), driving, steering, an item box.
+  - The 168 modules were rewritten as they were made, `a8310cf7c7acd0fe` first, with no red line from the rewrite.
+  - Frame times: the attract drive 178–209 ms a frame (the GPU 28–31 ms), the menus 26–37 ms, the race 236–303 ms (the GPU 32–38 ms). The replay's CPU holds the 3D scenes, as on Turnip.
+  - With the rewrite off (`DM_SPV_TGSPILL=0`) the same build lost the GPU 17 s in, after three submissions cut short, each with `2a89b6d4df731b8d` among its dispatches.
+- **The replay's CPU on the Pad 3, 2026-11-11** ([Read-only storage buffers compared at every bind](../../../docs/reference/rendering.md#read-only-storage-buffers-compared-at-every-bind)):
+  - A CPU sampler on the replay thread (simpleperf is denied there) put 92% of it in 3D under `ucopy`: a 9.56 MB read-only storage buffer, past `sb_keep`'s 8 MB and rewritten every frame, bound about 370 times a frame and compared whole with a shadow at each bind (228 of 280 ms a frame). Qualcomm's driver was 3%.
+  - With that compare replaced by the dirty tracker, in the same build (`DM_VK_SB_DIRTY=0` for the old way):
+
+    | Scene | Old compare: frame / replay CPU | Dirty tracker: frame / replay CPU |
+    |---|---|---|
+    | Attract drive / title | 181–220 ms | 41–47 ms / 32–37 ms |
+    | Race | 216–312 ms / 200–294 ms (1,625–2,443 draws) | 47–65 ms / 36–52 ms (1,017–1,889 draws), the GPU 20–28 ms |
+
+  - With the replay this fast, the real title ("Press L + R to start") shows; the slow replay ran the attract demo first, which takes no input until it hands back to the title (about frame 1,600).
+  - `DM_VK_SB_CHECK=1` over the attract drive, the menus and a race: 1,840,757 binds compared with the shadow, none different; 218 copies were made again after a write the tracker saw.
+  - Memory is tight in the fast runs: 0.5–0.7 GB available in the race, 4 GB of the game swapped. One of the two dirty-tracker runs crashed in the menus, in Qualcomm's driver at a chunk's submit (SIGSEGV in `vulkan.adreno.so`, `mtl_sub_commit`) right after the driver failed to link a pipeline being built on another thread; the next run and the check run went on into the race.
+- **Frame times on Turnip:** menus and the movie 28–41 ms a frame; 3D scenes, the race included, 300–500 ms, of which the GPU is 21–45 ms and the replay's submit and present the rest. The track's surface is untextured (15 sparse images over the image limit), roadside bushes are missing (mesh draws skipped), and "virtual pool remap … failed" is logged several thousand times a run (Android cannot alias the private memory a virtual pool maps).
+
 ## Open
 
 - **Long frames:** first-use pipeline compiles (no `pso_manifest.tsv` yet).

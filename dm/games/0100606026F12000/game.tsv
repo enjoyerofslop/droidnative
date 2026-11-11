@@ -63,3 +63,8 @@ tex_dyn_slots	on
 # shaders per draw from its pipeline state, so every vertex shader is made to link with any pixel shader (shader_split.py separable_pairs)
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	FINAL FANTASY RESONANCE shaders
+# ---- Graphics ----
+# On Qualcomm's Adreno 7xx driver (the Ayn Odin 2), the first field's pixel-art flames: the driver's binning copy of their vertex shader lost the clip matrix (c3 rows 0-3) it
+# read at constant rows, so the cards were binned nowhere. Their position reads its rows at run time there (spv_android.py pos_rows, gfx_vk_posrows.inc); every other shader
+# keeps its constant rows, which cost less GPU time
+vk_pos_rows	19274e72bf8f5d0d

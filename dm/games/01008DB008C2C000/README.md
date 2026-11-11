@@ -77,3 +77,49 @@ First run on Android, 2026-11-10: a Samsung Galaxy S25 Edge (SM-S937U1: Snapdrag
 - **Sound:** an audio dump of the title and the house: the front pair at −22 / −23 dBFS RMS, peaks to −2 dBFS; no underrun in 266,000 callbacks.
 - **`[RED]`:** the same single line.
 - **Not tried:** outside the house, the Bag, a battle.
+
+**Past the first battle on the Z Flip 7**, the same day (job q78): main's Shield host at `5736949c` (the files were unchanged from the run above), the same phone and controls. Played by hand with adb input, 43 minutes from a new game, along the Retroid Pocket 5's route:
+
+- **The stretch:**
+  - Postwick, Route 1, Wedgehurst station and Leon's starters (Scorbunny);
+  - **Hop's battle**: Wooloo, then Grookey, finished with Ember. Won; Scorbunny went up to Lv 7;
+  - the next part of the story: Hop hears the Wooloo break through the gate, and the two follow it into the **Slumbering Weald**, where a wild Skwovet (Lv 2) is beaten in the fog.
+
+  The Weald's paths through the fog kept the walk to its first stretch: blind stick moves kept meeting trees and rocks, so the Weald's event and Route 2 were not reached.
+- **Saves and Continue:** four commits (manual saves and an autosave), the last in the Weald (play time 0:38). A cold start's title and Continue loaded it there.
+- **30 fps throughout:** 257 windows of 300 frames, frame p50 33.0–33.9 ms (median 33.4), p95 median 37.3 ms. GPU p50 median 14.2 ms, the most 22.1.
+- **First start:** the longest frame was 6.4 s at the first step outside. 245 pipelines and 298 libraries were made in that frame (5.7 s), on Samsung's slow first-time shader creation. 1.2–1.3 s frames came at two later loads. With the pipeline cache (6.5 MB), the Continue start's longest frame was 118 ms.
+- **Sound:** `DM_AUDIO_DUMP` over the Continue start (95 s): the title music, then the Weald's, in the front pair. No underrun in 647 reports during play and 22 after the restart.
+- **`[RED]`:** the same single line; no crash, no hang, nothing wrong seen in the picture (the battle scenes, the Weald's fog).
+
+**Through the Slumbering Weald on the Retroid Pocket 5**, the same day (job q105). The phone's own APK (main `5736949c`, 0.7.3-16-g5736949c), started from the Z Flip 7's Weald save (`saves/slumbering_weald`, a save made on an Android phone). Played by hand with adb input, 29 minutes.
+
+- **The stretch:**
+  - The Weald in the fog: a wild Rookidee and a wild Skwovet beaten on the way. The fog thickens until Hop can't see his own hand.
+  - **The Weald's event:** Zamazenta's silhouette in the fog, then the battle against "???". Its turns end in the fog, as the story has it. Leon and Charizard find the two, with the Wooloo.
+  - Back in Postwick: Hop sends the player home, and Mum's scene plays in the kitchen. The next objective is Wedgehurst.
+- **Through the fog with adb:** a short run (B held) in each direction, kept when the next screenshot changed. The depths are west: runs west, then north up a sunken path, reached the event. Hop following can make a blocked run look like a move.
+- **Saves and Continue:** six commits:
+  - the X menu's save after the Weald (its "Current time" is the real date and time);
+  - the game's autosave after Mum;
+  - a save in Hop's garden (play time 1:06).
+
+  A cold start's Continue loaded the last one there. Kept as `saves/after_weald_rp5`.
+- **30 fps throughout:** 172 windows of 300 frames, frame p50 33.0–34.5 ms (median 33.3), p95 median 36.3 ms. GPU p50 median 19.1 ms, at most 27.2, on the Adreno 650.
+- **Sound:** `DM_AUDIO_DUMP` over the Continue start (105 s, one 6-channel output): the title and Postwick's music in the front pair, at −22 to −31 dBFS RMS. Peaks on notes (440 / 880 Hz, 659 Hz), no clipping. No underrun during play; one 12 ms gap during the Continue start.
+- **`[RED]`:** the same single line; no crash, no hang.
+- **Not played:** Route 2, Professor Magnolia's house, the Wild Area.
+
+**Through Route 2 into Professor Magnolia's house on the Retroid Pocket 5**, the same day (job q112). The phone's own APK as before (main `5736949c`), started from the save above (`saves/after_weald_rp5`, in Hop's garden). Played by hand with adb input, 42 minutes:
+
+- **The stretch:**
+  - Route 1 to Wedgehurst: Hop stops the player once more. Sleeping Wooloo block the path, and "the long way round" goes through the tall grass east of it.
+  - Wedgehurst: Leon leads the way into the Pokémon Research Lab, where Sonia gives the Pokédex, and a man outside gives a Potion. Hop's Pokémon Center tutorial follows, then his talk about the Gym Challenge.
+  - Route 2: Leon's catching lesson (his Rookidee and a wild Wooloo). Then a wild Chewtle, beaten with Scorbunny at 2 HP and healed with a Potion from the Bag, and three trainers on the way to the lake, all won: one with a Skwovet, Lass Lauren's Chewtle, and Youngster Benjamin with a Nickit. Scorbunny reached Lv 9.
+  - **Professor Magnolia's house:** she meets Leon and Hop at her door, and her scene plays indoors. It stopped there, before the battle in her garden that decides Leon's endorsement.
+- **Saves and Continue:** four commits, the last in Magnolia's house (filed under "Route 2", play time 1:47). A cold start's Continue loaded it there. Kept as `saves/magnolia_house_rp5`.
+- **30 fps throughout:** 253 windows of 300 frames, frame p50 33.0–35.1 ms (median 33.3), p95 median 36.2 ms. GPU p50 median 22.1 ms, at most 27.1.
+- **First visits:** the longest frames were 1.7 s and 1.4 s, as the lab and Route 2 built their pipelines on this phone for the first time (86 pipelines and 172 libraries in the longer one). On the Continue start the longest was 87 ms.
+- **Sound:** `DM_AUDIO_DUMP` over the Continue start (68 s): the title music, then the house's, in the front pair. No underrun in 337 reports during play or 8 after the restart.
+- **`[RED]`:** the same single line; no crash, no hang, and nothing wrong seen in the picture (Wedgehurst, the lab, the Pokémon Center, Route 2's lake, the manor inside).
+- **Not played:** the battle in Magnolia's garden, Motostoke, the Wild Area.

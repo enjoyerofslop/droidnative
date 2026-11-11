@@ -56,21 +56,22 @@ BUILD_TOOLS, PLATFORM = '36.0.0', 'android-35'   # build_apk.py's defaults
 # libadrenotools and its hooks (dm/android/CMakeLists.txt), in every APK: DM_VK_DRIVER opens a Vulkan driver of the player's through them (dm/android/vk_driver.c), so trying
 # one needs no other build. Built beside the loader, and kept with it in the library
 VK_DRIVER_LIBS = ('libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so')
-# Games played on an Android device: the rows of the README's Game Status whose tier is Playable or In-game from a run on current code, with a profile, kept in
-# step with that table. The desktop app shows the others as not played there yet. Left out: In-game, blocked (Frostpunk, Ocarina of Time) and Menus (Mario Kart
-# World), and the rows from before the nxnative merge (†: Super Mario Bros. Wonder, Super Mario 3D World + Bowser's Fury), which current code hasn't run
+# Games played on an Android device: the rows of the README's Game Status whose tier is Playable – minor issues, Playable – major issues or In-game from a run
+# on current code, with a profile, kept in step with that table. The desktop app shows the others as not played there yet. Left out: In-game, blocked (Frostpunk,
+# Ocarina of Time) and Menus (Mario Kart World), and the rows from before the nxnative merge (†: Super Mario Bros. Wonder, Super Mario 3D World + Bowser's Fury),
+# which current code hasn't run
 ANDROID_TESTED = {
-    '01008DB008C2C000',   # Pokémon Shield (Playable through the first battle)
-    '010027400CDC6000',   # Divinity: Original Sin 2 - Definitive Edition (Playable through the cabin deck)
-    '010003F003A34000',   # Pokémon: Let's Go, Pikachu! (Playable through Route 1)
-    '0100000011D90000',   # Pokémon Brilliant Diamond (Playable through Lake Verity's first battle)
-    '0100DCD01525A000',   # Persona 3 Portable (Playable through the first battle)
+    '01008DB008C2C000',   # Pokémon Shield (Playable – minor issues through Route 2 into Professor Magnolia's house)
+    '010027400CDC6000',   # Divinity: Original Sin 2 - Definitive Edition (Playable – major issues through the first combat)
+    '010003F003A34000',   # Pokémon: Let's Go, Pikachu! (Playable – minor issues through the rival's first battle)
+    '0100000011D90000',   # Pokémon Brilliant Diamond (Playable – minor issues through Lake Verity's first battle)
+    '0100DCD01525A000',   # Persona 3 Portable (Playable – minor issues through the first battle)
     '01006F8002326000',   # Animal Crossing: New Horizons
     '0100000000010000',   # Super Mario Odyssey
     '01006A800016E000',   # Super Smash Bros. Ultimate
     '01006BB00C6F0000',   # The Legend of Zelda: Link's Awakening
     '01002DA013484000',   # The Legend of Zelda: Skyward Sword HD
-    '01007EF00011E000',   # The Legend of Zelda: Breath of the Wild
+    '01007EF00011E000',   # The Legend of Zelda: Breath of the Wild (Playable – major issues through the Shrine of Resurrection onto the Great Plateau)
     '0100606026F12000',   # Final Fantasy Resonance
     '010069C01AB82000',   # SHIN MEGAMI TENSEI V: Vengeance (a contributor's report)
 }
@@ -230,22 +231,36 @@ def standard_font(font):   # <font>/standard.ttf: a hinted TrueType font; withou
     if not dst.is_file() or dst.stat().st_size != Path(src).stat().st_size: shutil.copyfile(src, dst)
 
 
-def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=()):
+def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None):
     """The game's NVN shaders for the Vulkan replay: the split (build_ipa_from_nsp.py split_shaders, checked against the profile's tables), then
-    dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. None when there are none"""
-    if not sv: return None
+    dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. Returns that folder (None when there are none) and the profile.
+    A registered profile's tables may differ from the split in two ways the iPhone build accepts as well: installed DLC's own shaders, and compute kernels a newer reader decodes
+    from the registered build (compute_reader_additions). derive(reason) then makes the shader-only derived profile that the translation and the rest of the build use. Any other
+    failure of a registered profile's split stops the build: packed without shaders, AI: The Somnium Files played its sound over a black screen (droidplay-core#218)"""
+    if not sv: return None, g
     sh = work / 'shader'
-    own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
-    try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, dlc_roms=dlc_roms)   # its own stage (a DLC's shaders too)
-    except BuildError as e: bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None
+    own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional or derived profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
+    got = {}
+    def promote(reason):   # the split calls it only after its strict DLC-only or additive-compute comparison passed, and only when derive was given
+        assert derive is not None
+        got['g'] = derive(reason); return got['g']
+    dd = (lambda: promote('the installed DLC shader content differs from the registered tables')) if derive and not own else None
+    dc = (lambda: promote('the reader decoded additional compute kernels from this registered build')) if derive and not own else None
+    try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own,   # its own stage (a DLC's shaders too)
+                          dlc_roms=dlc_roms, derive_dlc=dd, derive_compute=dc)
+    except BuildError as e:
+        if not own: raise BuildError(f'{e}\nThe game is not packed: without its shaders it would play its sound over a black screen. Check that the folder holds the versions game profile '
+                                     f'{g.id} registers (its game.tsv); if it does, report this build with {logs / "shader_split.log"}') from e
+        bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None, g   # a provisional profile: shaders compiled at run time, captured later
+    g = got.get('g', g)
     bi.PROG.stage('shaders for Vulkan', step='translating')
     out = work / 'spv'
     try: bi.run([sys.executable, REPO / 'dm/android/tools/spv_build.py', sh / 'pkg', out, '--xlate', REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.dll',
                  '--facts', g.table('shader_facts.tsv')], logs / 'spv_build.log', env=env)
-    except BuildError as e: bi.PROG.end(str(e), ok=False); say(f'[RED] shader translation failed (see {logs / "spv_build.log"}): the game is packed with the shaders translated so far'); return out if out.is_dir() else None
+    except BuildError as e: bi.PROG.end(str(e), ok=False); say(f'[RED] shader translation failed (see {logs / "spv_build.log"}): the game is packed with the shaders translated so far'); return (out if out.is_dir() else None), g
     last = [l for l in (logs / 'spv_build.log').read_text(errors='replace').splitlines() if l.startswith('spv_build:')]
     bi.PROG.end(last[-1][11:] if last else str(out))
-    return out
+    return out, g
 
 
 def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game):
@@ -1091,7 +1106,7 @@ def main(argv):
         bi.PROG.plan((0 if a.update_shaders else 3) + 2 * bool(new) + bool(a.update_shaders))
         if new:   # the split again with the new captures, and the new ones translated (the others are kept)
             aoc = work / 'aoc'; dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc.is_dir() else []
-            spv = build_shaders(g.words('shader_versions') or [pkg_ver], {pkg_ver: game}, work, logs, env, g, dlc_roms) or spv
+            spv = build_shaders(g.words('shader_versions') or [pkg_ver], {pkg_ver: game}, work, logs, env, g, dlc_roms)[0] or spv
         if a.update_shaders:
             if not new: say('no new run-time shaders on the phone'); bi.PROG.end(); return
             bi.PROG.stage('copy the shaders to the phone'); dst = f'{REMOTE}/games/{g.id}'
@@ -1138,7 +1153,16 @@ def main(argv):
         if sv and bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['ue_decode'][0]:   # Unreal's Oodle-compressed shaders (ue_decode)
             with phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Unreal shaders') if serial else contextlib.nullcontext():
                 ue_decode(sdirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game)
-        spv = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms)
+        def derive_shader_tables(reason):   # build_ipa_from_nsp.py main's: the registered profile with the split's shader tables, everything else as registered
+            assert g is not None   # main stopped earlier without a profile; a nested function keeps no narrowing
+            pdir = work / 'profile'
+            bi.derive_profile(g, pdir / g.id, pkg_ver, game, g.words('modules'), app, shader_only=True)
+            os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = os.pathsep.join([str(pdir)] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d and d != str(pdir)])
+            os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
+            dg = gamemod.load(g.id)
+            say(f'{reason}: using a shader-only derived profile at {dg.dir}; registered module fixes are preserved')
+            return dg
+        spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables)
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         if not a.game_apk: library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                             'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})

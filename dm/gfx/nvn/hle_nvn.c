@@ -256,11 +256,12 @@ NVN(nvnMemoryPoolBuilderSetDevice, void, NVNmemoryPoolBuilder *b, NVNdevice *d) 
 NVN(nvnMemoryPoolBuilderSetStorage, void, NVNmemoryPoolBuilder *b, void *m, size_t n) { ((pool_builder_t *)b)->mem = m; ((pool_builder_t *)b)->size = n; }
 NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool_builder_t *)b)->flags = f; }
 static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o);   // sparse virtual pools, see MapVirtual
+__attribute__((weak)) void mtl_pool_flags(const void *mem, uint64_t size, int flags) { (void)mem; (void)size; (void)flags; }   // a pool's NVN flags, before mtl_pool_add (the Vulkan replay's raw memory)
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
-    else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
+    else if (o->mem) { mtl_pool_flags(o->mem, o->size, o->flags); mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
     if (o->mem && !(o->flags & 0x200)) dm_device_share(o->mem, o->size, 1);   // the GPU maps the storage: the host refuses to unmap it until Finalize, as Horizon does (hle_svc.c)
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
@@ -1302,6 +1303,18 @@ NVN_NOPROTO(nvnCommandBufferDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NV
 NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, const void *view, const void *tex) { (void)c; (void)view; (void)tex; }
 NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int first, int n, const void *entries) { (void)c; (void)first; (void)n; (void)entries; }
 NVN_NOPROTO(nvnCommandBufferSetShadingRatePaletteMode, void, NVNcommandBuffer *c, int mode) { (void)c; (void)mode; }
+// NVN2 ray tracing: the size query of an acceleration structure, (device, const build info, size_t *result, size_t *build scratch, size_t *update scratch): three out words the
+// game sums into the memory pool it makes for its acceleration structures (Welcome Tour: main+0x6130cc, pool from the sum at main+0xfc2cc / +0x11bf1c). The red stub wrote nothing, and
+// the caller does not zero them, so the sum was stack garbage: 0xffffffff + 1 + 1 = 0x100000001, a 4 GB pool committed before the first frame (half of the Switch 2's 9 GB pool), and
+// the game then ran out of memory in its loader 16 frames in. The host builds no acceleration structures (the build commands go to the red stub, and no ray is traced), so small
+// sizes with the pool's 4 KB granule keep every later offset valid
+NVN_NOPROTO(nvnDeviceCalculateAccelerationStructureMemoryRequirements, void, NVNdevice *d, const void *info, uint64_t *result, uint64_t *build, uint64_t *update) {
+    (void)d; (void)info;
+    if (result) *result = 0x10000;
+    if (build) *build = 0x10000;
+    if (update) *update = 0x10000;
+    static int once; if (!once++) LOG("[nvn] [RED] CalculateAccelerationStructureMemoryRequirements: 64 KB each for the structure and its scratch (no acceleration structure is built on the host)");
+}
 NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind) { rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind}); }
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {

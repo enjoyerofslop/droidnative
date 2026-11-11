@@ -57,6 +57,18 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
   - **Saves:** the manual save and the game's autosave committed, and Continue loaded each.
   - **Sound:** an audio dump has sound from the title on, at −30 to −38 dBFS (the game's two outputs written together).
   - No `[RED]` line, no crash. BC textures are decoded on the CPU (the Mali-G715 has none). The first launch took 90 s to its first frame (the pipeline list), the later ones 6 s.
+- 2026-11-10, Android, a Moto Razr Plus 2023 (SM8475, Adreno 730 with Qualcomm's driver V@0615.98, Vulkan 1.1.128, Android 16), open, on its inner screen, BD's host from `main` at `5736949c` (with #174's layer-output fallback, which this driver needs to boot), played by hand with adb input from a new game in an empty save folder: the language, Rowan, the look and both names (`DM_KBD`), the TV scene, Mom, Twinleaf, Barry's house and room, Route 201, Lake Verity with Rowan and Dawn, the briefcase and Turtwig, and **the first battle**, a wild Starly, won with Tackle. Then a save at Verity Lakefront, a cold start, and Continue loaded it there.
+  - **60 fps:** 55.8–60.0 fps in every 30 s of the 19-minute launch after the first (frame p50 16.6–17.1 ms), GPU p50 11.3–14.0 ms; the battle 59.8 fps, frame p95 18.9 ms, GPU 12.9 ms. The starter screen didn't slow down here (58.8–59.8 fps).
+  - **Saves:** the manual save and the game's autosaves committed (`save commit #4` the last), and Continue after a cold start loaded the save.
+  - **Sound:** an audio dump over the cold start has sound from the title on, at −30 to −38 dBFS RMS, peaks −13 dBFS; no underrun in 22 reports.
+  - No `[RED]` line, no crash. The driver's subgroups have 64 lanes, so the 23 `fwidth` shaders run as rewritten; #183's ShuffleXor rewrite, on for this driver, finds no butterfly shuffle in BD's shaders. Twinleaf's pond is calm water, as on the Pixel 9 Pro XL, so the grid of white dashes the Z Flip 7 showed there is the Xclipse's alone. (Its cause: [16-bit normalized textures a GPU cannot filter](../../../docs/reference/rendering.md#16-bit-normalized-textures-a-gpu-cannot-filter).)
+- 2026-11-10, Android, the Galaxy Z Flip 7 again (Xclipse 950), BD's host from `main` at `0a33aa37` (with #204 and #197), played by hand with adb input from a new game, in one 34-minute launch after the first start's pipeline builds (3,346 in 55 s):
+  - **The stretch:** the language, Rowan, the look and both names (`DM_KBD`), the TV scene, the bedroom, Mom, Twinleaf at night with its pond calm water ([16-bit normalized textures a GPU cannot filter](../../../docs/reference/rendering.md#16-bit-normalized-textures-a-gpu-cannot-filter)), the neighbours' house, Barry at his door and in his room, Route 201, Lake Verity with Rowan and Dawn, the briefcase and Turtwig, and the battle with a wild Starly, won with Tackle.
+  - **60 fps:** 59.8 fps over the 32 minutes after the language menu, every 30 s window at 57.9–60.0; frame p50 16.7 / p95 19.1 / p99 20.7 ms, 59 frames over 50 ms (loads and scene changes); GPU p50 8.6 ms, p95 10.7.
+  - **Saves:** the save at Verity Lakefront after the battle commits (`save commit #6`, with the game's own autosaves before it); after a cold start the title loads it with Continue, the player beside Barry where it was made.
+  - **Sound:** a `DM_AUDIO_DUMP` of the cold start: the game's second output (`audio #1`) carries the music from the logos on at −23 to −34 dBFS RMS, peaks to −12 dBFS; `audio #0` stays silent. No underrun in 2,152,000 callbacks over both launches.
+  - No `[RED]` line, no crash. The test save is in `files/q107/save` on the phone, and on the Mac in `saves/lakefront_flip`.
+
 
 ## Found on this game
 
@@ -77,6 +89,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 - [Maxwell's 32-lane warps in a wider subgroup](../../../docs/reference/rendering.md#maxwells-32-lane-warps-in-a-wider-subgroup): on the Adreno 830's 64-lane subgroups the same 23 `fwidth` shaders read other quads' values in lanes 32-63 as translated; rewritten so that each 32 lanes are one warp (not yet compared in a frame).
 - [Shader modules made only for pipelines the driver's cache lacks](../../../docs/reference/rendering.md#shader-modules-made-only-for-pipelines-the-drivers-cache-lacks): on a Galaxy Z Flip 7 (Xclipse 950) its 8,844 modules took 6.1–9.6 s of every start; the first frame at 3.3 s after, 9.7–17.9 before.
 - [Layer output from vertex shaders on a GPU that has none](../../../docs/reference/rendering.md#layer-output-from-vertex-shaders-on-a-gpu-that-has-none): the crash at every boot in the Moto Razr Plus 2023's Adreno 730 driver (V@0615.98) compiler, from 12 vertex shaders that write the layer.
+- [16-bit normalized textures a GPU cannot filter](../../../docs/reference/rendering.md#16-bit-normalized-textures-a-gpu-cannot-filter): on a Galaxy Z Flip 7 (Xclipse 950) Twinleaf's pond was a grid of white dashes, its R16G16_UNORM water simulation point sampled; calm water once that texture is made as R16G16_SFLOAT.
 
 ## Open
 

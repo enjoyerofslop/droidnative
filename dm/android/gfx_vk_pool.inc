@@ -116,6 +116,7 @@ static VkImageView pool_view(const treg_t *rg, uint32_t bits) {
     uint32_t nat = pool_code_of(vv && vv->set_target ? vv->target : rg->t.d.target), code = (bits >> nat & 1) ? nat : (uint32_t)__builtin_ctz(bits);
     if ((bits & (bits - 1)) && !(bits >> nat & 1)) RED_ONCE(152, "a texture pool ID read as view types %#x, none its own (%u): the first is made", bits, nat);
     vtex *v = vt_get(&rg->t); if (!v) return VK_NULL_HANDLE;
+    v->pool_read = 1;   // kept from eviction: a view dropped from the pool set reads 0 until the next sync after a draw reads its ID again (gfx_vk_evict.inc)
     int ms = code >= 7; VkImageViewType vt = ms ? (code == 8 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D) : (VkImageViewType)code;
     if ((v->samples > 1) != ms || !pool_fits(v, vt, vv)) return VK_NULL_HANDLE;
     uint8_t swz[4]; int has_swz = rg->t.set_swz || (vv && vv->set_swizzle);

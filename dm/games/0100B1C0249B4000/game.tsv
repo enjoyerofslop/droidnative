@@ -1,5 +1,5 @@
 # Game profile of Frostpunk (Switch, update 1.0.1). Plays on the Mac from boot through the title, the main menu and A New Home's intro into the city at 30 fps;
-# on Android the same at 30 fps, but every building, the Generator and the props are invisible (raw global memory, see README.md)
+# on Android the same at 30 fps, with the buildings, the Generator and the props drawn through raw global memory (android_defaults.txt, see README.md)
 # Format: see dm/games/README.md
 # 11 bit studios' own Liquid engine (namespace N6Liquid; the survey's "Unreal 4" marker is a stray "UE4" in main, there are no paks), NVN, SDK 20.5.19.
 # Every game file is in a dozen archives of three files each at the RomFS root (<name>.idx / .str / .dat: zstd entries, sound and movies as Ogg streams);
