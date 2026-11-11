@@ -4,7 +4,7 @@ Updates 4.0.0 (v1441792) and 4.0.1 (v1507328) over the base game, SDK 4.4.0, the
 
 The 4.0.1 build has the same `subsdk0` and `sdk` build IDs as 4.0.0 and a different `main` build ID. This profile has no build-specific function patches. [A 4.0.1 iPhone report](https://github.com/seedds/nxnative/issues/281) covers the title, menus and a complete three-lap Grand Prix race after the shared notification-wait fix. A second 4.0.1 build from current upstream, with Booster Course DLC and a derived profile, completed a full race on an iPhone 15 Pro Max (iOS 27.0.1) and on a Mac. The registered profile's combined shader tables and Mac build passed shader and pipeline prebuild checks; gameplay on a build made from this registered profile has not yet been tested. A build from the registered profile needs both update NSPs in the input folder.
 
-On Android it plays two 50cc races at 60 fps on a Pixel 9 Pro XL, steered by the game's Smart Steering; on a Moto Razr Plus 2023 (Adreno 730) it crashes as a course loads ([Android](#android)).
+On Android it plays two 50cc races at 60 fps on a Pixel 9 Pro XL, steered by the game's Smart Steering, and races were steered by hand on a Galaxy Z Fold 8; on a Moto Razr Plus 2023 (Adreno 730) at about 45 fps, since a crash at every course load was fixed; on a OnePlus Pad 3 (Adreno 830) at 60 fps ([Android](#android)).
 
 Brought up on the Mac from 4.0.0: boot, the title with its demo race, the Mii pick, the menus (their movie previews play), a 50cc Grand Prix race at Mario Kart Stadium to its results, and a second boot that loads the save. 60 fps (p50 16.7 ms), sound; about 2.4 GB resident and 1.26 GB of Metal allocations in the race, flat over minutes.
 
@@ -67,7 +67,8 @@ Played on a Google Pixel 9 Pro XL (Mali-G715, Android 16) on 2026-11-10, from `m
 
 - **The build:** the folder held the base game and 4.0.1 (v1507328), not 4.0.0, so the packing script used a profile derived from 4.0.1, with 4.0.1's own shaders: 29,651, all translated for Vulkan, none failed. The RomFS (12.1 GB) went beside the APK, as the app's OBB file.
 - **Played:** from a new save: boot, the title and its demo race, L+R, Select a Mii (the six default Miis, their heads blank as on the Mac; see [Miis](#miis)), the menus with their movie previews, then Grand Prix, 50cc, Mario in the Standard Kart and the Mushroom Cup. Mario Kart Stadium's three laps, won (1st).
-- **The steering:** the game's Smart Steering, on by default (the kart's antenna), with accelerate held over adb; no Auto-Accelerate switch was found on the kart screen. No race has been steered by hand, so how steering feels on a phone is not checked, and the game stays In-game until someone steers a race by hand with a controller.
+- **The steering:** the game's Smart Steering, on by default (the kart's antenna), with accelerate held over adb; no Auto-Accelerate switch was found on the kart screen.
+- **Steered by hand:** the project's owner steered Mario Kart 8 Deluxe races by hand on their own Samsung Galaxy Z Fold 8 (2026-11-11) and reports that the steering controls work as expected. No frame times, log or sound check were taken from that run.
 - **Save:** six save commits by the end of the race. After the app was stopped and started again, L+R at the title went straight to the main menu with no Mii pick, so the save loaded. A second race from there was won too (15 points).
 - **Frame rate:** 60 fps. Over each race the median frame time was 16.6 ms, with a p95 of about 20 ms. The worst 30 s was 56.6 fps on the first start (pipelines building, and the results menu after the race) and 59.1 on the second. GPU 9–11 ms a frame, 600–740 draws (1,262 at most), about 10 ms of replay CPU; on the title, GPU about 11 ms.
 - **Memory:** 4.3–4.4 GB resident, against 2.4 GB on the Mac: the Mali-G715 has no BC textures, so they are decoded on the CPU.
@@ -76,14 +77,33 @@ Played on a Google Pixel 9 Pro XL (Mali-G715, Android 16) on 2026-11-10, from `m
   - `[vk] a GPU block encoder draws into a BC texture decoded on the CPU (format 137): only BC4 and BC5 are decoded on the GPU, the pass draws into the decoded image`: a GPU without BC textures only (Mali, Xclipse).
   - `[vk] texture view in format 107 over an image of format 37, which lists only its own and its sRGB twin …: read in the image's format`.
 - **Pipelines:** 2,290 draws on the first start and 481 on the second were left out while their pipelines built in the background.
-- **Not tried:** steering or items by hand, other cups and courses, 100cc and up, other Mali devices.
+- **Not tried:** items used by hand, other cups and courses, 100cc and up, other Mali devices.
 
 On a Moto Razr Plus 2023 (Adreno 730, Qualcomm driver V@0615.98, Vulkan 1.1, Android 16) on 2026-11-10, the same game app:
 
 - **The title and menus:** 60 fps (p50 16.6 ms, p95 18.9 ms), GPU about 8 ms a frame, 1.8–1.9 GB resident with the BC textures native (the Pixel was at 2.1 GB on the title). The Mii pick and the menus through the cup select worked.
-- **Every course load crashes:** `CRASH sig=11 addr=0x4 pc=…(vulkan.adreno.so+0x16ff5c)` on the replay thread (`NVN queue replay`), in `vkCmdEndRenderPass` (`rp_end`, `gfx_vk_draw.inc`). The title's demo race crashed at about frame 2,100 in all four boots, and a 50cc race from the menus as Mario Kart Stadium loaded, at frame 5,100. None of these changed it: `DM_VK_ASYNC_PIPE=0` (no background pipeline builds), `DM_VK_WB_READBACK=0`, `DM_VK_SLOT0_FILL=1` (no pass had slot 0 empty) and `DM_VK_MID_DRAWS=100000`. Which pass it is has not been found yet.
-- **Red lines:** none up to the crash. The Pixel's two came in its first 5 s, so both are Mali's only.
-- No save was made and no race was run, so the Razr shows Menus.
+- **Resolved: every course load crashed**, until [#243](https://github.com/enjoyerofslop/droidplay-core/pull/243): `CRASH sig=11 addr=0x4 pc=…(vulkan.adreno.so+0x16ff5c)` on the replay thread, in `vkCmdEndRenderPass` (`rp_end`). The title's demo race crashed at about frame 2,100 in every boot, and a 50cc race as Mario Kart Stadium loaded. The pass: one full-screen draw, colour slots 0–2 empty and an A2B10G10R10 target alone in slot 3, 480×270 to 640×360 with the dynamic resolution. A scratch target in slot 0 stops it: [A render pass with colour slot 0 empty hangs or crashes Qualcomm's Adreno driver](../../../docs/reference/rendering.md#a-render-pass-with-colour-slot-0-empty-hangs-or-crashes-qualcomms-adreno-driver-android).
+- **With the fix** (a game app from `main` 0d83f7df with #243's change, no switches; 2026-11-11):
+  - the demo race played through to the title again;
+  - a 50cc Grand Prix race at Mario Kart Stadium ran to its results (5th, Smart Steering with accelerate held over adb);
+  - the save loaded after a cold start, with no Mii pick.
+- **Frame rate in the race:** about 45 fps (median frame 22.1 ms, p95 30.6 ms, worst 30 s 42.7 fps), against 60 on the title and menus. The GPU takes 10.9 ms a frame and the replay's CPU 19 ms (the Pixel's: 10 ms), with about 760 draws, so the race is CPU-bound on this phone. Thermal status 0.
+- **Memory:** 1.6 GB resident in the race with the BC textures native, against the Pixel's 4.3 GB.
+- **Sound:** 613 s from boot through the race (`DM_AUDIO_DUMP`), stereo, −26 to −40 dBFS, no clipping, 0 underruns.
+- **Red lines:** none. The Pixel's two came in its first 5 s, so both are Mali's only.
+
+On a OnePlus Pad 3 (Snapdragon 8 Elite, Adreno 830 with Qualcomm's driver 0x8032004a, Vulkan 1.3.284, Android 16) on 2026-11-11, a game app from `main` e8feb01a (with #243), no switches. Two launches, about 17 minutes:
+
+- **Played:** boot, two of the title's demo races, the Mii pick, the menus, then Grand Prix, 50cc, Mario in the Standard Kart and the Mushroom Cup. Mario Kart Stadium and Water Park ran to their results: 9th and 7th, with Smart Steering and accelerate held over adb (the hold ran out once near each race's end). After a cold start, L+R at the title went to the main menu with no Mii pick, so the save loaded.
+- **#243's scratch target in slot 0:** on, since the log names Qualcomm's driver (driver ID 8). 35,544 render passes of the first launch's 52,201 frames got it, about one a frame in a race; its targets were 512×512 and 1024×512. No course load crashed.
+- **Frame rate:** 60 fps.
+  - Title, menus and demo races: every log window's median frame time 16.6–17.5 ms, GPU about 7.4 ms.
+  - The races: median frame time 16.7 ms at Mario Kart Stadium and 17.1 ms at Water Park; window medians up to 19.0 ms, p95 about 23–25 ms, worst 30 s about 56.5 fps.
+  - GPU 7.2–9.7 ms a frame (median 8.2 and 8.6 ms), NVN submit+present about 9.5 ms.
+- **Memory:** 2.6 GB at most in the log's resident count (1.8 GB on the title), 2.65 GB PSS at the second race's results, with the BC textures native. The Razr: 1.6 GB; the Pixel: 4.3 GB; the Mac: 2.4 GB.
+- **Sound:** stereo. One underrun in the first launch, three at the second's boot. A `DM_AUDIO_DUMP` holds sound.
+- **Red lines:** none in either launch.
+- **The picture:** the courses, karts, items and HUD looked right in screenshots; not compared with the Mac. Mario looked black and glossy at the first race's results: the Blooper's ink. The second race showed the same look while he was inked, and he was clean at its results.
 
 ## Found on this game
 
@@ -106,5 +126,5 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- On the Moto Razr Plus 2023 (Adreno 730) every course load crashes in the driver's `vkCmdEndRenderPass` ([Android](#android)).
+- On the Moto Razr Plus 2023 (Adreno 730) a race runs at about 45 fps: the replay takes 19 ms of CPU a frame, against 10 ms on the Pixel 9 Pro XL ([Android](#android)).
 - Mii heads draw nothing: the host ships no MiiModel firmware data (the player README notes "no Mii heads").

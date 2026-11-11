@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import zlib
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -97,20 +98,29 @@ class FormatTest(unittest.TestCase):
 
 class PhoneTest(unittest.TestCase):
     """Phone.job against a stand-in for adb: what it runs on the phone, and what it does with the answers"""
-    def run_job(self, df_free_k, pulled, size_word=None):
+    def run_job(self, df_free_k, pulled, size_word=None, log='DM_OODLE_JOB: 1 records decoded', logged=None):
+        """log: what the grep of the game's log.txt finds; pulled[0] None: the game left no output. logged, a list: gets the job's log file as the build wrote it"""
         calls = []
         def adb(serial, *args, check=True):
             calls.append(args)
             cmd = args[1] if args[0] == 'shell' else ''
             if cmd.startswith('df -k'): return f'Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/fuse 1000000 0 {df_free_k} 0% /storage/emulated\n'
-            if 'grep -E' in cmd: return 'DM_OODLE_JOB: 1 records decoded'
-            if cmd.startswith('stat -c'): return str(size_word if size_word is not None else len(pulled[0]))
+            if 'grep -E' in cmd: return log
+            if cmd.startswith('stat -c'): return '' if pulled[0] is None else str(size_word if size_word is not None else len(pulled[0]))
+            if cmd.startswith('ls -l'): return '-rw-rw---- 1 u0_a160 ext_data_rw 0 log.txt'
+            if args[0] == 'logcat': return 'I/Zygote  ( 1279): Process 10751 exited cleanly (0)'
             if args[0] == 'pull': Path(args[2]).write_bytes(pulled.pop(0) if len(pulled) > 1 else pulled[0])
             return ''
-        with tempfile.TemporaryDirectory() as d:
+        class Clock:   # time for android_oodle: each sleep moves it on, so the 20 s before a gone game counts take no real time
+            t = 1000.0
+            def time(self): return self.t
+            def sleep(self, s): self.t += s
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ao, 'time', Clock()):
             ph = ao.Phone(adb, 'SERIAL', '0100606026F12000', '/sdcard/x', 'org.nxnative.android', d, d, lambda s: None)
-            try: return ph.job([(stream(b'abc'), 3)]), calls
-            except ValueError as e: return e, calls
+            try: r = ph.job([(stream(b'abc'), 3)])
+            except ValueError as e: r = e
+            if logged is not None: logged.append((Path(d) / 'oodle_phone_1.log').read_text())
+            return r, calls
 
     def test_too_little_space_stops_before_the_job(self):
         r, calls = self.run_job(1024, [b''])
@@ -126,6 +136,19 @@ class PhoneTest(unittest.TestCase):
         cut = b'DMOR' + struct.pack('<I', 1) + struct.pack('<I', 3) + b'ab'
         r, _ = self.run_job(10 << 20, [cut])
         self.assertIsInstance(r, ValueError); self.assertIn('cut short', str(r)); self.assertIn('free now', str(r))
+
+    def test_a_game_gone_without_its_last_line_is_taken_at_its_output(self):   # issue #228: on Android the host's last lines can miss log.txt as it _exit()s
+        good = b'DMOR' + struct.pack('<I', 1) + struct.pack('<I', 3) + b'abc'; logged = []
+        r, calls = self.run_job(10 << 20, [good], log='DM_OODLE_JOB: OodleLZ_Decompress at main+0x5a9e590', logged=logged)
+        self.assertEqual(r, [b'abc']); self.assertIn('its last log lines did not reach log.txt', logged[0])
+        self.assertFalse([c for c in calls if c[0] == 'logcat'])   # a job that finished needs no evidence
+
+    def test_a_gone_game_without_output_logs_what_the_phone_shows(self):   # issue #228: an empty log.txt said nothing more
+        logged = []
+        r, calls = self.run_job(10 << 20, [None], log='', logged=logged)
+        self.assertIsInstance(r, ValueError); self.assertIn('stopped before it decoded anything', str(r))
+        self.assertIn('---- ls -l /sdcard/x ----', logged[0]); self.assertIn('exited cleanly (0)', logged[0]); self.assertIn('no host for it', logged[0])
+        self.assertFalse([c for c in calls if c[0] == 'pull'])
 
 
 if __name__ == '__main__':

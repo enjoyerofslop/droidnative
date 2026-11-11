@@ -66,7 +66,7 @@ static void pb_dump(void);   // gfx_vk_draw.inc: the pipelines being built, for 
 static int g_stencil_export;   // VK_EXT_shader_stencil_export enabled: a fragment shader writes the stencil test's value (gfx_vk_dscopy.inc)
 static int g_nonuni, g_null_desc;   // for the texture pool by ID (gfx_vk_pool.inc): VK_EXT_descriptor_indexing's non-uniform sampled image indexing; VK_EXT_robustness2's null descriptors
 static int g_pool_texn;   // the IDs of the game's texture pools in the host table (mtl_set_tex_pool_n, hle_nvn.c): the pool set's image count (gfx_vk_pool.inc)
-static vkb_ctx g_vk; static pthread_once_t g_vk_once = PTHREAD_ONCE_INIT; static int g_vk_ok;
+static vkb_ctx g_vk; static pthread_mutex_t g_vk_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic int g_vk_made; static int g_vk_ok;   // vkb; vkb_fallback makes it again
 #include "gfx_vk_rec.inc"   // the vkCmd* calls below go through its wrappers (DM_VK_RECORDER)
 // Query resets (the chunks' query pools, "Query resets" below). DM_VK_QRESET_USED=0 (env.txt): every pool is reset whole in the command buffer at every chunk begin, as before
 // (no host resets either); DM_VK_HOST_QRESET=0: VK_EXT_host_query_reset is not enabled, and the used queries are reset in the command buffer at the chunk's next begin
@@ -79,9 +79,17 @@ static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name)
 #include "gfx_vk_memreport.inc"   // DM_VK_MEMREPORT: the driver's memory reports, by object type
 static int gm_want(const VkExtensionProperties *e, uint32_t n); static void *gm_feat_query(void *next); static int gm_feat_take(const char **dext, uint32_t *nde);   // raw global memory's
 static void *gm_feat_enable(void *next); static void gm_device_made(void);   // device part (gfx_vk_gmem.inc, DM_VK_RAW_GMEM)
-static void vk_create(void) {
-    pthread_mutex_init(&g_vk.qmu, NULL);
-    if (!vk_driver_load()) return;
+// A step of vk_try that failed: why, for its [RED] line (or the fallback's). forced: DM_VK_DRIVER_FAIL made it fail
+static int vk_failed(char *why, size_t n, const char *what, const char *call, VkResult r, int forced) {
+    if (forced) snprintf(why, n, "%s (DM_VK_DRIVER_FAIL)", what);
+    else if (call) snprintf(why, n, "%s (%s: %s)", what, call, vk_result_str(r));
+    else snprintf(why, n, "%s", what);
+    return 0;
+}
+// One try at the device, on the driver vk_driver_load opened: 1, or 0 with why (vk_create destroys the instance it made)
+static int vk_try(char *why, size_t nwhy) {
+    // what a try whose driver then failed may have left: values, and a feature chain into its stack
+    g_sg_stages = VK_SHADER_STAGE_ALL; g_sg_size = 32; g_div_first0 = 0; g_mr_feat = (VkPhysicalDeviceDeviceMemoryReportFeaturesEXT){.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT};
     uint32_t ni = 0; vkEnumerateInstanceExtensionProperties(NULL, &ni, NULL);
     VkExtensionProperties *ie = calloc(ni ? ni : 1, sizeof *ie); vkEnumerateInstanceExtensionProperties(NULL, &ni, ie);
     const char *iext[2]; uint32_t nie = 0;
@@ -89,10 +97,13 @@ static void vk_create(void) {
     free(ie);
     VkApplicationInfo ai = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "nxnative", .apiVersion = VK_API_VERSION_1_1};
     VkInstanceCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = nie, .ppEnabledExtensionNames = iext};
-    if (vkCreateInstance(&ic, NULL, &g_vk.inst) != VK_SUCCESS) { LOG("[RED] [vk] no Vulkan instance"); return; }
+    int forced = vk_driver_fail("instance");
+    VkResult r = forced ? VK_ERROR_INITIALIZATION_FAILED : vkCreateInstance(&ic, NULL, &g_vk.inst);
+    if (r != VK_SUCCESS) { g_vk.inst = VK_NULL_HANDLE; return vk_failed(why, nwhy, "no Vulkan instance", "vkCreateInstance", r, forced); }
     vk_driver_instance(g_vk.inst);
-    uint32_t n = 1; VkResult r = vkEnumeratePhysicalDevices(g_vk.inst, &n, &g_vk.pd);
-    if ((r != VK_SUCCESS && r != VK_INCOMPLETE) || !n) { LOG("[RED] [vk] no GPU"); return; }
+    uint32_t n = 1; r = vkEnumeratePhysicalDevices(g_vk.inst, &n, &g_vk.pd);
+    if ((forced = vk_driver_fail("gpu")) || (r != VK_SUCCESS && r != VK_INCOMPLETE) || !n)
+        return vk_failed(why, nwhy, "no GPU", r != VK_SUCCESS && r != VK_INCOMPLETE ? "vkEnumeratePhysicalDevices" : NULL, r, forced);
     vkGetPhysicalDeviceProperties(g_vk.pd, &g_vk.props); vkGetPhysicalDeviceMemoryProperties(g_vk.pd, &g_vk.mp);
     if (VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 1 || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1) {
         VkPhysicalDeviceSubgroupProperties sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
@@ -104,7 +115,7 @@ static void vk_create(void) {
     uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(g_vk.pd, &nq, NULL);
     VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(g_vk.pd, &nq, qp);
     for (g_vk.qf = 0; g_vk.qf < nq && !(qp[g_vk.qf].queueFlags & VK_QUEUE_GRAPHICS_BIT); g_vk.qf++) {}
-    if (g_vk.qf == nq) { LOG("[RED] [vk] no graphics queue"); return; }
+    if ((forced = vk_driver_fail("queue")) || g_vk.qf == nq) return vk_failed(why, nwhy, "no graphics queue", NULL, VK_SUCCESS, forced);
     uint32_t nd = 0; vkEnumerateDeviceExtensionProperties(g_vk.pd, NULL, &nd, NULL);
     VkExtensionProperties *de = calloc(nd ? nd : 1, sizeof *de); vkEnumerateDeviceExtensionProperties(g_vk.pd, NULL, &nd, de);
     // Which driver runs the Adreno: Qualcomm's, or Turnip (libadrenotools loads one with DM_VK_DRIVER). Builders name Turnip's device differently ("Turnip Adreno (TM) 650",
@@ -119,6 +130,9 @@ static void vk_create(void) {
     const char *dext[15]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
                                               // shader module identifier, pipeline creation cache control and display timing; raw global memory's (gm_feat_take) take what of the 15 is left
     if (has_ext(de, nd, "VK_KHR_swapchain")) { dext[nde++] = "VK_KHR_swapchain"; g_vk.has_swapchain = 1; }
+    // A DM_VK_DRIVER driver must offer what the window needs (front_android.c vk_init refuses a device without it); the system's driver goes on without, as before
+    if (vk_driver_name() && ((forced = vk_driver_fail("extensions")) || !g_vk.has_surface || !g_vk.has_swapchain)) {
+        free(de); return vk_failed(why, nwhy, forced ? "no window extensions" : !g_vk.has_surface ? "no VK_KHR_android_surface" : "no VK_KHR_swapchain", NULL, VK_SUCCESS, forced); }
     { const char *e = getenv("DM_VK_PRESENT_TIMING");   // frames start on the display's vsyncs and are shown at a time given with them (gfx_vk_vsync.inc); Android's loader implements it on every driver
       if (g_vk.has_swapchain && has_ext(de, nd, "VK_GOOGLE_display_timing") && !(e && *e == '0')) { dext[nde++] = "VK_GOOGLE_display_timing"; g_vk.has_display_timing = 1; } }
     // NVN vertex streams step per N instances (gfx_vk_draw.inc pipe_get). The KHR extension (core in Vulkan 1.4) has the EXT's structures and type values: a device that
@@ -196,7 +210,9 @@ static void vk_create(void) {
     if (gm) en = gm_feat_enable(en);
     VkDeviceCreateInfo dc = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = en, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qc, .enabledExtensionCount = nde, .ppEnabledExtensionNames = dext,
                              .pEnabledFeatures = &want};
-    if (vkCreateDevice(g_vk.pd, &dc, NULL, &g_vk.dev) != VK_SUCCESS) { LOG("[RED] [vk] no Vulkan device"); return; }
+    forced = vk_driver_fail("device");
+    r = forced ? VK_ERROR_INITIALIZATION_FAILED : vkCreateDevice(g_vk.pd, &dc, NULL, &g_vk.dev);
+    if (r != VK_SUCCESS) { g_vk.dev = VK_NULL_HANDLE; return vk_failed(why, nwhy, "no Vulkan device", "vkCreateDevice", r, forced); }
     vkGetDeviceQueue(g_vk.dev, g_vk.qf, 0, &g_vk.q);
     if (hqr && !(g_qreset = (PFN_vkResetQueryPoolEXT)vkGetDeviceProcAddr(g_vk.dev, "vkResetQueryPoolEXT"))) LOG("[RED] [vk] VK_EXT_host_query_reset is enabled but vkResetQueryPoolEXT was not found");
     if (dfault) g_fault_info = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetDeviceFaultInfoEXT");
@@ -209,9 +225,33 @@ static void vk_create(void) {
     { void crash_set_gfx_hook(void (*)(void)); crash_set_gfx_hook(pb_dump); }   // a crash dump lists the pipelines being built (gfx_vk_draw.inc)
     LOG("[vk] %s (Vulkan %u.%u.%u): BC %s, ASTC %s", g_vk.props.deviceName, VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion),
         VK_API_VERSION_PATCH(g_vk.props.apiVersion), g_vk.has_bc ? "native" : "decoded on the CPU", g_vk.has_astc ? "native" : "missing");
-    g_vk_ok = 1;
+    return 1;
 }
-vkb_ctx *vkb(void) { pthread_once(&g_vk_once, vk_create); return g_vk_ok ? &g_vk : NULL; }
+// A DM_VK_DRIVER driver opens only if it offers a GPU (vk_driver.c), but it can still fail any step after that. Each such failure tries again on the system's driver, with a
+// [RED] line saying why (vk_driver_fallback): before this, the game ran with no picture, as the front end had no device to draw with
+static void vk_make(void) {
+    for (;;) {
+        char why[200];
+        if (vk_try(why, sizeof why)) { g_vk_ok = 1; return; }
+        if (!vk_driver_name()) { LOG("[RED] [vk] %s", why); return; }   // the system's driver: nothing to fall back to
+        if (g_vk.inst) vkDestroyInstance(g_vk.inst, NULL);
+        pthread_mutex_destroy(&g_vk.qmu); memset(&g_vk, 0, sizeof g_vk); pthread_mutex_init(&g_vk.qmu, NULL);
+        if (!vk_driver_fallback(why)) return;
+    }
+}
+// Made at the first call, under g_vk_mu rather than a pthread_once, since vkb_fallback (after gfx_vk_draw.inc) can make it once more
+vkb_ctx *vkb(void) {
+    if (!atomic_load_explicit(&g_vk_made, memory_order_acquire)) {
+        pthread_mutex_lock(&g_vk_mu);
+        if (!atomic_load_explicit(&g_vk_made, memory_order_relaxed)) {
+            pthread_mutex_init(&g_vk.qmu, NULL);
+            if (vk_driver_load()) vk_make();
+            atomic_store_explicit(&g_vk_made, 1, memory_order_release);
+        }
+        pthread_mutex_unlock(&g_vk_mu);
+    }
+    return g_vk_ok ? &g_vk : NULL;
+}
 uint32_t vkb_mem_type(uint32_t bits, VkMemoryPropertyFlags want) {
     for (uint32_t i = 0; i < g_vk.mp.memoryTypeCount; i++) if ((bits >> i & 1) && (g_vk.mp.memoryTypes[i].propertyFlags & want) == want) return i;
     return UINT32_MAX;
@@ -357,6 +397,10 @@ static int lsnap_on(void), wb_revert_on(void), wb_absorb_on(void), up_range_on(v
 static int chunks_init(void) {
     static int ok = -1; if (ok >= 0) return ok;
     ok = 0; if (!vkb()) return 0;
+    // A test of the crash guard (vk_driver.c crash_hook): the driver reads a create info at address 0. Here, at the replay's first use of the device, since the host's
+    // crash handler goes in only as the host starts (main.c), after the device and the first window: a crash before it leaves the record at trying
+    if (vk_driver_fail("crash")) { LOG("[vk] DM_VK_DRIVER_FAIL=crash: the driver is about to crash, on purpose"); VkSampler s; vkCreateSampler(g_vk.dev, NULL, NULL, &s); }
+    if (vk_driver_fail("crash_host")) { LOG("[vk] DM_VK_DRIVER_FAIL=crash_host: the host is about to crash outside the driver, on purpose"); *(volatile int *)16 = 0; }   // crashed elsewhere
     fgpu_on(); stg_pool_on(); lsnap_on(); wb_revert_on(); wb_absorb_on(); up_range_on(); wb_words_on(); ds_recycle();   // read before the completion thread starts (sp_done reads g_sp_on, draw_chunk_reset the recycling switch)
     { const char *e = getenv("DM_VK_CHUNKS"); int n = e ? atoi(e) : 0; if (n > 0) g_nchunk = n < 2 ? 2 : n > NCHUNK_MAX ? NCHUNK_MAX : n;
       LOG("[vk] chunks in flight: up to %d%s", g_nchunk, g_nchunk != NCHUNK_DEF ? " (DM_VK_CHUNKS)" : ""); }
@@ -544,6 +588,7 @@ static uint64_t g_flushes;
 enum { GPU_SLOW_NS = 200000000 };   // a chunk this long on the GPU (64 draws by default, 512 with DM_VK_MID_DRAWS=512) is a hang or as good as one
 static void gpu_fault_log(VkResult r) {   // once, from whichever thread sees the loss first
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
+    vk_driver_lost(r);   // a DM_VK_DRIVER driver's lost device: the next start runs the system's driver once
     if (!g_fault_info) { LOG("[RED] [vk] the GPU was lost (%d); the driver offers no VK_EXT_device_fault to say why", r); return; }
     VkDeviceFaultCountsEXT fc = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
     VkResult q = g_fault_info(g_vk.dev, &fc, NULL);
@@ -1947,6 +1992,21 @@ static void clear_tex(const p_clear_tex *ct) {
 
 static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip);   // below (the pass dump's PNGs)
 #include "gfx_vk_draw.inc"
+
+// The front end's first window failed on a DM_VK_DRIVER driver (front_android.c vk_window_first), which has destroyed what it made: the device and instance are destroyed
+// too and made again on the system's driver. Only while nothing else holds objects of them, before the host starts: no texture, buffer, pipeline or cache yet. Here,
+// after gfx_vk_draw.inc, for raw global memory's state (g_gm_on). 0: no DM_VK_DRIVER driver was running, or no device was made
+int vkb_fallback(const char *why) {
+    if (!vk_driver_name()) return 0;
+    pthread_mutex_lock(&g_vk_mu);
+    if (g_vk_ok) { vkDeviceWaitIdle(g_vk.dev); vkDestroyDevice(g_vk.dev, NULL); }
+    if (g_vk.inst) vkDestroyInstance(g_vk.inst, NULL);
+    g_vk_ok = 0; g_qreset = NULL; g_fault_info = NULL; g_smid = NULL; g_gm_on = 0;
+    pthread_mutex_destroy(&g_vk.qmu); memset(&g_vk, 0, sizeof g_vk); pthread_mutex_init(&g_vk.qmu, NULL);
+    if (vk_driver_fallback(why)) vk_make();
+    pthread_mutex_unlock(&g_vk_mu);
+    return g_vk_ok;
+}
 #include "gfx_vk_dscopy.inc"
 #include "gfx_vk_bcdec.inc"   // a GPU block encoder's blocks decoded into a BC texture the CPU decoded (bcd_decode)
 #include "gfx_vk_upsq.inc"   // a game's upscaler network replaced by a bilinear scale and a signed square (upsq_run)
