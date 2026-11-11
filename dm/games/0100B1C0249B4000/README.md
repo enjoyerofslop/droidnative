@@ -72,7 +72,22 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 - **On a Moto Razr Plus 2023, 2026-11-10: blocked by the driver's compiler.** Adreno 730 with Qualcomm's driver V@0615.98 (Vulkan 1.1.128), Android 16, open. Frostpunk's host from `main` at `0cad2e47`, the game files from the build folder with `defaults.txt` holding `DM_VK_RAW_GMEM=1`.
   - **What runs:** the title, the menu, the intro movie, the story screen and the city, with sound. Raw global memory is on (the AHardwareBuffer route, 618 pieces, 349 MiB placed), and the terrain, snow, lights and UI draw. City: 29.0 fps, frame p50 34.1 / p95 37.7 ms, GPU p50 17.8 ms (without the meshes). The sound dump runs at −17 to −32 dBFS; 1 underrun in 68,000 callbacks.
   - **What doesn't:** the Generator, the buildings and the props, which leave only their shadows and lights. Every pipeline with one of the 1,108 shaders that read raw global memory fails (`pipeline creation failed: VkResult -13`: 32 pipelines, about 242,000 draws left out in four minutes). Logcat says why: `AdrenoVK-0: Shader compilation failed for shaderType: 0 ... INTERNAL ERROR: Instruction OpConvertUToPtr not supported`. The translator turns raw global memory into `PhysicalStorageBuffer` pointers made with `OpConvertUToPtr` from 64-bit addresses (539 vertex and 569 fragment modules).
-  - **Two rewrites tried on the device** (the modules swapped in `games/<id>/spv`, then put back): an `OpBitcast` from the 64-bit address fails `src expected to have two components`, and an `OpBitcast` through a `uvec2` (GL_EXT_buffer_reference_uvec2's form, valid by spirv-val) gets past that but crashes the compiler (`SIGSEGV in libllvm-qgl.so+0x2cc258`, building `7069f9743717cd32`). So this driver takes no physical pointer form tried; a newer driver or Turnip might, and a translation of raw global memory without pointers would.
+  - **Two rewrites tried on the device** (the modules swapped in `games/<id>/spv`, then put back): an `OpBitcast` from the 64-bit address fails `src expected to have two components`, and an `OpBitcast` through a `uvec2` (GL_EXT_buffer_reference_uvec2's form, valid by spirv-val) gets past that but crashes the compiler (`SIGSEGV in libllvm-qgl.so+0x2cc258`, building `7069f9743717cd32`). So this driver takes no physical pointer form tried; Turnip does (below), and a translation of raw global memory without pointers would.
+- **On the Moto Razr Plus 2023 with a Turnip driver, 2026-11-11: the meshes draw.** Mr. Purple's Turnip T30 (`turnip_mrpurple_T30-toasted.adpkg.zip`, a third-party Mesa build; not part of DroidPlay) put on the phone and named with `DM_VK_DRIVER=vulkan.purple.so` ([Another Vulkan driver](../../../docs/android.md#another-vulkan-driver-turnip)). The installed app from `main` at `ec8f451f`, the game files as above (`DM_VK_RAW_GMEM=1`), and `DM_KEYS=45:A,52:A,60:A,100:B,105:B,112:A,122:A,132:A` into the city; the two drivers run back to back with the same build and route:
+
+  | | Qualcomm's driver V@0615.98 | Turnip T30 |
+  |---|---|---|
+  | Device | `Adreno (TM) 730`, Vulkan 1.1.128 | `PurpleVK-public Adreno (TM) 725`, Vulkan 1.4.359 (T30 names the GPU a 725) |
+  | Raw global memory | AHardwareBuffers (no `VK_EXT_map_memory_placed`) | placed Vulkan memory: 635 pieces, 358.9 MiB |
+  | Pipelines that fail | 31 (`pipeline creation failed`) | none |
+  | Generator, buildings, props | invisible | drawn |
+  | City: frame time | p50 33.8 / p95 34.3 ms (about 29.6 fps) | p50 34.0 / p95 34.9 ms (about 29.4 fps) |
+  | City: GPU | p50 17.0 / p95 19.4 ms, without the meshes | p50 13.7 / p95 14.3 ms, with them |
+  | The game's PSS | 1.59 GB (+171 MB swap) | 1.95 GB (+151 MB swap), about the placed memory more |
+  | Crashes, `[RED]` lines | none; the sky's uniform slot line | none; the sky's uniform slot line |
+
+  - T30's first start compiled every pipeline from an empty cache and still reached the city by 220 s.
+  - **Not done:** played past the tutorial's first pop-up, a building placed, a night, a save and Continue. Other Adreno 7xx phones on old drivers weren't tried.
 
 ## Found on this game
 
@@ -82,7 +97,7 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 
 ## Open
 
-- **Android: the Adreno 730's driver (V@0615.98) compiles no raw global memory shader** (the Moto Razr Plus 2023, above): the meshes are invisible there.
+- **Android: the Adreno 730's driver (V@0615.98) compiles no raw global memory shader** (the Moto Razr Plus 2023, above): the meshes are invisible there on the phone's own driver. With a Turnip driver they draw (above); a translation of raw global memory without pointers would fix it on Qualcomm's driver too.
 - **Android: the opening view's darker picture** and the sky shader's unbound uniform slot, above.
 - **Android: hull and domain shaders** (terrain, terrain shadow map, water and 8 `meshsolid` variants). None were seen in the first city view; a tessellated scene was not looked for.
 - **Mac: the two domain shaders' attribute clash and the 40 shaders without a texture slot**, above.
