@@ -105,6 +105,24 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** `nvnTextureBuilderGetSparseTileLayout` and `nvnTextureGetSparseTileLayout` answer from the host's [sparse layout](rendering.md#sparse-textures-laid-out-in-64-kb-tiles) (`nvn_tex_sparse_tiles`: the levels at least one tile wide, high and deep).
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md), at boot (`main+0x1f1a688`).
 
+### A refused virtual pool mapping left a hole in the pool's reservation on Android
+
+- **Symptom:** Android only, in a game with sparse virtual pools: a SIGSEGV now and then, minutes into a run, right after `[RED] virtual pool remap … failed: 5` lines. It lands
+  wherever something uses memory mapped not long before: the replay's `memcpy` into an arena block (`sb_copy`, `stage_set`), or inside Qualcomm's driver at a submission
+  (`mtl_sub_commit`). The fault address is the start of the mapping, and it lies inside the range a failed remap named as its destination.
+- **Cause:** `vpool_map` aliases a physical pool's pages into the virtual pool's reserved range with `vm_remap` at a fixed address. Android's stand-in
+  (`plat_android.c`) made that one `mremap` of the source with old size 0 and `MREMAP_FIXED`. The kernel unmaps the destination before it looks at the source, and it
+  refuses to duplicate a private mapping (`EINVAL`), which every pool is on Android. So each refused request left its destination unmapped: a hole in the reservation
+  that the next `mmap` of anyone (the driver's `vkMapMemory`, a heap) could take. The game's next request over the same range then unmapped whatever had landed there.
+- **Fix:** the duplicate is made where the kernel puts it (`mremap` without `MREMAP_FIXED`, which touches nothing when it is refused), and only then moved to the fixed
+  destination. Should the move fail, the destination is mapped inaccessible again, so it stays reserved.
+- **Check:** `dm/android/tests/t_vm_remap.c` (a device test, `-DDM_TESTS=ON`): after a refused request the reservation is whole and a mapping made afterwards lies
+  outside it; a shareable source is aliased at the destination and reads and writes the same memory. On a Galaxy S25 Edge (kernel 6.6.77) the old stand-in fails the
+  first two checks and the new one passes all eight.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), which makes about 9,000 such requests in the menus and a race. On a Galaxy S25 Edge an
+  84 MB request failed, a 17 MB arena block was mapped inside its destination, the same request failed again 71 s later, and the replay faulted writing the block 15 ms
+  after that. On a OnePlus Pad 3 the driver faulted at a submission right after a run of such requests.
+
 ### Textures read through a 4 KB page table of a sparse pool
 
 - **Symptom:** `CRASH sig=10` in `memmove` from `pkg_upload` → `nvn_deswizzle`, at an address 32 GB into a sparse virtual pool; textures with unaliased tails came out magenta.
