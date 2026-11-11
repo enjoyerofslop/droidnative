@@ -206,7 +206,7 @@ and what has not been tried.
 | Super Mario 3D World + Bowser's Fury 1.2.2 | POCO X5 5G | Menus: Bowser's Fury starts and is drawn with correct colours; how far it was played isn't recorded, and one launch stopped at a black loading screen † |
 | Danganronpa V3 Anniversary Edition 1.0.2 | POCO X5 5G | Menus: boots, plays its opening movie and draws its picture, from a provisional profile; not played through † |
 | The Binding of Isaac: Afterbirth+ 1.7.9b | POCO X5 5G | Boots: runs from a provisional profile with its Repentance DLC, its shaders compiled at run time and captured on the phone; how far it got isn't recorded † |
-| **Mario Kart World 1.8.0 (Switch 2)** | Ayn Odin 2 | **Menus** (2026-11-08, not run since): the world map at about 55 fps, then the attract drive at about 3.4 fps, with no input given. Open: sparse textures (the terrain is untextured), virtual memory pools, constant-buffer copies in the replay, no mesh shaders on the device |
+| **Mario Kart World 1.8.0 (Switch 2)** | Galaxy S25 Edge with the Turnip T30 driver, Ayn Odin 2 | **In-game, blocked** (2026-11-11, on the Galaxy S25 Edge with Mr. Purple's Turnip T30 through `DM_VK_DRIVER`): the title, the menus by adb input, and a Mushroom Cup race at Mario Bros. Circuit, driven and steered, at 2–3 fps in 3D (frames of 300–500 ms, held by the replay's CPU; the GPU 21–45 ms a frame); the track untextured (sparse textures), no roadside bushes (no mesh shaders). On Qualcomm's own driver the GPU is lost about 10 s after the title, in compute shader `2a89b6d4df731b8d`, which never ends there (it ends on Turnip and on a Galaxy Z Flip 7's Xclipse 950). The Odin 2 (2026-11-08): the world map at about 55 fps, the attract drive at about 3.4 fps. Open: that shader on Qualcomm's compiler, the replay's CPU in 3D scenes, sparse textures, virtual memory pools, no mesh shaders |
 | **The Legend of Zelda: Ocarina of Time v131072 (Switch 2)** | Samsung Galaxy Z Fold 8 | **In-game, blocked:** the title at about 30 fps (the movie behind the logo black), the Load screen, and Kokiri Forest from a Mac save at about 1.7 fps with the forest black: 2,247 of the game's shaders read raw global memory, which the Vulkan replay doesn't have yet. Open: raw global memory, then the CPU's 460 ms a frame and the memory (10.2 GB of the phone's 11.3) |
 
 † Tested before DroidPlay Core merged nxnative's `main` (2026-11-08); not run since. "Not run since" with a date marks a later run on code `main` has moved on
@@ -217,8 +217,8 @@ each device, with frame times, the devices' drivers, and the known problems with
 2, the Pad 3 and the Retroid Pocket 5. On 2026-11-10 the Galaxy S25 Edge's column and the rows for Final Fantasy Resonance and Breath of the Wild were added, and
 the Retroid Pocket 5's rows were measured again; Ocarina of Time on the Galaxy Z Fold 8 and Super Mario Odyssey on the Pixel 9 Pro XL have sections of their own
 there; cells measured again since are dated (Smash's battles, Link's Awakening's Ancient Ruins, Skyward Sword HD's Skyloft). The other rows are
-from the games' own notes, which the [games table](dm/games/README.md#games) links, but for three: SHIN MEGAMI TENSEI V: Vengeance's device is named in its
-contributor's pull request ([#101](https://github.com/enjoyerofslop/droidplay-core/pull/101)), Mario Kart World's run of 2026-11-08 is not in its note yet, and
+from the games' own notes, which the [games table](dm/games/README.md#games) links, but for two: SHIN MEGAMI TENSEI V: Vengeance's device is named in its
+contributor's pull request ([#101](https://github.com/enjoyerofslop/droidplay-core/pull/101)), and
 the POCO X5 5G rows are from the original port's README.
 
 Every other game in the [games table](dm/games/README.md#games) has a profile and can be packed the same way, but has not been run on Android. A game without a

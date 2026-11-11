@@ -86,6 +86,28 @@ The work folder `0400C3F00006E000-work` beside the dump has `rewrite.sh`, `rebui
 
 Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported it, and its facts (not its code) went into the host for this profile: the packing of a version with a `subsdk1`, and the Switch 2 services 1.8.0 calls at boot, which the base game does not import (the Nmouse pointer, GameChat's room event and camera storage, the camera context, the graphics system check, the HDR Bezier metadata and its clears; [services.md](../../../docs/reference/services.md#the-camera-through-the-graphics-system)). The NSP script packs it from a profile derived from this one, with its own shader tables. None of it has been run on 1.8.0.
 
+## Android
+
+Packed for Android as its own game app (`--game-apk`, the 21.9 GB RomFS as the data file beside it), from the 1.8.0 update.
+
+- **Ayn Odin 2 (Adreno 740), 2026-11-08:** the world map at about 55 fps, then the attract drive at about 3.4 fps, with no input given; the terrain untextured.
+- **Galaxy S25 Edge (Adreno 830, Qualcomm's driver), 2026-11-10 to 11, `main` 5736949c and later:**
+  - About 10 s after the world map, as the 3D scene starts, three submissions in a row run about 250 ms each until the driver's hang recovery cuts them short, then the device is lost. Fault addresses look like floats (`0x3f80…`, 1.0f's bit pattern plus an offset) or null plus an offset.
+  - GPU breadcrumbs (`DM_VK_BC`, pull request [#212](https://github.com/enjoyerofslop/droidplay-core/pull/212)) name compute shader `2a89b6d4df731b8d` every time, begun and never ended. It animates a 24-bone skeleton:
+    - one workgroup of 64 invocations, 4 of them past an early return;
+    - three counted loops to 24;
+    - its inputs sound: a valid parent tree, identity matrices, a 24×636 RGBA16F animation texture with 3 layers.
+  - With it skipped (a local test switch), `e2a5bd13907993e3`, of the same kind, hangs next. `04dedc705a7ef88b` is a third of them.
+  - **Not the cause:** #191, raw global memory, robust buffer and image access, the texture pool by ID, compute `spv_wide` (#189; these shaders have no warp operations).
+  - **Rewrites of the three that still hang:** the loop bound loaded once, the early return made an `if`, both, a constant bound of 24, while loops tested at the top, for loops with an unroll hint, and the module re-emitted by glslang unchanged.
+- **Galaxy Z Flip 7 (Xclipse 950), 2026-11-10:** the same module ends. The 3D desert highway draws with Mario's kart animated, at about 2.5 fps, the GPU 26–29 ms a frame.
+- **Galaxy S25 Edge with Mr. Purple's Turnip T30 (`DM_VK_DRIVER`), 2026-11-11:**
+  - The same module ends there too, so the hang is Qualcomm's compiler, not the translation or the data.
+  - The title ("Press L + R to start") on a fresh save. L+R opens the main menu.
+  - Single Player → Grand Prix → Mario → Standard Kart → Mushroom Cup → 50cc → OK, then the cup's VP9 movie (1,423 pictures).
+  - A race at Mario Bros. Circuit: A held through the countdown (a rocket start), then driving, steered with the on-screen stick.
+- **Frame times on Turnip:** menus and the movie 28–41 ms a frame; 3D scenes, the race included, 300–500 ms, of which the GPU is 21–45 ms and the replay's submit and present the rest. The track's surface is untextured (15 sparse images over the image limit), roadside bushes are missing (mesh draws skipped), and "virtual pool remap … failed" is logged several thousand times a run (Android cannot alias the private memory a virtual pool maps).
+
 ## Open
 
 - **Long frames:** first-use pipeline compiles (no `pso_manifest.tsv` yet).
