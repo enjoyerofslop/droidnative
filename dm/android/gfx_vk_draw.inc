@@ -1624,6 +1624,17 @@ static void pk_record(const pipe_key *k) {   // under g_bk
     if (!g_pk_out) { static int tried; if (tried++) return; g_pk_out = pk_open("ab"); if (!g_pk_out) return; }
     fwrite(r, PK_REC, 1, g_pk_out); fflush(g_pk_out);
 }
+// Whether each shader of a key is the stage of its slot (vk_draw__: vertex 0, fragment 1, geometry 2; slot 3 stays empty, as tessellation draws are skipped there). sh_get makes
+// every stage it does not draw (task, mesh, tessellation) SH_TS with the vertex stage bit, and a draw with one is skipped before it has a key; but the start-up list makes its
+// entries from their shader keys alone, and an entry a build that drew mesh shaders had written put Ocarina of Time's mesh shader 0c1ffecd02018fb0 in the vertex slot. Made as
+// a vertex stage, that module crashed the Adreno 830's compiler (libllvm-qgl.so) a few seconds into every start on a OnePlus Pad 3
+static const char *sh_stage_name(int st) { return st == SH_VS ? "vertex" : st == SH_PS ? "fragment" : st == SH_GS ? "geometry" : st == SH_CS ? "compute" : "task, mesh or tessellation"; }
+static const char *const PK_SLOT[4] = {"vertex", "fragment", "geometry", "fourth (unused)"};
+static int pk_stages_ok(const pipe_key *k, int *slot) {
+    static const int want[4] = {SH_VS, SH_PS, SH_GS, -1};
+    for (int i = 0; i < 4; i++) if (k->sh[i] && k->sh[i]->stage != want[i]) { *slot = i; return 0; }
+    return 1;
+}
 static pipe_t *pipe_get(const pipe_key *k);
 static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t *onva, VkPrimitiveTopology *otp);
 static void pipe_prep(const pipe_key *k);
@@ -1634,7 +1645,7 @@ static VkRenderPass rp_get(const rp_key *k);
 static void *prewarm_thread(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-prewarm"); setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
     FILE *f = pk_open("rb"); if (!f) return NULL;
-    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); int made = 0, had = 0, bad = 0, n = 0, rep = 0;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); int made = 0, had = 0, bad = 0, n = 0, rep = 0, wrong = 0;
     uint8_t *all = NULL; size_t cnt = 0, cap = 0, rec = PK_REC;
     pthread_mutex_lock(&g_bk); if (!g_pk_listed.klen) g_pk_listed.klen = PK_REC; pthread_mutex_unlock(&g_bk);
     for (;;) {
@@ -1664,6 +1675,10 @@ static void *prewarm_thread(void *arg) {
         pthread_mutex_lock(&g_bk);   // the shaders, the pass and what the pipeline shares (pipe_prep), under the lock; the compile without it
         pipe_key k; memset(&k, 0, sizeof k); int ok = 1, mk = 0;
         for (int j = 0; j < 4 && ok; j++) if (h.sh[j][0]) { h.sh[j][16] = 0; k.sh[j] = sh_get(h.sh[j]); if (!k.sh[j]) ok = 0; }
+        int slot; if (ok && !pk_stages_ok(&k, &slot)) {   // an entry the replay would never make for a draw (pk_stages_ok)
+            if (!wrong++) LOG("[RED] [vk] start-up list: an entry with %s shader %s in the %s slot is left out (the replay makes no such pipeline; a build that drew those shaders wrote it)",
+                              sh_stage_name(k.sh[slot]->stage), k.sh[slot]->key, PK_SLOT[slot]);
+            pthread_mutex_unlock(&g_bk); continue; }
         if (ok) { k.z = z; k.rk = rk; k.rp = rp_get(&rk); memcpy((uint8_t *)&k + pk_tail_off(), r + sizeof h + 4 + sizeof rk, PK_TAIL); if (!k.rp) ok = 0; }
         if (ok) { if (nvn_hm_get(&g_pipes, &k)) had++; else { pipe_prep(&k); mk = 1; } } else bad++;
         pthread_mutex_unlock(&g_bk);
@@ -1679,7 +1694,8 @@ static void *prewarm_thread(void *arg) {
         usleep(1000);
     }
     free(all);
-    LOG("[vk] pipelines made again from the list: %d made, %d there already, %d failed, of the first %zu of %d records (%d repeats dropped), in %.1f s", made, had, bad, cnt, n, rep, (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e9);
+    LOG("[vk] pipelines made again from the list: %d made, %d there already, %d failed, %d left out (a shader in the wrong slot), of the first %zu of %d records (%d repeats dropped), in %.1f s",
+        made, had, bad, wrong, cnt, n, rep, (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e9);
     // the cache was written only when the app paused: a session that ended otherwise (killed for an update or by the system) lost what the list compiled, and the next start
     // compiled it all again (Super Mario Bros. Wonder on the Adreno 619: about 23 ms a pipeline from the stale cache, 7 from a saved one)
     if (made) vkb_pipeline_cache_save();
@@ -1714,6 +1730,9 @@ static void pb_dump(void) {   // crash.c, on the crashing thread, after its back
 // The pipeline of key k into pp (its layout and pipeline). Under the replay's lock from pipe_get; the start-up list (prewarm_thread) calls it without the lock after pipe_prep,
 // so a compile there no longer holds the game's draws up (the driver's pipeline cache is internally synchronized)
 static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t *onva, VkPrimitiveTopology *otp) {
+    int slot; if (!pk_stages_ok(k, &slot)) {   // never handed to the driver (pk_stages_ok): a module of another stage in a slot crashed a compiler
+        RED_ONCE(178, "a pipeline with %s shader %s in its %s slot is not made (said once)", sh_stage_name(k->sh[slot]->stage), k->sh[slot]->key, PK_SLOT[slot]);
+        return VK_ERROR_INITIALIZATION_FAILED; }
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &g_empty_dsl); }
     VkDescriptorSetLayout sets[POOL_SET + 1] = {g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl}; uint32_t nset = 1;
     VkPipelineShaderStageCreateInfo st[4]; lmod *lms[4]; uint32_t ns = 0; VkSpecializationInfo psi; memset(&psi, 0, sizeof psi);

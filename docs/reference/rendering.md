@@ -1992,6 +1992,19 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** a test build that crashed the 40th pipeline build on purpose, Super Mario Odyssey on an Ayn Odin 2: `[dm] CRASH sig=11 … thread 12790 "vk-prewarm"`, then `[dm] pipeline being built by the crashing thread: thread 12790 "vk-prewarm", graphics, shaders 384597a04ae3928e 12bd959fa3ef29ce - - (vertex .z variant), topology 3, 6 colour targets`.
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) on a Retroid Pocket 5 ([Android baselines](../../dm/android/baselines.md), problem 2): its pipeline led to [subgroup operations in a stage the Adreno 650 runs none in](#subgroup-operations-rewritten-for-stages-the-gpu-runs-none-in).
 
+### A start-up list entry with a mesh shader in its vertex slot
+
+- **Symptom:** Android only: every start crashes a few seconds in, soon after the 30th frame, in the driver's shader compiler (`libllvm-qgl.so`), with `[dm] pipeline being built by the crashing thread: thread … "vk-prewarm", graphics, shaders <A> <B> - - (vertex .z variant)`. Shader A's `res.json` says `"stage": "ms"` (or `ts`, `tc`, `te`), and with `DM_VK_PREWARM=0` the game plays. Ocarina of Time on a OnePlus Pad 3: `CRASH sig=11` at `libllvm-qgl.so+0x63a4e4`, shaders `0c1ffecd02018fb0` and `7ad8843afe105a32`, with raw global memory on or off.
+- **Cause:** a pipeline Vulkan forbids, built by the replay; not a driver bug.
+  - `sh_get` makes every stage the replay doesn't draw (task, mesh, tessellation) `SH_TS`, with the vertex stage bit. A draw with one is skipped before it has a key (`vk_draw__`), so play never builds such a pipeline.
+  - The start-up list (`prewarm_thread`, [the pipeline cache written during play](#the-pipeline-cache-written-during-play)) makes its entries from their recorded shader keys alone. The list on that Pad 3 held an entry another build had written, with Ocarina of Time's mesh shader `0c1ffecd02018fb0` in the vertex slot; test builds of task and mesh shaders as compute had run there.
+  - Made as a vertex stage, the `MeshEXT` module crashed the compiler at every start.
+- **Fix:** `pk_stages_ok` (`gfx_vk_draw.inc`): each shader of a key must be its slot's stage (vertex, fragment, geometry; the fourth slot empty, as tessellation draws are skipped).
+  - The start-up list leaves out an entry that isn't, with one red line naming the shader, and counts them in its `pipelines made again from the list` line.
+  - `pipe_make` refuses such a key from any caller (`[RED] [vk] a pipeline with … shader … in its … slot is not made`).
+- **Check:** in Ocarina of Time's packed shaders on the Mac, `0c1ffecd02018fb0.res.json` has stage `ms`, and its `.spv` is a `MeshEXT` entry point (SPIR-V 1.4, `SPV_EXT_mesh_shader`). The host compiles for Android (NDK 28.2) with its usual flags. Not yet run on the Pad 3, which keeps the entry for that check.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a OnePlus Pad 3.
+
 ### A GPU hang names the submission it was in
 
 - **Symptom:** Android only: `[RED] [vk] vkQueueSubmit failed: -4` (`VK_ERROR_DEVICE_LOST`), after which the picture stays as it was (a loading screen for good) and the GPU time reads 0, with a frame of about 3 s just before it and nothing else in the log to say where.
