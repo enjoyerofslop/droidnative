@@ -2,6 +2,12 @@
 # DM_VK_RAW_GMEM: raw global memory (gfx_vk_gmem.inc, enjoyerofslop/droidplay-core#150), off unless a game turns it on, and only on Qualcomm's Adreno. 2,247 of this game's
 # shaders load from addresses they read from memory, through the translator's raw pool table; without it each such load reads 0. On a OnePlus Pad 3 (Adreno 830) Link and the
 # Kokiri drew as near-black silhouettes without it and lit with it (2026-11-10). In Kokiri Forest on a Galaxy Z Fold 8 (Adreno 840) storage buffers bound in their placed pools
-# took the replay from 2.3-2.8 to about 10 fps. Its large pools are placed in 2 MiB chunks as they are used and its shader-code pools are left out (gfx_vk_gmem_lazy.inc), so
-# the low-memory killer no longer ends Kokiri Forest on the Fold, under app pressure too. Not yet on a OnePlus Pad 3: 7 of 11 launches killed there (README.md, Android)
+# took the replay from 2.3-2.8 to about 10 fps. Its large pools are placed in 2 MiB chunks as bindings and pointers reach them and its shader-code pools are left out
+# (gfx_vk_gmem_lazy.inc), so the low-memory killer no longer ends Kokiri Forest on the Fold, under app pressure too. Not yet on a OnePlus Pad 3: 7 of 11 launches killed
+# there (README.md, Android)
 DM_VK_RAW_GMEM=1
+# DM_VK_UPSCALER_SQUARE=1: the game's upscaler network (agl's NDSR, one of four compute shaders by the dynamic resolution, square-root colour from a335c1db6270c355 in,
+# its 1440x810 scene to 1920x1080 out) is replaced by a bilinear scale and a signed square (gfx_vk_upsq.inc). The network itself draws right since its input is written
+# (#193) and its warp operations fit 64-lane subgroups (#189), but on the OnePlus Pad 3's Adreno 830 it is 21 of a frame's 45 ms of GPU work, and replacing it takes
+# Kokiri Forest from 10.4 to 15.8 fps (raw global memory on), over half of the game's 30. No network detail is added. =0 in env.txt runs the network
+DM_VK_UPSCALER_SQUARE=1
