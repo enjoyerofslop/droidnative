@@ -2002,7 +2002,7 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Fix:** `pk_stages_ok` (`gfx_vk_draw.inc`): each shader of a key must be its slot's stage (vertex, fragment, geometry; the fourth slot empty, as tessellation draws are skipped).
   - The start-up list leaves out an entry that isn't, with one red line naming the shader, and counts them in its `pipelines made again from the list` line.
   - `pipe_make` refuses such a key from any caller (`[RED] [vk] a pipeline with … shader … in its … slot is not made`).
-- **Check:** in Ocarina of Time's packed shaders on the Mac, `0c1ffecd02018fb0.res.json` has stage `ms`, and its `.spv` is a `MeshEXT` entry point (SPIR-V 1.4, `SPV_EXT_mesh_shader`). The host compiles for Android (NDK 28.2) with its usual flags. Not yet run on the Pad 3, which keeps the entry for that check.
+- **Check:** in Ocarina of Time's packed shaders on the Mac, `0c1ffecd02018fb0.res.json` has stage `ms`, and its `.spv` is a `MeshEXT` entry point (SPIR-V 1.4, `SPV_EXT_mesh_shader`). On the Pad 3, from its own list: `main` crashed as above, and with this check Kokiri played (4.0 fps, raw global memory off). The list logged `an entry with task, mesh or tessellation shader d4171cf9adf0504b in the vertex slot is left out`, and its summary said `755 made, … 45 failed, 32 left out (a shader in the wrong slot), of the first 832 of 833 records`.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a OnePlus Pad 3.
 
 ### A GPU hang names the submission it was in
