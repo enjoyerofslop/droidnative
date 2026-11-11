@@ -109,6 +109,11 @@ def ready_devices():
     return [line.split()[0] for line in out if len(line.split()) > 1 and line.split()[1] == 'device']
 
 
+def phone_key(serial):   # the phone's stable ID (dm/android/tools/phone_id.py), or its serial: its lock is named after it, as build_android_from_nsp.py names it
+    try: return phone_id.from_props(sh(serial, phone_id.ID_CMD, timeout=15)) or serial
+    except (OSError, subprocess.SubprocessError): return serial
+
+
 def device_info(serial):
     props = dict(re.findall(r'^\[([^\]]+)\]: \[([^\]]*)\]', sh(serial, 'getprop'), re.M))
     mem = re.search(r'MemTotal:\s+(\d+)', sh(serial, 'cat /proc/meminfo'))
@@ -426,8 +431,10 @@ def main():
     serials = args.serial or ready_devices()
     if not serials: sys.exit('no adb device ready')
     what = 'bench_android.py: ' + ', '.join(Path(f).expanduser().resolve().parent.name for f in args.folders) + (f' ({args.route})' if args.route else '')
+    keys = {s: phone_key(s) for s in serials}   # a phone on a cable and on Wi-Fi at once is one device: run once, over the cable, under one lock
+    serials = [d['serial'] for d in phone_id.one_per_phone([{'serial': s, 'id': keys[s]} for s in serials])]
     for s in list(serials):   # each device for the whole run: another bench's or an install's force-stop and env.txt would void this one's runs, and the reverse
-        try: device_lock.acquire(s, what, args.wait_device, say=lambda m: print(m, flush=True))
+        try: device_lock.acquire(keys[s], what, args.wait_device, say=lambda m: print(m, flush=True))
         except device_lock.DeviceBusy as e:
             if args.serial: sys.exit(str(e))
             print(f'left out: {e}', flush=True); serials.remove(s)

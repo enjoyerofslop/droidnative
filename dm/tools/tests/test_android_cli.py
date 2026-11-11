@@ -34,7 +34,8 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
         self.said = []
-        for cm in (mock.patch.object(ba.bi, 'PROG', mock.Mock()), mock.patch.object(ba, 'say', self.said.append), mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data')):
+        for cm in (mock.patch.object(ba.bi, 'PROG', mock.Mock()), mock.patch.object(ba, 'say', self.said.append), mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'),
+                   mock.patch.dict(ba._keys, clear=True)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
 
@@ -457,6 +458,25 @@ class AdbErrors(unittest.TestCase):
             with self.assertRaisesRegex(ba.BuildError, r"failed \(exit status 255\): adb: device 'S' not found$"): ba.adb('S', 'shell', 'true')
 
 
+class PickDevice(Base):   # the console's default phone: the only one ready, a phone on a cable and on Wi-Fi at once counting once
+    def pick(self, listed, props):
+        out = 'List of devices attached\n' + ''.join(f'{s}\t{st}\n' for s, st in listed)
+        with mock.patch.object(ba.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=out, stderr='')), \
+                mock.patch.object(ba, 'adb', lambda serial, *a, **k: props.get(serial, '')):
+            return ba.pick_device()
+
+    def test_one_phone_on_usb_and_wifi_is_used_over_the_cable(self):
+        props = dict.fromkeys(('192.168.1.20:37123', 'R5CY51ZLGKH', 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp'), 'R5CY51ZLGKH\n9774d56d682e549c\n')
+        self.assertEqual(self.pick([(s, 'device') for s in props], props), 'R5CY51ZLGKH')
+        self.assertEqual(self.pick([('192.168.1.20:37123', 'device'), ('adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp', 'device')], props),
+                         'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp')   # an mDNS name outlives the port
+
+    def test_two_phones_still_ask_which(self):
+        props = {'R5CY51ZLGKH': 'R5CY51ZLGKH\n9774d56d682e549c\n', '192.168.1.30:5555': 'e7879cce\nf00dfeed12345678\n'}
+        with self.assertRaisesRegex(ba.BuildError, r'2 adb devices ready'): self.pick([(s, 'device') for s in props], props)
+        self.assertEqual(self.pick([('R5CY51ZLGKH', 'device'), ('192.168.1.30:5555', 'offline')], props), 'R5CY51ZLGKH')
+
+
 class Phone(Base):
     def setUp(self):
         super().setUp()
@@ -473,6 +493,7 @@ class Phone(Base):
                 path = c[1].split("'")[1]; return 'yes\n' if self.remote.get(path) else ''
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('sha256sum '): return self.remote.get('sha', '') + '  x\n'
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('cat ') and ba.MANIFEST in c[1]: return self.remote.get('manifest', '')
+            if c == ['shell', ba.phone_id.ID_CMD]: return self.remote.get('props', {}).get(serial, '')
             return ''
         cm = mock.patch.object(ba, 'adb', adb); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
         self.game = self.tmp / 'v1'; (self.game / 'RomFS').mkdir(parents=True); (self.game / 'RomFS/a.bin').write_bytes(b'a')
@@ -501,6 +522,11 @@ class Phone(Base):
         self.assertTrue(any(f"chmod -R a+rwX '{dst}' 2>&1; chmod a+rwx '{ba.REMOTE}/games' 2>&1" in c for c in flat), flat)
         writes = [c for c in flat if not c.startswith('shell [ -e ')]   # the one-game layout is only looked for
         self.assertFalse(any(f'{ba.REMOTE}/game/' in c or c.endswith(f'{ba.REMOTE}/game') for c in writes), writes)
+
+    def test_a_phones_logs_folder_keeps_its_name_over_wifi(self):   # named after the phone's ID: its serial over Wi-Fi changes with each new port
+        self.remote['props'] = {s: 'R5CY51ZLGKH\n9774d56d682e549c\n' for s in ('R5CY51ZLGKH', '192.168.1.20:37123', '192.168.1.20:41011')}
+        for serial in self.remote['props']: self.push(serial)
+        self.assertEqual([p.name for p in (self.tmp / 'logs').iterdir()], ['push_R5CY51ZLGKH'])
 
     def test_launcher_files_end_lines_with_newline_alone(self):   # on Windows too: the desktop app reads game.json by lines, and the \r of \r\n split its JSON
         ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'DM_LANG=en-US\n', self.tmp, self.tmp / 'logs', {'title_id': GID, 'name': 'x'})

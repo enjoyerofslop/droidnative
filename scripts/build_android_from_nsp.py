@@ -549,21 +549,34 @@ def make_apk(sdk, logs, env):   # the app with every host in the library → thi
 WAIT_DEVICE = 0.0   # --wait-device
 
 
+_keys = {}   # serial → phone_key's answer, asked once a run
+
+
+def phone_key(serial):   # the phone's stable ID (dm/android/tools/phone_id.py), or its serial when it gives none: what its lock and its logs folder are named after,
+    # so a phone on a cable and on Wi-Fi at once is one device with one lock, and a Wi-Fi phone keeps its folder when its port changes
+    if serial not in _keys:
+        try: _keys[serial] = phone_id.from_props(adb(serial, 'shell', phone_id.ID_CMD, check=False)) or serial
+        except OSError: _keys[serial] = serial   # no adb at all: the step that needs it says so
+    return _keys[serial]
+
+
 @contextlib.contextmanager
 def phone(serial, what):   # the device to this build while it installs or runs something there (dm/android/tools/device_lock.py): a bench's runs on it, or another build's
     # install, would be force-stopped by this one, and this one's by them. Not held while it builds on the computer
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import device_lock   # pyright: ignore[reportMissingImports]
-    try: lock = device_lock.held(serial, what, WAIT_DEVICE, say); lock.__enter__()
+    try: lock = device_lock.held(phone_key(serial), what, WAIT_DEVICE, say); lock.__enter__()
     except device_lock.DeviceBusy as e: raise BuildError(str(e)) from None
     try: yield
     finally: lock.__exit__(None, None, None)
 
 
 def pick_device():
-    """The one device adb lists as ready ('device'): an offline Wi-Fi entry left from an earlier connection does not count"""
+    """The one device adb lists as ready ('device'): an offline Wi-Fi entry left from an earlier connection does not count, and a phone on a cable and on Wi-Fi
+    at once is one device, used over the cable"""
     out = subprocess.run(['adb', 'devices'], capture_output=True, text=True, errors='replace').stdout.splitlines()[1:]
     rows = [l.split() for l in out if l.strip()]
     ready = [r[0] for r in rows if len(r) > 1 and r[1] == 'device']
+    if len(ready) > 1: ready = [d['serial'] for d in phone_id.one_per_phone([{'serial': r, 'id': phone_key(r)} for r in ready])]
     if len(ready) == 1: return ready[0]
     listed = ', '.join(f'{r[0]} ({r[1]})' for r in rows) or 'none'
     raise BuildError(f'{len(ready)} adb devices ready ({listed}): connect one, or pick it with --serial')
@@ -818,8 +831,8 @@ def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, 
     dst = f'{REMOTE}/games/{gid}'
     # each device's copy logs, and the tar archives and RomFS pieces named after them, in a folder of its own: two installs at once (one per device) shared
     # adb_push_spv.tar, and one's cleanup removed the archive the other was sending. Named by phone_id.safe: a Wi-Fi phone's serial, 192.168.1.20:37123, made a
-    # folder Windows refuses, and every install over Wi-Fi from the desktop app stopped there
-    logs = logs / f'push_{phone_id.safe(serial)}'; logs.mkdir(parents=True, exist_ok=True)
+    # folder Windows refuses, and every install over Wi-Fi from the desktop app stopped there. After the phone's ID, not its serial, which changes with its port
+    logs = logs / f'push_{phone_id.safe(phone_key(serial))}'; logs.mkdir(parents=True, exist_ok=True)
     parts = ['the one-game install', 'font', 'code'] + ['shaders'] * bool(spv) + ['RomFS'] + ['DLC'] * aoc.is_dir() + ['launcher files', 'permissions']
     def part(name, step=None):   # the part in the step's name; the count is the part's files or bytes (counting), or the parts when it has none
         bi.PROG.set(step=f'{step or name} · part {parts.index(name) + 1} of {len(parts)}'); bi.PROG.set(done=parts.index(name), total=len(parts), unit='parts')
