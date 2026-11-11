@@ -102,10 +102,16 @@ Packed for Android as its own game app (`--game-apk`, the 21.9 GB RomFS as the d
   - **Rewrites of the three that still hang:** the loop bound loaded once, the early return made an `if`, both, a constant bound of 24, while loops tested at the top, for loops with an unroll hint, and the module re-emitted by glslang unchanged.
 - **Galaxy Z Flip 7 (Xclipse 950), 2026-11-10:** the same module ends. The 3D desert highway draws with Mario's kart animated, at about 2.5 fps, the GPU 26–29 ms a frame.
 - **Galaxy S25 Edge with Mr. Purple's Turnip T30 (`DM_VK_DRIVER`), 2026-11-11:**
-  - The same module ends there too, so the hang is Qualcomm's compiler, not the translation or the data.
+  - The same module ends there too.
   - The title ("Press L + R to start") on a fresh save. L+R opens the main menu.
   - Single Player → Grand Prix → Mario → Standard Kart → Mushroom Cup → 50cc → OK, then the cup's VP9 movie (1,423 pictures).
   - A race at Mario Bros. Circuit: A held through the countdown (a rocket start), then driving, steered with the on-screen stick.
+- **The cause, 2026-11-11 (q171): compute shared memory past the driver's limit.**
+  - `2a89b6d4df731b8d` declares `shared uint _44[12288]`, 48 KB of workgroup memory. So do 167 more of the game's 728 compute modules: the same `DrivePassShaderDefault` kernels the Mac moves to device memory ([Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb)).
+  - Qualcomm's driver on the Adreno 830 reports `maxComputeSharedMemorySize` 32,768. Vulkan doesn't allow a module more, and the Android path has no such move.
+  - Run alone in a standalone test with that dispatch's captured inputs (uniform and storage buffers at their bound sizes, its 24×636 texture, the replay's memory types and image flags), it finished in 0.2 ms, even 64 workgroups at once. In the game it never ends.
+  - With the three shaders' arrays declared at 32 KB (they use about 4.5 KB for a 24-bone skeleton), Qualcomm's driver ran 150 s with no GPU loss. The next dispatch to stop was `a8310cf7c7acd0fe`, another of the 168.
+  - Turnip and the Xclipse 950 run them as they are, so presumably with a higher limit (not read there).
 - **Frame times on Turnip:** menus and the movie 28–41 ms a frame; 3D scenes, the race included, 300–500 ms, of which the GPU is 21–45 ms and the replay's submit and present the rest. The track's surface is untextured (15 sparse images over the image limit), roadside bushes are missing (mesh draws skipped), and "virtual pool remap … failed" is logged several thousand times a run (Android cannot alias the private memory a virtual pool maps).
 
 ## Open
