@@ -111,6 +111,7 @@ DroidPlay Core's first Switch 2 attempt, on a Galaxy Z Fold 8 (SM-F971U1: Snapdr
   - **With the binding numbers made dense,** on a local test build: OoT's opt-in to raw global memory, image eviction and this.
     - The start-up list's 193 pipelines rebuild in 4.2 s with a native heap of about 170 MB (9.4 GB before).
     - Kokiri Forest loads with the HUD and the minimap, 8.6 GB at most, with no kill. The first load's 720 pipelines took 140 s.
+    - With main, #217, #244 and this: bench_android's `kokiri` route a warm-up and three times, each at about 8.2 GB, with a native heap of 140–150 MB and no kill. The window ran at 15.7, 11.7, 15.9 and 15.7 fps, GPU p50 40–54 ms. Saria's scene played to its end ("You should hurry. Catch me up later!") at 9.5 GB at most, where the Fold was killed, at 8–18 fps.
     - Raw global memory's stores reach the AHardwareBuffer route: 12 store ranges logged, 5,025 write-log entry bits, the sink counter 0.
   - **Open, the picture:** the 3D view is solid red, or red noise with the game's own upscaler network (`DM_VK_UPSCALER_SQUARE=0`). It stays red with raw global memory off.
     - A frame dump shows Kokiri drawn in the 1440x810 scene target (Link, the trees, the rocks, the sky), so the red comes later in the frame: the post-processing, upscaling or output.
