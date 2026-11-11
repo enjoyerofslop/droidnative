@@ -86,8 +86,10 @@ static int gm_lz_touched(uintptr_t a, uintptr_t z) {
     return 0;
 }
 static int gm_lz_written(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_WRITTEN"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_RAW_GMEM_WRITTEN=1: chunks the CPU wrote are placed too"); } return v; }
+// DM_VK_RAW_GMEM_REACHED=0 (env.txt): a pool a scanned pointer reached gets only the two chunks at the pointer, as before (to tell the two apart in a run)
+static int gm_lz_reached(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_REACHED"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAW_GMEM_REACHED=0: pools a pointer reached get no written chunks placed"); } return v; }
 static void gm_lz_scan(gm_lz *L) {   // the chunks not placed with a page written: wanted. Every pool with DM_VK_RAW_GMEM_WRITTEN=1; else only those a pointer reached (L->raw)
-    if (!gm_lz_written() && !L->raw) return;
+    if (!gm_lz_written() && !(L->raw && gm_lz_reached())) return;
     uint64_t t0 = gm_now();
     for (uint32_t c = 0; c < L->nch; c++) if (L->st[c] == LZ_NO && gm_lz_touched(L->lo + (uintptr_t)c * GM_CHUNK, gm_lz_end(L, c))) { L->st[c] = LZ_WANT; L->want = 1; g_lz_res++; }
     g_lz_scans++; g_lz_scan_ns += gm_now() - t0;
