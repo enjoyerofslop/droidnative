@@ -2237,7 +2237,18 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
     - `DM_VK_RAW_GMEM_TEST=1`: 64 of 64 reads through the array match the CPU's bytes;
     - 29.4-29.5 fps either way; GPU p50 27.1-28.3 ms in four launches against 17.1 ms without the meshes. A 16-slot array, no `NonUniform` decorations and every fetch made twice (a test build) each left the GPU time there, so the array isn't what the meshes cost on this driver;
     - `DM_VK_RAW_GMEM_NOPTR_SET=3`: the same picture and times with the array at set 3.
-  - **Not run yet:** Ocarina of Time on the Ayn Odin 2 (Adreno 740), and the array against pointers on a driver that takes both.
+  - **The array against pointers on a driver that takes both,** a Galaxy Z Flip 7 (Xclipse 950, driver 24.0.533), whose probe passes: the phone's app with Frostpunk's and Ocarina of Time's hosts replaced, the default (pointers) against `DM_VK_RAW_GMEM_NOPTR=1`, 2026-11-11:
+
+    | | Pointers (the default there) | The array (`DM_VK_RAW_GMEM_NOPTR=1`) |
+    |---|---|---|
+    | Frostpunk, the city | 29.5 fps, frame p50 33.95 ms, GPU p50 12.41 ms, PSS 2.50 GB | 29.5 fps, 33.91 ms, GPU 12.57 ms, PSS 2.51 GB |
+    | Ocarina of Time, Kokiri Forest (`kokiri`), warm caches | 13.0 and 13.0 fps, frame p50 77.8 and 78.5 ms, GPU p50 50.6 and 50.5 ms | 12.8 fps, frame p50 79.7 ms, GPU p50 52.1 ms |
+    | Ocarina of Time: placed, PSS | 95-102 pieces, 390-408 MiB; 8.27-8.31 GB | 99-102 pieces (as many slots), 401-407 MiB; 8.33-8.37 GB |
+
+    - The pictures match: Frostpunk's Generator and wreckage; Link, the ferns and the water lit in Kokiri Forest. `DM_VK_RAW_GMEM_TEST=1` reads 64 of 64 either way (26 of them not all zero in Ocarina of Time).
+    - Ocarina of Time's raw stores go through the array too (298 of its 311 write logs held stores in the array run), and 6 pieces were given back and their slots freed in each run.
+    - The first launch with the array compiled the rewritten shaders' pipelines anew (60 of them, with stalls of up to 16 s on this driver); the runs above are the ones after.
+  - **Not run yet:** Ocarina of Time on the Ayn Odin 2 (Adreno 740).
 
 ### A texture without NVN's image flag bound to an image slot (Android)
 
