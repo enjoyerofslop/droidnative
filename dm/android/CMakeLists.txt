@@ -71,6 +71,7 @@ file(GLOB_RECURSE VPX_C ${DM}/third_party/libvpx/*.c)
 set(DM_GFX vk CACHE STRING "NVN replay backend: vk or null")
 set(ANDROID_C
   ${CMAKE_CURRENT_SOURCE_DIR}/plat_android.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/guest_file_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/pac_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/coreaudio_aaudio.c
   ${CMAKE_CURRENT_SOURCE_DIR}/media_android.c
@@ -154,7 +155,7 @@ target_link_options(main_hook PRIVATE -Wl,-s -Wl,-z,global -Wl,--no-undefined -W
 option(DM_TESTS "build dm/host/tests for the device" OFF)
 if(DM_TESTS)
   set(T ${DM}/host/tests)
-  set(TEST_COMMON ${CMAKE_CURRENT_SOURCE_DIR}/plat_android.c)
+  set(TEST_COMMON ${CMAKE_CURRENT_SOURCE_DIR}/plat_android.c ${CMAKE_CURRENT_SOURCE_DIR}/guest_file_android.c)
   function(dm_test name)
     cmake_parse_arguments(A "" "PROFILE" "SOURCES;DEFS" ${ARGN})
     add_executable(${name} ${A_SOURCES} ${TEST_COMMON})

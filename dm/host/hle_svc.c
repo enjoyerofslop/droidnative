@@ -200,8 +200,20 @@ static void *guest_file_thread(void *arg) {
     }
     return NULL;
 }
+#elif defined(__ANDROID__)   // the files' Linux parts are in dm/android/guest_file_android.c (DM_GUEST_FILE=1 on Android)
+int dm_android_guest_file_punch(int fd, size_t off, size_t len);
+static void guest_file_sweep(void);
+static void guest_file_punch(uintptr_t lo, uintptr_t hi) {
+    while (lo < hi) {
+        size_t off = lo - (uintptr_t)g_as, k = off / g_gf_chunk, in = off - k * g_gf_chunk, fsz = (int)k == g_gf_n - 1 ? g_reserve - k * g_gf_chunk : g_gf_chunk;
+        size_t len = hi - lo < fsz - in ? hi - lo : fsz - in; int err = dm_android_guest_file_punch(g_gf_tab[k], in, len);
+        if (!err) atomic_fetch_add(&g_gf_punched, len);
+        else { static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 4) LOG("[RED] [mem] guest file: punching file %zu +%#zx+%#zx failed (errno %d): the range keeps its disk blocks", k, in, len, err); }
+        lo += len;
+    }
+}
 #else
-static void guest_file_punch(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; }   // Android keeps the guest anonymous (g_gf_n stays 0): its callers never reach it
+static void guest_file_punch(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; }   // no files on this system (g_gf_n stays 0): its callers never reach it
 #endif
 // Whether the guest goes in files: DM_GUEST_FILE when it is set, otherwise when the game's memory pool does not fit the room to the memory limit (room 0: no limit known, as on the Mac)
 static int guest_file_wanted(const char *e, uint64_t pool, uint64_t room) { return e && *e ? atoi(e) > 0 : room && pool > room; }
@@ -273,9 +285,25 @@ static int guest_files_map(const char *dir, size_t chunk, int n, struct statfs *
 }
 #endif
 static void guest_file_init(void) {
-#ifndef __APPLE__
-    // Android: no Darwin temporary folder, statfs volume type, rusage or footprint parts, and no memory limit like iOS's to keep the guest under
-    const char *e = getenv("DM_GUEST_FILE"); if (e && atoi(e) > 0) LOG("[RED] [mem] guest memory: anonymous (DM_GUEST_FILE is not supported on Android)");
+#if defined(__ANDROID__)
+    // Android: only when asked (DM_GUEST_FILE=1), in DM_GUEST_FILE_DIR (front_android.c: the app's internal storage). The files, their watch and the 10-s line are in
+    // dm/android/guest_file_android.c; giving memory back, the alias region's sweep and zeroing are this file's, as on the Mac
+    int dm_android_guest_files_map(uint8_t *as, size_t reserve, size_t chunk, int n, int *fds, uint64_t min_free, char *why, size_t nwhy);
+    void dm_android_guest_file_watch(const int *fds, int n, uint64_t min_free, void (*sweep)(void), _Atomic uint64_t *punched);
+    const double G = 1073741824.0; const char *e = getenv("DM_GUEST_FILE"), *mf = getenv("DM_GUEST_FILE_MIN_FREE");
+    if (!guest_file_wanted(e, DM_GAME_APP_POOL, 0)) return;
+    g_gf_min_free = mf && *mf ? env_size("DM_GUEST_FILE_MIN_FREE", 0, 0x100000) : (uint64_t)2 << 30;
+    size_t chunk = env_size("DM_GUEST_FILE_CHUNK", (size_t)64 << 20, 0x100000); if (!chunk) chunk = (size_t)1 << 30;
+    if ((g_reserve + chunk - 1) / chunk > GF_MAX) chunk = ((g_reserve + GF_MAX - 1) / GF_MAX + 0xfffff) & ~(size_t)0xfffff;
+    int n = (int)((g_reserve + chunk - 1) / chunk); char why[1400];
+    if (!dm_android_guest_files_map(g_as, g_reserve, chunk, n, g_gf_tab, g_gf_min_free, why, sizeof why)) { LOG("[RED] [mem] guest memory: anonymous (DM_GUEST_FILE: %s)", why); return; }
+    g_gf_n = n; g_gf_chunk = chunk;
+    { const char *pu = getenv("DM_GUEST_FILE_PUNCH"); if (pu && *pu) g_gf_punch = atoi(pu) > 0; }
+    LOG("[mem] guest memory: %d files of %.2f GB in %s (unnamed or unlinked, sparse, shared), %.2f GB in all; holes punched where the game gives memory back: %s",
+        n, chunk / G, getenv("DM_GUEST_FILE_DIR"), g_reserve / G, g_gf_punch ? "on" : "off (DM_GUEST_FILE_PUNCH=0)");
+    dm_android_guest_file_watch(g_gf_tab, g_gf_n, g_gf_min_free, guest_file_sweep, &g_gf_punched);
+#elif !defined(__APPLE__)
+    const char *e = getenv("DM_GUEST_FILE"); if (e && atoi(e) > 0) LOG("[RED] [mem] guest memory: anonymous (DM_GUEST_FILE is not supported on this system)");
 #else
     const double G = 1073741824.0; const char *e = getenv("DM_GUEST_FILE"), *d = getenv("DM_GUEST_FILE_DIR"), *mf = getenv("DM_GUEST_FILE_MIN_FREE");
 #if TARGET_OS_IPHONE

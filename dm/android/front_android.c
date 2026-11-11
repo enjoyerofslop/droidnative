@@ -190,6 +190,9 @@ static void start_host(void) {
     // gfx_vk_draw.inc dump_write; made at every start: the request files beside it (shot_now, dump_now, threads_now, vk_mid) are looked up as <DM_DUMP_DIR>/../<name>,
     // which does not resolve while the folder is missing, so on a fresh install none of them was ever seen
     snprintf(buf, sizeof buf, "%s/dump", g_ext); setenv("DM_DUMP_DIR", buf, 0); mkdirs(buf);
+    // DM_GUEST_FILE=1 (hle_svc.c, guest_file_android.c): the guest memory's files in internal storage, where shared writable mappings of a sparse file are local (f2fs or ext4); the
+    // external files are on a FUSE mount
+    snprintf(buf, sizeof buf, "%s/guestmem", g_int); setenv("DM_GUEST_FILE_DIR", buf, 0); mkdirs(buf);
     snprintf(buf, sizeof buf, "%s/main.fixups.tsv", code);
     if (exists(buf) && !getenv("DM_FORCE_SELFTEST")) {
         setenv("DM_ROOT", g_game, 0);
