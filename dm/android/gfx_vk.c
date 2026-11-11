@@ -276,6 +276,7 @@ static int stg_new(stg_t *s, VkDeviceSize n) {
     s->n = n; return 1;
 }
 static void stg_free(stg_t *s) { if (s->b) { vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); atomic_fetch_add(&g_stg_frees, 1); } memset(s, 0, sizeof *s); }
+#include "gfx_vk_bc.inc"   // DM_VK_BC: GPU breadcrumbs around every dispatch, read when the GPU hangs or is lost
 
 // ---------------- Submissions: chunks ----------------
 // The commands go to the GPU in chunks: a command buffer with everything the GPU reads through it (staging buffers, the draws' arena, descriptor pools, texel
@@ -607,12 +608,13 @@ static void gpu_fault_log(VkResult r) {   // once, from whichever thread sees th
         LOG("[vk]   fault: %s at %#llx (precision %#llx)", (unsigned)ad[i].addressType < 7 ? kind[ad[i].addressType] : "?", (unsigned long long)ad[i].reportedAddress, (unsigned long long)ad[i].addressPrecision);
     for (uint32_t i = 0; i < fc.vendorInfoCount; i++)
         LOG("[vk]   vendor: \"%s\", code %#llx, data %#llx", vd[i].description, (unsigned long long)vd[i].vendorFaultCode, (unsigned long long)vd[i].vendorFaultData);
+    bc_report("device lost", 0);
 }
 // the completion thread: c took ns on the GPU, its fence gave fr; cut: its end timestamp was never written (the driver's hang recovery skipped the rest of it)
 static void gpu_slow(chunk *c, VkResult fr, uint64_t ns, int cut) {
     if (fr != VK_SUCCESS) gpu_fault_log(fr);
     static int nrep; if (nrep >= 3) return;
-    nrep++; int n = c->ncr < CR_MAX ? c->ncr : CR_MAX;
+    nrep++; bc_report("a slow submission", c->seq); int n = c->ncr < CR_MAX ? c->ncr : CR_MAX;
     LOG("[RED] [vk] submission %llu took %.0f ms on the GPU%s%s (the one before had completed): it recorded %d passes, draws and dispatches, the last %d of them:", (unsigned long long)c->seq, ns / 1e6,
         cut ? ", its end timestamp never written (the driver's hang recovery cut it short)" : "", fr == VK_ERROR_DEVICE_LOST ? ", and its fence reports the device lost" : "", c->ncr, n);
     for (int k = 0; k < n;) {   // a run of the same crumb (Breath of the Wild's chunks hold runs of 17 alike draws) is one line, "× run"

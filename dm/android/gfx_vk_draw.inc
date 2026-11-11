@@ -2510,6 +2510,7 @@ static void sr_put(sr_ent *e, VkDescriptorSetLayout l, VkDescriptorSet set) {   
 // (C->seq after cur()): nothing is written or taken once another is recorded (ds_moved), and the caller tells that 0 from another failure by ds_moved
 static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, const prog_t *pr, int prog_stage, uint32_t base_inst, uint64_t dseq) {
     g_alias_key = s->key;
+    int bcs = s->stage == SH_CS && bc_on(); if (bcs) { g_bc_dn = 0; g_bc_desc[0] = 0; }   // the bindings text of a dispatch's breadcrumb (gfx_vk_bc.inc)
     int nst = nvn_stage_of(s->stage);
     VkDescriptorSet set = VK_NULL_HANDLE; *pset = VK_NULL_HANDLE;   // the writes name their set once it is known (below)
     // one write per binding; every element of an array is written (an unwritten descriptor is undefined)
@@ -2547,6 +2548,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
                 if (!mtl_addr(u->addr, rd, NULL, NULL)) { RED_ONCE(119, "uniform buffer slot %d of shader %s at %#llx is in no memory pool: it reads 0", slot - 3, s->key, (unsigned long long)u->addr); src = NULL; n = 16; } }
             else { static int nlog; if (nlog < 8) { nlog++; LOG("[RED] [vk] shader %s reads uniform slot %d, which has no buffer bound: it reads 0", s->key, slot - 3); } } }
         size_t nall = n;   // (ext_check)
+        if (bcs) { bc_addf(" | c%d b%d %s%zu bytes", slot, s->cb[i].binding, src ? "" : "none, ", n); if (src) bc_words("", src, n, 16); }
         if (s->cb[i].ext && n > s->cb[i].ext) n = s->cb[i].ext;   // only what the shader reads (cb_ext_pick)
         if (dump_on() && slot != 0 && slot != 2) {   // the draw's constant buffers in the dump's log: c1 (the shader's own segment) and the game's uniform buffers, the first 8 vec4
             char vb[700]; int q = 0; const float *fv = src; size_t nf = src ? n / 4 : 0; if (nf > 32) nf = 32;
@@ -2582,6 +2584,8 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         // a binding whose range is in no memory pool any more (the game finalized the pool and left the binding): the GPU would find no pages there, the replay's copy of it
         // faulted (Super Mario Bros. Wonder on Android: SIGSEGV in memcpy from stage_set); read as unbound, as copies and indirect arguments outside every pool are
         if (u && u->addr && !mtl_addr(u->addr, n, NULL, NULL)) { RED_ONCE(118, "storage buffer of shader %s at %#llx (%zu bytes) is in no memory pool: it reads 0", s->key, (unsigned long long)u->addr, n); u = NULL; n = 16; }
+        if (bcs) { bc_addf(" | storage b%d c%d+%#x %s %#llx %zu bytes", sb->binding, sb->cb_slot, off, sb->flags & 1 ? "written" : "read", u ? (unsigned long long)u->addr : 0ull, n);
+            if (u && u->addr) bc_words("", (const void *)(uintptr_t)u->addr, n, 32); }
         if (!u || !u->addr) RED_ONCE(91, "storage buffer of shader %s (c%d +%#x) is not a bound buffer: it reads 0", s->key, sb->cb_slot, off);
         if (s->gm && gm_check_on() && u && u->addr) gm_check(s, sb->cb_slot, off, u->addr, n);   // DM_VK_RAW_GMEM_CHECK (gfx_vk_gmem.inc)
         VkDeviceSize ao, ipr;   // ao: the arena offset (off above is the c0 / uniform buffer word); ipr: the range bound in place
@@ -2665,6 +2669,9 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             if (dump_on() && e < 4) { const vtex *dv = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? nvn_hm_get(&g_tex, &g_treg[tid].t.serial) : NULL; if (dv) dump_note_tex(dv->serial);
                 LOG("[dump]   %s binding %d[%d] type %#x tid %d sid %d -> %s s%llu %ux%ux%u layers %u levels %u vk%d pkg %d image %#llx", s->key, t->binding, e, t->type, tid, sid, dv ? "tex" : "none",
                     dv ? (unsigned long long)dv->serial : 0ull, dv ? dv->w : 0, dv ? dv->h : 0, dv ? dv->d : 0, dv ? dv->layers : 0, dv ? dv->levels : 0, dv ? dv->fmt : 0, dv ? dv->pkg : 0, dv ? (unsigned long long)(uint64_t)dv->img : 0ull); }
+            if (bcs) { const vtex *bv = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? nvn_hm_get(&g_tex, &g_treg[tid].t.serial) : NULL;
+                bc_addf(" | texture b%d[%d] type %#x tid %d sid %d: %s s%llu %ux%ux%u, %u layers, %u levels, vk format %d%s", t->binding, e, t->type, tid, sid, bv ? "" : rg ? "registered, no image," : "unregistered (a stand-in),",
+                        bv ? (unsigned long long)bv->serial : 0ull, bv ? bv->w : 0, bv ? bv->h : 0, bv ? bv->d : 0, bv ? bv->layers : 0, bv ? bv->levels : 0, bv ? (int)bv->fmt : 0, sp ? "" : ", no sampler"); }
             int shd = (t->type & 0x400) != 0; VkSampler smp;
             if (tex_once() && sp && g_scache) { VkSampler *sc = &g_scache[sid][shd]; if (*sc) g_sc_hit++; else { *sc = samp_get(sp, shd); g_sc_made++; } smp = *sc; }   // per ID (g_scache)
             else if (tex_once() && !sp) { static VkSampler none[2]; if (!none[shd]) none[shd] = samp_get(NULL, shd); smp = none[shd]; }
@@ -2688,6 +2695,8 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             if (v) { iv = storage_view(v, ri->has_v ? &ri->v : NULL, vt, t->fmt); if (!iv) g_bind_bad = 1; }
             if (iv && v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && s->stage == SH_CS) { if (t->binding < 64) g_e5_need |= 1ull << t->binding; else g_bind_bad = 1; }   // its pipeline packs RGB9E5 there (cpipe_e5)
             if (!iv) iv = dummy_storage(vt, t->fmt);
+            if (bcs) bc_addf(" | image b%d[%d] type %#x tid %d: %s s%llu %ux%ux%u, %u layers, vk format %d, usage %#x", t->binding, e, t->type, tid, v ? "" : ri ? "registered, no image (a stand-in)," : "unregistered (a stand-in),",
+                             v ? (unsigned long long)v->serial : 0ull, v ? v->w : 0, v ? v->h : 0, v ? v->d : 0, v ? v->layers : 0, v ? (int)v->fmt : 0, v ? (unsigned)v->usage : 0u);
             if (!iv) g_bind_bad = 1;
             ii[nii + e] = (VkDescriptorImageInfo){VK_NULL_HANDLE, iv, VK_IMAGE_LAYOUT_GENERAL};
         }
@@ -3311,7 +3320,9 @@ static int vk_dispatch(const p_dispatch *dp) {
     int pr_i = -1;
     if (prof_on() && C->pq && C->npq + 2 <= 512 && g_nprof < 1024) { prof_rec *r = &g_prof[pr_i = g_nprof++]; memset(r, 0, sizeof *r); r->c = C; r->ncolor = -1; r->w = g[0]; r->h = g[1]; r->draws = (int)g[2]; r->seq = g_prof_seq++;
         r->s0 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->pq, (uint32_t)r->s0); }
+    uint32_t bcid = bc_on() ? bc_begin(c, s->key, g, C->seq) : 0;   // DM_VK_BC (gfx_vk_bc.inc)
     vkCmdDispatch(c, g[0], g[1], g[2]); crumb(dp->ind ? 'C' : 'c', s->key, NULL, g[0], g[1] * g[2]);
+    bc_end(c, bcid);
     if (pr_i >= 0) { g_prof[pr_i].s1 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->pq, (uint32_t)g_prof[pr_i].s1); }
     cb_barrier();
     g_dispatches++; C->ndraw++;

@@ -68,6 +68,7 @@ General host changes first needed here; each applies to every game:
 - **Per-depth-mode vertex entry points** (`vs_depth`, `main0_z`, `mtl_set_depth_zero`): [04, section 5](../../../docs/agents/04-graphics.md#5-depth-convention).
 - **The NVN present crops by the vi layer crop** (`present_crop` in `hle_nvn.c`): [The NVN present crops by the vi layer crop](../../../docs/reference/rendering.md#the-nvn-present-crops-by-the-vi-layer-crop).
 - **Vertex outputs start at (0, 0, 0, 1)** (`vs_init`): [Unwritten components of a written output start as (0, 0, 0, 1)](../../../docs/reference/shaders.md#unwritten-components-of-a-written-output-start-as-0-0-0-1).
+- **The swapchain in the window texture's encoding (Android)** (`sc_encoding` in `front_android.c`): [An sRGB window texture shown through a UNORM swapchain is a gamma too dark](../../../docs/reference/rendering.md#an-srgb-window-texture-shown-through-a-unorm-swapchain-is-a-gamma-too-dark-android).
 - **`shader_facts_manual.tsv`** for facts the machine code cannot tell: [dm/games/README.md](../README.md).
 - **The DeviceSink found by its size** (`capture` in `hle_audren.c`), the SDK 8 parameter size, `oe` notifications, the npad style event: [SDK 8: command IDs numbered differently](../../../docs/reference/audio.md#sdk-8-command-ids-numbered-differently), [SDK 8's longer `AudioRendererParameter`](../../../docs/reference/audio.md#sdk-8s-longer-audiorendererparameter), [The oe notification event and its queue](../../../docs/reference/threads.md#the-oe-notification-event-and-its-queue), [Npad style set update event](../../../docs/reference/services.md#npad-style-set-update-event).
 - **Jump tables checked on another register** (`jump_offsets`): [Offset jump tables with the bounds check on another register](../../../docs/reference/rewriter.md#offset-jump-tables-with-the-bounds-check-on-another-register).
@@ -100,12 +101,23 @@ General host changes first needed here; each applies to every game:
     - GPU 4.8–13.0 ms a frame, 10–13 ms where it drops to 30.
   - **Sound:** stereo. Two underruns in the first launch, otherwise none. The dump holds sound.
   - **Red line:** one, once per launch, around the first load outdoors: `storage buffer of shader d367b0db078dafba (c0 +0x3b0) is not a bound buffer: it reads 0`. That is `shape_anim_compute` (`region_common/shader/shape_anim_compute.bfsha`), reading compute storage slot 10, which has no buffer bound. Nothing in the picture showed it.
-  - **The picture on screen was a gamma too dark,** from the title on. Mabe Village outside Marin's house looked like night beside the Mac's screenshot of the same spot (the screen's mean colour about 0.04–0.06).
+  - **Resolved: the picture on screen was a gamma too dark,** from the title on, until [#258](https://github.com/enjoyerofslop/droidplay-core/pull/258) ([An sRGB window texture shown through a UNORM swapchain is a gamma too dark](../../../docs/reference/rendering.md#an-srgb-window-texture-shown-through-a-unorm-swapchain-is-a-gamma-too-dark-android)). Mabe Village outside Marin's house looked like night beside the Mac's screenshot of the same spot (the screen's mean colour about 0.04–0.06).
     - Frame dumps looked right, because the presented texture's bytes are right: LA presents a 1920×1080 `RGBA8_SRGB` window.
     - The front end blits it into an `R8G8B8A8_UNORM` swapchain, and a blit decodes sRGB to linear without encoding again, so the screen showed linear values.
-    - [#258](https://github.com/enjoyerofslop/droidplay-core/pull/258) makes the swapchain sRGB while the frame is; with it, Mabe Village is in daylight (mean colour 0.16, 0.24, 0.13).
+    - #258 makes the swapchain sRGB while the frame is. With it, Mabe Village is in daylight: mean colour 0.16, 0.24, 0.13 with the change on its branch, and 0.15, 0.24, 0.13 on `main` `205aef53` (q184).
     - The cause is in the front end, so every Android device showed LA too dark. Where the notes above call the Ancient Ruins' picture right, that holds for the frame itself, as dumps show it, not for what the screen showed.
     - `DM_VK_UBWC=0` doesn't change it, and neither the slot-0 fill nor the duplicate-slot fix applies to LA here (0 passes each).
-  - **Current: nothing casts a sun shadow outdoors,** with the swapchain fixed: Link, the flowers and the cucco, none of which the Mac draws without one. Mabe stays a little dimmer than on the Mac.
+  - **Current: nothing casts a sun shadow outdoors,** with the swapchain fixed: Link, the flowers and the cucco, none of which the Mac draws without one. Mabe stays dimmer than on the Mac: at Marin's door its mean colour is 0.17, 0.25, 0.13, against 0.42, 0.56, 0.21 in the Mac's screenshot of the same spot. That isn't another gamma error, which would make the blue 0.03, but the missing direct sunlight.
     - That is what LA's resolved Mac fault looked like, where vertex outputs left unwritten started at w = 0 ([Unwritten components of a written output start as (0, 0, 0, 1)](../../../docs/reference/shaders.md#unwritten-components-of-a-written-output-start-as-0-0-0-1)).
     - `vs_init` fixed it in the MSL only; whether Android's SPIR-V starts those outputs at (0, 0, 0, 1) is unchecked.
+- **The sword, OnePlus Pad 3, 2026-11-11.** LA's host from `main` `205aef53` (with #258), the same way as above, from that save. Two launches, about 25 minutes.
+  - **The beach:** the save puts Link at the water's edge, right below a Spiked Beetle. Idle, or walking east, he lost all three hearts within seconds, three times: twice to that beetle, once to a second one near the outcrops. Their hits knock him back into the surf.
+    - Holding the shield (R) as he appeared held the beetle off, and he walked east through the shallow surf.
+    - A Sea Urchin in the gap between two outcrops was pushed aside with the shield (one heart lost touching it).
+    - A retry respawned him beside that gap instead.
+  - **The sword:** the Owl's scene, then "Take", "You found your sword!" and "You can swing it with B".
+  - **Save:** from the System tab, into File 1 (Toronbo Shores, dated 10:57). After a cold start Start put Link back at the sword's spot with it in hand.
+  - **Frame rate:** on the beach, 49 of 93 log windows at 60 fps and 43 at the 30 fps interval, GPU 4.6–13.3 ms.
+  - **Sound:** 3 underruns.
+  - **Red line:** the same one per launch.
+  - **Not tried:** fighting with the sword, the walk back north, the Mysterious Forest.

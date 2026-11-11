@@ -2025,6 +2025,22 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** Breath of the Wild on a OnePlus Pad 3: three submissions of 249, 277 and 281 ms, each with its end timestamp unwritten and each holding the draw of vertex shader `2decd3e894b3736a` and fragment shader `26ae1640f3448ba4`, before the device was lost; with chunks of one draw, that draw alone. `VK_EXT_device_fault` gave no address and no vendor record (a hang, not a page fault).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) on a OnePlus Pad 3 (the hang itself is open there).
 
+### A GPU hang names the dispatch it was in, with its bindings
+
+- **Symptom:** Android only: the device is lost (`vkQueueSubmit failed: -4`) after a few submissions the driver's hang recovery cut short. The replay names each of those submissions and what it recorded, but they hold twenty or more passes, draws and dispatches, the same ones each time, and `VK_EXT_device_fault`'s addresses name no buffer (Mario Kart World: reads at `0x3f800580`, 1.0f's bit pattern plus an offset, and at `0xaac0`, null plus an offset).
+- **Cause:** a chunk's breadcrumbs ([A GPU hang names the submission it was in](#a-gpu-hang-names-the-submission-it-was-in)) say what the replay recorded into it, not how far the GPU got. Finding the item meant skipping shaders by key one run at a time, and robustness features (`robustBufferAccess2`, `robustImageAccess2`) did not stop the faults, which left the bindings and the shader itself to check.
+- **Fix:** `DM_VK_BC=1` (a diagnostic, off by default; `gfx_vk_bc.inc`):
+  - Before each dispatch the GPU writes the dispatch's number into a host-visible ring (`vkCmdFillBuffer`, then a barrier, so the dispatch starts after the write). After it, a barrier then a fill writes the number into the next word. A dispatch with only the first word written began and never ended.
+  - The host keeps each number's shader key, groups and bindings, as `stage_set` resolved them: uniform buffers with their size and first 16 words, storage buffers with their address, size and first 32 words, textures and images with their serial, size, layers, levels and Vulkan format, and whether a binding fell back to a stand-in.
+  - `gpu_slow` lists a slow chunk's dispatches up to its first one never begun, and a lost device lists the last eight begun and never ended.
+  - The barriers make each dispatch wait for the one before, so frame times with it on are not the game's.
+  - The recorder thread (`DM_VK_RECORDER=1`) makes its calls later, so breadcrumbs stay off with it.
+- **Check:** Mario Kart World on a Galaxy S25 Edge (Adreno 830, Android 16):
+  - Over two runs, three slow submissions and the loss each named compute shader `2a89b6d4df731b8d` (one workgroup) as begun and never ended, with the next dispatch never begun.
+  - Its bindings: a 24-bone skeleton's records (parents `-1 0 0 1 1 1 2 2 3 3 4 5 10 11 12 12 13 13 13 13 16 17 18 19`), identity matrices in its storage buffer, and a 24×636 RGBA16F texture with 3 layers. The data was sound, which pointed at the shader's three 24-iteration loops instead.
+  - With it skipped, the next one named was `e2a5bd13907993e3`, the same kind of shader.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) on a Galaxy S25 Edge (the hang itself is open there).
+
 ### Command recording on a thread of its own (Android)
 
 - **Symptom:** a game with thousands of draws a frame is held by the replay thread's CPU time. In a profile of that thread the driver's recording calls are a large share: Breath of the Wild on a OnePlus Pad 3, `vkCmdDrawIndexed` 9.9%, `vkCmdBindDescriptorSets` 8.2%, `vkCmdBeginRenderPass` 1.4%, and binds, copies and dynamic state besides. Meanwhile the phone's other cores are idle.
@@ -2227,6 +2243,14 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - A later draw of the pass that writes a slot left unused and not the kept one loses that write. It is counted in the stats line, with a red line.
   - `DM_VK_DUP_SLOTS=0` attaches the image at every slot, as before.
 - **Check:** Breath of the Wild's `outdoors` save on a Galaxy S25 Edge (Adreno 830, Samsung's driver 0x80320001): the Shrine is drawn as on the Odin 2, with no write lost, and the GPU time drops from 21.4 to 20.5 ms. With `DM_VK_DUP_SLOTS=0` it is dark as before. On the Pad 3 a local test leaving the later slot of each pair unused drew it right too. A Galaxy Z Fold 8 (Adreno 840) draws it right either way, and with the fix its GPU time drops from 30.3 to 29.6 ms.
+
+### An sRGB window texture shown through a UNORM swapchain is a gamma too dark (Android)
+
+- **Symptom:** Link's Awakening on Android is drawn far too dark on screen: Mabe Village outside Marin's house looks like night (the screenshot's mean colour about 0.04–0.06 of full scale), the title and the menus duller than on the Mac. Frame dumps look right: the dump's `present.png` of the same frame is bright, as on the Mac.
+- **Cause:** the game presents a 1920×1080 `RGBA8_SRGB` window texture (vk43), and the front end's swapchain was `R8G8B8A8_UNORM` (format 37, chosen whenever the surface lists it). The front end puts the frame on the screen with `vkCmdBlitImage`, and a blit converts as sampling and rendering do: it decodes an sRGB source to linear and stores into a UNORM destination without encoding. So the swapchain got linear values, which the display shows as sRGB: every channel raised to about the power 2.2. The texture's bytes were right, which is why the dump, a copy of them, showed no fault (its mean 0.355 against the screen's 0.10: 0.355^2.2 = 0.10).
+- **Fix:** the swapchain is made in the presented frame's encoding (`front_android.c` `sc_encoding`): `R8G8B8A8_SRGB` for an sRGB frame, where the surface lists it, so the blit decodes and encodes again and carries the frame's bytes; `R8G8B8A8_UNORM` for the rest, as before. When the encoding changes, the swapchain is made again before the next frame, with a `[front]` line. `DM_VK_SC_SRGB=0` keeps the UNORM swapchain.
+- **Check:** Link's Awakening on a OnePlus Pad 3 (Adreno 830, Android 16): the swapchain is made again in format 43 at the first frame. Mabe Village's mean colour goes from about (0.04, 0.06, 0.02) to (0.16, 0.24, 0.13), and the title's from (0.37, 0.48, 0.85) to (0.54, 0.67, 0.92). Frames in UNORM, such as other games' windows, see no change.
+- **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#android).
 
 ### Clears in a layered pass clear every layer (Android)
 
