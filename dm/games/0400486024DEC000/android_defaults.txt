@@ -1,0 +1,6 @@
+# Switches this game gets on Android (build_android_from_nsp.py puts them in the game's defaults.txt; env.txt and the settings screen still win)
+# DM_VK_UPSCALER_SQUARE=1: the game's upscaler network (agl's NDSR, one of four compute shaders by the dynamic resolution, square-root colour from a335c1db6270c355 in,
+# its 1440x810 scene to 1920x1080 out) is replaced by a bilinear scale and a signed square (gfx_vk_upsq.inc). The network itself draws right since its input is written
+# (#193) and its warp operations fit 64-lane subgroups (#189), but on the OnePlus Pad 3's Adreno 830 it is 21 of a frame's 45 ms of GPU work, and replacing it takes
+# Kokiri Forest from 10.4 to 15.8 fps (raw global memory on), over half of the game's 30. No network detail is added. =0 in env.txt runs the network
+DM_VK_UPSCALER_SQUARE=1

@@ -75,6 +75,19 @@
 - **Fix:** the error shows each differing table's row counts and its first row on each side. For a splitter change, check that the new rows are right, then copy the tables from `shader/pkg.partial/tables` in the build folder into the profile. A change to the splitter's output also needs the other profiles it reaches split again.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md) ([issue #1263](https://github.com/seedds/nxnative/issues/1263)): [NVN2 task and mesh shaders](shaders.md#nvn2-task-and-mesh-shaders) moved one row from vertex to mesh. Donkey Kong Bananza, Pokemon Pokopia and Hyrule Warriors: Age of Imprisonment were checked and hold no such shader; Fire Emblem Fortune's Weave was not checked, as no dump was at hand.
 
+### An Android build packs a registered game without shaders after a split error, and succeeds
+
+- **Symptom:** Android only: a game from a registered profile starts with its music and sound over a black screen, and the log has `no translated shader` lines. The build log says `the split shader tables differ from game profile <id>'s`, then `[RED] the game is packed without shaders (its draws are skipped)`, and the build still ends with exit code 0.
+- **Cause:** `build_android_from_nsp.py build_shaders` caught every error of the shader split and packed the game without shaders. That fallback is meant for games that compile their shaders while they run, which a provisional profile captures later ([docs/android.md](../android.md#games-that-compile-their-shaders-while-they-run)). For a registered profile it hid real failures.
+  - It also turned away a difference the iPhone build accepts: compute kernels a newer reader decodes from the registered build ([registered tables after a reader update](shaders.md#unity-computeshader-objects)). The Android call passed neither `derive_compute` nor `derive_dlc` to `split_shaders`.
+  - AI: THE SOMNIUM FILES 1.0.1, the update its profile registers, hit both: a player's split found 15 compute kernels the profile's 13,057 rows lack (the Unity 2017.4 layout now reads its `ComputeShader` objects).
+- **Fix:** `build_shaders` passes the same two hooks as the iPhone build. After the split's strict DLC-only or additive-compute comparison passes, `derive_shader_tables` makes a shader-only derived profile (`derive_profile(…, shader_only=True)` in `<id>_build/profile`), which the translation and the rest of the build use. Any other split failure of a registered profile now stops the build, with the split's own message and what to check. A provisional or derived profile still packs without shaders and says so.
+- **Check:** `python3 dm/tools/tests/test_android_shaders.py`:
+  - a registered profile's mismatch stops the build, and a provisional profile's error still packs without shaders;
+  - additive compute kernels and DLC-only shaders promote the derived profile, whose `shader_facts.tsv` the translation reads;
+  - a provisional profile gets no derive hooks.
+- **Found on:** [AI: THE SOMNIUM FILES](../../dm/games/010089B00D09C000/README.md) ([droidplay-core#218](https://github.com/enjoyerofslop/droidplay-core/issues/218)), not rebuilt here (no game files).
+
 ### The shader package and the shader map come from different splits
 
 - **Symptom:** `dmsh_build.py` stops with `[RED] <package> holds no record of shader <key>, which the shader map names: the package and the map come from different shader_split.py runs`, with `(its records carry no keys: it was split before they did)` for a package from before chain `3df44a5a4e0c`. Before that chain: wrong shaders wherever the game drew, such as a black screen with sound.

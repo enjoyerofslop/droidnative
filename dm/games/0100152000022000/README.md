@@ -4,7 +4,7 @@ Updates 4.0.0 (v1441792) and 4.0.1 (v1507328) over the base game, SDK 4.4.0, the
 
 The 4.0.1 build has the same `subsdk0` and `sdk` build IDs as 4.0.0 and a different `main` build ID. This profile has no build-specific function patches. [A 4.0.1 iPhone report](https://github.com/seedds/nxnative/issues/281) covers the title, menus and a complete three-lap Grand Prix race after the shared notification-wait fix. A second 4.0.1 build from current upstream, with Booster Course DLC and a derived profile, completed a full race on an iPhone 15 Pro Max (iOS 27.0.1) and on a Mac. The registered profile's combined shader tables and Mac build passed shader and pipeline prebuild checks; gameplay on a build made from this registered profile has not yet been tested. A build from the registered profile needs both update NSPs in the input folder.
 
-On Android it plays two 50cc races at 60 fps on a Pixel 9 Pro XL, steered by the game's Smart Steering ([Android](#android)).
+On Android it plays two 50cc races at 60 fps on a Pixel 9 Pro XL, steered by the game's Smart Steering; on a Moto Razr Plus 2023 (Adreno 730) it crashes as a course loads ([Android](#android)).
 
 Brought up on the Mac from 4.0.0: boot, the title with its demo race, the Mii pick, the menus (their movie previews play), a 50cc Grand Prix race at Mario Kart Stadium to its results, and a second boot that loads the save. 60 fps (p50 16.7 ms), sound; about 2.4 GB resident and 1.26 GB of Metal allocations in the race, flat over minutes.
 
@@ -76,7 +76,14 @@ Played on a Google Pixel 9 Pro XL (Mali-G715, Android 16) on 2026-11-10, from `m
   - `[vk] a GPU block encoder draws into a BC texture decoded on the CPU (format 137): only BC4 and BC5 are decoded on the GPU, the pass draws into the decoded image`: a GPU without BC textures only (Mali, Xclipse).
   - `[vk] texture view in format 107 over an image of format 37, which lists only its own and its sRGB twin …: read in the image's format`.
 - **Pipelines:** 2,290 draws on the first start and 481 on the second were left out while their pipelines built in the background.
-- **Not tried:** steering or items by hand, other cups and courses, 100cc and up, other devices.
+- **Not tried:** steering or items by hand, other cups and courses, 100cc and up, other Mali devices.
+
+On a Moto Razr Plus 2023 (Adreno 730, Qualcomm driver V@0615.98, Vulkan 1.1, Android 16) on 2026-11-10, the same game app:
+
+- **The title and menus:** 60 fps (p50 16.6 ms, p95 18.9 ms), GPU about 8 ms a frame, 1.8–1.9 GB resident with the BC textures native (the Pixel was at 2.1 GB on the title). The Mii pick and the menus through the cup select worked.
+- **Every course load crashes:** `CRASH sig=11 addr=0x4 pc=…(vulkan.adreno.so+0x16ff5c)` on the replay thread (`NVN queue replay`), in `vkCmdEndRenderPass` (`rp_end`, `gfx_vk_draw.inc`). The title's demo race crashed at about frame 2,100 in all four boots, and a 50cc race from the menus as Mario Kart Stadium loaded, at frame 5,100. None of these changed it: `DM_VK_ASYNC_PIPE=0` (no background pipeline builds), `DM_VK_WB_READBACK=0`, `DM_VK_SLOT0_FILL=1` (no pass had slot 0 empty) and `DM_VK_MID_DRAWS=100000`. Which pass it is has not been found yet.
+- **Red lines:** none up to the crash. The Pixel's two came in its first 5 s, so both are Mali's only.
+- No save was made and no race was run, so the Razr shows Menus.
 
 ## Found on this game
 
@@ -99,4 +106,5 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- On the Moto Razr Plus 2023 (Adreno 730) every course load crashes in the driver's `vkCmdEndRenderPass` ([Android](#android)).
 - Mii heads draw nothing: the host ships no MiiModel firmware data (the player README notes "no Mii heads").

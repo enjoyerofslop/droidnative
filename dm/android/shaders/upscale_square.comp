@@ -1,0 +1,13 @@
+#version 450
+// A game's upscaler network replaced (gfx_vk_upsq.inc): its input, square-root encoded colour, filtered bilinearly at each output texel's centre, then decoded by a
+// signed square into linear colour. No network detail is added. The result goes to an RGBA16F intermediate, which a blit converts to the network's output format.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D dst;
+layout(push_constant) uniform Size { uvec2 size; } pc;
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.size.x || p.y >= pc.size.y) return;
+    vec3 e = textureLod(src, (vec2(p) + 0.5) / vec2(pc.size), 0.0).rgb;
+    imageStore(dst, ivec2(p), vec4(e * abs(e), 1.0));
+}
