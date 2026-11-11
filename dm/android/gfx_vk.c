@@ -400,6 +400,7 @@ static int chunks_init(void) {
     // A test of the crash guard (vk_driver.c crash_hook): the driver reads a create info at address 0. Here, at the replay's first use of the device, since the host's
     // crash handler goes in only as the host starts (main.c), after the device and the first window: a crash before it leaves the record at trying
     if (vk_driver_fail("crash")) { LOG("[vk] DM_VK_DRIVER_FAIL=crash: the driver is about to crash, on purpose"); VkSampler s; vkCreateSampler(g_vk.dev, NULL, NULL, &s); }
+    if (vk_driver_fail("crash_host")) { LOG("[vk] DM_VK_DRIVER_FAIL=crash_host: the host is about to crash outside the driver, on purpose"); *(volatile int *)16 = 0; }   // crashed elsewhere
     fgpu_on(); stg_pool_on(); lsnap_on(); wb_revert_on(); wb_absorb_on(); up_range_on(); wb_words_on(); ds_recycle();   // read before the completion thread starts (sp_done reads g_sp_on, draw_chunk_reset the recycling switch)
     { const char *e = getenv("DM_VK_CHUNKS"); int n = e ? atoi(e) : 0; if (n > 0) g_nchunk = n < 2 ? 2 : n > NCHUNK_MAX ? NCHUNK_MAX : n;
       LOG("[vk] chunks in flight: up to %d%s", g_nchunk, g_nchunk != NCHUNK_DEF ? " (DM_VK_CHUNKS)" : ""); }

@@ -234,14 +234,17 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators:
   textures and pipelines are on the device by then.
 - Start records and the crash guard (`vk_driver.c`): a driver that crashes or hangs the game would do it at every start. Before the driver opens, the host writes
   `{"state": "trying", …}` to `<external files>/vk_driver_state/<driver file>.json`, and the same state to the game's `games/<title ID>/vk_driver_result.txt`
-  (`driver=`, `result=`, `reason=`, `time=` lines, for the desktop app). Then: `ok` after 120 presented frames or 30 s of the game (a first start's pipeline compile
-  takes longer), `fell back` (any fallback above), `crashed` (crash.c's `crash_set_pc_hook`: the crashing thread's pc, lr or a return address in its first 16
-  frames lies in the driver's mapping, from `/proc/self/maps`), `device lost` (`gpu_fault_log`). A start that finds `crashed`, `device lost` or `trying` (a start
-  that ended before `ok`) runs the system's driver once and writes `skipped`, with a `[RED]` line and a line on the status screen, which also names the driver in use
-  or why it isn't; the next start tries the driver again. A start without `DM_VK_DRIVER` removes the game's result file; on a phone without KGSL the result is
+  (`driver=`, `result=`, `reason=`, `time=` lines, for the desktop app and the launcher). Then: `ok` after 120 presented frames or 30 s of the game (a first
+  start's pipeline compile takes longer), or once the self test's picture check has drawn; `fell back` (any fallback above); `crashed` (crash.c's
+  `crash_set_pc_hook`: the crashing thread's pc, lr or a return address in its first 16 frames lies in the driver's mapping, from `/proc/self/maps`); `crashed
+  elsewhere` (a crash with the driver running, in the host's or the game's code, with the module and offset); `device lost` (`gpu_fault_log`). A start that finds
+  `crashed`, `device lost` or `trying` (a start that ended before `ok`) runs the system's driver once and writes `skipped`, with a `[RED]` line and a line on the
+  status screen, which also names the driver in use or why it isn't; the next start tries the driver again. `crashed elsewhere` doesn't skip (a game that crashes at
+  boot in its own code would otherwise change drivers at every start); the next start says it in the log and on the status screen. A hang in the driver after `ok`
+  isn't caught: the records can't tell a hang past 30 s from a long first compile, as the plan accepts. A start without `DM_VK_DRIVER` removes the game's result file; on a phone without KGSL the result is
   `not used`. The host's crash handler goes in as the host starts (`main.c`), after the device and the first window, so a crash in the driver before then is
   left as `trying`, which skips the driver once too. `DM_VK_DRIVER_FAIL=crash` crashes in the driver's code (a `vkCreateSampler` with no create info) at the
-  replay's first use of the device, to try the guard.
+  replay's first use of the device, to try the guard; `crash_host` crashes in the host's code there, for `crashed elsewhere`.
 - A phone without `/dev/kgsl-3d0` (a Mali or Xclipse GPU) doesn't open `DM_VK_DRIVER` at all, with one plain `[vk] DM_VK_DRIVER` line: Turnip drives Qualcomm's
   kernel driver, KGSL, and `libadrenotools.so` is not loaded, so its constructor doesn't patch the linker.
 - Each driver keeps its own pipeline cache: `DM_PIPELINE_CACHE` with `.<driver file name>` after it (`gfx_vk_draw.inc` `pcache`).

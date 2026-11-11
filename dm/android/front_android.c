@@ -674,13 +674,16 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
 
 // ---------- Lifecycle ----------
 static int g_started;
-// A start on a DM_VK_DRIVER driver counts as good (vk_driver.c vk_driver_ok) after 120 presented frames or 30 s of the game, so a crash or hang before then makes the next start
-// skip the driver once. A driver's first start compiles the game's pipelines with the status screen up, for over a minute in Brilliant Diamond: that is not a failure
+// A start on a DM_VK_DRIVER driver counts as good (vk_driver.c vk_driver_ok) after 120 presented frames or 30 s of the game, or once the self test's picture check has drawn
+// on it, so a crash or hang before then makes the next start skip the driver once. A driver's first start compiles the game's pipelines with the status screen up, for over a
+// minute in Brilliant Diamond: that is not a failure, and so a hang in the driver after 30 s counts as good too (the records can't tell the two apart)
 static void driver_proven(void) {
     static int done; static uint64_t t0; int st = atomic_load(&g_state);
-    if (done || (st != ST_GAME && st != ST_PASS)) return;
+    if (done) return;
+    if (st == ST_PASS && g_demo_frames) { done = 1; vk_driver_ok(); return; }   // (ST_PASS comes once before the picture check too, when the self test passes)
+    if (st != ST_GAME) return;
     if (!t0) t0 = mono_ns();
-    if (st == ST_PASS || atomic_load(&g_frames) >= 120 || mono_ns() - t0 >= 30000000000ull) { done = 1; vk_driver_ok(); }
+    if (atomic_load(&g_frames) >= 120 || mono_ns() - t0 >= 30000000000ull) { done = 1; vk_driver_ok(); }
 }
 static void on_cmd(struct android_app *app, int32_t cmd) {
     int game = atomic_load(&g_state) == ST_GAME;
