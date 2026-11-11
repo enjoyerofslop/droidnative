@@ -65,6 +65,16 @@ Played by hand on the Ayn Odin 2 from `saves/combat`'s `QuickSave_1` (2026-11-10
 - Sound: AudioOut #0's six channels, L and R about −35 dBFS, the rear pair about −62, centre and LFE silent (`DM_AUDIO_DUMP`); 2 and 1 underruns, around loads.
 - Red lines: besides `SetRenderEnableConditional`, four fragment shaders (`08733b8aaa14e146`, `278dbcf7be929822`, `b7c32f113d8b0ee8`, `f6361d15a3d1ae5c`): "an alpha test is set, but the shader has no float vec4 colour 0 to test … the draw keeps the shader as it is". Nothing wrong showed on screen.
 
+## On the Pixel 9 Pro XL
+
+Played by hand on a Google Pixel 9 Pro XL (Mali-G715, Android 16) from `saves/combat`'s `AutoSave_2`, at the foot of the stairs to the top deck (2026-11-10, `main` at `cd1be830` with [#185](https://github.com/enjoyerofslop/droidplay-core/pull/185)'s network clock, adb button and stick events, a private `DM_SAVE` copy):
+
+- The fight: the two Viscous Voidlings, won in four rounds with Dragon's Blaze, Decaying Touch and plain attacks; the second died on its own turn, Burning. The turn order, action points, the cone's aim, targeting (R), surfaces and damage numbers all worked.
+- Quick Save after the fight (`QuickSave_2`, in-game Day 1 14:47), Main Menu, then the app stopped and started again: Continue loaded `QuickSave_2` on the top deck. The Load list dates it 22:47:56 10/11/2026, at the top, above the folder's older saves.
+- 30 fps, as on the Odin 2: over the 47 windows of 300 frames from the top deck's load to the Quick Save the median frame time stayed between 33.0 and 33.6 ms, with a p95 median of 38.9 ms (40.7 at most); the one frame over 100 ms (144 ms) came at the Quick Save. The GPU takes about 26 ms a frame (about 16 on the Odin 2), with 1,692 draws and 24 ms of replay CPU a frame. BC textures are decoded on the CPU, as the Mali-G715 has none (resident 2.4 GB); ASTC is native.
+- Sound: 187 s of AudioOut #0 from the cold start through Continue (`DM_AUDIO_DUMP`): 5 s of silence at boot, then L and R about −33 dBFS, the rear pair about −39, centre −77, LFE silent, no clipping, spectra like music (flatness 0.00–0.01); 0 underruns in the log.
+- Red lines: the same as the Odin 2's, `SetRenderEnableConditional` and the four alpha-test shaders ([Below deck](#below-deck)). 2,254 draws were left out while new pipelines built in the background, over the first launch's 15 minutes of title, menus, two loads and the fight. Nothing Mali-only showed, on screen or in the log.
+
 ## Routes
 
 [`bench_android.tsv`](bench_android.tsv), for `scripts/bench_android.py`:
@@ -75,7 +85,7 @@ Played by hand on the Ayn Odin 2 from `saves/combat`'s `QuickSave_1` (2026-11-10
 - `walk`: the hold from the same save, the left stick down for 1 s at 84 s (and right at 95 s, which a camera tutorial box stops); where the first walk ends, in the shot at 90 s, shows whether the game moves by time or by frames.
 - `cc`: a fresh save into character creation, for profiles of the title screen, the main menu and character creation.
 - `saves/cabin` (not a route yet): a Quick Save on the cabin deck next to the murder room, past Magister Siwan's second dialogue, made by hand on the Pad 3; the way to the top deck from there is in [To the first combat](#to-the-first-combat).
-- `saves/combat` (not a route yet): the save folder from the Odin 2 after the first fight. Load `QuickSave_1` by name for the top deck beside the two Voidlings; Continue picks another save.
+- `saves/combat` (not a route yet): the save folder from the Odin 2 after the first fight. Load `QuickSave_1` by name for the top deck beside the two Voidlings, or `AutoSave_2` for the foot of the stairs just before the fight; Continue picks another save.
 
 ## Frame rate
 
