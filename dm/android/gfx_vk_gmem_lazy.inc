@@ -1,7 +1,7 @@
 // ---- Pools placed in chunks as they are used (DM_VK_RAW_GMEM_LAZY) ----
 // Placed memory is committed when it is allocated and can't go to swap. Placing whole pools pinned the pages the game never touched: in Ocarina of Time's Kokiri Forest only
 // 571 of the 1,967 MiB placed had been resident before, the game's own anonymous memory sat 4.1 GB deep in swap (dumpsys meminfo), and the low-memory killer ended 2 of 11
-// runs on a Galaxy Z Fold 8 (PSS about 11.2 GB on 10.8 GB). A pool of GM_LAZY_MIN or more is now placed in chunks of GM_CHUNK, each when it is first used:
+// runs on a Galaxy Z Fold 8 (PSS about 11.2 GB on 10.8 GB). A pool is now placed in chunks of GM_CHUNK (one under it a single chunk; gm_lazy_min), each when it is first used:
 // - when a storage buffer in a chunk is bound (gm_inplace → gm_lazy_bind), the chunks it covers, as one allocation so that it binds in place;
 // - when a word in a storage buffer that a shader binding the raw pool table reads points into a chunk, or a word in the first 4 KiB at such a pointer does (gm_lazy_ptrs, from
 //   stage_set): that chunk and the next, placed at once (a buffer is scanned again at most every 100 ms);
@@ -17,7 +17,7 @@
 // host write in gm_frz_prep (a system call writing a read-only page fails rather than faults). This is the design of nx2android's lazy pool backing and its freeze window
 // (vk_pool_of, nvn_dirty_freeze), written anew; it backs a chunk at its first GPU use as well, and backs every addressed pool once a shader uses raw memory, where this
 // places what a binding or a pointer reaches. DM_VK_RAW_GMEM_LAZY=0 (env.txt): whole pools at their first buffer address, as before
-typedef struct { uintptr_t lo, hi; const void *pool; uint8_t *st; uint32_t nch; int merge; } gm_lz;   // st: each chunk's state (LZ_*); merge: a binding crossed two of its pieces
+typedef struct { uintptr_t lo, hi; const void *pool; uint8_t *st; uint32_t nch; int merge, want; } gm_lz;   // st: each chunk's state (LZ_*); merge: a binding crossed two of its pieces; want: a chunk of it is LZ_WANT (gm_lazy_tick visits only those)
 enum { LZ_NO, LZ_WANT, LZ_PLACED, LZ_REFUSED };
 static gm_lz *g_lz; static int g_nlz, g_clz;   // under g_gm_pl
 static _Atomic int g_lz_any;
@@ -51,7 +51,20 @@ static int gm_frz_begin(uintptr_t lo, uintptr_t hi) {   // inside nvn_dirty_open
 static void gm_frz_end(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; atomic_store(&g_frz_hi, 0); }
 
 // ---- The chunks (caller holds g_gm_pl) ----
-static gm_lz *gm_lz_of(uintptr_t a) { for (int i = 0; i < g_nlz; i++) if (a >= g_lz[i].lo && a < g_lz[i].hi) return &g_lz[i]; return NULL; }
+// g_lz is kept sorted by address (pools don't overlap: none did in Ocarina of Time, counted on a Galaxy S25 Edge), so a lookup is a binary search. The pointer scan asks for
+// every word it reads, and with every pool chunked there are thousands of them (4,041 in Kokiri Forest)
+static gm_lz *gm_lz_of(uintptr_t a) {
+    int lo = 0, hi = g_nlz;   // the first pool starting above a
+    while (lo < hi) { int m = (lo + hi) / 2; if (g_lz[m].lo <= a) lo = m + 1; else hi = m; }
+    return lo > 0 && a < g_lz[lo - 1].hi ? &g_lz[lo - 1] : NULL;
+}
+// Every pool is placed in chunks by default, a pool under GM_CHUNK being a single chunk: placing the pools under 4 MiB whole at their first buffer address placed about 500 MiB in
+// Kokiri Forest, 356 MiB of it memory no binding reads (a test-only count); chunked, 123 MiB is placed in all against 693, the picture as before and no raw store lost, for about
+// 1-3 ms more of the replay thread a frame on a Galaxy S25 Edge. DM_VK_RAW_GMEM_LAZY_MIN=<bytes> (or whole K / M / G; env.txt): the smallest pool placed in chunks, the rest whole
+static uint64_t gm_lazy_min(void) {
+    static uint64_t v; static int done; if (!done) { done = 1; if (getenv("DM_VK_RAW_GMEM_LAZY_MIN")) { v = gm_size_env("DM_VK_RAW_GMEM_LAZY_MIN"); LOG("[vk] DM_VK_RAW_GMEM_LAZY_MIN: pools of %llu bytes or more are placed in chunks, the rest whole", (unsigned long long)v); } }
+    return v ? v : 1;
+}
 static uintptr_t gm_lz_end(const gm_lz *L, uint32_t c) { uintptr_t e = L->lo + (uintptr_t)(c + 1) * GM_CHUNK; return e < L->hi ? e : L->hi; }
 // Whether a page of [a, z) was ever written: present or swapped out, from /proc/self/pagemap's bits 63 and 62 (mincore misses a swapped page, and under this memory pressure
 // much of the game's anonymous memory is in zram). A page the game only read maps the zero page and counts too
@@ -73,7 +86,7 @@ static int gm_lz_written(void) { static int v = -1; if (v < 0) { const char *e =
 static void gm_lz_scan(gm_lz *L) {   // DM_VK_RAW_GMEM_WRITTEN=1: the chunks not placed with a page written: wanted
     if (!gm_lz_written()) return;
     uint64_t t0 = gm_now();
-    for (uint32_t c = 0; c < L->nch; c++) if (L->st[c] == LZ_NO && gm_lz_touched(L->lo + (uintptr_t)c * GM_CHUNK, gm_lz_end(L, c))) { L->st[c] = LZ_WANT; g_lz_res++; }
+    for (uint32_t c = 0; c < L->nch; c++) if (L->st[c] == LZ_NO && gm_lz_touched(L->lo + (uintptr_t)c * GM_CHUNK, gm_lz_end(L, c))) { L->st[c] = LZ_WANT; L->want = 1; g_lz_res++; }
     g_lz_scans++; g_lz_scan_ns += gm_now() - t0;
 }
 // chunks [c, e), all wanted, as one swap. may_wait 0 (inside stage_set): when a pending write overlaps them they stay wanted, -1. → chunks placed
@@ -107,14 +120,17 @@ static int gm_lz_place(gm_lz *L, int live, int may_wait) {   // every run of wan
         int r = gm_lz_run(L, c, e, live, may_wait); if (r > 0) got += r;
         c = e;
     }
+    L->want = 0; for (uint32_t c = 0; c < L->nch && !L->want; c++) L->want = L->st[c] == LZ_WANT;   // a pending write kept some back: the tick tries again
     return got;
 }
 static void gm_lazy_add(const void *pool, uintptr_t lo, size_t size, int live) {   // gm_place, at the pool's first buffer address (or its Initialize)
     for (int i = 0; i < g_nlz; i++) if (g_lz[i].pool == pool) return;
     if (g_nlz == g_clz) { g_clz = g_clz ? 2 * g_clz : 32; g_lz = realloc(g_lz, (size_t)g_clz * sizeof *g_lz); if (!g_lz) die("raw global memory: the chunked pools"); }
-    gm_lz *L = &g_lz[g_nlz]; memset(L, 0, sizeof *L);
-    L->lo = lo; L->hi = lo + size; L->pool = pool; L->nch = (uint32_t)((size + GM_CHUNK - 1) / GM_CHUNK); L->st = calloc(L->nch, 1);
-    if (!L->st) return;
+    uint32_t nch = (uint32_t)((size + GM_CHUNK - 1) / GM_CHUNK); uint8_t *st = calloc(nch, 1); if (!st) return;
+    int at = g_nlz; while (at > 0 && g_lz[at - 1].lo > lo) at--;   // sorted by address (gm_lz_of)
+    memmove(g_lz + at + 1, g_lz + at, (size_t)(g_nlz - at) * sizeof *g_lz);
+    gm_lz *L = &g_lz[at]; memset(L, 0, sizeof *L);
+    L->lo = lo; L->hi = lo + size; L->pool = pool; L->nch = nch; L->st = st;
     g_nlz++; g_lz_pools++; atomic_store(&g_lz_any, 1); atomic_fetch_add(&g_gm_gen, 1);   // (the table's sink ranges: DM_VK_RAW_GMEM_SINK)
     gm_lz_scan(L);
     int got = gm_lz_place(L, live, 1);
@@ -122,7 +138,7 @@ static void gm_lazy_add(const void *pool, uintptr_t lo, size_t size, int live) {
                                      (unsigned long)lo, size, GM_CHUNK >> 20, got, L->nch);
 }
 static void gm_lazy_drop(const void *pool) {   // gm_unplace, the pool's Finalize (its placed chunks are segments of the pool and given back with them)
-    for (int i = 0; i < g_nlz; i++) if (g_lz[i].pool == pool) { free(g_lz[i].st); g_lz[i] = g_lz[--g_nlz]; atomic_fetch_add(&g_gm_gen, 1); return; }
+    for (int i = 0; i < g_nlz; i++) if (g_lz[i].pool == pool) { free(g_lz[i].st); memmove(g_lz + i, g_lz + i + 1, (size_t)(--g_nlz - i) * sizeof *g_lz); atomic_fetch_add(&g_gm_gen, 1); return; }
 }
 // the replay's thread, under g_bk, inside stage_set: a storage buffer [addr, addr + n) in no placed piece. → 1 when the chunks holding it were placed now (as one allocation)
 static int gm_lazy_bind(uint64_t addr, size_t n) {
@@ -133,7 +149,7 @@ static int gm_lazy_bind(uint64_t addr, size_t n) {
         uint32_t c0 = (uint32_t)((addr - L->lo) / GM_CHUNK), c1 = (uint32_t)((addr + n - 1 - L->lo) / GM_CHUNK); int ok = 1;
         for (uint32_t k = c0; k <= c1; k++) if (L->st[k] == LZ_PLACED || L->st[k] == LZ_REFUSED) ok = 0;
         if (!ok) { if (!L->merge) { L->merge = 1; g_lz_cross++; } }   // part of it placed already (an allocation of its own) or refused: copied now, the pool made one allocation at the next tick
-        else { for (uint32_t k = c0; k <= c1; k++) L->st[k] = LZ_WANT;
+        else { for (uint32_t k = c0; k <= c1; k++) L->st[k] = LZ_WANT; L->want = 1;
                int r = gm_lz_run(L, c0, c1 + 1, 1, 0); got = r > 0 ? r : 0;   // this run alone now: the pool's other wanted chunks wait for the tick
                g_lz_bind += (uint64_t)got; }
     }
@@ -148,7 +164,7 @@ static void gm_lz_ptr_scan(uintptr_t addr, size_t n, int depth, gm_lz **hit, int
     for (size_t k = 0; k < nw; k++) {
         uint64_t v = w[k]; gm_lz *L = v >> 40 ? NULL : gm_lz_of((uintptr_t)v); if (!L) continue;
         g_lz_ptr_hits++; uint32_t c = (uint32_t)(((uintptr_t)v - L->lo) / GM_CHUNK); int got = 0;
-        for (uint32_t x = c; x < L->nch && x <= c + 1; x++) if (L->st[x] == LZ_NO) { L->st[x] = LZ_WANT; g_lz_ptr++; got = 1; }
+        for (uint32_t x = c; x < L->nch && x <= c + 1; x++) if (L->st[x] == LZ_NO) { L->st[x] = LZ_WANT; L->want = 1; g_lz_ptr++; got = 1; }
         if (got) { int dup = 0; for (int i = 0; i < *nhit && !dup; i++) dup = hit[i] == L; if (!dup && *nhit < 8) hit[(*nhit)++] = L; }
         if (!depth) gm_lz_ptr_scan((uintptr_t)v, L->hi - (uintptr_t)v, 1, hit, nhit);
     }
@@ -204,7 +220,8 @@ static void gm_lazy_tick(void) {
     if (!atomic_load(&g_lz_any)) return;
     static uint64_t last; uint64_t now = gm_now(); int scan = now - last > 200000000ull;
     if (pthread_mutex_trylock(&g_gm_pl)) { g_lz_busy++; return; }
-    for (int i = 0; i < g_nlz; i++) { if (g_lz[i].merge) { gm_lz_merge(&g_lz[i]); continue; } if (scan) gm_lz_scan(&g_lz[i]); gm_lz_place(&g_lz[i], 1, 1); }
+    int wr = scan && gm_lz_written();   // the written-pages scan (DM_VK_RAW_GMEM_WRITTEN=1) visits every pool; otherwise only those with a merge or a wanted chunk (thousands of pools)
+    for (int i = 0; i < g_nlz; i++) { gm_lz *L = &g_lz[i]; if (L->merge) { gm_lz_merge(L); continue; } if (wr) gm_lz_scan(L); if (L->want) gm_lz_place(L, 1, 1); }
     if (scan) last = now;
     pthread_mutex_unlock(&g_gm_pl);
 }

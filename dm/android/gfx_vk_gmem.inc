@@ -322,7 +322,8 @@ static int gm_code_skip(int flags) {
     if (v && (flags & NVN_MEMORY_POOL_FLAGS_SHADER_CODE)) { g_gm_code_skipped++; return 1; }
     return 0;
 }
-enum { GM_CHUNK = 2u << 20, GM_LAZY_MIN = 4u << 20 };   // a pool at least GM_LAZY_MIN is placed in chunks of GM_CHUNK as they are used (gfx_vk_gmem_lazy.inc)
+enum { GM_CHUNK = 2u << 20 };   // pools are placed in chunks of GM_CHUNK as they are used (gfx_vk_gmem_lazy.inc); one under it is a single chunk
+static uint64_t gm_lazy_min(void);   // the smallest pool placed in chunks: every pool, or DM_VK_RAW_GMEM_LAZY_MIN (gfx_vk_gmem_lazy.inc)
 static int gm_lazy_on(void); static void gm_lazy_add(const void *pool, uintptr_t lo, size_t size, int live); static void gm_lazy_drop(const void *pool);
 static void gm_place(const void *mem, uint64_t size, int live) {   // live: the pool is in use (mtl_pool_addressed); 0: at its Initialize, before anything uses it
     if (!size || !gm_game() || !vkb() || !gm_on()) return;   // (the game first: for another game the device is not made here, earlier than it would be)
@@ -338,7 +339,7 @@ static void gm_place(const void *mem, uint64_t size, int live) {   // live: the 
     if (over) { g_gm_overlap++; pthread_mutex_unlock(&g_gm_pl); static int nl; if (nl++ < 4) LOG("[vk] raw global memory: the memory pool at %#lx+%#llx overlaps a placed one: not placed (the placed one's pages serve both)", (unsigned long)lo, (unsigned long long)size); return; }
     { size_t np = (size_t)(size >> 12); unsigned char *v = malloc(np ? np : 1);   // how much of the pool the game had touched: the rest is committed by placing it
       if (v && !mincore((void *)lo, (size_t)size, v)) { size_t r = 0; for (size_t i = 0; i < np; i++) r += v[i] & 1; g_gm_resident += (uint64_t)r << 12; } free(v); }
-    if (gm_lazy_on() && size >= GM_LAZY_MIN) { gm_lazy_add(mem, lo, (size_t)size, live); pthread_mutex_unlock(&g_gm_pl); return; }   // in chunks, as they are used (gfx_vk_gmem_lazy.inc)
+    if (gm_lazy_on() && size >= gm_lazy_min()) { gm_lazy_add(mem, lo, (size_t)size, live); pthread_mutex_unlock(&g_gm_pl); return; }   // in chunks, as they are used (gfx_vk_gmem_lazy.inc)
     if (g_gm_cap && g_gm_bytes + size > g_gm_cap) { g_gm_capped++; pthread_mutex_unlock(&g_gm_pl); RED_ONCE(162, "raw global memory: %.2f GiB placed and DM_VK_RAW_GMEM_MAX is %.2f GiB: pools from %#lx+%#llx on stay anonymous, raw accesses to them read 0",
                                                                                                 g_gm_bytes / 1073741824.0, g_gm_cap / 1073741824.0, (unsigned long)lo, (unsigned long long)size); return; }
     gm_note fail = {0}, probe = {0};
