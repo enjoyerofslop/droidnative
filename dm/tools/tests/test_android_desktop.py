@@ -365,8 +365,11 @@ class VkCatalog(unittest.TestCase):   # the Vulkan driver catalog (dm/android/vk
 
     def test_download_checked_by_both_hashes(self):
         data = make_pkg(self.tmp).read_bytes(); base = self.serve({'/turnip.adpkg.zip': data}); e = self.entry(base, data)
+        self.assertFalse(vkd.present(e, self.tmp / 'dl'))
         f = vkd.download(e, self.tmp / 'dl')
-        self.assertEqual(f.read_bytes(), data); self.assertEqual(vkd.cached(e, self.tmp / 'dl'), f)
+        self.assertEqual(f.read_bytes(), data); self.assertEqual(vkd.cached(e, self.tmp / 'dl'), f); self.assertTrue(vkd.present(e, self.tmp / 'dl'))
+        f.write_bytes(bytes(len(data)))   # the same size, other bytes: present by its size, refused by its hash
+        self.assertTrue(vkd.present(e, self.tmp / 'dl')); self.assertIsNone(vkd.cached(e, self.tmp / 'dl'))
         other = make_pkg(self.tmp, 'other.zip', data=elf(pad=64)).read_bytes()   # same name, another driver: the zip's hash refuses it
         base2 = self.serve({'/turnip.adpkg.zip': other})
         with self.assertRaises(ValueError): vkd.download(self.entry(base2, data), self.tmp / 'dl2')
@@ -391,3 +394,8 @@ class VkCatalog(unittest.TestCase):   # the Vulkan driver catalog (dm/android/vk
         self.assertEqual(vk_catalog.check([e], lambda url: rel(f'sha256:{e["zip_sha256"]}')), [])
         self.assertIn('has changed', vk_catalog.check([e], lambda url: rel('sha256:' + '0' * 64))[0])
         self.assertIn('no longer', vk_catalog.check([e], lambda url: rel('x', 'other.zip'))[0])
+
+    def test_a_report_names_the_driver_and_its_last_start(self):   # every "it doesn't work on Turnip" report needs the driver named
+        h = ex.header({'version': '0.8.0', 'phone': 'Odin2', 'android': '13', 'gpu': 'Adreno (TM) 740', 'vk_driver': 'Mr. Purple Turnip T30', 'vk_result': 'fell back no Vulkan device'})
+        self.assertIn('Vulkan driver: Mr. Purple Turnip T30 (last start: fell back no Vulkan device)', h)
+        self.assertFalse(any('Vulkan driver' in x for x in ex.header({'phone': 'Odin2'})))

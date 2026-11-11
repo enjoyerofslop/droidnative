@@ -3,7 +3,8 @@
 # It drives scripts/build_android_from_nsp.py (its --progress json events, --info, --check, --push-only, --apk-only, --migrate) and adb:
 #   Get started  a new player's four steps (keys, tools, phone, first game), each with its state: where a first launch and the empty Library land; the top bar's
 #                "Setup 2 of 4" opens it while a step is left (dm/android/desktop/first_run.py works the steps out)
-#   Library      your games (the NSP folders you added): the picked one large, Play (on the phone picked at the top), its options and Manage; the collection below
+#   Library      your games (the NSP folders you added): the picked one large, Play (on the phone picked at the top), its options (version, language, the Vulkan
+#                driver from the catalog, dm/android/desktop/vk_drivers.py) and Manage; the collection below
 #   Builds       the running build: its stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console
 #                shows here too, from the journal the script writes (<data>/builds/*.jsonl)
 #   Phones       adb devices over USB and Wi-Fi (pair, connect, discover) with each one's GPU, the app and the games on each, saves backed up to the computer
@@ -25,7 +26,7 @@ try:
     from PySide6.QtWidgets import (  # pyright: ignore[reportMissingImports]
                                    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
                                    QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-                                   QProgressBar, QPushButton, QRadioButton, QScrollArea, QSplitter, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton,
+                                   QProgressBar, QProgressDialog, QPushButton, QRadioButton, QScrollArea, QSplitter, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton,
                                    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 except ImportError:
     sys.exit(f'DroidPlay (nxnative_android.py) needs PySide6: uv run {__file__}, or {sys.executable} -m pip install PySide6')
@@ -42,6 +43,7 @@ import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]  (p
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]  (how to connect a phone, by brand; its battery and free space)
 import update as upd   # noqa: E402  # pyright: ignore[reportMissingImports]  (the newest release, and its Setup downloaded and checked)
 import phone_gpu as gpu   # noqa: E402  # pyright: ignore[reportMissingImports]  (a phone's GPU from its properties and SurfaceFlinger's GLES line)
+import vk_drivers as vkd   # noqa: E402  # pyright: ignore[reportMissingImports]  (the Vulkan driver catalog, its downloads and a player's own drivers)
 
 LANGUAGES = [('en-US', 'American English'), ('en-GB', 'British English'), ('ja', 'Japanese'), ('fr', 'French'), ('de', 'German'), ('es-419', 'Latin American Spanish'),
              ('es', 'Spanish'), ('it', 'Italian'), ('nl', 'Dutch'), ('fr-CA', 'Canadian French'), ('pt', 'Portuguese'), ('ru', 'Russian'), ('ko', 'Korean'),
@@ -208,6 +210,7 @@ def alive(pid):
 def journal_title(argv):   # what a build from the console does, from its command line
     if '--apk-only' in argv: return 'Update the app'
     if '--migrate' in argv: return 'Move the old install'
+    if '--set-vk-driver' in argv: return 'Set the Vulkan driver'
     if '--setup' in argv: return fr.SETUP_TITLE
     folder = next((x for x in argv if not x.startswith('-') and Path(x).is_dir()), None)
     name = None
@@ -282,6 +285,159 @@ class Game:
         return f'{x}Not built yet', ERR if x else TEXT3, 'build'
 
 
+# ---------------- Vulkan drivers (droidplay's plans/turnip-driver-windows-app.md, phase 3) ----------------
+def vk_folder(): return ba.data_dir() / 'vk_drivers'
+
+
+class VkDrivers:   # the window's: the catalog (vk_drivers.json), the player's own drivers (QSettings vkdrv/custom/<id>) and each game's choice (vkdrv/<title ID>; '' = the system's)
+    def __init__(self, st):
+        self.st = st; self.error = ''
+        try: self.catalog = vkd.load()
+        except Exception as e: self.catalog = []; self.error = str(e)
+    def customs(self):
+        out = {}
+        for k in self.st.allKeys():
+            if k.startswith('vkdrv/custom/'):
+                try: out[k[13:]] = json.loads(str(self.st.value(k)))
+                except ValueError: pass
+        return out
+    def add_custom(self, rec): self.st.setValue(f'vkdrv/custom/{rec["id"]}', json.dumps(rec))
+    def remove_custom(self, rid):
+        self.st.remove(f'vkdrv/custom/{rid}')
+        for k in self.st.allKeys():
+            if k.startswith('vkdrv/') and k.count('/') == 1 and self.st.value(k) == rid: self.st.setValue(k, '')
+    def choice(self, gid): return str(self.st.value(f'vkdrv/{gid}', '') or '')
+    def entry(self, c): return next((e for e in self.catalog if e['id'] == c), None)
+    def name(self, c):
+        if not c: return 'System driver'
+        e = self.entry(c); r = self.customs().get(c)
+        return e['name'] if e else (r or {}).get('name') or c
+    def env_args(self, c):   # the Mesa switches a catalog entry sets beside its driver (its env), as the packing script takes them
+        return [x for line in (self.entry(c) or {}).get('env') or [] for x in ('--vk-driver-env', line)]
+    def file(self, c):   # the file the packing script takes for choice c, or None (a catalog entry not downloaded yet, a player's file gone). Hashes: off the UI thread
+        e = self.entry(c)
+        if e: return vkd.cached(e, vk_folder())
+        r = self.customs().get(c)
+        return Path(r['file']) if r and Path(r['file']).is_file() else None
+    def name_installed(self, path):   # a phone's DM_VK_DRIVER (vk_drivers/<stem>-<sha8>.so) → the driver's name, by the hash in its file name
+        tag = re.search(r'-([0-9a-f]{8})\.so$', path or '')
+        if tag:
+            for e in self.catalog:
+                if e['library_sha256'].startswith(tag[1]): return e['name']
+            for r in self.customs().values():
+                if r['sha256'].startswith(tag[1]): return r['name']
+        return Path(path).name if path else ''
+
+
+class VkDriverBox(QWidget):   # the options dialog's Vulkan driver choice for one game, marked against the picked phone's GPU (vk_drivers.mark)
+    def __init__(self, page, g):
+        super().__init__(); self.page, self.win, self.g = page, page.win, g; self.vk = self.win.vk
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        s = self.win.serial(); d = next((x for x in self.win.devs or [] if x['serial'] == s), {}) if s else {}
+        self.gpu, sdk = d.get('gpu') or {}, d.get('sdk')
+        lay.addWidget(label('VULKAN DRIVER' + (f'  ·  for {self.win.phone_name()} ({self.gpu.get("label") or "GPU not known"}, Android {d.get("android") or "?"})' if s else
+                                              '  ·  no phone picked: pick one to see which drivers suit it'), 'muted'))
+        self.not_adreno = self.gpu.get('kind') in ('mali', 'xclipse', 'powervr', 'other')
+        if self.not_adreno: lay.addWidget(label('This phone uses its own driver. The drivers DroidPlay can add (Turnip) are for Qualcomm Adreno GPUs only; a choice here is kept '
+                                                'for other phones, and an install to this one leaves it out.', 'meta', wrap=True))
+        nvn2 = str((ba.games_table().get(g.id) or {}).get('graphics', '')).upper().startswith('NVN2')
+        self.group = QButtonGroup(self); self.radios = {}; cur = self.vk.choice(g.id)
+        def add(cid, text, sub, enabled=True, extra=None, into=lay):
+            r = QRadioButton(text); r.setEnabled(enabled and not self.not_adreno); self.group.addButton(r); self.radios[cid] = r
+            row = QHBoxLayout(); row.addWidget(r); row.addStretch()
+            if extra: row.addWidget(extra)
+            into.addLayout(row)
+            if sub: lb = label(sub, 'muted', wrap=True); lb.setContentsMargins(26, 0, 0, 4); lb.setEnabled(enabled); into.addWidget(lb)
+            return r
+        add('', "System driver: the phone's own (the default)", '')
+        other = QWidget(); ol = QVBoxLayout(other); ol.setContentsMargins(0, 0, 0, 0); ol.setSpacing(6); n_other = 0
+        for e in self.vk.catalog:
+            m = vkd.mark(e, self.gpu, sdk, g.id); have = vkd.present(e, vk_folder())   # (by its size: the hashes are checked off this thread before it is used)
+            lines = [{'tested': '✓ ', 'supported': '○ ', 'unknown': '○ '}.get(m['kind'], '✕ ') + m['text'] + '.']
+            lines += [f'   {r["device"]} (Adreno {r["gpu"]}, Android {r["android"]}): {line or "; ".join(r["games"].values())}' for r, line in m['rows'][:3]]
+            if m['warn']: lines.append(f'⚠ {m["warn"]}.')
+            if nvn2 and vkd.mesh_note(e): lines.append(f'⚠ {vkd.mesh_note(e)}.')
+            fits = m['kind'] in (vkd.TESTED, vkd.SUPPORTED, vkd.UNKNOWN) or not s
+            if not fits: n_other += 1
+            add(e['id'], f'{e["name"]}  ·  Mesa {e.get("mesa") or "?"}  ·  ' + ('downloaded' if have else f'{gb_text(e["size"])} download'), '\n'.join(lines),
+                enabled=fits, into=lay if fits else ol)
+        for rid, rec in self.vk.customs().items():
+            rm = QPushButton('Remove'); rm.setObjectName('ghost'); rm.clicked.connect(lambda _=False, i=rid: self.remove(i))
+            add(rid, f'My driver: {rec["name"]}  ·  sha256 {rec["sha256"][:8]}…', 'A driver you added: not checked by DroidPlay on any phone.' +
+                (' A proprietary driver from another device.' if rec.get('proprietary') else ''), extra=rm)
+        (self.radios.get(cur) or self.radios['']).setChecked(True); self.prev = cur if cur in self.radios else ''
+        if n_other:   # open when the game's choice is one of them (a driver for another phone), so a choice is never hidden
+            more = QPushButton(f'Show drivers for other GPUs ({n_other})'); more.setObjectName('ghost'); more.setCheckable(True)
+            more.toggled.connect(other.setVisible); lay.addWidget(more, 0, Qt.AlignLeft); lay.addWidget(other)
+            shown = cur in self.radios and other.isAncestorOf(self.radios[cur]); more.setChecked(shown); other.setVisible(shown)
+        self.group.buttonClicked.connect(self.picked)
+        row = QHBoxLayout(); add_b = QPushButton('Add your own…'); add_b.clicked.connect(self.add_own); row.addWidget(add_b)
+        self.page_b = QPushButton("Builder's release page"); self.page_b.setObjectName('ghost'); self.page_b.clicked.connect(self.open_page); row.addWidget(self.page_b)
+        row.addStretch(); lay.addLayout(row); add_b.setEnabled(not self.not_adreno)
+        meta = self.win.phone_games.get(g.id) or {}
+        if s and g.id in self.win.phone_games:   # what the phone's copy of the game names now, and how its last start went (the host's vk_driver_result.txt)
+            on = meta.get('vk_driver'); res = meta.get('vk_result') or {}
+            lay.addWidget(label(f'On {self.win.phone_name()} now: ' + (self.vk.name_installed(on) if on else "the system driver"), 'meta'))
+            if res.get('result'):
+                ok = res['result'] == 'ok'; why = res.get('reason') or ''
+                lay.addWidget(label(f'Last start: ran on {self.vk.name_installed(on) or res.get("driver")} ✓' if ok else
+                                    f'Last start: ⚠ {res["result"]}{": " + why if why else ""}', 'meta', wrap=True))
+        if self.win.phone_env_driver:
+            lay.addWidget(label(f'⚠ env.txt on this phone sets DM_VK_DRIVER={self.win.phone_env_driver}, which wins for every game. Remove that line to choose per game.', 'meta', wrap=True))
+        row = QHBoxLayout(); self.apply_b = QPushButton('Apply to phone now'); self.apply_b.clicked.connect(self.apply); row.addWidget(self.apply_b)
+        row.addWidget(label('no rebuild; the game picks it up at its next start', 'muted')); row.addStretch(); lay.addLayout(row)
+        self.apply_b.setEnabled(bool(s and g.id in self.win.phone_games and not self.not_adreno))
+        lay.addWidget(label("A new driver compiles the game's shaders again at its first start (a minute or more). Each driver keeps its own cache.", 'muted', wrap=True))
+        self.picked_page()
+    def choice(self): return next((c for c, r in self.radios.items() if r.isChecked()), '')
+    def picked_page(self): self.page_b.setEnabled(self.vk.entry(self.choice()) is not None)
+    def picked(self, _btn):   # a catalog entry not downloaded yet: its size and source asked about once, then downloaded
+        c = self.choice(); e = self.vk.entry(c); self.picked_page()
+        if e and not vkd.present(e, vk_folder()):
+            host = '/'.join(e['url'].split('/')[2:4])
+            if not self.win.st.value(f'vkdrv/asked/{c}', False, type=bool):
+                if QMessageBox.question(self, 'Download the driver', f'Download {e["name"]} ({gb_text(e["size"])}) from {host}? DroidPlay checks it against the '
+                                        'checksums in its catalog and runs nothing from it on this computer.') != QMessageBox.Yes:
+                    self.radios[self.prev].setChecked(True); self.picked_page(); return
+                self.win.st.setValue(f'vkdrv/asked/{c}', True)
+            prev = self.prev
+            def got(f):   # a failed or cancelled download leaves the choice it replaced, so OK can't save a driver that isn't there
+                if f: self.prev = c
+                else: self.radios[prev].setChecked(True); self.picked_page()
+            self.win.vk_download(e, got); return
+        self.prev = c
+    def add_own(self):
+        f, _ = QFileDialog.getOpenFileName(self, 'Add a Vulkan driver', str(Path.home()), 'Driver packages (*.zip *.adpkg *.so)')
+        if not f: return
+        bg(lambda: vkd.import_custom(f, vk_folder()), self.added)   # read and hashed off the UI thread (a driver is about 19 MB)
+    def added(self, rec):
+        if isinstance(rec, Exception): QMessageBox.warning(self, 'Not a driver DroidPlay can use', str(rec)); return
+        text = vkd.ADD_WARNING + ('\n\n' + vkd.PROPRIETARY_WARNING.format(vendor=(rec.get('meta') or {}).get('vendor') or 'non-Mesa') if rec['proprietary'] else '')
+        box = QMessageBox(QMessageBox.Warning, 'Add your own driver', f'<b>{esc(rec["name"])}</b><br>sha256 {rec["sha256"]}', parent=self); box.setInformativeText(text)
+        box.setStyleSheet('QLabel#qt_msgbox_informativelabel { min-width: 460px; }')
+        go = box.addButton('Add it', QMessageBox.AcceptRole); box.addButton(QMessageBox.Cancel); box.exec()
+        if box.clickedButton() is not go: return
+        self.vk.add_custom(rec); self.win.st.setValue(f'vkdrv/{self.g.id}', rec['id']); self.win.toast(f'{rec["name"]} added: open the options again to see it')
+        self.window().close()
+    def remove(self, rid):
+        if QMessageBox.question(self, 'Remove the driver', f'Remove {self.vk.name(rid)} from DroidPlay? Games that chose it go back to the system driver at their next install.') != QMessageBox.Yes: return
+        self.vk.remove_custom(rid); shutil.rmtree(vk_folder() / rid, ignore_errors=True); self.window().close()
+    def open_page(self):
+        e = self.vk.entry(self.choice())
+        if e: QDesktopServices.openUrl(QUrl(e['page']))
+    def apply(self):   # --set-vk-driver: the phone's copy of the game switched now, with no build
+        c = self.choice(); s = self.win.serial(); self.win.st.setValue(f'vkdrv/{self.g.id}', c); win, g, after = self.win, self.g, self.page.after_task
+        def go(f):
+            if c and not f: return
+            win.builds.start(f'Set the Vulkan driver of {g.name}', ['--set-vk-driver', str(f) if c else 'system', '--title', g.id, '--serial', s, *win.vk.env_args(c)], after=after)
+        def have(f):
+            if c and f is None and win.vk.entry(c): win.vk_download(win.vk.entry(c), go)
+            else: go(f)
+        if c: bg(lambda: win.vk.file(c), lambda f: have(None if isinstance(f, Exception) else f))   # (hashed off the UI thread)
+        else: go(None)
+        self.window().close()
+
+
 class Hero(QWidget):   # the picked game, large: its art's wash behind, the art itself on the right, the status, the title and the actions
     def __init__(self):
         super().__init__(); self.setMinimumHeight(330); self.pm = QPixmap(); self.cache = None
@@ -293,7 +449,7 @@ class Hero(QWidget):   # the picked game, large: its art's wash behind, the art 
         self.meta = label('', 'meta', wrap=True); self.meta.setMaximumWidth(900); lay.addWidget(self.meta); lay.addStretch(); lay.addSpacing(20)
         row = QHBoxLayout(); row.setSpacing(16)
         self.play = QPushButton('  Play'); self.play.setObjectName('play'); self.play.setIcon(icon('play', '#121212', 22)); self.play.setIconSize(QSize(22, 22)); self.play.setCursor(Qt.PointingHandCursor)
-        self.opts = QPushButton(); self.opts.setObjectName('round'); self.opts.setIcon(icon('settings', TEXT, 22)); self.opts.setIconSize(QSize(22, 22)); self.opts.setToolTip('Version and language'); self.opts.setCursor(Qt.PointingHandCursor)
+        self.opts = QPushButton(); self.opts.setObjectName('round'); self.opts.setIcon(icon('settings', TEXT, 22)); self.opts.setIconSize(QSize(22, 22)); self.opts.setToolTip('Game options: version, language, Vulkan driver'); self.opts.setCursor(Qt.PointingHandCursor)
         self.manage = QToolButton(); self.manage.setObjectName('manage'); self.manage.setText(' Manage  '); self.manage.setIcon(icon('more', TEXT, 18)); self.manage.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.manage.setPopupMode(QToolButton.InstantPopup); self.manage.setCursor(Qt.PointingHandCursor)
         row.addWidget(self.play); row.addWidget(self.opts); row.addWidget(self.manage); row.addStretch(); lay.addLayout(row)
@@ -498,7 +654,7 @@ class LibraryPage(QWidget):
                               'will most likely not boot. Nothing is installed on the phone. It is the starting point for porting the game.', parent=self)
             go = box.addButton('Build anyway', QMessageBox.AcceptRole); box.setDefaultButton(box.addButton(QMessageBox.Cancel)); box.exec()
             if box.clickedButton() is go: self.run(g, ['--no-push'], 'Experimental build')
-    def run(self, g, extra, what, after=None):
+    def run(self, g, extra, what, after=None, vk=None):
         keys = self.win.st.value('keys', '')
         if not keys or not Path(keys).is_file(): self.win.toast('Pick your prod.keys first'); self.win.go('setup'); return
         args = [g.folder, '-k', keys, '-l', self.win.st.value(f'lang/{g.id}', 'en-US') or 'en-US']
@@ -509,10 +665,19 @@ class LibraryPage(QWidget):
             if not s: self.win.toast(self.win.no_phone()); return
             if self.win.phone_legacy and not self.legacy_ok(s): return
             args += ['--serial', s]
+        # the game's Vulkan driver (its options; vk: the game app dialog's pick), for what installs to a phone or packs a game app: downloaded first when the catalog's
+        # entry isn't yet, and checked again by the script (--vk-driver)
+        c = self.win.vk.choice(g.id) if vk is None else vk
         done = after or self.after_task
         def installed():   # it went onto that phone: the next Play there is a first start, with its shaders to prepare
             self.win.st.setValue(f'firststart/{s}/{g.id}', True); done()
-        self.win.builds.start(f'{what} {g.name}', args + extra, after=installed if '--serial' in args else done)
+        def start(more): self.win.builds.start(f'{what} {g.name}', args + extra + more, after=installed if '--serial' in args else done)
+        if not c or not ('--game-apk' in extra or ('--no-push' not in extra and '--update-shaders' not in extra)): start([]); return
+        def have(f):
+            if f is None and self.win.vk.entry(c): self.win.vk_download(self.win.vk.entry(c), lambda got: got and self.run(g, extra, what, after, c)); return
+            if f is None: self.win.toast(f'{self.win.vk.name(c)}, the Vulkan driver chosen for {g.name}, is gone: pick one in its options'); return
+            start(['--vk-driver', str(f), *self.win.vk.env_args(c)])
+        bg(lambda: self.win.vk.file(c), lambda f: have(None if isinstance(f, Exception) else f))   # (its hashes checked off the UI thread)
     def first_start_ok(self, g, s):   # the first Play since the game went onto this phone: say the screen stays black a while, so it isn't taken for a crash
         key = f'firststart/{s}/{g.id}'
         if not self.win.st.value(key, False, type=bool) or self.win.st.value('firststart/never', False, type=bool): return True
@@ -545,6 +710,11 @@ class LibraryPage(QWidget):
         lay.addWidget(label(f'One file, with {data} as the app\'s OBB file, for an XAPK installer app on the device. It holds a full copy of the data, so it takes '
                             'that much more space on this computer.', 'muted', wrap=True))
         (xapk if self.win.st.value('game_app_kind', 'apk') == 'xapk' else apk).setChecked(True)
+        lay.addSpacing(6); lay.addWidget(label('Vulkan driver', 'meta')); drv = QComboBox(); drv.addItem('System driver (works on every phone)', '')
+        for e in self.win.vk.catalog: drv.addItem(f'{e["name"]}  ·  Adreno ' + ', '.join(f'{lo}–{hi}' for lo, hi in e['gpus']), e['id'])
+        drv.setCurrentIndex(max(drv.findData(self.win.vk.choice(g.id)), 0)); lay.addWidget(drv)   # the catalog's only: a game app is made to share, and a driver you added may not be passed on
+        lay.addWidget(label("The app carries it and uses it on Adreno phones it suits; on a phone without an Adreno GPU, or one the driver doesn't support, the app "
+                            "uses the phone's own driver. To change it, build the app again.", 'muted', wrap=True))
         lay.addSpacing(6); lay.addWidget(label(f'It goes in the game\'s folder, {g.folder}, beside the other kind if that was built too.', 'muted', wrap=True))
         bb = QDialogButtonBox(QDialogButtonBox.Cancel); bb.addButton('Build', QDialogButtonBox.AcceptRole); bb.accepted.connect(d.accept); bb.rejected.connect(d.reject)
         foot = QWidget(); fl = QVBoxLayout(foot); fl.setContentsMargins(24, 8, 24, 24); fl.addWidget(bb); outer.addWidget(foot)
@@ -556,7 +726,7 @@ class LibraryPage(QWidget):
         x = xapk.isChecked(); self.win.st.setValue('game_app_kind', 'xapk' if x else 'apk')
         made = f'{ba.safe_name(g.name) or g.id}.{"xapk" if x else "apk"}'
         def done(): self.after_task(); reveal(g.folder); self.win.toast(f'{made} is in the game\'s folder')
-        self.run(g, ['--game-apk'] + (['--xapk'] if x else []), 'Build the game app of', after=done)
+        self.run(g, ['--game-apk'] + (['--xapk'] if x else []), 'Build the game app of', after=done, vk=drv.currentData())
     def after_task(self): self.win.refresh_phone(); self.reload()
     def legacy_ok(self, s):   # the phone holds the one-game install (files/game) and its save: installing moves it to the launcher, and the app copies the save on its next start
         b = QMessageBox(QMessageBox.Warning, 'This phone has a save', f'{self.win.phone_name()} has the app from before the launcher, with its game and save. Installing updates the app '
@@ -577,8 +747,15 @@ class LibraryPage(QWidget):
         i = lang.findData(self.win.st.value(f'lang/{g.id}', 'en-US')); lang.setCurrentIndex(max(i, 0))
         f.addRow(label('Version to pack', 'meta'), ver); f.addRow(label('Game language', 'meta'), lang)
         f.addRow(label('The language is the default on the phone; the app\'s settings screen changes it too.', 'muted', wrap=True))
+        # Advanced options: the game's Vulkan driver, folded away unless one is chosen, so a choice other than the default is never hidden
+        box = VkDriverBox(self, g); adv = QToolButton(); adv.setText('Advanced options'); adv.setCheckable(True); adv.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        adv.setStyleSheet(f'QToolButton {{ border: none; color: {TEXT2}; font-weight: 600; }}')
+        adv.toggled.connect(lambda on: (box.setVisible(on), adv.setArrowType(Qt.DownArrow if on else Qt.RightArrow), d.adjustSize()))
+        on = bool(self.win.vk.choice(g.id)); adv.setChecked(on); box.setVisible(on); adv.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        f.addRow(adv); f.addRow(box)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); bb.accepted.connect(d.accept); bb.rejected.connect(d.reject); f.addRow(bb)
-        if d.exec(): self.win.st.setValue(f'ver/{g.id}', ver.currentData()); self.win.st.setValue(f'lang/{g.id}', lang.currentData())
+        if d.exec():
+            self.win.st.setValue(f'ver/{g.id}', ver.currentData()); self.win.st.setValue(f'lang/{g.id}', lang.currentData()); self.win.st.setValue(f'vkdrv/{g.id}', box.choice())
     def fill_menu(self):
         self.menu.clear(); g = self.current(); s = self.win.serial()
         if not g: self.menu.addAction('Add a game…', self.win.add_game); return
@@ -771,7 +948,13 @@ class BuildsPage(QWidget):
     def report_info(self):   # the report's header: the phone by its model, never the name its owner gave it
         ctx, g, serial, st = self.context(); d = next((d for d in self.win.devs or [] if d['serial'] == serial), {})
         return {'version': self.win.version, 'title': self.title, 'stage': st[2], 'k': st[0], 'n': st[1], 'game': g.name if g else '', 'game_id': g.id if g else '',
-                'game_version': (g.display or g.newest) if g else '', 'phone': d.get('model') or ('a phone' if serial else ''), 'android': d.get('android', '')}, serial
+                'game_version': (g.display or g.newest) if g else '', 'phone': d.get('model') or ('a phone' if serial else ''), 'android': d.get('android', ''),
+                **self.vk_info(g)}, serial
+    def vk_info(self, g):   # the Vulkan driver the phone's copy of the game names, and how its last start with it went: every Turnip report needs them
+        m = self.win.phone_games.get(g.id) or {} if g else {}
+        if not m.get('vk_driver'): return {}
+        res = m.get('vk_result') or {}
+        return {'vk_driver': self.win.vk.name_installed(m['vk_driver']), 'vk_result': ' '.join(x for x in (res.get('result', ''), res.get('reason', '')) if x)}
     def copy_report(self):   # Markdown for #help, under Discord's 2,000 characters: the phone's GPU asked for first (adb, a second or two)
         info, serial = self.report_info(); reds, lines = list(self.reds), self.log.toPlainText().splitlines()
         known = self.win.gles.get(serial, '') if serial else ''   # the Phones page asked already, most often
@@ -948,7 +1131,8 @@ class PhonesPage(QWidget):
         self.app.setText(f'The DroidPlay app {m.get("versionName", "")} · updated {m["lastUpdateTime"][:16]}' if 'lastUpdateTime' in m else
                          'The DroidPlay app is not installed' if self.win.serial() else 'The app and the games on the picked phone show here.')
         for gid, meta in games.items():
-            it = QListWidgetItem(f'{meta.get("name") or gid}     {gid} · {meta.get("display") or meta.get("version") or "?"}'); it.setData(Qt.UserRole, gid); self.games.addItem(it)
+            drv = self.win.vk.name_installed(meta['vk_driver']) if meta.get('vk_driver') else ''   # a game whose defaults.txt names a Vulkan driver
+            it = QListWidgetItem(f'{meta.get("name") or gid}     {gid} · {meta.get("display") or meta.get("version") or "?"}' + (f' · {drv}' if drv else '')); it.setData(Qt.UserRole, gid); self.games.addItem(it)
         if legacy: self.games.addItem('A one-game install (files/game, before the launcher): Move the old one-game install puts it in the launcher, its save copied over')
     def pair(self):
         addr, ok = QInputDialog.getText(self, 'Pair over Wi-Fi', 'Address and port from "Pair device with pairing code" (e.g. 192.168.1.125:37123):')
@@ -1351,6 +1535,7 @@ class Window(QMainWindow):
         self.st = QSettings('nxnative', 'android'); self.devs = None; self.adb = True; self.phone_games = {}; self.phone_legacy = False; self.models = {}   # the old name: the settings stay
         # each phone's GLES renderer, asked once (about a second) and kept: the Phones page's GPU column, Copy report, which Vulkan drivers fit (phone_gpu.py)
         self.gles = {k[4:]: str(self.st.value(k) or '') for k in self.st.allKeys() if k.startswith('gpu/')}; self.gles_tried = set()
+        self.vk = VkDrivers(self.st); self.phone_env_driver = ''   # the Vulkan drivers; DM_VK_DRIVER in the picked phone's env.txt, which wins over every game's choice
         central = QWidget(); central.setObjectName('page'); root = QVBoxLayout(central); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0); self.setCentralWidget(central)
         # the top bar: the wordmark, the pages, the phone, search, + Build game
         top = QWidget(); top.setObjectName('topbar'); top.setAttribute(Qt.WA_StyledBackground, True); tl = QHBoxLayout(top); tl.setContentsMargins(28, 14, 28, 14); tl.setSpacing(6)
@@ -1504,26 +1689,43 @@ class Window(QMainWindow):
         s = self.serial()
         if s: self.st.setValue('serial', s)
         self.refresh_phone()
+    def vk_download(self, e, done):   # a catalog driver from its builder's release, checked (vk_drivers.download), with a bar; done(its file, or None)
+        st = {'done': 0, 'total': e['size'], 'cancel': False}
+        dlg = QProgressDialog(f'Downloading {e["name"]} from {"/".join(e["url"].split("/")[2:4])}…', 'Cancel', 0, 100, self); dlg.setWindowModality(Qt.WindowModal); dlg.setMinimumDuration(0)
+        t = QTimer(dlg); t.timeout.connect(lambda: dlg.setValue(min(99, int(100 * st['done'] / max(st['total'], 1))))); t.start(100)
+        dlg.canceled.connect(lambda: st.update(cancel=True))
+        def got(r):
+            t.stop(); dlg.close()
+            if isinstance(r, Exception):
+                if not isinstance(r, vkd.Cancelled): QMessageBox.warning(self, 'The driver did not download', str(r))
+                done(None)
+            else: done(r)
+        bg(lambda: vkd.download(e, vk_folder(), lambda a, b: st.update(done=a, total=b or st['total']), lambda: st['cancel']), got)
     def refresh_phone(self):   # the app and the games on the picked phone: the Library's statuses and the Phones page
         s = self.serial()
-        if not s: self.phone_games = {}; self.library.refresh_status(); self.phones.show_phone('', {}, False); return
+        if not s: self.phone_games = {}; self.phone_env_driver = ''; self.library.refresh_status(); self.phones.show_phone('', {}, False); return
         def look():
             _, pkg = adb_run(s, 'shell', f'dumpsys package {PKG} | grep -E "lastUpdateTime|versionName" | head -2')
             # game.json on one line, its \r too: a build on Windows wrote it with \r\n, and splitlines() below cut the JSON at each \r
-            _, ls = adb_run(s, 'shell', f'for d in {REMOTE}/games/*/; do [ -f "$d/code/main.fixups.tsv" ] || continue; echo "@$d"; cat "$d/game.json" 2>/dev/null | tr -d "\\r\\n"; echo; echo "#$(ls "$d/glslc_capture" 2>/dev/null | wc -l)"; done; '
-                                        f'[ -f {REMOTE}/game/code/main.fixups.tsv ] && echo LEGACY')
-            games, legacy, cur = {}, False, None
+            # and each game's Vulkan driver (defaults.txt's DM_VK_DRIVER), its last start (the host's vk_driver_result.txt), and env.txt's DM_VK_DRIVER, which wins over them
+            _, ls = adb_run(s, 'shell', f'for d in {REMOTE}/games/*/; do [ -f "$d/code/main.fixups.tsv" ] || continue; echo "@$d"; cat "$d/game.json" 2>/dev/null | tr -d "\\r\\n"; echo; echo "#$(ls "$d/glslc_capture" 2>/dev/null | wc -l)"; '
+                                        'echo "%$(grep -m1 "^DM_VK_DRIVER=" "$d/defaults.txt" 2>/dev/null | tr -d "\\r")"; echo "^$(tr "\\n" "|" < "$d/vk_driver_result.txt" 2>/dev/null)"; done; '
+                                        f'echo "~$(grep -m1 "^DM_VK_DRIVER=" {REMOTE}/env.txt 2>/dev/null | tr -d "\\r")"; [ -f {REMOTE}/game/code/main.fixups.tsv ] && echo LEGACY')
+            games, legacy, cur, env_drv = {}, False, None, ''
             for l in ls.splitlines():
                 if l == 'LEGACY': legacy = True
+                elif l.startswith('~'): env_drv = l[1:].partition('=')[2].strip()
+                elif cur and l.startswith('%'): games[cur]['vk_driver'] = l[1:].partition('=')[2].strip()
+                elif cur and l.startswith('^'): games[cur]['vk_result'] = dict(x.split('=', 1) for x in l[1:].split('|') if '=' in x)
                 elif l.startswith('@'): cur = l[1:].rstrip('/').rsplit('/', 1)[-1].upper(); games[cur] = {}
                 elif cur and l.strip().startswith('{'):
-                    try: games[cur] = dict(json.loads(l), **{k: v for k, v in games[cur].items() if k == 'captures'})
+                    try: games[cur] = dict(json.loads(l), **{k: v for k, v in games[cur].items() if k in ('captures', 'vk_driver', 'vk_result')})
                     except ValueError: pass
                 elif cur and l.startswith('#') and l[1:].strip().isdigit(): games[cur]['captures'] = int(l[1:])   # run-time shaders the game saved on the phone
-            return pkg, games, legacy
+            return pkg, games, legacy, env_drv
         def got(r):
             if isinstance(r, Exception): return
-            pkg, games, legacy = r
+            pkg, games, legacy, self.phone_env_driver = r
             self.phone_games = games if 'lastUpdateTime' in pkg else {}; self.phone_legacy = legacy
             self.library.refresh_status(); self.phones.show_phone(pkg, games, legacy)
         bg(look, got)
