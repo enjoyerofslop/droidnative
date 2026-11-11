@@ -109,6 +109,10 @@ When the phone picked at the top drops off Wi-Fi (it slept, roamed, or Wireless 
 it again. If the phone's Wi-Fi itself went off, Android turns Wireless debugging off with it: turn it on again on the phone. The Performance page's log carries
 on once the phone is back.
 
+**Use over Wi-Fi…** (Phones page) takes a phone connected by its cable onto Wi-Fi with no pairing, on Android 10 as well: DroidPlay restarts adb on the phone in
+network mode (`adb tcpip 5555`) and connects to it at its Wi-Fi address, and then the cable can come out. That connection is **not encrypted** (the phone still
+accepts only computers it has allowed) and lasts until the phone restarts; on Android 11 and later, Pair over Wi-Fi gives an encrypted one.
+
 ### From source
 
 On Linux or a Mac, or on Windows without Setup, `uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the

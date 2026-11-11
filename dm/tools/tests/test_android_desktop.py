@@ -237,6 +237,20 @@ class WiFi(unittest.TestCase):   # PairDialog and Connect…: adb's mDNS list, p
         self.assertEqual(wifi.stale(devs, 'e7879cce', {'10.0.0.7:5555': 'e7879cce'}, 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp'), ['10.0.0.7:5555'])   # known by ID this session
         self.assertEqual(wifi.stale(devs, 'e7879cce', {}, 'R5CY51ZLGKH'), [])   # back on its cable: an address's IP isn't known to be its
 
+    def test_a_cable_phones_wifi_address(self):   # Use over Wi-Fi reads it before adb tcpip, while the cable still reaches the phone
+        out = ('1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000\n    inet 127.0.0.1/8 scope host lo\n'
+               '14: rmnet_data2: <UP,LOWER_UP> mtu 1500 qdisc mq state UNKNOWN group default qlen 1000\n    inet 10.168.2.17/30 scope global rmnet_data2\n'
+               '30: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 3000\n'
+               '    inet 192.168.50.66/24 brd 192.168.50.255 scope global dynamic wlan0\n')
+        self.assertEqual(wifi.wifi_ip(out), '192.168.50.66')   # the Pad 3's, as q215 read it; not the mobile network's
+        self.assertIsNone(wifi.wifi_ip(out.split('30: wlan0')[0].replace('rmnet_data2', 'rmnet_data2')))   # on mobile data only: no Wi-Fi address
+        self.assertEqual(wifi.wifi_ip('5: eth0: <UP>\n    inet 10.0.0.9/24 brd 10.0.0.255 scope global eth0\n'), '10.0.0.9')   # a handheld on a dock's Ethernet
+
+    def test_adb_tcpip_replies(self):
+        self.assertEqual(wifi.tcpip_result(True, 'restarting in TCP mode port: 5555')[0], True)
+        ok, text = wifi.tcpip_result(False, 'error: closed'); self.assertFalse(ok); self.assertIn('error: closed', text)
+        self.assertIn('not encrypted', wifi.TCPIP_WARNING); self.assertIn('Android 10', wifi.TCPIP_WARNING)
+
     def test_after_pairing_the_phones_connection_is_found(self):   # adb's own connection by mDNS name, or the service the phone offers at the same address
         devs = 'List of devices attached\nR5CY51ZLGKH\tdevice\nadb-e7879cce-DkIYY8._adb-tls-connect._tcp\tdevice\n'
         self.assertEqual(wifi.listed(devs, 'e7879cce', '192.168.50.66'), 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp')

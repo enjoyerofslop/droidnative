@@ -996,7 +996,7 @@ class PhonesPage(QWidget):
         self.warn = label('', wrap=True); self.warn.setStyleSheet(f'color: {BUILD}; font-size: 13px'); self.warn.hide(); lay.addWidget(self.warn)   # the picked phone's low battery
         row = QHBoxLayout(); self.adb_buttons = []
         b = QPushButton('How to connect a phone…'); b.clicked.connect(win.phone_guide); row.addWidget(b)
-        for text, fn in (('Pair over Wi-Fi…', self.pair), ('Connect…', self.connect), ('Discover', self.discover), ('Disconnect', self.disconnect)):
+        for text, fn in (('Pair over Wi-Fi…', self.pair), ('Connect…', self.connect), ('Discover', self.discover), ('Disconnect', self.disconnect), ('Use over Wi-Fi…', self.tcpip)):
             b = QPushButton(text); b.clicked.connect(fn); row.addWidget(b); self.adb_buttons.append(b)
         row.addStretch(); lay.addLayout(row)
         lay.addSpacing(10); self.ph = label('The picked phone', 'h2'); lay.addWidget(self.ph); self.app = label('—', 'meta', wrap=True); lay.addWidget(self.app)
@@ -1075,6 +1075,29 @@ class PhonesPage(QWidget):
                lambda _: (self.win.toast(f'Wireless debugging is off on {name}: turn it on again on the phone to reconnect'), self.win.refresh_devices())); return
         bg(lambda: adb_run(None, 'disconnect', s, timeout=15), lambda r: (self.win.toast(f'Disconnected {name}' if not isinstance(r, Exception) and r[0] else f'Could not disconnect {name}: {r[1] if not isinstance(r, Exception) else r}'),
                                                                            self.win.refresh_devices()))
+    def tcpip(self):   # a phone on its cable, over Wi-Fi with no pairing (adb tcpip): Android 10 has no Wireless debugging, and a phone allowed over USB needs no pairing
+        r = self.table.currentRow(); s = self.table.item(r, 0).data(Qt.UserRole) if r >= 0 and self.table.item(r, 0) else self.win.serial()
+        name = self.win.models.get(s) or s
+        if not s or phone_id.wifi(s): self.win.toast('Pick a phone connected by its cable: Use over Wi-Fi starts from there'); return
+        box = QMessageBox(QMessageBox.Question, 'Use over Wi-Fi', f'<b>Use {esc(name)} over Wi-Fi?</b>', parent=self); box.setInformativeText(wifi.TCPIP_WARNING)
+        box.setStyleSheet('QLabel#qt_msgbox_informativelabel { min-width: 460px; }')
+        go = box.addButton('Use over Wi-Fi', QMessageBox.AcceptRole); box.addButton(QMessageBox.Cancel); box.setDefaultButton(go); box.exec()
+        if box.clickedButton() is not go: return
+        def run():   # its Wi-Fi address first: adb on the phone is out of reach over USB for a moment once it restarts
+            ip = wifi.wifi_ip(adb_run(s, 'shell', wifi.IP_CMD, timeout=10)[1])
+            if not ip: return False, f'{name} is not on Wi-Fi: connect it to the same network as this PC, then try again'
+            ok, text = wifi.tcpip_result(*adb_run(s, 'tcpip', str(wifi.TCPIP_PORT), timeout=20))
+            if not ok: return False, text
+            addr = f'{ip}:{wifi.TCPIP_PORT}'
+            for _ in range(6):   # adb on the phone takes a second or two to listen again
+                time.sleep(2); ok, text = wifi.connect_result(*adb_run(None, 'connect', addr, timeout=10))
+                if ok: return True, addr
+            return False, text
+        def got(r):
+            ok, text = r if not isinstance(r, Exception) else (False, str(r))
+            if ok: self.win.st.setValue('wifi', text)
+            self.win.toast(f'{name} is connected over Wi-Fi at {text} (not encrypted): you can unplug its cable' if ok else re.sub(r'<[^>]+>', '', text)); self.win.refresh_devices()
+        self.win.toast(f'Connecting to {name} over Wi-Fi…'); bg(run, got)
     def update_app(self):
         s = self.win.serial()
         if s: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.win.refresh_phone)

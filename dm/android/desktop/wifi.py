@@ -94,3 +94,22 @@ def stale(devs, want, seen, now):   # the offline Wi-Fi entries a phone left beh
     ip = now.rsplit(':', 1)[0] if phone_id.transport(now) == 'tcp' else None
     return [d['serial'] for d in devs if d['state'] == 'offline' and d['serial'] != now and phone_id.wifi(d['serial']) and
             (seen.get(d['serial']) == want or phone_id.serialno_of(d['serial']) == want or (ip and d['serial'].rsplit(':', 1)[0] == ip))]
+
+
+TCPIP_PORT = 5555   # adb tcpip's: Use over Wi-Fi restarts the phone's adb on it
+TCPIP_WARNING = ("DroidPlay restarts adb on the phone in network mode (adb tcpip) and connects to it at its Wi-Fi address, with no pairing: this works on "
+                 "Android 10 too. <b>This connection is not encrypted</b>: someone on your network could see what goes over it (the phone still accepts only "
+                 "computers it has allowed). It lasts until the phone restarts. On Android 11 and later, Pair over Wi-Fi gives an encrypted connection.")
+IP_CMD = 'ip -f inet addr show'   # every interface's IPv4 address, in one shell call
+
+
+def wifi_ip(out):   # `ip -f inet addr show` → the phone's Wi-Fi address (a wlan* interface's; else the first that isn't loopback or a phone network's), or None
+    found = re.findall(r'inet (\d+\.\d+\.\d+\.\d+)/\d+.*?\b(\S+)\s*$', out or '', re.M)
+    for ip, dev in found:
+        if dev.startswith('wlan'): return ip
+    return next((ip for ip, dev in found if not dev.startswith(('lo', 'rmnet', 'ccmni', 'dummy', 'tun', 'v4-'))), None)
+
+
+def tcpip_result(ok, out):   # adb tcpip's exit and output → (restarted, what to tell the player)
+    if 'restarting in tcp mode' in (out or '').lower(): return True, 'adb restarted on the phone in network mode'
+    return False, f"adb on the phone didn't restart in network mode: {last_line(out)}"
