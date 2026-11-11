@@ -66,6 +66,14 @@ class Json(unittest.TestCase):
         self.assertTrue(ba.ANDROID_TESTED)
         self.assertEqual(sorted(g for g in ba.ANDROID_TESTED if g not in t), [])
 
+    def test_game_status_rows_start_with_a_tier(self):   # the README's tiers spelled as its tier table spells them: a hyphen typed for the en dash, or a bare "Playable", fails
+        tiers = ('Playable – minor issues through ', 'Playable – major issues through ', 'In-game', 'Menus', 'Boots', "Doesn't run")
+        table = (REPO / 'README.md').read_text(encoding='utf-8').split('| Game | Device | State |\n|---|---|---|\n', 1)[1].split('\n\n', 1)[0]
+        rows = [[c.strip() for c in line[1:-1].split('|')] for line in table.splitlines()]
+        self.assertGreater(len(rows), 10)
+        self.assertEqual([r[0] for r in rows if len(r) != 3], [])
+        self.assertEqual([r[0] for r in rows if not r[2].lstrip('*').startswith(tiers)], [])
+
 
 class Windows(unittest.TestCase):
     def test_loads_where_python_has_no_fcntl(self):   # Windows: build_ipa_from_nsp.py loads tree_tar.py, which imports fcntl; dm/android/tools/compat's stand-in is found
