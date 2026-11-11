@@ -743,6 +743,21 @@ class VkDriverGameApp(Base):   # --game-apk --vk-driver: the driver and its NOTI
         self.assertEqual(staged['defaults.txt'].decode(), f'DM_LANG=en-US\nDM_VK_DRIVER=games/{GID}/vk_driver/{vk.name}\nDM_VK_DRIVER_SHA256={vk.sha256}\nTU_DEBUG=sysmem\n')
         self.assertIn(f'vk_driver/{vk.name}', staged['files.txt'].decode().split('\n'))   # GameStart unpacks what files.txt lists
 
+    def test_the_notice_claims_no_terms_the_builder_didnt_give(self):   # Mesa's core is MIT; a builder's patches are its own (T30's repository has no licence at all)
+        v = vkpkg(); d = v.read(make_pkg(self.tmp))
+        n = v.notice(d); self.assertIn("Mesa's core is under the MIT licence", n); self.assertIn("the builder's to state", n); self.assertNotIn('apply to this copy', n)
+        self.assertIn('records their terms: MIT (the repository and its patches)', v.notice(d, 'MIT (the repository and its patches)'))
+
+    def test_a_proprietary_driver_stays_out_of_game_apps(self):
+        v = vkpkg(); meta = {'schemaVersion': 1, 'name': 'Q', 'description': '', 'author': 'Q', 'packageVersion': '1', 'vendor': 'Qualcomm', 'driverVersion': '891',
+                             'minApi': 33, 'libraryName': 'vulkan.adreno.so'}
+        q = v.read(make_pkg(self.tmp, 'q.zip', 'vulkan.adreno.so', meta=meta)); self.assertIn('Qualcomm', v.proprietary(q))
+        so = self.tmp / 'vulkan.adreno.so'; so.write_bytes(elf(needed=('libc.so', 'libgsl.so', 'libllvm-qgl.so')))   # a bare .so: told by what it needs
+        self.assertIn('libgsl.so', v.proprietary(v.read(so)))
+        self.assertEqual(v.proprietary(v.read(make_pkg(self.tmp))), '')
+        with self.assertRaises(ba.BuildError): ba.game_app_driver(q)
+        ba.game_app_driver(v.read(make_pkg(self.tmp)))   # a Mesa build goes in
+
     def test_gamestart_clears_an_old_driver_at_an_update(self):   # a rebuild without --vk-driver leaves no 19 MB driver behind
         src = (REPO / 'dm/android/java/org/nxnative/android/GameStart.java').read_text()
         self.assertRegex(src, r'new String\[\] \{[^}]*"vk_driver"[^}]*\}\) rm\(')
