@@ -1824,7 +1824,11 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Fix:** `own_alias` (in `tbuf_view` and in `stage_set`'s storage buffers) binds a binding that lies inside a write-back this same draw or dispatch made on that write-back's copy. It adds no copy and no write-back of its own; `wb_alias.h` decides, and `test_wb_alias.py` tests it.
   - The `[vk] read on the GPU from a dispatch's pending write` line counts these bindings.
   - `DM_VK_ALIAS=0`: each binding gets its own copy, as before.
-- **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md)'s Niagara argument shader `544e80ec57b3a10b`. It binds its 8 KB counts buffer as an R32ui image it reads and as a format-less image it clears, and on its title screen it's the first in its submission to write that buffer. In the field an earlier dispatch has written it, so both bindings were already in place there.
+- **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md)'s Niagara argument shader `544e80ec57b3a10b`. It binds its 8 KB counts buffer as an R32ui image it reads and as a format-less image it clears. As the first field loads it's the first in its submission to write that buffer, and own_alias binds 16 bindings in those frames. Later in the field an earlier dispatch has written it, so both bindings are already in place.
+- **Check:** Final Fantasy Resonance's `field` route on a Moto Razr Plus 2023 (Adreno 730), with and without (`DM_VK_ALIAS=0`).
+  - The 16 bindings come 54 s in, as the field loads.
+  - 15.9–16.0 fps against 16.0, GPU 38.5–38.6 ms against 38.3. The picture at the route's end is the same.
+  - Super Mario Odyssey on a Retroid Pocket 5 binds none (59.4 against 59.5 fps).
 
 ### Render passes kept over CPU-side commands
 
