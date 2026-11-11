@@ -329,6 +329,20 @@ class VkDrivers:   # the window's: the catalog (vk_drivers.json), the player's o
         return Path(path).name if path else ''
 
 
+def ask_download(parent, win, e):   # a catalog driver's download, asked about once per driver (its size and source): True to go on
+    if win.st.value(f'vkdrv/asked/{e["id"]}', False, type=bool): return True
+    if QMessageBox.question(parent, 'Download the driver', f'Download {e["name"]} ({gb_text(e["size"])}) from {"/".join(e["url"].split("/")[2:4])}? DroidPlay checks it '
+                            'against the checksums in its catalog and runs nothing from it on this computer.') != QMessageBox.Yes: return False
+    win.st.setValue(f'vkdrv/asked/{e["id"]}', True); return True
+
+
+def driver_suggestion(win, g):   # (catalog entry, Adreno number, its tested line for g) when the picked phone's last start of g had pipelines refused on its own driver
+    s = win.serial(); m = win.phone_games.get(g.id) or {} if s else {}
+    if not m or win.st.value(f'vkdrv/nosuggest/{g.id}', '') or m.get('vk_driver'): return None   # dismissed; or a driver already set on the phone
+    d = next((x for x in win.devs or [] if x['serial'] == s), {})
+    return vkd.suggestion(win.vk.catalog, m.get('vk_start'), d.get('gpu'), g.id, win.vk.choice(g.id))
+
+
 class VkDriverBox(QWidget):   # the options dialog's Vulkan driver choice for one game, marked against the picked phone's GPU (vk_drivers.mark)
     def __init__(self, page, g):
         super().__init__(); self.page, self.win, self.g = page, page.win, g; self.vk = self.win.vk
@@ -349,6 +363,11 @@ class VkDriverBox(QWidget):   # the options dialog's Vulkan driver choice for on
             into.addLayout(row)
             if sub: lb = label(sub, 'muted', wrap=True); lb.setContentsMargins(26, 0, 0, 4); lb.setEnabled(enabled); into.addWidget(lb)
             return r
+        sug = driver_suggestion(self.win, g)
+        if sug and not self.not_adreno:   # the last start's refused pipelines, and a driver tested for this game on this GPU: said, chosen only by the player
+            row = QHBoxLayout(); row.addWidget(label(vkd.suggestion_text(self.win.phone_games[g.id]['vk_start'], sug[0], sug[1], g.name), 'meta', wrap=True), 1)
+            pick = QPushButton(f'Choose {sug[0]["name"]}'); pick.clicked.connect(lambda: (self.radios[sug[0]['id']].setChecked(True), self.picked(None))); row.addWidget(pick)
+            lay.addLayout(row)
         add('', "System driver: the phone's own (the default)", '')
         other = QWidget(); ol = QVBoxLayout(other); ol.setContentsMargins(0, 0, 0, 0); ol.setSpacing(6); n_other = 0
         for e in self.vk.catalog:
@@ -394,12 +413,7 @@ class VkDriverBox(QWidget):   # the options dialog's Vulkan driver choice for on
     def picked(self, _btn):   # a catalog entry not downloaded yet: its size and source asked about once, then downloaded
         c = self.choice(); e = self.vk.entry(c); self.picked_page()
         if e and not vkd.present(e, vk_folder()):
-            host = '/'.join(e['url'].split('/')[2:4])
-            if not self.win.st.value(f'vkdrv/asked/{c}', False, type=bool):
-                if QMessageBox.question(self, 'Download the driver', f'Download {e["name"]} ({gb_text(e["size"])}) from {host}? DroidPlay checks it against the '
-                                        'checksums in its catalog and runs nothing from it on this computer.') != QMessageBox.Yes:
-                    self.radios[self.prev].setChecked(True); self.picked_page(); return
-                self.win.st.setValue(f'vkdrv/asked/{c}', True)
+            if not ask_download(self, self.win, e): self.radios[self.prev].setChecked(True); self.picked_page(); return
             prev = self.prev
             def got(f):   # a failed or cancelled download leaves the choice it replaced, so OK can't save a driver that isn't there
                 if f: self.prev = c
@@ -446,7 +460,15 @@ class Hero(QWidget):   # the picked game, large: its art's wash behind, the art 
         lay.addWidget(self.status); lay.addSpacing(18)
         self.title = label('', wrap=True); self.title.setStyleSheet('font-size: 54px; font-weight: 800; letter-spacing: -1.6px; line-height: 1.05')
         self.title.setMaximumWidth(900); lay.addWidget(self.title); lay.addSpacing(10)
-        self.meta = label('', 'meta', wrap=True); self.meta.setMaximumWidth(900); lay.addWidget(self.meta); lay.addStretch(); lay.addSpacing(20)
+        self.meta = label('', 'meta', wrap=True); self.meta.setMaximumWidth(900); lay.addWidget(self.meta)
+        # a driver to try (driver_suggestion): the phone's own refused some of this game's pipelines at its last start, and the catalog has one tested for it there
+        self.tip = QFrame(); self.tip.setObjectName('tipbanner'); self.tip.setMaximumWidth(900)
+        self.tip.setStyleSheet('QFrame#tipbanner { background: rgba(253,243,220,0.07); border: 1px solid rgba(253,243,220,0.25); border-radius: 12px; }')
+        tl = QHBoxLayout(self.tip); tl.setContentsMargins(16, 10, 10, 10); tl.setSpacing(10)
+        self.tip_text = label('', 'meta', wrap=True); tl.addWidget(self.tip_text, 1)
+        self.tip_try = QPushButton(); tl.addWidget(self.tip_try)
+        self.tip_no = QPushButton('Not now'); self.tip_no.setObjectName('ghost'); tl.addWidget(self.tip_no)
+        lay.addSpacing(12); lay.addWidget(self.tip); self.tip.hide(); lay.addStretch(); lay.addSpacing(20)
         row = QHBoxLayout(); row.setSpacing(16)
         self.play = QPushButton('  Play'); self.play.setObjectName('play'); self.play.setIcon(icon('play', '#121212', 22)); self.play.setIconSize(QSize(22, 22)); self.play.setCursor(Qt.PointingHandCursor)
         self.opts = QPushButton(); self.opts.setObjectName('round'); self.opts.setIcon(icon('settings', TEXT, 22)); self.opts.setIconSize(QSize(22, 22)); self.opts.setToolTip('Game options: version, language, Vulkan driver'); self.opts.setCursor(Qt.PointingHandCursor)
@@ -532,13 +554,14 @@ class Card(QWidget):   # one game of the collection: its art in a 16:9 frame (th
 # ---------------- Library ----------------
 class LibraryPage(QWidget):
     def __init__(self, win):
-        super().__init__(); self.win = win; self.setObjectName('page'); self.games = {}; self.cards = []; self.picked = None; self.filter = ''
+        super().__init__(); self.win = win; self.setObjectName('page'); self.games = {}; self.cards = []; self.picked = None; self.filter = ''; self.sug = None
         page = QVBoxLayout(self); page.setContentsMargins(0, 0, 0, 0)
         self.vscroll = QScrollArea(); self.vscroll.setWidgetResizable(True); self.vscroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff); page.addWidget(self.vscroll)
         inner = QWidget(); inner.setObjectName('page'); self.vscroll.setWidget(inner)   # too low a window scrolls instead of piling the collection onto the hero
         outer = QVBoxLayout(inner); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
         self.hero = Hero(); outer.addWidget(self.hero, 1)
         self.hero.play.clicked.connect(self.play); self.hero.opts.clicked.connect(self.options)
+        self.hero.tip_try.clicked.connect(self.try_driver); self.hero.tip_no.clicked.connect(self.no_driver)
         self.menu = QMenu(self); self.hero.manage.setMenu(self.menu); self.menu.aboutToShow.connect(self.fill_menu)
         body = QWidget(); bl = QVBoxLayout(body); bl.setContentsMargins(48, 8, 48, 24); bl.setSpacing(18)
         head = QHBoxLayout(); head.addWidget(label('Your collection', 'h2')); head.addStretch(); self.count = label('', 'muted'); head.addWidget(self.count); bl.addLayout(head)
@@ -617,12 +640,26 @@ class LibraryPage(QWidget):
         for c in self.cards: c.set_picked(c.g is g)
         self.show_hero(g)
     def show_hero(self, g):
-        if not g: self.hero.show_game(None, '', TEXT3); self.hero.play.setEnabled(False); self.hero.opts.setEnabled(False); return
+        if not g: self.hero.show_game(None, '', TEXT3); self.hero.play.setEnabled(False); self.hero.opts.setEnabled(False); self.hero.tip.hide(); self.sug = None; return
         text, color, state = g.status(self.win.phone_games, self.win.phone_name())
         self.hero.show_game(g, text, color); self.hero.opts.setEnabled(bool(g.profile))
         self.hero.play.setText({'play': '  Play', 'install': '  Install on phone', 'build': '  Build and install', 'survey': '  Experimental build', 'keys': '  Pick your prod.keys',
                                 'tools': '  Install the tools', 'none': "  Can't read it"}[state])
         self.hero.play.setEnabled(state != 'none')
+        sug = driver_suggestion(self.win, g) if g.profile else None; self.sug = (g, sug[0]) if sug else None
+        if sug: self.hero.tip_text.setText(vkd.suggestion_text(self.win.phone_games[g.id]['vk_start'], sug[0], sug[1], g.name)); self.hero.tip_try.setText(f'Try {sug[0]["name"]}')
+        self.hero.tip.setVisible(bool(sug))
+    def try_driver(self):   # the suggestion's one click: the game's driver choice set, as the options set it (downloaded and checked first); the phone changes when the player installs
+        if not self.sug: return
+        g, e = self.sug
+        def chosen(f):
+            if not f: return   # a failed or cancelled download chooses nothing
+            self.win.st.setValue(f'vkdrv/{g.id}', e['id']); self.show_hero(g)
+            self.win.toast(f'{e["name"]} chosen for {g.name}: it goes to the phone with the next install, or with Apply to phone now in the game\'s options')
+        if vkd.present(e, vk_folder()): chosen(True)
+        elif ask_download(self, self.win, e): self.win.vk_download(e, chosen)
+    def no_driver(self):   # not suggested again for this game; the options still list the driver, marked tested
+        if self.sug: g, e = self.sug; self.win.st.setValue(f'vkdrv/nosuggest/{g.id}', e['id']); self.show_hero(g)
     def current(self): return self.games.get(self.picked)
     def slide(self, d): sb = self.scroll.horizontalScrollBar(); sb.setValue(sb.value() + d * (Card.W + 20) * 2)
     def arrows(self):
@@ -1708,8 +1745,9 @@ class Window(QMainWindow):
             _, pkg = adb_run(s, 'shell', f'dumpsys package {PKG} | grep -E "lastUpdateTime|versionName" | head -2')
             # game.json on one line, its \r too: a build on Windows wrote it with \r\n, and splitlines() below cut the JSON at each \r
             # and each game's Vulkan driver (defaults.txt's DM_VK_DRIVER), its last start (the host's vk_driver_result.txt), and env.txt's DM_VK_DRIVER, which wins over them
+            # and its last start on any driver (vk_start.txt: the pipelines the driver refused), for the suggestion of a tested driver (vk_drivers.suggestion)
             _, ls = adb_run(s, 'shell', f'for d in {REMOTE}/games/*/; do [ -f "$d/code/main.fixups.tsv" ] || continue; echo "@$d"; cat "$d/game.json" 2>/dev/null | tr -d "\\r\\n"; echo; echo "#$(ls "$d/glslc_capture" 2>/dev/null | wc -l)"; '
-                                        'echo "%$(grep -m1 "^DM_VK_DRIVER=" "$d/defaults.txt" 2>/dev/null | tr -d "\\r")"; echo "^$(tr "\\n" "|" < "$d/vk_driver_result.txt" 2>/dev/null)"; done; '
+                                        'echo "%$(grep -m1 "^DM_VK_DRIVER=" "$d/defaults.txt" 2>/dev/null | tr -d "\\r")"; echo "^$(tr "\\n" "|" < "$d/vk_driver_result.txt" 2>/dev/null)"; echo "!$(tr "\\n" "|" < "$d/vk_start.txt" 2>/dev/null)"; done; '
                                         f'echo "~$(grep -m1 "^DM_VK_DRIVER=" {REMOTE}/env.txt 2>/dev/null | tr -d "\\r")"; [ -f {REMOTE}/game/code/main.fixups.tsv ] && echo LEGACY')
             games, legacy, cur, env_drv = {}, False, None, ''
             for l in ls.splitlines():
@@ -1717,9 +1755,10 @@ class Window(QMainWindow):
                 elif l.startswith('~'): env_drv = l[1:].partition('=')[2].strip()
                 elif cur and l.startswith('%'): games[cur]['vk_driver'] = l[1:].partition('=')[2].strip()
                 elif cur and l.startswith('^'): games[cur]['vk_result'] = dict(x.split('=', 1) for x in l[1:].split('|') if '=' in x)
+                elif cur and l.startswith('!'): games[cur]['vk_start'] = vkd.parse_start(l[1:])   # the last start's driver, GPU and refused pipelines (the host's vk_start.txt)
                 elif l.startswith('@'): cur = l[1:].rstrip('/').rsplit('/', 1)[-1].upper(); games[cur] = {}
                 elif cur and l.strip().startswith('{'):
-                    try: games[cur] = dict(json.loads(l), **{k: v for k, v in games[cur].items() if k in ('captures', 'vk_driver', 'vk_result')})
+                    try: games[cur] = dict(json.loads(l), **{k: v for k, v in games[cur].items() if k in ('captures', 'vk_driver', 'vk_result', 'vk_start')})
                     except ValueError: pass
                 elif cur and l.startswith('#') and l[1:].strip().isdigit(): games[cur]['captures'] = int(l[1:])   # run-time shaders the game saved on the phone
             return pkg, games, legacy, env_drv

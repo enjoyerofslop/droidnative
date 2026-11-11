@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "about": "Vulkan drivers DroidPlay for Windows offers per game (dm/android/desktop/vk_drivers.py). Each is a builder's own GitHub release asset, pinned by the zip's and the driver's SHA-256: the app downloads it on demand, checks both, and never runs anything from it on the computer. Changed by pull request, shipped with releases. tested rows are DroidPlay's own runs only. dm/android/tools/vk_catalog.py check compares each zip with the digest GitHub lists.",
+ "about": "Vulkan drivers DroidPlay for Windows offers per game (dm/android/desktop/vk_drivers.py). A tested row's games are the drivers marked tested for that game on that GPU: the app suggests one when the phone's own driver refused pipelines at the game's last start (vk_start.txt), and never switches by itself. Each is a builder's own GitHub release asset, pinned by the zip's and the driver's SHA-256: the app downloads it on demand, checks both, and never runs anything from it on the computer. Changed by pull request, shipped with releases. tested rows are DroidPlay's own runs only. dm/android/tools/vk_catalog.py check compares each zip with the digest GitHub lists.",
  "drivers": [
   {
    "id": "turnip-mrpurple-t30",
@@ -25,7 +25,8 @@
     {"gpu": 730, "device": "Moto Razr Plus 2023", "android": 16, "date": "2026-11-11",
      "games": {"0100B1C0249B4000": "Frostpunk: the Generator and the buildings draw, which the phone's own driver can't build; the city at 29.4 fps"}},
     {"gpu": 740, "device": "Ayn Odin 2", "android": 13, "date": "2026-11-11",
-     "games": {"0100000011D90000": "Brilliant Diamond: 60 fps", "0100000000010000": "Super Mario Odyssey: the opening at 60 fps on 2026-11-08"}},
+     "games": {"0100000011D90000": "Brilliant Diamond: 60 fps", "0100000000010000": "Super Mario Odyssey: the opening at 60 fps on 2026-11-08",
+               "0400486024DEC000": "Ocarina of Time: Kokiri Forest lit, its characters drawn, no pipeline refused (the phone's own driver refuses the pipelines that draw them, leaving them dark); 9.2 fps against about 14 on its own driver, and 1.6 GB more memory"}},
     {"gpu": 830, "device": "Galaxy S25 Edge", "android": 16, "date": "2026-11-11",
      "games": {"0400C3F00006E000": "Mario Kart World: the title, the menus and a Grand Prix race; the skinning shader that hangs the phone's own driver completes"}},
     {"gpu": 840, "device": "Galaxy Z Fold 8", "android": 17, "date": "2026-11-11",
@@ -78,11 +79,15 @@
    "min_api": 28,
    "mesa": "27.0",
    "gpus": [[800, 899]],
-   "tested": [],
+   "tested": [
+    {"gpu": 730, "device": "Moto Razr Plus 2023", "android": 16, "date": "2026-11-11",
+     "games": {"0100000011D90000": "Brilliant Diamond: 60 fps in its language menu, after about 3 minutes building its pipelines at the first start with this driver",
+               "0100B1C0249B4000": "Frostpunk: the Generator and the buildings draw, as on T30 and faux123; the city at 29.5 fps"}}
+   ],
    "mesh_shaders": null,
    "env": [],
    "licence": "GPL-3.0 (the repository's build scripts); Mesa's core is MIT",
-   "notes": "For the Adreno 8xx only (Gen8). Mesa 27.0 per the release's title (Turnip v27.0.0-R2). Experimental, as Adreno 8xx Turnip builds are: one has been seen to wedge a GPU until a reboot. Whether it has VK_EXT_mesh_shader isn't checked. On 2026-11-11 it also ran Brilliant Diamond (60 fps in its language menu) and Frostpunk (as faux123 does) on a Razr Plus 2023's Adreno 730, which the builder doesn't list: the catalog offers it for the 8xx only, where it hasn't been tested yet."
+   "notes": "For the Adreno 8xx only (Gen8). Mesa 27.0 per the release's title (Turnip v27.0.0-R2). Experimental, as Adreno 8xx Turnip builds are: one has been seen to wedge a GPU until a reboot. Whether it has VK_EXT_mesh_shader isn't checked. Its tested row is a 730, which the builder doesn't list: DroidPlay ran it there, and the app shows it as tested on that GPU; on the 8xx it is listed but not tested yet."
   }
  ]
 }

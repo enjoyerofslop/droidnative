@@ -59,7 +59,8 @@ Qualcomm's Adreno GPUs have had the most testing; Mali and Xclipse are newer to 
 
 On an Adreno GPU, a game can run on a Vulkan driver you put on the phone instead of the system's, as in Switch emulators: usually a build of Mesa's
 open-source Turnip driver. Trying one needs no new build, and whether it helps depends on the game and the device. DroidPlay for Windows offers a short catalog of
-them per game (the game's options › Advanced options), and they can be put on the phone by hand: [Another Vulkan driver](docs/android.md#another-vulkan-driver-turnip).
+them per game (the game's options › Advanced options), and suggests one only when the phone's own driver refused some of a game's shaders and a catalog driver is
+tested for that game on that GPU; it never switches by itself. They can also be put on the phone by hand: [Another Vulkan driver](docs/android.md#another-vulkan-driver-turnip).
 
 ## Get started
 
