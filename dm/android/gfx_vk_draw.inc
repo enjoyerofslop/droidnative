@@ -2334,8 +2334,10 @@ static VkImageView storage_view(vtex *v, const view_t *vv, VkImageViewType vt, V
         VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, srgb_twin(f), &tp);
         if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = srgb_twin(f); fp = tp; }
     }
-    // E5B9G9R9, which no GPU here stores to, through an R32_UINT view: the compute shader bound to it packs RGB9E5 (cpipe_e5, spv_e5.h)
-    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && e5_store_on()) {
+    // E5B9G9R9 through an R32_UINT view, on every GPU: the compute shader bound to it packs RGB9E5 (cpipe_e5, spv_e5.h), and Maxwell's stores to it are raw words
+    // already packed (Ocarina of Time's a335c1db6270c355, SUST.B), which a format view would pack again. Samsung's Xclipse stores to E5B9G9R9 itself, and there the view
+    // was E5B9G9R9: each word went in as the red channel's float, green and blue 0, and Ocarina of Time's picture was solid red after its upscaler
+    if (!v->conv && (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && e5_store_on()) {
         VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, VK_FORMAT_R32_UINT, &tp);
         if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = VK_FORMAT_R32_UINT; fp = tp; }
     }
