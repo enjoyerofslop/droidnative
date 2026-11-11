@@ -1393,8 +1393,9 @@ static vtex *vt_create(const tex_t *t) {
 // - A format the GPU cannot store to (sRGB) takes STORAGE for views in its UNORM twin alone (EXTENDED_USAGE, ext_store), which storage_view then makes.
 // Under g_bk; cb() ends an open render pass. 0: it cannot be (a decoded BC texture, multisample, depth or stencil, no format of it the GPU stores to)
 static uint64_t g_st_up;
-// An E5B9G9R9 texture bound to an image slot: no GPU here stores to a shared-exponent format, so it is stored through an R32_UINT view, the shader packing each texel
-// into RGB9E5 (spv_e5.h), and the texture keeps its format and its bits. DM_VK_E5_STORE=0 (env.txt): skipped, as before
+// An E5B9G9R9 texture bound to an image slot: Qualcomm's and Samsung's drivers store to no shared-exponent format, so it is stored through an R32_UINT view, the shader
+// packing each texel into RGB9E5 (spv_e5.h), and the texture keeps its format and its bits. A compute shader's is viewed so on every GPU, Mali's too, which stores
+// E5B9G9R9 itself (stage_set). DM_VK_E5_STORE=0 (env.txt): skipped, as before
 static int e5_store_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_E5_STORE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_E5_STORE=0: an E5B9G9R9 texture bound to an image slot is skipped"); } return v; }
 static int vt_storage_up(vtex *v) {
     if (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) return 1;

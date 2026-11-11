@@ -2325,7 +2325,8 @@ static int img_up(vtex *v, int compute) {
 }
 static VkImageView storage_view(vtex *v, const view_t *vv, VkImageViewType vt, VkFormat decl) {
     VkFormat f = decl ? decl : v->fmt;
-    if (f != v->fmt && (v->conv || !fmt_bytes(v->fmt) || fmt_bytes(v->fmt) != fmt_bytes(f))) { RED_ONCE(110, "image of format %d bound where the shader declares format %d: skipped", v->fmt, f); return VK_NULL_HANDLE; }
+    int e5u = v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && f == VK_FORMAT_R32_UINT;   // a compute shader's packed RGB9E5 (stage_set): fmt_bytes has no shared-exponent entry
+    if (f != v->fmt && !e5u && (v->conv || !fmt_bytes(v->fmt) || fmt_bytes(v->fmt) != fmt_bytes(f))) { RED_ONCE(110, "image of format %d bound where the shader declares format %d: skipped", v->fmt, f); return VK_NULL_HANDLE; }
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
     // an sRGB format the GPU cannot store to is stored through its UNORM twin, texels as the shader writes them, as Maxwell's image stores do and the Mac's linear-twin
     // views (nvn_mtl.m img_fit); the image takes STORAGE for such views (vt_storage_up). Only into an image that has it: with DM_VK_STORAGE_UP=0 an sRGB image without it was
@@ -2334,7 +2335,8 @@ static VkImageView storage_view(vtex *v, const view_t *vv, VkImageViewType vt, V
         VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, srgb_twin(f), &tp);
         if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = srgb_twin(f); fp = tp; }
     }
-    // E5B9G9R9, which no GPU here stores to, through an R32_UINT view: the compute shader bound to it packs RGB9E5 (cpipe_e5, spv_e5.h)
+    // E5B9G9R9 the GPU does not store to, through an R32_UINT view: the compute shader bound to it packs RGB9E5 (cpipe_e5, spv_e5.h). A compute binding asks for the
+    // R32_UINT view itself (stage_set), whether or not the GPU stores E5B9G9R9
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && e5_store_on()) {
         VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, VK_FORMAT_R32_UINT, &tp);
         if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = VK_FORMAT_R32_UINT; fp = tp; }
@@ -2724,8 +2726,11 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             VkImageView iv = VK_NULL_HANDLE; vtex *v = !ri ? NULL : ce ? ce->v : vt_get(&ri->t);
             if (v && !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !img_up(v, s->stage == SH_CS)) { g_bind_bad = 1; v = NULL; }   // made without storage use (vt_storage_up)
             if (v && s->upsq && !g_upsq_dst) g_upsq_dst = v;   // a listed upscaler's output (gfx_vk_upsq.inc)
-            if (v) { iv = storage_view(v, ri->has_v ? &ri->v : NULL, vt, t->fmt); if (!iv) g_bind_bad = 1; }
-            if (iv && v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && s->stage == SH_CS) { if (t->binding < 64) g_e5_need |= 1ull << t->binding; else g_bind_bad = 1; }   // its pipeline packs RGB9E5 there (cpipe_e5)
+            // an E5B9G9R9 image of a compute shader: its pipeline packs RGB9E5 there (cpipe_e5), so it is viewed as R32_UINT whether or not the GPU stores E5B9G9R9 itself.
+            // Mali-G715 does, and the view of its own format took the packed words as a shared-exponent store: Ocarina of Time's upscaler input stayed black there
+            int e5 = v && v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && s->stage == SH_CS && e5_store_on();
+            if (v) { iv = storage_view(v, ri->has_v ? &ri->v : NULL, vt, e5 ? VK_FORMAT_R32_UINT : t->fmt); if (!iv) g_bind_bad = 1; }
+            if (iv && e5) { if (t->binding < 64) g_e5_need |= 1ull << t->binding; else g_bind_bad = 1; }
             if (!iv) iv = dummy_storage(vt, t->fmt);
             if (bcs) bc_addf(" | image b%d[%d] type %#x tid %d: %s s%llu %ux%ux%u, %u layers, vk format %d, usage %#x", t->binding, e, t->type, tid, v ? "" : ri ? "registered, no image (a stand-in)," : "unregistered (a stand-in),",
                              v ? (unsigned long long)v->serial : 0ull, v ? v->w : 0, v ? v->h : 0, v ? v->d : 0, v ? v->layers : 0, v ? (int)v->fmt : 0, v ? (unsigned)v->usage : 0u);
