@@ -1,38 +1,29 @@
 <!-- The "droidnative" anchor keeps links made before the rename working: the project was droidnative until 2026-11-09. -->
 # <a id="droidnative"></a>DroidPlay Core
 
-**Nintendo Switch and Switch 2 games running natively on Android: not an emulator.** The game's own ARM64 code runs directly on the device's CPU, and its NVN
-graphics are replayed on the GPU through Vulkan. Pokémon Brilliant Diamond plays at 60 fps on an Ayn Odin 2, Animal Crossing: New Horizons at 30.
+[![Latest release](https://img.shields.io/github/v/release/enjoyerofslop/droidplay-core?label=latest%20release)](https://github.com/enjoyerofslop/droidplay-core/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/enjoyerofslop/droidplay-core)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-DroidPlay-5865F2?logo=discord&logoColor=white)](https://discord.gg/3r92f8wmh7)
 
-- **Native, not emulated.** A Switch and an Android device both run ARM64 code: the game's code is rewritten only where the host needs it (system calls,
-  thread registers), and a host answers the Switch's system calls and SDK services. There is no CPU emulation.
-- **A game is an app of its own**, with its name, icon and saves, installable on any arm64 device with Vulkan, or every game in one launcher app.
-- **Packed on your computer** from your own dump: NSP / XCI files, or a Switch 2 game's `.nup` or dump folder. [DroidPlay for Windows](#the-desktop-app) and
-  [DroidPlay](https://github.com/enjoyerofslop/droidplay) on a Mac do it with a click; the command line works on any computer.
+**Play the Switch games you own on your Android phone or handheld, natively.** DroidPlay builds your own copy of a Switch game into an Android app: the
+game's code runs directly on the phone's processor, not in an emulator, and its graphics are drawn by the phone's GPU through Vulkan.
 
-DroidPlay Core is [seedds/nxnative](https://github.com/seedds/nxnative) (Switch games natively on the iPhone, the iPad and the Mac) with an Android port: the engine the
-DroidPlay apps build games with. The port began as [RogelioLB/nxnative-android](https://github.com/RogelioLB/nxnative-android) (the Vulkan replay of NVN, the Android
-front end, the packing script); DroidPlay Core carries it on and follows nxnative's `main`, merged in regularly, so its games, fixes and Switch 2 work reach Android too. nxnative itself stays Apple-only by its
-maintainer's choice: Android work belongs here, not there. Everything below the line further down is nxnative's own README (the iPhone and Mac side).
-
-It was called droidnative until 2026-11-09, and was renamed so as not to be confused with [DroidNative](https://github.com/DroidNative/DroidNativeApp), which runs
-Linux desktop apps on Android ([#40](https://github.com/enjoyerofslop/droidplay-core/issues/40)). Links to the old name lead here.
+It's for players with an Android phone or handheld and a Switch of their own to dump their games from. You build each game once on your computer, and
+DroidPlay installs it on the phone. DroidPlay Core is the engine behind it: [seedds/nxnative](https://github.com/seedds/nxnative), which runs Switch games
+natively on the iPhone, the iPad and the Mac, with an Android port that began as [RogelioLB/nxnative-android](https://github.com/RogelioLB/nxnative-android).
 
 > [!IMPORTANT]
 > **Bring your own game.** Nothing from any game is in this repository, and no packed game is distributed: you dump the game and the keys from **your own**
 > Switch, and the app you build is for you only. Do not share APKs packed with a game (they carry its code and files), keys or firmware, and do not ask for them
 > in issues. The project is not affiliated with Nintendo or any game publisher.
 
-## Ways to play
+**Download [DroidPlay for Windows](https://github.com/enjoyerofslop/droidplay-core/releases/latest)**: **DroidPlay-Setup-&lt;version&gt;.exe** from the latest
+release. Run it, and it walks you through the rest ([Get started](#get-started)). On a Mac, use [DroidPlay](https://github.com/enjoyerofslop/droidplay).
 
-- **DroidPlay for Windows:** download **DroidPlay-Setup-&lt;version&gt;.exe** from the [latest release](https://github.com/enjoyerofslop/droidplay-core/releases/latest)
-  and run it. DroidPlay opens on **Get started**, a checklist that installs the tools it builds with, helps you set up your phone and builds your first game
-  ([The desktop app](#the-desktop-app)). The same app runs on Linux and a Mac from source (`uv run scripts/nxnative_android.py`). It has DroidPlay's name and
-  icon, but it is a separate app from DroidPlay on a Mac.
-- **DroidPlay on a Mac:** add your games folder, then **Install on Android** (one launcher app holding every game, over adb) or **Build Game App** (an APK, or an
-  XAPK for an installer app). See [DroidPlay](https://github.com/enjoyerofslop/droidplay).
-- **The command line, any computer:** [Packing from the command line](#packing-from-the-command-line). `--game-apk` makes a game app; without it the game goes into
-  the launcher app on a connected device.
+- **Runs on** arm64 phones and handhelds with Android 10 or later and a Vulkan GPU. Tested on Qualcomm Adreno (the Ayn Odin 2, the Retroid Pocket 5, the
+  Galaxy S25 Edge and others), Arm Mali (the Pixel 9 Pro XL) and Samsung Xclipse (the Galaxy Z Flip 7): [Phones and handhelds](#phones-and-handhelds).
+- **What plays:** [Game Status](#game-status) lists every game run on Android, on which devices, and how far it got.
+- **Help:** the [DroidPlay Discord](https://discord.gg/3r92f8wmh7), #help for a problem and #compatibility for how a game runs on your device.
 
 <table>
 <tr>
@@ -41,8 +32,108 @@ Linux desktop apps on Android ([#40](https://github.com/enjoyerofslop/droidplay-
 </tr>
 </table>
 
+[Phones and handhelds](#phones-and-handhelds) · [Get started](#get-started) · [Updating](#updating) · [On your phone](#on-your-phone) ·
+[Game Status](#game-status) · [Help and reports](#help-and-reports) · [Guides](#guides) · [How it works](#how-it-works) · [Contributing](#contributing)
+
+## Phones and handhelds
+
+DroidPlay runs on arm64 Android phones, handhelds and tablets with Android 10 or later and a GPU with Vulkan. How well a game runs depends on the GPU and the
+game: [Game Status](#game-status) gives each game's frame rate on each device. Games have been run on these:
+
+| Device | Chip | GPU |
+|---|---|---|
+| Samsung Galaxy Z Fold 8 | Snapdragon 8 Elite Gen 5 | Adreno 840 |
+| Samsung Galaxy S25 Edge | Snapdragon 8 Elite for Galaxy | Adreno 830 |
+| OnePlus Pad 3 | Snapdragon 8 Elite | Adreno 830 |
+| Ayn Odin 2 | Snapdragon 8 Gen 2 | Adreno 740 |
+| Moto Razr Plus 2023 | Snapdragon 8+ Gen 1 | Adreno 730 |
+| Retroid Pocket 5 | Snapdragon 865 | Adreno 650 |
+| POCO X5 5G | Snapdragon 695 | Adreno 619 |
+| Google Pixel 9 Pro XL | Google Tensor G4 | Arm Mali-G715 |
+| Samsung Galaxy Z Flip 7 | Samsung Exynos 2500 | Samsung Xclipse 950 |
+
+Qualcomm's Adreno GPUs have had the most testing; Mali and Xclipse are newer to the project. The POCO X5 5G is the original port's device, last run before
+2026-11-08. Other devices may work too, but haven't been tested by the project: say how a game runs on yours in #compatibility on the Discord.
+
+### Another Vulkan driver (Turnip)
+
+On an Adreno GPU, a game can run on a Vulkan driver you put on the phone instead of the system's, as in Switch emulators: usually a build of Mesa's
+open-source Turnip driver. Trying one needs no new build, and whether it helps depends on the game and the device. The steps:
+[Another Vulkan driver](docs/android.md#another-vulkan-driver-turnip).
+
+## Get started
+
+### What you need
+
+- **A computer to build on:** a Windows 10 (1809 or later) or Windows 11 PC, 64-bit, for DroidPlay for Windows; or a Mac with Apple silicon and macOS 15 or
+  later for [DroidPlay on a Mac](https://github.com/enjoyerofslop/droidplay). On Windows, DroidPlay and the tools it installs take about 6 GB, and each game's
+  build needs room besides.
+- **An Android phone or handheld** with Android 10 or later ([the devices tested](#phones-and-handhelds)), a USB cable (or wireless debugging), and room for
+  the game: its files are copied to the phone (6.7 GB for Danganronpa V3).
+- **Your own Switch, and the game and keys dumped from it:** the game as NSP or XCI files in one folder (the base game and, if you have them, its update and
+  DLC; for example with nxdumptool), and your Switch's `prod.keys` (Lockpick_RCM). A Switch 2 game is built from its `.nup` file or dump folder, which needs
+  no keys; Switch 2 games are at an early stage on Android ([Game Status](#game-status)).
+
+### Install and build your first game
+
+On Windows:
+
+1. **Install DroidPlay.** Download **DroidPlay-Setup-&lt;version&gt;.exe** from the [latest release](https://github.com/enjoyerofslop/droidplay-core/releases/latest)
+   and run it. Windows warns that it comes from the internet and isn't signed: choose **More info**, then **Run anyway**. It installs for your Windows user
+   only, with no administrator prompt.
+2. **Follow Get started.** DroidPlay opens on a checklist of four steps. Setting up takes about half an hour the first time.
+   - **Your keys:** pick your `prod.keys`.
+   - **Tools for building:** **Install tools** downloads the JDK, the .NET SDK and Google's Android SDK (about 1.5 GB to download). DroidPlay asks
+     before accepting the Android SDK's license.
+   - **Your phone:** turn on USB debugging, plug the phone in and tap **Allow** on it. **Set up my phone** shows the steps for your phone's brand.
+   - **Your first game:** add the folder with its NSP or XCI files, then **Build and install**. The first build of a game takes about 10 to 20 minutes;
+     later builds reuse what didn't change.
+3. **Play.** Press **Play** in DroidPlay's Library, or open the DroidPlay app on the phone and pick the game. The first start of a game takes a minute or
+   more while the phone prepares its shaders; later starts take a few seconds.
+
+Every page of the app, uninstalling, and running it from source: [DroidPlay for Windows](docs/android.md#droidplay-for-windows).
+
+### On a Mac or from the command line
+
+- **On a Mac:** [DroidPlay](https://github.com/enjoyerofslop/droidplay) builds and installs Android games too: add your games folder, then **Install on
+  Android** (one app holding every game, over adb) or **Build Game App**. Its README has the requirements and the setup steps.
+- **From the command line,** on Windows, macOS or Linux: `scripts/build_android_from_nsp.py`
+  ([Packing from the command line](docs/android.md#packing-from-the-command-line)).
+
+## Updating
+
+- **DroidPlay for Windows** says when a new release is out: press **Update**, or **Update to &lt;version&gt;** under Updates in **Settings**. It downloads
+  the new Setup, checks it against the release, installs it and opens again; your games, builds and settings stay. Or close DroidPlay and run the new Setup
+  yourself.
+- **Games you've already built** keep what they were built with. Build them again (**Build and install**) to get a release's fixes; what didn't change isn't
+  redone, so it's usually quick. Saves stay on the phone.
+- **What changed** in each release is in the [release notes](https://github.com/enjoyerofslop/droidplay-core/releases).
+
+## On your phone
+
+- **The DroidPlay app** lists the games on the phone. Pick one for its settings (console mode, game language, render scale where the game supports it, the
+  frame-rate counter, rumble), then **Play**.
+- **Controls:** touch controls are drawn over the game in three layouts, 2D, 3D and Tap, switched with the round button at the top. A controller works as
+  player 1 and hides them.
+- **Back to the list:** the **≡** button at the top returns to the list while the game keeps running; **Play** on the same game resumes it.
+- **Saves** stay in the app's storage, so updating the app keeps them. DroidPlay for Windows backs them up to your computer from its **Phones** page.
+- **Game apps:** **Manage › Build a game app…** in DroidPlay for Windows makes one game into an app of its own, with its own icon and saves, to copy to a
+  device and install there. It's for your own devices only: it carries the game, so never share it.
+
+More: [The Android app](docs/android.md#the-android-app) · [Game apps](docs/android.md#game-apps).
+
 <!-- The "status" anchor keeps links made before the rename working: DroidPlay's README links to #status. -->
 ## <a id="status"></a>Game Status
+
+Which games run on Android, on which devices, and how far each has been played. Every row comes from runs on real devices, by the project or a contributor.
+A Playable game was played by hand through the stretch its row names, with saves and sound checked; the tiers below say exactly what each label asks for.
+
+Playable now:
+
+- **Playable – minor issues:** Pokémon Brilliant Diamond, Pokémon Shield, Pokémon: Let's Go, Pikachu!, Persona 3 Portable and Divinity: Original Sin 2 - Definitive Edition.
+- **Playable – major issues:** The Legend of Zelda: Breath of the Wild.
+
+More games reach gameplay (In-game) or their menus; the table below has every game run on Android, and the issues seen.
 
 Screen captures from the test runs, taken on the device. The round button at the top is DroidPlay's menu, the line at the bottom Android's gesture bar. On a
 phone, DroidPlay's on-screen controls are drawn over the game.
@@ -96,7 +187,7 @@ and what has not been tried.
 
 | Game | Device | State |
 |---|---|---|
-| Pokémon Brilliant Diamond 1.3.0 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5, Samsung Galaxy S25 Edge, Samsung Galaxy Z Flip 7, Google Pixel 9 Pro XL, Moto Razr Plus 2023 | Playable – minor issues through Lake Verity's first battle: 60 fps (the profile's rate; the Switch runs it at 30). On the Pixel 9 Pro XL (Mali) and the Moto Razr Plus 2023 (Adreno 730), played by hand from a new game through Twinleaf, Route 201 and Lake Verity to Turtwig and the first battle, a wild Starly, won, with sound, a save made on the phone and Continue working. Issues: on the Pixel, one minute at the starter screen at 50–54 fps; none seen on the Razr. On the other five, In-game: 59–60 fps in Eterna City's overworld, in a scripted run from a downloaded save with the player standing by the Pokémon Center; a new game was played by hand into the overworld on the Odin 2 on 2026-11-07, before the nxnative merge, and not since. The Retroid Pocket 5 no longer crashes at launch, and its own driver now runs Eterna City as fast as [Turnip](#another-vulkan-driver-turnip) does (15 fps before) |
+| Pokémon Brilliant Diamond 1.3.0 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5, Samsung Galaxy S25 Edge, Samsung Galaxy Z Flip 7, Google Pixel 9 Pro XL, Moto Razr Plus 2023 | Playable – minor issues through Lake Verity's first battle: 60 fps (the profile's rate; the Switch runs it at 30). On the Pixel 9 Pro XL (Mali), the Moto Razr Plus 2023 (Adreno 730) and the Samsung Galaxy Z Flip 7 (Xclipse), played by hand from a new game through Twinleaf, Route 201 and Lake Verity to Turtwig and the first battle, a wild Starly, won, with sound, a save made on the phone and Continue working; on the Z Flip 7, 59.8 fps over 32 minutes (no 30 s window under 57.9) and Twinleaf's pond drawn as water since #204. Issues: on the Pixel, one minute at the starter screen at 50–54 fps; none seen on the Razr or the Z Flip 7. On the other four, In-game: 59–60 fps in Eterna City's overworld, in a scripted run from a downloaded save with the player standing by the Pokémon Center; a new game was played by hand into the overworld on the Odin 2 on 2026-11-07, before the nxnative merge, and not since. The Retroid Pocket 5 no longer crashes at launch, and its own driver now runs Eterna City as fast as [Turnip](#another-vulkan-driver-turnip) does (15 fps before) |
 | Animal Crossing: New Horizons 3.0.3 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5, Samsung Galaxy S25 Edge | In-game: 30 fps (as on the Switch) on all four, in scripted runs: the new game's airport at Nook Inc.'s counter (a fresh save, no input), and outside the player's house from a downloaded save with the player standing. Not played by hand or through |
 | Super Mario Odyssey 1.4.1 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5, Samsung Galaxy S25 Edge, Google Pixel 9 Pro XL | In-game: the Start menu and the opening cutscene at 59–60 fps on all five (the cutscene ran at 38 on the Retroid Pocket 5 on 2026-11-08), and play in the Cap Kingdom at 60 on the Odin 2 (one scripted run of 15 s), past the hint video that used to crash it (the host's AVC decoder, fixed; the video plays on the Pad 3 too). Not played by hand. The crash now and then while it loads is fixed. The Pixel 9 Pro XL's Mali-G715, the first GPU outside Adreno, has no BC textures, so they are decoded on the CPU (2.2 GB resident in the cutscene, against 1.64 GB) |
 | Super Smash Bros. Ultimate 13.0.5 | Ayn Odin 2, OnePlus Pad 3, Retroid Pocket 5, Samsung Galaxy S25 Edge | In-game: boots to its opening movie at 60 fps on all four, with the hinted shared font the packer now ships (Android's Roboto made it crash); the crash in about one boot in five is fixed too. The route's battle (Mario against a random CPU fighter, the player idle; not played by hand) runs at 60 fps on the S25 Edge, 52–60 on the Pad 3 (2026-11-09) and 57–60 on the Retroid Pocket 5 (2026-11-10), by stage and fighter; 40–59 on the Odin 2 (2026-11-08, not measured since) |
@@ -106,7 +197,7 @@ and what has not been tried.
 | Pokémon Shield 1.3.2 | Retroid Pocket 5, Samsung Galaxy S25 Edge, Google Pixel 9 Pro XL, Samsung Galaxy Z Flip 7 | Playable – minor issues through Route 2 into Professor Magnolia's house: 30 fps (as on the Switch) on all four. On the Z Flip 7 (Xclipse), played by hand from a new game through the opening, Route 1, Wedgehurst and the starters to Hop's battle, won, then into the Slumbering Weald with a wild battle there; on the Retroid Pocket 5, as far as Hop's battle, won, and from the Z Flip 7's Weald save through the Weald's event (the battle in the fog, Leon's rescue) back to Postwick and Mum, then from there through Wedgehurst (the Pokédex), Route 2 and its first trainers into Professor Magnolia's house; on the S25 Edge and the Pixel 9 Pro XL (Mali), into Postwick, where Hop meets the player outside the house. Sound, saves made on the phone and Continue work on all four. Issues: a first start's pipeline builds (one 6.4 s frame on the Z Flip 7 and one of 5.0 s on the Retroid Pocket 5; 118 and 178 ms at most on the next start), and frames of 1.4–1.7 s as the lab and Route 2 built theirs on a first visit; nothing else seen. Not played as far as the battle in Magnolia's garden or the Wild Area; not tried on the other devices |
 | Frostpunk 1.0.1 | Samsung Galaxy S25 Edge | In-game: 30 fps from the title through A New Home's intro into the city, with sound, in scripted runs and about two minutes with live input. The Generator, the buildings and the props draw through raw global memory, which its profile turns on. Not played past the first minutes: no building placed, no night, no save made |
 | Pokémon: Let's Go, Pikachu! 1.0.0 | Samsung Galaxy Z Fold 8, Google Pixel 9 Pro XL, Samsung Galaxy Z Flip 7 | Playable – minor issues through Viridian City and the rival's first battle (Oak's Parcel; Route 2 not reached yet): 30 fps (as on the Switch) on all three. On the Z Fold 8, played by hand from a save made on the phone in Pallet Town through Professor Oak's scene, getting Pikachu, his lab and the Pokédex, to two wild catches on Route 1 made with the buttons (no motion needed); the opening into Pallet Town was a scripted run there. On the Pixel 9 Pro XL (Mali), played by hand from a new game through the opening and the rival's visit into Pallet Town, and a wild Pidgey caught on Route 1 from the Z Fold 8's save. Then, from that save, by hand through Route 1 (more catches) to Viridian City, the Poké Mart clerk's Oak's Parcel back to Professor Oak, and the rival's first battle in the lab (his Eevee, won with Thunder Shock), at 29.6–30.0 fps in every minute of a 35-minute launch, with a save made after it that Continue loads after a cold start. On the Z Flip 7 (Xclipse), played by hand from a new game through the opening into the bedroom. Sound (confirmed by audio dumps), a save made on the phone and Continue work on all three. Issues: none seen. Not tried: the Pokémon Center and Mart inside, Route 2 and Viridian Forest's trainers, aiming with motion, the other devices |
-| Divinity: Original Sin 2 - Definitive Edition 1.0.3.1 | Ayn Odin 2, OnePlus Pad 3 | Playable – major issues through the first combat: the game's 30 fps from a new game through character creation and the opening cinematic into the Merryweather's hold, then by hand to the cabin deck, and on the Odin 2 from a save made there through the burning hold to the top deck, where the first fight (two Voidwoken, turn-based) was won with the Red Prince's skills at 30 fps, with sound, Quick Save and the save loaded again. Issues: Continue can load an older save, as every save's time reads 31/12/1969 (Load lists them by name; [#185](https://github.com/enjoyerofslop/droidplay-core/pull/185) dates saves by the host's clock). On the Pad 3 it runs at 40 or 60 fps with a setting, the game moving by real time at each, and held 60 for 25 minutes ([its note](dm/games/010027400CDC6000/README.md#frame-rate)). Not played as far as Fort Joy |
+| Divinity: Original Sin 2 - Definitive Edition 1.0.3.1 | Ayn Odin 2, OnePlus Pad 3, Google Pixel 9 Pro XL | Playable – minor issues through the second fight below deck (before the locked Greasy Door): the game's 30 fps from a new game through character creation and the opening cinematic into the Merryweather's hold, then by hand to the cabin deck, and on the Odin 2 through the burning hold to the top deck's first fight (two Voidwoken, won), the lifeboat and its dialogue, and below deck a second fight (Void Hatchlings, won with Lohse and Beast), with sound, Quick Saves dated by the host's clock and Continue loading the latest after a cold start. Every window's median frame time 33.1–33.5 ms; four alpha-test red lines in the log, nothing wrong on screen. On the Pixel 9 Pro XL (Mali) the top deck's first fight, won, at 30 fps too, with sound and Continue after a cold start; its GPU takes about 26 ms of the 33 ms frame ([its note](dm/games/010027400CDC6000/README.md#on-the-pixel-9-pro-xl)). On the Pad 3 it runs at 40 or 60 fps with a setting, the game moving by real time at each, and held 60 for 25 minutes ([its note](dm/games/010027400CDC6000/README.md#frame-rate)). Not played as far as Fort Joy |
 | The Legend of Zelda: Breath of the Wild 1.9.0 | Ayn Odin 2, OnePlus Pad 3, Samsung Galaxy S25 Edge, Samsung Galaxy Z Fold 8 | Playable – major issues through the Shrine of Resurrection onto the Great Plateau (no combat yet): 30 fps (its Android target) on the Odin 2, played by hand from a new game: waking in the Shrine, taking the Sheikah Slate, opening its doors and climbing out, then the cutscene over Hyrule and the first minutes on the plateau, with sound, an autosave made on the phone and Continue after a cold start. The Old Man not reached ([its note](dm/games/01007EF00011E000/README.md#android)). Issues: the stretch ends before the first combat; the frame where Link died from a fall had red smears on nearby rocks, not compared with the Mac. The Shrine from a save made on the Mac: 30 fps on the Pad 3 and the S25 Edge with its Android defaults (descriptor sets bound again, the command recorder, a 30 fps target); 24 on the Galaxy Z Fold 8, whose GPU takes 30 ms a frame. On the Pad 3 it lost the GPU at its first frame in the field, and on both Adreno 830s it drew the Shrine dark: both are fixed (the picture checked on the S25 Edge; on the Pad 3 only in a local test). 60 fps needs the replay's CPU time and the GPU's to come down |
 | Persona 3 Portable 1.0.2 | Samsung Galaxy S25 Edge, Samsung Galaxy Z Flip 7 | Playable – minor issues through the first battle (April 9's rooftop): 60 fps (as on the Switch) on both, played by hand from a new game through the opening, the dorm and the first school days with their point-and-click exploration, to the night of April 9 and its first battle, won with the buttons, with sound, a save made at the dorm's Sign-In Sheet and Continue working. On the S25 Edge in console mode, on the Z Flip 7 (Xclipse) in Android's default handheld mode, which works on both ([its note](dm/games/0100DCD01525A000/README.md#android)). Issues: none seen on the S25 Edge; on the Z Flip 7, one frame of the opening movie covered in a fine dot grid, not compared with the Mac. Not played past the first battle (Tartarus); not tried on the other devices |
 | SHIN MEGAMI TENSEI V: Vengeance 1.0.3 | Samsung Galaxy S25 Ultra | In-game (contributor report): a save in Mita at 30 fps, and at 60 with `DM_UE_DYNRES_BUDGET=16.7` ([its note](dm/games/010069C01AB82000/README.md#frame-rate)). Not run on the project's devices |
@@ -139,17 +230,35 @@ shaders. Super Mario 3D All-Stars still builds, since its launcher draws with NV
 The games the script refuses are in the Doesn't run tier. Street Fighter 30th Anniversary Collection stopped at its first EGL call on a Retroid Pocket 5
 before the script refused it ([its note](dm/games/0100024008310000/README.md#android)).
 
-## Testing and reporting
+## Help and reports
 
-Help with packing and playing, and reports of how a game runs on your device, go to the [DroidPlay Discord](https://discord.gg/4wNHX3uqSU): #help
-for a problem, #compatibility for a game. Its rules are this README's: no games, keys, firmware or packed APKs.
+- **Ask in the [DroidPlay Discord](https://discord.gg/3r92f8wmh7):** #help for a problem, #compatibility for how a game runs on your device. Its rules are
+  this README's: no games, keys, firmware or packed APKs.
+- **When a build fails,** DroidPlay for Windows says why in plain words, with the button that fixes it where there is one. Otherwise **Copy report** on the
+  Builds page copies a short report to paste in #help; it leaves out your user folder, the phone's serial and anything that looks like a key.
+- **A useful report** names the device and its GPU (Settings, or `adb shell getprop ro.product.model`), Android version, the game, its title ID and version,
+  how it was packed (DroidPlay, the command line, game app or launcher), and attaches the log: `adb logcat -s DroidPlay` (`-s nxnative` for an app older
+  than 0.5.0), or `log.txt` in the app's folder (`Android/data/<package>/files/`). A screenshot and the first `[RED]` lines help most. Never attach game
+  files or keys.
+- **Testers and contributors** can also open an issue with the bug report form ([Reporting a problem](CONTRIBUTING.md#reporting-a-problem)).
 
-Testers and contributors are welcome. Useful reports name the device and its GPU (Settings, or `adb shell getprop ro.product.model`), Android version, the game,
-its title ID and version, how it was packed (DroidPlay, the command line, game app or launcher), and attach the log: `adb logcat -s DroidPlay` (`-s nxnative` for an app older than 0.5.0), or `log.txt` in the
-app's folder (`Android/data/<package>/files/`). A screenshot and the first `[RED]` lines help most. Never attach game files or keys. How changes get in, and how
-DroidPlay Core stays in step with nxnative: [CONTRIBUTING.md](CONTRIBUTING.md#droidplay-core).
+## Guides
 
-## How it fits together
+- [DroidPlay for Windows](docs/android.md#droidplay-for-windows): installing, Get started and every page of the app, in detail.
+- [The Android app](docs/android.md#the-android-app): the launcher, a game's settings, the first start, controls, saves and the log.
+- [Game apps](docs/android.md#game-apps): a game as an app of its own.
+- [Another Vulkan driver (Turnip)](docs/android.md#another-vulkan-driver-turnip): on an Adreno GPU, a driver you put on the phone.
+- [Games that compile their shaders while they run](docs/android.md#games-that-compile-their-shaders-while-they-run): The Binding of Isaac, for one.
+- [Packing from the command line](docs/android.md#packing-from-the-command-line): what it needs, and its options.
+- [Seeing what a game draws](docs/android.md#seeing-what-a-game-draws): screenshots, frame dumps and thread states from a running game.
+
+## How it works
+
+A Switch and an Android phone both run ARM64 code, so there is no CPU emulation. The game's code is rewritten only where the host needs it (system calls,
+thread registers), a host answers the Switch's system calls and SDK services, and the game's NVN graphics are replayed on the GPU through Vulkan, with its
+shaders translated to SPIR-V when the game is built.
+
+### How it fits together
 
 ```
  Your computer (Windows, macOS or Linux)                         Your Android phone
@@ -170,152 +279,7 @@ DroidPlay Core stays in step with nxnative: [CONTRIBUTING.md](CONTRIBUTING.md#dr
 One app holds every game: each game you build adds its host to a library on your computer, and every APK is packed from the whole library, so building a second
 game keeps the first one in the app. Game files (code, shaders, RomFS, icon) live in the app's folder on the phone; saves stay in the app's internal storage.
 
-## What you need
-
-- **Your game and keys**, dumped from your own Switch: the game as NSP / XCI files (the base game and, if you have it, its update; for example with nxdumptool) in one
-  folder, and your `prod.keys` (Lockpick_RCM).
-- **On the computer:** Python 3.12 or newer with `lz4`, `capstone`, `fonttools` and `backports.zstd` (not needed on Python 3.14), plus `PySide6` for the desktop app:
-  `pip install lz4 capstone fonttools backports.zstd PySide6`. The .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (set `ANDROID_HOME` or pass
-  `--sdk`), `adb`, and a JDK (for `keytool` and `javac`). The desktop app's **Settings** page checks all of this and says how to get what is missing.
-  On Windows, use Python 3.14 and set `PYTHONUTF8=1` for the command line (the desktop app sets it for what it runs): the scripts read and write text as UTF-8,
-  which Python on Windows does by default only from 3.15, and lz4 has no Windows build for 3.15 yet.
-- **On the phone:** USB debugging (or wireless debugging) turned on, so that `adb devices` lists the phone, and room for the game: its RomFS is copied as one image
-  (Danganronpa V3's is 6.7 GB).
-
-## The desktop app
-
-`uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the
-modules the script names at its top; `python scripts/nxnative_android.py` works too, with them installed).
-
-**On Windows**, from nothing:
-
-1. Download **DroidPlay-Setup-&lt;version&gt;.exe** from the [latest release](https://github.com/enjoyerofslop/droidplay-core/releases/latest) and run it. Windows
-   warns that it comes from the internet and isn't signed: **More info**, then **Run anyway**.
-   - It installs DroidPlay for you only, in `%LOCALAPPDATA%\Programs\DroidPlay`, with no administrator prompt and nothing more to download: its own Python with
-     the app's modules, and DroidPlay Core (Setup is about 80 MB, 600 MB installed). Each Setup has a `.sha256` beside it on the release page.
-   - DroidPlay is then in the Start menu, on the desktop, and in **Settings › Apps**, which uninstalls it. Your games and their builds, the Android SDK, the
-     tools and your settings stay.
-   - DroidPlay says when a newer release is out, and **Update** installs it: DroidPlay downloads the new Setup, checks it against the release, runs it
-     (a small Updating DroidPlay window shows its progress) and opens again. Or close DroidPlay and run the new Setup yourself.
-   - **Coming from Install DroidPlay.cmd?** Close DroidPlay and run Setup: it moves your DroidPlay over and removes the copy the .cmd installed, and keeps your
-     games, builds and settings. `Install DroidPlay.cmd uninstall` still removes such a copy by hand (`dm/android/windows/install_droidplay.cmd`).
-   - Or from source: install [uv](https://docs.astral.sh/uv/) (`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`), get
-     DroidPlay Core (`git clone https://github.com/enjoyerofslop/droidplay-core`) and, in its folder, `uv run scripts\nxnative_android.py`.
-2. DroidPlay opens on **Get started**: four steps, each saying what it needs and whether it's done. Setting up takes about half an hour the first time.
-   - **Your keys:** pick your `prod.keys`.
-   - **Tools for building:** **Install tools** downloads Microsoft's JDK 21 and the .NET SDK 10 into the app's own folder (`%LOCALAPPDATA%\nxnative\android\tools`),
-     and Google's Android SDK with the NDK, CMake, build-tools, platform and platform-tools into Android Studio's place, `%LOCALAPPDATA%\Android\Sdk` (about 1.5 GB
-     to download, 5 GB installed), with one bar and the time left. Installing the Android SDK means accepting its
-     [license](https://developer.android.com/studio/terms), which the app asks first; its usage metrics stay off. What the computer already has is kept.
-     From a console: `build_android_from_nsp.py --setup --accept-android-licenses`.
-   - **Your phone:** plug it in with USB debugging on; the step says when the phone is waiting for you to tap **Allow**.
-   - **Your first game:** add the folder with its NSP or XCI files, then **Build and install**.
-
-   Until all four are done, a launch opens on the checklist and the top bar's **Setup 2 of 4** opens it; **Settings › Show the setup checklist** does any time.
-
-<table>
-<tr>
-<td align="center" valign="top" width="36%"><img src="docs/images/windows/phone-setup.png" alt="DroidPlay for Windows' Set up your phone guide for a Samsung Galaxy: Build number, Auto Blocker, USB debugging and Allow, with the phone waiting for Allow at its foot"><br><small><b>Set up my phone</b>: the steps for your phone's brand</small></td>
-<td align="center" valign="top" width="64%"><img src="docs/images/windows/build.png" alt="DroidPlay for Windows' Builds page part-way through building Pokémon Brilliant Diamond: four stages done, the shaders for Vulkan translating, with the time left"><br><small><b>Builds</b>: a first build part-way, its stages and the time left</small></td>
-</tr>
-</table>
-
-- **Library:** the games you added (**+ Build game** picks a folder with a game's NSP files), each with its box art, version and status on the phone picked at the top.
-  The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
-  build only, update the app on the phone, remove the game. A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
-  provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.
-- **Builds:** the running build's stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console shows here too.
-  When a build fails, a banner says what went wrong in plain words, with the button that fixes it where there is one (**Install again** once the phone has room,
-  **Choose prod.keys** for keys older than the game). Otherwise it is likely a bug: **Copy report** copies a short report to paste in #help on the Discord, and
-  **Save full report** saves the whole log; both leave out your user folder, the phone's serial and anything that looks like a key.
-- **Phones:** adb devices over USB and Wi-Fi (pair, connect, discover), each one's battery and free space, the app version and the games on each phone, saves
-  backed up to the computer. **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
-  (Samsung's Auto Blocker, Xiaomi's Install via USB, a Pixel's driver) and what to try when the phone doesn't show up; a phone below 20% battery gets a warning,
-  since a PC's USB port charges slowly and an install takes minutes.
-- **Performance:** the game's log from `adb logcat`, with the frame time, GPU and CPU figures the host prints, and a frame's GPU time per pass.
-- **Settings:** your `prod.keys`, and the requirements above with how to install what is missing (on Windows, **Install what's missing** does it).
-
-A rebuild only does what changed: the extraction, the rewritten code and the translated shaders are reused when their inputs are the same, and the RomFS image is not
-copied to the phone again when the phone already holds the same one.
-
-## The Android app
-
-- **Launcher.** Opening **DroidPlay** (its package is still `org.nxnative.android`) shows the games on the phone with their icon, name and version (a game whose
-  host the installed app lacks is marked as needing an app update). Picking a game opens its **settings screen**, grouped into Game and Controls: console mode (handheld is lighter), game language, game timing, render
-  scale where the game supports it, the frame-rate counter, rumble and its strength. **Play** starts the game. Lines like `DM_RENDER_SCALE=0.8` in
-  `Android/data/org.nxnative.android/files/env.txt` win over the screen (they show greyed out).
-- **The first start** of a game builds its pipelines for the phone's GPU, and stays on the loading screen meanwhile: 80 seconds for Brilliant Diamond on a
-  Galaxy S25 Edge, 39 on a OnePlus Pad 3. Desktop DroidPlay says so the first time **Play** is pressed after an install, and the app says so when the game has no
-  pipelines saved yet. Later starts take a few seconds.
-- **In the game.** Touch controls are drawn over the picture in three layouts (2D, 3D and Tap, switched with the round button at the top); touches no control takes go
-  to the game's touch screen. A physical controller works as player 1 and hides the touch controls; rumble goes to the controller or the phone, and shaking the phone
-  shakes the controller. The **≡** button at the top (left of −) goes back to the launcher while the game keeps running behind it: **Play** on the same game resumes
-  it, and picking another game asks before closing the running one.
-- **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; the desktop app backs them up to the computer. The log is
-  `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`).
-
-## Another Vulkan driver (Turnip)
-
-On a phone with an Adreno GPU, a game can run on a Vulkan driver you put on the phone instead of the system's, as in Switch emulators: usually a build of Mesa's
-open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666/purple-turnip/releases). The app carries what loads it
-([libadrenotools](dm/third_party/libadrenotools/README.md)), so trying one needs no new build:
-
-1. Unzip the driver package (`turnip_mrpurple_T30-toasted.adpkg.zip`, say). It holds a `.so` (`vulkan.purple.so`) and a `meta.json` that names it.
-2. Copy the `.so` into `Android/data/org.nxnative.android/files/`, beside `env.txt`: `adb push vulkan.purple.so /sdcard/Android/data/org.nxnative.android/files/`.
-   A game app reads its own folder, `Android/data/org.nxnative.game.t<title ID>/files/`.
-3. Add `DM_VK_DRIVER=vulkan.purple.so` to `env.txt` there (a path relative to that folder, or an absolute one), then start the game.
-
-The app copies the driver into its internal storage at start, since Android loads no code from shared storage, and copies it again when the file changes. The log
-names the driver that runs: `[vk] driver: … (DM_VK_DRIVER, through libadrenotools), not the system's: PurpleVK-public Adreno (TM) 740 …`. A driver that can't run
-(a wrong path, a build for another GPU) gets one `[RED] [vk] DM_VK_DRIVER …` line saying why, and the game runs on the system's driver. Remove the line from `env.txt`
-(or start it with `#`) to go back. Each driver keeps its own pipeline cache, so the first start on a new driver compiles the game's pipelines again (it can take a
-minute to the first frame, and it stutters until they are built), and the system driver's cache is still there afterwards.
-
-Whether a driver helps depends on the game and the device. With Mr. Purple's T30, Super Mario Odyssey's opening runs at 60 fps on an Odin 2 (as on its own driver)
-and at 40 fps on a Retroid Pocket 5 (38 on its own); Pokémon Brilliant Diamond's Eterna City runs at 58 fps on a Retroid Pocket 5 with
-Turnip (15 on its own driver), and at 60 fps on an Odin 2, as on its own driver.
-
-## Packing from the command line
-
-```
-python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k "<your prod.keys>"    build, install, copy the game
-                         (a Switch 2 game: the folder with its .nup or dump, or the .nup itself; no keys needed)
-    --game-apk [--xapk]  the game as an app of its own (<name>.apk, plus <name>.romfs, with its DLC after the RomFS, for a game over 2 GB, or one .xapk); no device needed
-    -p v0                pack the base game instead of the newest version in the folder (a version the profile does not register is packed from a derived profile)
-    -l es-419            the default game language (a code or a name)
-    --serial <device>    the adb device, when more than one is connected
-    --no-push            build the APK only (a game without a profile is first built this way)
-    --push-only          install the app and copy a game built before, without building
-python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
-python scripts/build_android_from_nsp.py --check       what the build needs on this computer, as JSON
-```
-
-The first build of a game takes a while (the shader translation and, on a hard disk, the RomFS image); later builds reuse what did not change.
-
-## Seeing what a game draws
-
-When a game shows a black or wrong picture, these files in `Android/data/org.nxnative.android/files/` ask the running game for diagnostics (each is checked every
-30 frames and removed when taken; `adb shell touch <path>` creates one):
-
-- `shot_now`: the next presented frame as a PNG in `dump/` (`DM_NVN_SHOT=<frame>[,<frame>...]:<path>` in `env.txt` does the same for given frames).
-- `dump_now`: every render target of one frame, after each pass, as `.raw` and `.png` in `dump/` (a 3D texture's slices stacked, up to 1,024 images), with each draw's shaders, bound textures, constant buffers (their first values) and blend state in the log.
-- `threads_now`: every game thread's state, what it waits on and its backtrace, in the log (for a game that stops moving on).
-
-## Games that compile their shaders while they run
-
-Some games carry their shaders as GLSL source and compile them with Nintendo's GLSL compiler while they run (The Binding of Isaac does). Their files hold no shader to
-translate, so the first build has none (`[RED] the game is packed without shaders`): the game runs but draws nothing. The app captures them on the phone by itself:
-
-1. Play the game for a while: each shader is saved the first time the game compiles it (in the game's folder on the phone, `glslc_capture/`).
-2. On the computer, the game's card in the desktop app says how many new shaders the phone has; **Manage → Update shaders from the phone** copies them, translates
-   the new ones and puts them on the phone (no app build: about a minute). From the command line: `build_android_from_nsp.py "<NSP folder>" -k <prod.keys> --update-shaders`.
-   Every build and **Install on phone** also picks up the new ones first.
-3. Open the game again.
-
-A scene reached later (or a DLC) can compile more shaders: repeat until the log shows no `no translated shader`. This is done for games packed from a provisional
-profile; a registered profile's shader tables name the captures they were made from. DLC in the NSP folder is extracted and copied to the phone with the game.
-
-## What the Android port changed
+### What the Android port changed
 
 The iOS / Mac host runs on Android with stand-ins for the Darwin interfaces it calls (`dm/android/compat`); the guest's thread slots go through the x18 register (the
 rewriter emits `mov xN, x18` for `DM_TARGET=android`). NVN is replayed on Vulkan (`dm/android/gfx_vk.c`, `gfx_vk_draw.inc`): textures (BC decoded on the CPU where the
@@ -334,6 +298,32 @@ Problems found on the way, each with its cause and fix in the reference ([render
   thread's small stack (Bowser's Fury after a few seconds).
 - **Speed:** syncs limited to what a draw reads, passes kept open, early and mid-pass submissions, constant buffers copied only as far as the shader reads, pipeline keys
   built from the state fields, a capped pipeline prebuild; *Game time* holds the audio to the game's frames for levels timed to the music.
+
+## Contributing
+
+DroidPlay Core is nxnative with an Android port. Android work belongs here; a fix for the Mac or the iPhone goes to
+[seedds/nxnative](https://github.com/seedds/nxnative) first and reaches DroidPlay Core with the next merge. nxnative's `main` is merged in regularly, so
+its games, fixes and Switch 2 work reach Android too; nxnative itself stays Apple-only by its maintainer's choice. Testers and contributors are welcome.
+
+- [CONTRIBUTING.md](CONTRIBUTING.md#droidplay-core): how a change gets in, the checks to run, and how DroidPlay Core stays in step with nxnative.
+- [dm/android/README.md](dm/android/README.md): the Android host, the Vulkan replay, packing, game apps and the desktop app.
+- [Android baselines](dm/android/baselines.md): the same scripted runs on each device, with frame times, the drivers and the known problems.
+- [The games table](dm/games/README.md#games) and each game's note: what its profile needs, what was found on it and what is open.
+- [AGENTS.md](AGENTS.md) and [docs/agents](docs/agents/README.md): where to start on a crash, a hang or a wrong picture.
+- [docs/development.md](docs/development.md): nxnative's internals, the packing script's options and building by hand.
+
+## Credits and license
+
+- [seedds/nxnative](https://github.com/seedds/nxnative) runs Switch games natively on the iPhone, the iPad and the Mac; DroidPlay Core is nxnative with an
+  Android port. nxnative's [acknowledgements](#acknowledgements), below, name the work both stand on.
+- [RogelioLB/nxnative-android](https://github.com/RogelioLB/nxnative-android) began the port: the Vulkan replay of NVN, the Android front end and the packing
+  script.
+- DroidPlay Core was called droidnative until 2026-11-09, and was renamed so as not to be confused with
+  [DroidNative](https://github.com/DroidNative/DroidNativeApp), which runs Linux desktop apps on Android
+  ([#40](https://github.com/enjoyerofslop/droidplay-core/issues/40)). Links to the old name lead here.
+- MIT ([LICENSE](LICENSE)). Third-party code keeps its own license ([dm/third_party](dm/third_party/README.md)).
+
+Below the line is nxnative's own README, merged in from nxnative with the rest of its changes: building games for the iPhone, the iPad and the Mac.
 
 ---
 
