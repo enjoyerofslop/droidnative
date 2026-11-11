@@ -101,14 +101,14 @@ static void gm_lazy_add(const void *pool, uintptr_t lo, size_t size, int live) {
     gm_lz *L = &g_lz[g_nlz]; memset(L, 0, sizeof *L);
     L->lo = lo; L->hi = lo + size; L->pool = pool; L->nch = (uint32_t)((size + GM_CHUNK - 1) / GM_CHUNK); L->st = calloc(L->nch, 1);
     if (!L->st) return;
-    g_nlz++; g_lz_pools++; atomic_store(&g_lz_any, 1);
+    g_nlz++; g_lz_pools++; atomic_store(&g_lz_any, 1); atomic_fetch_add(&g_gm_gen, 1);   // (the table's sink ranges: DM_VK_RAW_GMEM_SINK)
     gm_lz_scan(L);
     int got = gm_lz_place(L, live, 1);
     static int nl; if (nl++ < 4) LOG("[vk] raw global memory: memory pool %#lx+%#zx placed in chunks of %u MiB as they are used: %d of %u now (DM_VK_RAW_GMEM_LAZY=0: whole)",
                                      (unsigned long)lo, size, GM_CHUNK >> 20, got, L->nch);
 }
 static void gm_lazy_drop(const void *pool) {   // gm_unplace, the pool's Finalize (its placed chunks are segments of the pool and given back with them)
-    for (int i = 0; i < g_nlz; i++) if (g_lz[i].pool == pool) { free(g_lz[i].st); g_lz[i] = g_lz[--g_nlz]; return; }
+    for (int i = 0; i < g_nlz; i++) if (g_lz[i].pool == pool) { free(g_lz[i].st); g_lz[i] = g_lz[--g_nlz]; atomic_fetch_add(&g_gm_gen, 1); return; }
 }
 // the replay's thread, under g_bk, inside stage_set: a storage buffer [addr, addr + n) in no placed piece. → 1 when the chunks holding it were placed now (as one allocation)
 static int gm_lazy_bind(uint64_t addr, size_t n) {
@@ -141,8 +141,42 @@ static void gm_lazy_stat(void) {
     for (int i = 0; i < g_nlz; i++) for (uint32_t k = 0; k < g_lz[i].nch; k++) { uint64_t len = gm_lz_end(&g_lz[i], k) - (g_lz[i].lo + (uintptr_t)k * GM_CHUNK); all += len; if (g_lz[i].st[k] == LZ_PLACED) placed += len; }
     int n = g_nlz; pthread_mutex_unlock(&g_gm_pl);
     LOG("[vk] raw global memory in chunks: %d pools of %.1f MiB, %.1f MiB of them placed; chunks placed for a binding %llu, wanted for written pages %llu, kept back by a pending write %llu, "
-        "refused %llu, bindings across a placed chunk %llu, placements put off (lock busy) %llu; %llu scans (%.2f ms in all); writes that waited for a swap %llu, host writes %llu (cumulative; gfx_vk_gmem_lazy.inc)",
+        "refused %llu, bindings across a placed chunk %llu, placements put off (lock busy) %llu; %llu scans (%.2f ms in all); writes that waited for a swap %llu, host writes %llu; raw stores into chunks not placed "
+        "(DM_VK_RAW_GMEM_SINK) %llu (cumulative; gfx_vk_gmem_lazy.inc)",
         n, all / 1048576.0, placed / 1048576.0, (unsigned long long)g_lz_bind, (unsigned long long)g_lz_res, (unsigned long long)g_lz_waited, (unsigned long long)g_lz_refused,
         (unsigned long long)g_lz_cross, (unsigned long long)g_lz_busy, (unsigned long long)g_lz_scans, g_lz_scan_ns / 1e6,
-        (unsigned long long)atomic_load(&g_frz_waits), (unsigned long long)atomic_load(&g_frz_preps));
+        (unsigned long long)atomic_load(&g_frz_waits), (unsigned long long)atomic_load(&g_frz_preps), (unsigned long long)atomic_load(&g_sink_hits));
 }
+
+// ---- DM_VK_RAW_GMEM_SINK=1 (env.txt; a diagnostic): raw stores into chunks not placed, counted ----
+// A raw store to an address missing from the table goes nowhere and leaves no trace. With the switch, each chunk not placed gets a table entry onto one zeroed 2 MiB sink buffer,
+// so such a store sets that entry's bit in its write log, which gm_chunk_done reads: the stores a chunked pool would lose are counted and the first chunks named. Raw loads
+// from those chunks then read the sink (zero unless such a store wrote it) instead of 0
+static int gm_sink_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_SINK"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_RAW_GMEM_SINK=1: chunks not placed are in the raw pool table, onto a sink, so raw stores into them are counted"); } return v; }
+static VkBuffer g_sink_b; static VkDeviceMemory g_sink_m; static uint64_t g_sink_gpu;   // (g_sink_hits: gfx_vk_gmem.inc)
+static int gm_sink_make(void) {
+    if (g_sink_gpu) return 1;
+    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GM_CHUNK, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR};
+    if (vkCreateBuffer(g_vk.dev, &bc, NULL, &g_sink_b) != VK_SUCCESS) return 0;
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g_vk.dev, g_sink_b, &mr);
+    uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkMemoryAllocateFlagsInfo fi = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR};
+    VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &fi, .allocationSize = mr.size, .memoryTypeIndex = mt};
+    void *p = NULL;
+    if (mt == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ma, NULL, &g_sink_m) != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, g_sink_b, NULL); g_sink_b = VK_NULL_HANDLE; return 0; }
+    vkBindBufferMemory(g_vk.dev, g_sink_b, g_sink_m, 0);
+    if (vkMapMemory(g_vk.dev, g_sink_m, 0, VK_WHOLE_SIZE, 0, &p) == VK_SUCCESS) { memset(p, 0, (size_t)mr.size); vkUnmapMemory(g_vk.dev, g_sink_m); }
+    VkBufferDeviceAddressInfoKHR ai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR, .buffer = g_sink_b}; g_sink_gpu = g_gm_bda(g_vk.dev, &ai);
+    return g_sink_gpu != 0;
+}
+// gm_table: the chunks not placed as ranges onto the sink, appended to *seg from n on (grown as needed). → the new count. Skipped when the placement lock is busy (the next build has them)
+static int gm_sink_ranges(uint64_t (**seg)[3], int *cap, int n) {
+    if (!gm_sink_on() || !atomic_load(&g_lz_any) || !gm_sink_make() || pthread_mutex_trylock(&g_gm_pl)) return n;
+    for (int i = 0; i < g_nlz; i++) for (uint32_t k = 0; k < g_lz[i].nch; k++) {
+        if (g_lz[i].st[k] == LZ_PLACED) continue;
+        if (n == *cap) { *cap = *cap ? 2 * *cap : 1024; *seg = realloc(*seg, (size_t)*cap * sizeof **seg); if (!*seg) die("raw global memory: the table's ranges"); }
+        uint64_t a = g_lz[i].lo + (uint64_t)k * GM_CHUNK; (*seg)[n][0] = a; (*seg)[n][1] = gm_lz_end(&g_lz[i], k); (*seg)[n++][2] = g_sink_gpu - a; }
+    pthread_mutex_unlock(&g_gm_pl);
+    return n;
+}
+static int gm_sink_is(const uint64_t e[3]) { return g_sink_gpu && e[0] + e[2] == g_sink_gpu; }

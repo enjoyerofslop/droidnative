@@ -401,6 +401,8 @@ static int gm_tab_new(gm_tab *t) {   // a new table buffer, host-visible and map
     if (vkMapMemory(g_vk.dev, t->m, 0, VK_WHOLE_SIZE, 0, (void **)&t->p) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, t->m, NULL); vkDestroyBuffer(g_vk.dev, t->b, NULL); t->b = VK_NULL_HANDLE; return 0; }
     g_gm_tab_new++; return 1;
 }
+static int gm_sink_ranges(uint64_t (**seg)[3], int *cap, int n); static int gm_sink_is(const uint64_t e[3]); static _Atomic uint64_t g_sink_hits;   // gfx_vk_gmem_lazy.inc
+static int gm_seg_cmp(const void *x, const void *y) { uint64_t a = *(const uint64_t *)x, b = *(const uint64_t *)y; return a < b ? -1 : a > b; }
 static int gm_table(void) {
     uint64_t gen = atomic_load(&g_gm_gen);
     if (g_gt.b && g_gt.gen == gen) return 1;
@@ -414,6 +416,7 @@ static int gm_table(void) {
     if (g_ngm > cseg) { cseg = g_ngm + 256; seg = realloc(seg, (size_t)cseg * sizeof *seg); if (!seg) die("raw global memory: the table's ranges"); }
     for (int i = 0; i < g_ngm; i++) { seg[n][0] = g_gm[i].lo; seg[n][1] = g_gm[i].hi; seg[n++][2] = g_gm[i].gpu - g_gm[i].lo; }
     pthread_mutex_unlock(&g_gm_mu);
+    { int n0 = n; n = gm_sink_ranges(&seg, &cseg, n); if (n > n0) qsort(seg, (size_t)n, sizeof *seg, gm_seg_cmp); }   // DM_VK_RAW_GMEM_SINK (gfx_vk_gmem_lazy.inc)
     n = gmem_table_fill(t.p, (const uint64_t (*)[3])seg, n, &over);
     if (over) RED_ONCE(163, "raw global memory: %d more placed pieces than the %d entries of the pool table: addresses in them are not reached", over, DMSH_GMEM_MAP_ENTRIES - 1);
     if (g_gt.b) { g_gt.seq = C ? C->seq : g_seq;   // the chunk recorded now may read it
@@ -439,7 +442,8 @@ static void gm_chunk_done(chunk *c) {
     for (int i = 0; i < c->ngml; i++) {
         const uint32_t *w = (const uint32_t *)(c->ar[c->gml[i].blk].p + c->gml[i].off); const uint8_t *t = c->gml[i].tab; int any = 0;
         for (int j = 0; j < GM_LOG_BYTES / 4; j++) for (uint32_t bits = w[j]; bits; bits &= bits - 1) {
-            uint64_t e[2]; memcpy(e, t + (size_t)(j * 32 + __builtin_ctz(bits)) * DMSH_GMEM_MAP_ENTRY, sizeof e); any = 1; g_gm_logbits++;
+            uint64_t e[3]; memcpy(e, t + (size_t)(j * 32 + __builtin_ctz(bits)) * DMSH_GMEM_MAP_ENTRY, sizeof e); any = 1; g_gm_logbits++;
+            if (gm_sink_is(e)) { static int ns; if (atomic_fetch_add(&g_sink_hits, 1) < 1 || ns < 16) { ns++; LOG("[RED] [vk] raw global memory: raw stores reached %#llx-%#llx, a chunk not placed: they went to the sink (DM_VK_RAW_GMEM_SINK)", (unsigned long long)e[0], (unsigned long long)e[1]); } continue; }
             int known = 0; for (int k = 0; k < nseen && !known; k++) known = seen[k][0] == e[0] && seen[k][1] == e[1];
             if (!known && nseen < GM_SEEN) { seen[nseen][0] = (uintptr_t)e[0]; seen[nseen++][1] = (uintptr_t)e[1];
                 if (nseen <= 16) LOG("[vk] raw global memory: stores reached %#llx-%#llx (%llu KiB), pool range %d seen so far", (unsigned long long)e[0], (unsigned long long)e[1], (unsigned long long)((e[1] - e[0]) >> 10), nseen); }
