@@ -79,6 +79,7 @@ set(ANDROID_C
   ${CMAKE_CURRENT_SOURCE_DIR}/haptics_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/apple_stubs.c
   ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/vk_start.c
   ${CMAKE_CURRENT_SOURCE_DIR}/module_pack.c
   ${CMAKE_CURRENT_SOURCE_DIR}/gfx_${DM_GFX}.c)
 
@@ -189,7 +190,7 @@ if(DM_TESTS)
   list(REMOVE_ITEM GFX_NO_IF ${DM}/gfx/nvn/hle_nvn.c)
   dm_test(t_nvn SOURCES ${DM}/gfx/tests/t_nvn.c ${DM}/host/crash.c ${DM}/host/hle_bigstack.c ${GFX_NO_IF} ${CMAKE_CURRENT_SOURCE_DIR}/gfx_${DM_GFX}.c
           ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_android_stubs.c ${DM}/gfx/tests/t_host_stubs.c ${CMAKE_CURRENT_SOURCE_DIR}/apple_stubs.c ${GEN}/asm/nvn_entry.S ${GEN}/asm/nvn_thunks.S
-          ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver.c)
+          ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver.c ${CMAKE_CURRENT_SOURCE_DIR}/vk_start.c)
   target_include_directories(t_nvn PRIVATE ${DM}/gfx/nvn/include ${DM}/gfx/nvn ${DM}/gfx/tex ${DM}/third_party/vulkan-headers/include)
   target_compile_options(t_nvn PRIVATE -march=armv8.2-a+lse)
   target_link_libraries(t_nvn dl)

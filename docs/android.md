@@ -143,7 +143,9 @@ the system's driver. On a phone without an Adreno GPU (Mali, Xclipse) the line i
 code, loses the GPU, or ends in its first 30 seconds (a hang you closed, say), the next start runs on the system's driver once, and the start screen and the log say why;
 the start after that tries your driver again. A crash outside the driver's code is noted but doesn't count against it, and a hang after the first 30 seconds isn't
 caught. The app keeps each driver's last start in `files/vk_driver_state/<driver file>.json` and each game's in
-`files/games/<title ID>/vk_driver_result.txt`, which DroidPlay for Windows can read. Remove the line from `env.txt`
+`files/games/<title ID>/vk_driver_result.txt`, which DroidPlay for Windows can read. Every start, on any driver, also writes
+`files/games/<title ID>/vk_start.txt`: the driver and GPU it ran on, how many pipelines the driver refused (their draws are missing from the picture) with the first
+shaders' keys, and a lost GPU. Remove the line from `env.txt`
 (or start it with `#`) to go back. Each driver keeps its own pipeline cache, so the first start on a new driver compiles the game's pipelines again (it can take a
 minute to the first frame, and it stutters until they are built), and the system driver's cache is still there afterwards.
 

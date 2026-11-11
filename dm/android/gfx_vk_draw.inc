@@ -1955,7 +1955,7 @@ static void *apipe_thread(void *arg) {
         VkResult pr = pipe_make(&q.k, &tmp, &ns, &nva, &tp);
         double ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6;
         pthread_mutex_lock(&g_bk);
-        if (pr == VK_SUCCESS) { *q.pp = tmp; pk_record(&q.k); pcache_made(); g_apq_built++; } else { q.pp->pl = VK_NULL_HANDLE; g_apq_failed++; }   // (failed: never made again, as at once)
+        if (pr == VK_SUCCESS) { *q.pp = tmp; pk_record(&q.k); pcache_made(); g_apq_built++; } else { q.pp->pl = VK_NULL_HANDLE; g_apq_failed++; vk_start_pipe_failed(q.k.sh[0] ? q.k.sh[0]->key : NULL, q.k.sh[1] ? q.k.sh[1]->key : "-"); }   // (failed: never made again, as at once)
         uint64_t built = g_apq_built, queued = g_apq_queued, left = g_apq_left;
         pthread_mutex_unlock(&g_bk);
         if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] pipeline creation failed in the background: VkResult %d (shaders %s %s; %u stages, %u vertex attributes, %u colour targets, topology %d)",
@@ -2001,6 +2001,7 @@ static pipe_t *pipe_get(const pipe_key *k) {
     if (pr != VK_SUCCESS) {
         static int n; if (n++ < 16) LOG("[RED] [vk] pipeline creation failed: VkResult %d (shaders %s%s %s; %u stages, %u vertex attributes, %u colour targets, topology %d, %u samples)", pr, k->sh[0] ? k->sh[0]->key : "-",
             k->z && k->sh[0] && k->sh[0]->modz ? " (.z)" : "", k->sh[1] ? k->sh[1]->key : "-", ns, nva, k->ncolor, (int)tp, k->rk.samples);
+        vk_start_pipe_failed(k->sh[0] ? k->sh[0]->key : NULL, k->sh[1] ? k->sh[1]->key : "-");   // the start record's count, which the desktop app reads
         pp->p = VK_NULL_HANDLE; return NULL;
     }
     if (vk_debug()) LOG("[vk] pipeline %u for shaders %s %s", g_pipes.n, k->sh[0] ? k->sh[0]->key : "-", k->sh[1] ? k->sh[1]->key : "-");
@@ -3303,7 +3304,7 @@ static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); VkResult pr = lm_pipeline(NULL, &pc, &pc.stage, mod, 1, &cp->p);
     pb_end(pb);
     atomic_fetch_add(&g_cpso_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); atomic_fetch_add(&g_cpso_made, 1);
-    if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] compute pipeline of shader %s failed", s->key); cp->p = VK_NULL_HANDLE; return NULL; }
+    if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] compute pipeline of shader %s failed", s->key); vk_start_pipe_failed(s->key, NULL); cp->p = VK_NULL_HANDLE; return NULL; }
     if (vk_debug()) LOG("[vk] compute pipeline for shader %s", s->key);
     return cp;
 }
