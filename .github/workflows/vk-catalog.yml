@@ -1,0 +1,31 @@
+# The Vulkan driver catalog (dm/android/vk_drivers.json) against its builders' releases: each pinned zip still there, the same size, with the SHA-256 digest
+# GitHub lists for it (dm/android/tools/vk_catalog.py check; nothing is downloaded). An owner can replace an asset under the same name, which the desktop
+# app's hash check then refuses, so a failed run here means an entry needs a pull request. Weekly, and on a pull request that changes the catalog.
+name: vk-catalog
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  pull_request:
+    paths: ['dm/android/vk_drivers.json', 'dm/android/tools/vk_catalog.py']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Vulkan driver catalog against its releases
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+      - name: Each entry's zip against its release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python dm/android/tools/vk_catalog.py check
