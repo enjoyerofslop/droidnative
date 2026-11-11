@@ -108,8 +108,10 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   update, where `front_android.c` finds the game, then starts `GameActivity` in its own process. The translated shaders are one entry, `spv.zip` (a stored ZIP of
   the `spv` folder, which GameStart unpacks into `spv/`), because an APK without ZIP64 holds at most 65,535 entries and a game's shaders are files of their own
   (Mario Kart 8 Deluxe's passed that, issue #169); the other files are counted against that limit before packing.
-- **A Vulkan driver** (`--game-apk --vk-driver <package>`): the driver goes in as `assets/game/vk_driver/<stem>-<sha8>.so` with a `NOTICE` (what it is, its builder, Mesa's
-  MIT terms: `vk_driver_pkg.notice`), and `defaults.txt` names it, `DM_VK_DRIVER=games/<id>/vk_driver/<name>` with `DM_VK_DRIVER_SHA256`. GameStart unpacks it with the
+- **A Vulkan driver** (`--game-apk --vk-driver <package>`): the driver goes in as `assets/game/vk_driver/<stem>-<sha8>.so` with a `NOTICE` (what it is, who built it,
+  Mesa's MIT notice for its core, and the builder's own terms only as far as they are known: `vk_driver_pkg.notice`). A proprietary driver (a `meta.json` vendor other
+  than Mesa, or one that needs Qualcomm's `libgsl.so` and the like: `vk_driver_pkg.proprietary`) is refused, since a game app is made to share; it goes with an install
+  only. `defaults.txt` names it, `DM_VK_DRIVER=games/<id>/vk_driver/<name>` with `DM_VK_DRIVER_SHA256`. GameStart unpacks it with the
   rest and clears `vk_driver/` at an update, so a rebuild without one leaves no driver behind. The phone is not known when a game app is built: on one without an Adreno
   GPU the host ignores the line, and the system's driver runs. To change the driver, build the app again.
 - **The RomFS is read where it lies, never copied.** GameStart opens it and sets `DM_ROMFS=fd:<descriptor>:<offset>:<length>` in the process's environment, which
@@ -261,8 +263,8 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators:
 - **The catalog** DroidPlay for Windows offers drivers from is `dm/android/vk_drivers.json`: each entry a builder's own GitHub release asset pinned by the zip's
   and the driver's SHA-256, with the Adreno numbers the builder lists (`gpus`) and DroidPlay's own runs (`tested`), changed by pull request and shipped with releases.
   `dm/android/desktop/vk_drivers.py` reads it for the app: an entry's mark against a phone's GPU (`phone_gpu.py`), its download from the release checked by both
-  hashes, and a player's own driver checked by `vk_driver_pkg`. `dm/android/tools/vk_catalog.py check` compares each zip with the digest GitHub lists for it, without
-  downloading (weekly and on a catalog pull request: `.github/workflows/vk-catalog.yml`); `vk_catalog.py entry` makes a new entry's checked fields from a package.
+  hashes, and a player's own driver checked by `vk_driver_pkg`. A game app's driver `NOTICE` gives the builder's terms as the catalog records them (`catalog_licence`). `dm/android/tools/vk_catalog.py check` compares each zip with the digest GitHub lists for it, without
+  downloading (weekly and on a catalog pull request: `.github/workflows/vk-catalog.yml`, whose weekly run opens an issue when an entry no longer matches); `vk_catalog.py entry` makes a new entry's checked fields from a package.
 - `build_android_from_nsp.py` builds the three libraries with every host and packs them into both kinds of app (`build_apk.py --lib`).
 - Tried with Mr. Purple's Turnip T30 (Mesa 26.3.0-devel, Vulkan 1.4.359) on an Odin 2 (Adreno 740, Android 13) and a Retroid Pocket 5 (Adreno 650, Android 13), with
   `scripts/bench_android.py`. It loads and draws on both. Super Mario Odyssey's opening: Odin 2 59.9 fps (GPU 3.5 ms against 5.7 on Qualcomm's driver), Retroid

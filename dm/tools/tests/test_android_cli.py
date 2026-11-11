@@ -476,6 +476,9 @@ class Phone(Base):
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('cat ') and ba.MANIFEST in c[1]: return self.remote.get('manifest', '')
             if c == ['shell', 'getprop ro.build.version.sdk']: return self.remote.get('sdk', '')
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('cat ') and 'defaults.txt' in c[1]: return self.remote.get('defaults', '')
+            if c[:2] == ['shell', 'cat'] and c[2].endswith('/defaults.txt'):
+                if isinstance(self.remote.get('defaults'), Exception): raise self.remote['defaults']
+                return self.remote.get('defaults', '')
             if c == ['shell', 'pidof org.nxnative.android:game']: return self.remote.get('pid', '')
             if c[0] == 'push' and str(c[1]).endswith('.txt') and c[2].endswith('/defaults.txt'): self.remote['pushed_defaults'] = Path(c[1]).read_text()
             return ''
@@ -675,6 +678,21 @@ class VkDriver(Base):   # --vk-driver (dm/android/tools/vk_driver_pkg.py): a dri
             with self.assertRaises(v.PackageError, msg=p.name) as e: v.read(p)
             self.assertIn(why, str(e.exception), p.name)
 
+    def test_a_malformed_package_is_a_package_error(self):   # never a traceback: the CLI and the desktop app's Add your own say why
+        v = vkpkg()
+        cut = self.tmp / 'cut.so'; cut.write_bytes(elf()[:300])   # the dynamic section and the tables past the file's end
+        b = bytearray(elf(sections=False)); i = b.find(struct.pack('<q', 10), 0x300)   # DT_STRSZ's entry (unread) becomes a DT_HASH 4 bytes before the file's end
+        b[i:i + 16] = struct.pack('<qQ', 4, len(b) - 4)
+        self.assertEqual(v.check_elf(bytes(b)), [])   # read without struct.error: the table past the end is passed over, the symbols counted another way
+        z = make_pkg(self.tmp, 'odd.zip')   # an entry with a compression method zipfile lacks (99, AE-x encryption's)
+        raw = bytearray(z.read_bytes())
+        for sig in (b'PK\x03\x04', b'PK\x01\x02'):
+            i = -1
+            while (i := raw.find(sig, i + 1)) >= 0: raw[i + (8 if sig == b'PK\x03\x04' else 10):i + (10 if sig == b'PK\x03\x04' else 12)] = struct.pack('<H', 99)
+        odd = self.tmp / 'odd2.zip'; odd.write_bytes(bytes(raw))
+        for p in (cut, odd):
+            with self.assertRaises(v.PackageError, msg=p.name): v.read(p)
+
     def test_only_mesas_switches_go_beside_a_driver(self):
         v = vkpkg()
         self.assertEqual(v.parse_env(['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1']), ['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1'])
@@ -731,14 +749,49 @@ class VkDriverGameApp(Base):   # --game-apk --vk-driver: the driver and its NOTI
         self.assertEqual(staged['defaults.txt'].decode(), f'DM_LANG=en-US\nDM_VK_DRIVER=games/{GID}/vk_driver/{vk.name}\nDM_VK_DRIVER_SHA256={vk.sha256}\nTU_DEBUG=sysmem\n')
         self.assertIn(f'vk_driver/{vk.name}', staged['files.txt'].decode().split('\n'))   # GameStart unpacks what files.txt lists
 
+    def test_the_notice_claims_no_terms_the_builder_didnt_give(self):   # Mesa's core is MIT; a builder's patches are its own (T30's repository has no licence at all)
+        v = vkpkg(); d = v.read(make_pkg(self.tmp))
+        n = v.notice(d); self.assertIn("Mesa's core is under the MIT licence", n); self.assertIn("the builder's to state", n); self.assertNotIn('apply to this copy', n)
+        self.assertIn('records their terms: MIT (the repository and its patches)', v.notice(d, 'MIT (the repository and its patches)'))
+
+    def test_a_proprietary_driver_stays_out_of_game_apps(self):
+        v = vkpkg(); meta = {'schemaVersion': 1, 'name': 'Q', 'description': '', 'author': 'Q', 'packageVersion': '1', 'vendor': 'Qualcomm', 'driverVersion': '891',
+                             'minApi': 33, 'libraryName': 'vulkan.adreno.so'}
+        q = v.read(make_pkg(self.tmp, 'q.zip', 'vulkan.adreno.so', meta=meta)); self.assertIn('Qualcomm', v.proprietary(q))
+        so = self.tmp / 'vulkan.adreno.so'; so.write_bytes(elf(needed=('libc.so', 'libgsl.so', 'libllvm-qgl.so')))   # a bare .so: told by what it needs
+        self.assertIn('libgsl.so', v.proprietary(v.read(so)))
+        self.assertEqual(v.proprietary(v.read(make_pkg(self.tmp))), '')
+        with self.assertRaises(ba.BuildError): ba.game_app_driver(q)
+        ba.game_app_driver(v.read(make_pkg(self.tmp)))   # a Mesa build goes in
+
+    def test_the_notice_takes_the_catalogs_licence(self):   # T30's entry says its builder published no licence: the NOTICE says so rather than guessing
+        v = vkpkg(); d = v.read(make_pkg(self.tmp))
+        self.assertEqual(ba.catalog_licence(d), '')   # not in the catalog
+        t30 = json.loads((REPO / 'dm/android/vk_drivers.json').read_text())['drivers'][0]
+        d.sha256 = t30['library_sha256']; self.assertIn('No licence file', ba.catalog_licence(d))
+
     def test_gamestart_clears_an_old_driver_at_an_update(self):   # a rebuild without --vk-driver leaves no 19 MB driver behind
         src = (REPO / 'dm/android/java/org/nxnative/android/GameStart.java').read_text()
         self.assertRegex(src, r'new String\[\] \{[^}]*"vk_driver"[^}]*\}\) rm\(')
 
 
 class VkDriverSet(Phone):   # --set-vk-driver: an installed game's driver changed on the phone, with no build
+    def setUp(self):
+        super().setUp()
+        cm = mock.patch.object(ba, 'phone_host_takes_driver', lambda serial, gid, logs: self.remote.get('new_host', True)); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def test_an_app_too_old_for_drivers_is_refused(self):   # its host would load the driver with no hash check and no fallback
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, '/dev/kgsl-3d0': True, 'new_host': False})
+        with self.assertRaises(ba.BuildError): ba.set_vk_driver('S', GID, vkpkg().read(make_pkg(self.tmp)), [], self.tmp / 'logs')
+        self.assertFalse(any(c[0] == 'push' for c in self.cmds))
+        ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')   # going back to the system's driver needs no check
+
+    def test_a_host_takes_a_driver_by_its_mark(self):
+        new, old = self.tmp / 'new.so', self.tmp / 'old.so'; new.write_bytes(b'\x7fELF..' + ba.DRIVER_HOST_MARK + b'..'); old.write_bytes(b'\x7fELF....')
+        self.assertTrue(ba.host_takes_driver(new)); self.assertFalse(ba.host_takes_driver(old)); self.assertFalse(ba.host_takes_driver(self.tmp / 'none.so'))
+
     def test_the_driver_lines_are_replaced_and_its_records_cleared(self):
-        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, '/dev/kgsl-3d0': True, 'pid': '4242\n',
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, f'{g}/defaults.txt': True, '/dev/kgsl-3d0': True, 'pid': '4242\n',
                                                          'defaults': 'DM_LANG=en-US\r\nDM_VK_DRIVER=vk_drivers/old-00000000.so\nDM_VK_DRIVER_SHA256=00\nTU_DEBUG=sysmem\nDM_VK_RAW_GMEM=1\n'})
         vk = vkpkg().read(make_pkg(self.tmp))
         ba.set_vk_driver('S', GID, vk, ['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1'], self.tmp / 'logs')
@@ -750,10 +803,15 @@ class VkDriverSet(Phone):   # --set-vk-driver: an installed game's driver change
         self.assertTrue(any('takes effect at its next start' in m for m in self.said), self.said)
 
     def test_system_takes_the_driver_out(self):
-        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, 'defaults': 'DM_LANG=en-US\nDM_VK_DRIVER=vk_drivers/x.so\nDM_VK_DRIVER_SHA256=00\n'})
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, f'{g}/defaults.txt': True, 'defaults': 'DM_LANG=en-US\nDM_VK_DRIVER=vk_drivers/x.so\nDM_VK_DRIVER_SHA256=00\n'})
         ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')
         self.assertEqual(self.remote['pushed_defaults'], 'DM_LANG=en-US\n')
         self.assertFalse(any('vk_drivers' in ' '.join(c) for c in self.cmds if c[0] == 'push'))
+
+    def test_a_defaults_file_that_cant_be_read_stops_it(self):   # rather than writing it back without the game's own lines
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, f'{g}/defaults.txt': True, 'defaults': ba.BuildError('adb: device offline')})
+        with self.assertRaises(ba.BuildError): ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')
+        self.assertNotIn('pushed_defaults', self.remote)
 
     def test_a_game_not_on_the_phone_is_refused(self):
         with self.assertRaises(ba.BuildError): ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')

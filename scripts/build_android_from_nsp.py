@@ -467,7 +467,7 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
         # ignores it on a phone without an Adreno GPU: a game app goes to phones this computer never sees
         sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
         (stage / 'vk_driver').mkdir(); (stage / 'vk_driver' / vk.name).write_bytes(vk.data)
-        (stage / 'vk_driver' / 'NOTICE').write_text(vkpkg.notice(vk), encoding='utf-8', newline='\n')
+        (stage / 'vk_driver' / 'NOTICE').write_text(vkpkg.notice(vk, catalog_licence(vk)), encoding='utf-8', newline='\n')
         defaults += ''.join(ln + '\n' for ln in vkpkg.defaults_lines(f'games/{g.id}/vk_driver/{vk.name}', vk.sha256, vk_env))
         say(f'Vulkan driver: {vk.describe()}, in the app as vk_driver/{vk.name} (sha256 {vk.sha256[:12]}…); used on Adreno phones, the phone\'s own driver elsewhere')
     (stage / 'defaults.txt').write_text(defaults, encoding='utf-8', newline='\n')   # \n on Windows too, as the phone's files are
@@ -880,6 +880,19 @@ def vk_driver_arg(a):   # --vk-driver / --vk-driver-env → (vk_driver_pkg.Drive
     except vkpkg.PackageError as e: raise BuildError(f'--vk-driver: {e}') from None
 
 
+def catalog_licence(vk):   # the builder's terms as dm/android/vk_drivers.json records them for this driver (by its hash), for a game app's NOTICE; '' when it isn't listed
+    try: drivers = json.loads((REPO / 'dm/android/vk_drivers.json').read_text(encoding='utf-8')).get('drivers') or []
+    except (OSError, ValueError): return ''
+    return next((e.get('licence') or '' for e in drivers if e.get('library_sha256') == vk.sha256), '')
+
+
+def game_app_driver(vk):   # a game app is a file to share: a proprietary driver (Qualcomm's, from another device) has no licence to pass on, so it goes with an install only
+    sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
+    why = vkpkg.proprietary(vk)
+    if why: raise BuildError(f'--game-apk: {vk.library} looks like a proprietary driver ({why}). A game app is made to share, and such a driver may not be passed on: '
+                             'install it on your own phone with --vk-driver instead')
+
+
 def push_vk_driver(serial, vk, env, logs):
     """The driver → files/vk_drivers/<its name> (not again when the phone has it); → the lines for the game's defaults.txt, or none on a phone it can't run on"""
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
@@ -898,14 +911,35 @@ def push_vk_driver(serial, vk, env, logs):
     return vkpkg.defaults_lines(f'{vkpkg.REMOTE_DIR}/{vk.name}', vk.sha256, env)
 
 
+DRIVER_HOST_MARK = b'DM_VK_DRIVER_SHA256'   # in a host that checks a driver's hash and falls back to the system's driver (droidplay-core #235-#237, #263)
+
+
+def host_takes_driver(so):   # whether a game host (a libdmhost_*.so) checks a DM_VK_DRIVER driver's hash and falls back: one built before can't be given one safely
+    try: return DRIVER_HOST_MARK in Path(so).read_bytes()
+    except OSError: return False
+
+
+def phone_host_takes_driver(serial, gid, logs):   # the same of the host the app on the phone carries for gid (pulled: the app isn't debuggable, its libraries are readable)
+    apk = next((ln[8:].strip() for ln in adb(serial, 'shell', f'pm path {PKG}', check=False).splitlines() if ln.startswith('package:') and ln.strip().endswith('base.apk')), '')
+    if not apk: raise BuildError(f'the DroidPlay app ({PKG}) is not on the phone')
+    local = logs / f'phone_libdmhost_{gid}.so'; local.unlink(missing_ok=True)
+    adb(serial, 'pull', f'{apk.rsplit("/", 1)[0]}/lib/arm64/libdmhost_{gid}.so', local, check=False)
+    ok = local.is_file() and host_takes_driver(local); local.unlink(missing_ok=True)
+    return ok
+
+
 def set_vk_driver(serial, gid, vk, env, logs):
     """--set-vk-driver: games/<gid>/defaults.txt on the phone names vk (None: the system's driver) in place of the driver it named, with no build. The driver's start
     record and the game's last result go, so its next start tries the new one (vk_driver.c skips a driver whose last start crashed, once)"""
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
     dst = f'{REMOTE}/games/{gid}'
     if not remote_exists(serial, f'{dst}/game.json') and not remote_exists(serial, f'{dst}/code/main.fixups.tsv'): raise BuildError(f'no game {gid} on the phone ({dst})')
+    if vk and not phone_host_takes_driver(serial, gid, logs):   # the app on the phone would load it with no hash check and no fallback
+        raise BuildError("the DroidPlay app on the phone was built before it could check a driver and fall back to the phone's own: update the app with this game's host "
+                         'first (Build and install, or --push-only after building), then set the driver')
     lines = push_vk_driver(serial, vk, env, logs) if vk else []
-    old = adb(serial, 'shell', f'cat {sh_quote(dst + "/defaults.txt")} 2>/dev/null', check=False).replace('\r\n', '\n')
+    # the game's own lines (its language, its switches) are kept: a defaults.txt that can't be read stops here rather than being written back without them
+    old = adb(serial, 'shell', 'cat', f'{dst}/defaults.txt').replace('\r\n', '\n') if remote_exists(serial, f'{dst}/defaults.txt') else ''
     keep = [ln for ln in old.split('\n') if ln.strip() and not vkpkg.is_driver_line(ln)]
     local = logs / f'defaults_{gid}.txt'; local.write_text(''.join(ln + '\n' for ln in keep + lines), encoding='utf-8', newline='\n')
     adb(serial, 'push', local, f'{dst}/defaults.txt'); adb(serial, 'shell', f'chmod a+rw {sh_quote(dst + "/defaults.txt")}', check=False)
@@ -1105,6 +1139,7 @@ def main(argv):
         bi.PROG.end(); return
     vk, vk_env = vk_driver_arg(a)
     if vk and (a.apk_only or a.migrate or a.update_shaders or (a.no_push and not a.game_apk)): raise BuildError('--vk-driver goes with an install to a phone, --push-only or --game-apk')
+    if vk and a.game_apk: game_app_driver(vk)
     if a.apk_only or a.migrate:
         logs = data_dir() / 'logs'; logs.mkdir(parents=True, exist_ok=True)
         serial = a.serial or os.environ.get('ANDROID_SERIAL') or pick_device()
@@ -1258,6 +1293,9 @@ def main(argv):
         elif inside: say(f'done: {made[0]}, the game with its data inside. Install it on any Android device (arm64, Vulkan)')
         else: say(f'done: {made[0]} and {made[1].name}. Install the APK, put {made[1].name} anywhere on the device or its SD card, and pick it when the app first opens')
         return
+    if vk and not host_takes_driver((library().get(g.id) or (None,))[0] or so):   # --push-only packs the host built earlier, which may predate the driver checks
+        raise BuildError(f"{label}'s host on this computer was built before DroidPlay could check a Vulkan driver and fall back to the phone's own: build the game again "
+                         '(Build and install) to give it a driver')
     bi.PROG.stage('APK'); apk = make_apk(sdk, logs, env); bi.PROG.end(str(apk))
     if a.no_push:
         say(f'done: {data_dir() / "nxnative.apk"}. On the phone: install it, then copy {patched} to {REMOTE}/games/{g.id}/code and {bi.rfs.source(game)} to {REMOTE}/games/{g.id}/'); return
