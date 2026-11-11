@@ -60,3 +60,21 @@ def connect_target(mdns_out, serialno, ip):   # after pairing: the phone's wirel
     for name, kind, addr in phone_id.services(mdns_out):
         if kind == 'connect' and ((serialno and phone_id.serialno_of(name) == serialno) or (ip and addr.rsplit(':', 1)[0] == ip)): return addr
     return None
+
+
+def discovered(mdns_out, devices_out, names=None):   # Discover: every phone offering a connection on the network → [(label, 'ip:port', connected already)]
+    # names: serial number → the phone's name, for phones DroidPlay knows. adb tcpip's (_adb._tcp) are listed too, marked as not encrypted
+    ready = [p[0] for p in (ln.split() for ln in (devices_out or '').splitlines()[1:]) if len(p) > 1 and p[1] == 'device']
+    out = []
+    for name, kind, addr in phone_id.services(mdns_out):
+        if kind == 'pairing': continue
+        sn = phone_id.serialno_of(name) or (name[4:] if kind == 'tcp' and name.startswith('adb-') else None)   # adb tcpip names it adb-<serial number>, no suffix
+        on = addr in ready or bool(sn and any(s == sn or phone_id.serialno_of(s) == sn for s in ready))   # its USB serial is its serial number
+        out.append((f'{(names or {}).get(sn) or sn or name} · {addr}' + ('' if kind == 'connect' else ' · adb tcpip, not encrypted'), addr, on))
+    return out
+
+
+def disconnect_plan(serial):   # Disconnect, by the serial's kind → ('disconnect', serial) for an address adb connected to; ('wireless off', serial) for a phone adb
+    # connected by itself over the network (adb disconnect can't name it: it adds :5555 to the name, and adb would connect it again anyway); ('usb', serial)
+    t = phone_id.transport(serial)
+    return ('disconnect' if t == 'tcp' else 'wireless off' if t == 'mdns' else 'usb'), serial

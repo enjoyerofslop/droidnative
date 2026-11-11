@@ -99,6 +99,11 @@ DroidPlay can install and play over Wi-Fi instead of a cable, through Android's 
 The phone and this computer must be on the same network: a guest network keeps devices apart. A failed pairing says why (a wrong code, the pairing screen closed,
 another network) in place of adb's own words.
 
+**Discover** lists every phone offering wireless debugging on the network (a phone already connected, over Wi-Fi or its cable, is shown as such) and connects to
+the ones you tick. **Disconnect** drops the phone picked in the list (or at the top): a phone connected by address is disconnected at once. A phone adb connected
+by itself over the network would be connected again while Wireless debugging is on, so for that one DroidPlay offers to turn Wireless debugging off on the phone.
+A phone on its cable is unplugged to disconnect it.
+
 ### From source
 
 On Linux or a Mac, or on Windows without Setup, `uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the

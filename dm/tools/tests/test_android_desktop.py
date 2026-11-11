@@ -210,6 +210,20 @@ class WiFi(unittest.TestCase):   # PairDialog and Connect…: adb's mDNS list, p
         self.assertIn('pair it first', wifi.connect_result(True, 'failed to authenticate to 192.168.50.66:37853')[1])
         self.assertIn('not one adb can use', wifi.connect_result(False, "cannot resolve host 'pad' and port 5555: nodename nor servname provided")[1])
 
+    def test_discover_lists_every_phone_on_the_network(self):   # it offered the first one only
+        devs = 'List of devices attached\nR5CY51ZLGKH\tdevice\n'
+        mdns = self.MDNS + 'adb-R5CY51ZLGKH-AbCdEf\t_adb-tls-connect._tcp\t192.168.50.20:40111\n'
+        self.assertEqual(wifi.discovered(mdns, devs, {'e7879cce': 'OnePlus Pad 3'}), [
+            ('OnePlus Pad 3 · 192.168.50.66:37853', '192.168.50.66:37853', False),
+            ('GF518M0010960000 · 192.168.50.92:5555 · adb tcpip, not encrypted', '192.168.50.92:5555', False),
+            ('R5CY51ZLGKH · 192.168.50.20:40111', '192.168.50.20:40111', True)])   # on its cable already: the same phone
+        self.assertEqual(wifi.discovered('List of discovered mdns services\n', devs), [])
+
+    def test_disconnect_by_how_the_phone_is_connected(self):   # adb disconnect adds :5555 to an mDNS name (adb 37): "no such device 'adb-…._tcp:5555'"
+        self.assertEqual(wifi.disconnect_plan('192.168.50.66:37853'), ('disconnect', '192.168.50.66:37853'))
+        self.assertEqual(wifi.disconnect_plan('adb-e7879cce-DkIYY8._adb-tls-connect._tcp'), ('wireless off', 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp'))
+        self.assertEqual(wifi.disconnect_plan('e7879cce'), ('usb', 'e7879cce'))
+
     def test_after_pairing_the_phones_connection_is_found(self):   # adb's own connection by mDNS name, or the service the phone offers at the same address
         devs = 'List of devices attached\nR5CY51ZLGKH\tdevice\nadb-e7879cce-DkIYY8._adb-tls-connect._tcp\tdevice\n'
         self.assertEqual(wifi.listed(devs, 'e7879cce', '192.168.50.66'), 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp')

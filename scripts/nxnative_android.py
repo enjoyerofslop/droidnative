@@ -1041,17 +1041,40 @@ class PhonesPage(QWidget):
             ok2, text = wifi.connect_result(*r) if not isinstance(r, Exception) else (False, str(r))
             self.win.toast(f'Connected to {addr.strip()}' if ok2 else re.sub(r'<[^>]+>', '', text)); self.win.refresh_devices()
         bg(lambda: adb_run(None, 'connect', addr.strip(), timeout=30), got)
-    def discover(self):
+    def discover(self):   # every phone offering a connection on the network, to connect to: it offered the first one only
+        names = {i: self.win.models.get(s) for s, i in self.win.ids.items() if self.win.models.get(s)}
         def got(r):
-            text = r[1] if not isinstance(r, Exception) else str(r)
-            found = re.findall(r'_adb-tls-connect\._tcp\S*\s+(\d+\.\d+\.\d+\.\d+:\d+)', text)
-            if found and QMessageBox.question(self, 'Discover', f'Phones offering wireless debugging:\n{text}\n\nConnect to {found[0]}?') == QMessageBox.Yes:
-                bg(lambda: adb_run(None, 'connect', found[0], timeout=30), lambda _: self.win.refresh_devices())
-            elif not found: QMessageBox.information(self, 'Discover', text or 'Nothing found: pair the phone first, and keep its Wireless debugging screen open')
-        bg(lambda: adb_run(None, 'mdns', 'services'), got)
-    def disconnect(self):
-        s = self.win.serial()
-        if s and ':' in s: bg(lambda: adb_run(None, 'disconnect', s), lambda _: self.win.refresh_devices())
+            found = wifi.discovered(r[0], r[1], names) if not isinstance(r, Exception) else []
+            if not found: QMessageBox.information(self, 'Discover', 'No phone offers wireless debugging on this network. Pair it first (Pair over Wi-Fi…), keep its '
+                                                  'Wireless debugging screen on, and check that ' + wifi.SAME_NETWORK + '.'); return
+            d = QDialog(self); d.setWindowTitle('Discover'); d.setStyleSheet(STYLE + f'QDialog {{ background: {PANEL}; }}'); d.setMinimumWidth(480)
+            lay = QVBoxLayout(d); lay.setContentsMargins(24, 20, 24, 18); lay.addWidget(label('Phones offering wireless debugging on this network', 'h2'))
+            lst = QListWidget()
+            for text, addr, on in found:
+                it = QListWidgetItem(text + (' · connected' if on else '')); it.setData(Qt.UserRole, addr)
+                it.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled if not on else Qt.NoItemFlags); it.setCheckState(Qt.Unchecked if on else Qt.Checked); lst.addItem(it)
+            lay.addWidget(lst); box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); box.button(QDialogButtonBox.Ok).setText('Connect')
+            box.accepted.connect(d.accept); box.rejected.connect(d.reject); lay.addWidget(box)
+            if d.exec() != QDialog.Accepted: return
+            want = [lst.item(i).data(Qt.UserRole) for i in range(lst.count()) if lst.item(i).checkState() == Qt.Checked]
+            def connect_all(): return [(a, *wifi.connect_result(*adb_run(None, 'connect', a, timeout=20))) for a in want]
+            def done(rs):
+                bad = [f'{a}: {re.sub(r"<[^>]+>", "", t)}' for a, ok, t in rs if not ok] if not isinstance(rs, Exception) else [str(rs)]
+                self.win.toast(f'Connected to {len(want) - len(bad)} of {len(want)}' + (f'. {bad[0]}' if bad else '')); self.win.refresh_devices()
+            if want: bg(connect_all, done)
+        bg(lambda: (adb_run(None, 'mdns', 'services', timeout=8)[1], adb_run(None, 'devices', timeout=10)[1]), got)
+    def disconnect(self):   # the row picked here, else the phone picked at the top: a phone on USB and Wi-Fi has one entry at the top, its USB one
+        r = self.table.currentRow(); s = self.table.item(r, 0).data(Qt.UserRole) if r >= 0 and self.table.item(r, 0) else self.win.serial()
+        if not s: return
+        how, s = wifi.disconnect_plan(s); name = self.win.models.get(s) or s
+        if how == 'usb': self.win.toast(f'{name} is connected by its cable: unplug it to disconnect it'); return
+        if how == 'wireless off':
+            if QMessageBox.question(self, 'Disconnect', f'Turn off Wireless debugging on {name}? adb connected it by itself over the network and would connect it again '
+                                    'while Wireless debugging is on. Turn it on again on the phone to reconnect.') != QMessageBox.Yes: return
+            bg(lambda: adb_run(s, 'shell', 'settings put global adb_wifi_enabled 0', timeout=15),
+               lambda _: (self.win.toast(f'Wireless debugging is off on {name}: turn it on again on the phone to reconnect'), self.win.refresh_devices())); return
+        bg(lambda: adb_run(None, 'disconnect', s, timeout=15), lambda r: (self.win.toast(f'Disconnected {name}' if not isinstance(r, Exception) and r[0] else f'Could not disconnect {name}: {r[1] if not isinstance(r, Exception) else r}'),
+                                                                           self.win.refresh_devices()))
     def update_app(self):
         s = self.win.serial()
         if s: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.win.refresh_phone)
