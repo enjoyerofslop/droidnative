@@ -1299,14 +1299,14 @@ static uint32_t rt_layers(const vtex *v, const view_t *cv, uint32_t lv, uint32_t
 // Skipping the first pass's draws did not help (its clear still begins it); a scratch target in slot 0 alone stops it, slots 1-4 left empty, and an empty slot 6 below a
 // used slot 7 needs nothing. The Odin 2's Adreno 740 runs the same frames without it. On a Moto Razr Plus 2023 (Adreno 730, Qualcomm's driver V@0615.98) Mario Kart 8
 // Deluxe crashed at every course load (SIGSEGV at address 4 in vulkan.adreno.so, in vkCmdEndRenderPass): a one-draw pass with slots 0-2 empty and an A2B10G10R10 target in
-// slot 3; with slot 0 filled it runs. So it is on for every Adreno on Qualcomm's driver ("Adreno (TM) ...", not Turnip's "Turnip Adreno"). One RGBA8 image serves every
+// slot 3; with slot 0 filled it runs. So it is on for every Adreno on Qualcomm's driver (its driver ID, g_qcom_driver; not Turnip, however a build names it). One RGBA8 image serves every
 // such pass (an attachment may be larger than the framebuffer), made again larger when a pass is larger; the earlier ones are kept, as cached framebuffers name their views.
 // Its sides are rounded up to 512: Mario Kart 8 Deluxe's dynamic resolution grows that pass a few texels at a time (480x270, 484x272, 493x277...), which used up the 8
 // sizes in seconds and left a larger pass's slot 0 empty again. DM_VK_SLOT0_FILL: 1 on any GPU, 0 off
 static uint64_t g_slot0_fills;
 static int slot0_fill_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_VK_SLOT0_FILL"); v = e ? *e == '1' : g_vk.props.vendorID == 0x5143 && !strncmp(g_vk.props.deviceName, "Adreno (TM) ", 12);
+    if (v < 0) { const char *e = getenv("DM_VK_SLOT0_FILL"); v = e ? *e == '1' : g_qcom_driver;
                  LOG("[vk] a render pass with colour slot 0 empty below a used slot: %s", v ? "a scratch target in slot 0 (DM_VK_SLOT0_FILL)" : "slot 0 left empty"); }
     return v;
 }

@@ -51,6 +51,7 @@ static pthread_mutex_t g_bk = PTHREAD_MUTEX_INITIALIZER;   // the replay is one 
 static __thread int t_bk_sub;   // this thread holds g_bk for a submission (mtl_sub_begin to mtl_sub_commit): see BK_LOCK
 
 // ---------------- The device ----------------
+static int g_qcom_driver;   // Qualcomm's own Vulkan driver, not another on an Adreno such as Turnip (VkPhysicalDeviceDriverProperties driverID; vk_init)
 static uint32_t g_sg_stages = VK_SHADER_STAGE_ALL;   // the stages that run subgroup operations (subgroupSupportedStages; spv_limits.h); all when not known
 static int g_layer_out = 1;   // vertex shaders may write the layer and viewport index: VK_EXT_shader_viewport_index_layer or Vulkan 1.2 (spv_layer.h)
 static uint32_t g_sg_size = 32;   // the subgroup size (subgroupSize): over 32, Maxwell's warps are 32-lane parts of a subgroup (spv_wide.h)
@@ -104,6 +105,15 @@ static void vk_create(void) {
     if (g_vk.qf == nq) { LOG("[RED] [vk] no graphics queue"); return; }
     uint32_t nd = 0; vkEnumerateDeviceExtensionProperties(g_vk.pd, NULL, &nd, NULL);
     VkExtensionProperties *de = calloc(nd ? nd : 1, sizeof *de); vkEnumerateDeviceExtensionProperties(g_vk.pd, NULL, &nd, de);
+    // Which driver runs the Adreno: Qualcomm's, or Turnip (libadrenotools loads one with DM_VK_DRIVER). Builders name Turnip's device differently ("Turnip Adreno (TM) 650",
+    // "PurpleVK-public Adreno (TM) 650", Mr. Purple's T30 "Adreno (TM) 840 (git-62ac221a33)/unknown"), so the driver ID decides: VkPhysicalDeviceDriverProperties, core in 1.2
+    // and VK_KHR_driver_properties before. Without either, Qualcomm's driverVersion has its top bit set (0x80267062 on an Adreno 730, 0x8032004a on an 830) and Mesa's does not
+    { VkDriverId id = 0;
+      if (has_ext(de, nd, "VK_KHR_driver_properties") || VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 2 || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1) {
+          VkPhysicalDeviceDriverProperties dp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+          VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &dp}; vkGetPhysicalDeviceProperties2(g_vk.pd, &p2); id = dp.driverID;
+          LOG("[vk] driver ID %d: %s, %s", (int)id, dp.driverName, dp.driverInfo); }
+      g_qcom_driver = id ? id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY : g_vk.props.vendorID == 0x5143 && (g_vk.props.driverVersion & 0x80000000u); }
     const char *dext[15]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
                                               // shader module identifier, pipeline creation cache control and display timing; raw global memory's (gm_feat_take) take what of the 15 is left
     if (has_ext(de, nd, "VK_KHR_swapchain")) { dext[nde++] = "VK_KHR_swapchain"; g_vk.has_swapchain = 1; }
