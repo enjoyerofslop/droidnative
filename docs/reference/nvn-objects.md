@@ -605,6 +605,28 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** `t_cpu_storage` (a rewrite of storage the GPU never wrote is uploaded and becomes a GPU texture again at the GPU's next write; one the GPU wrote over afterwards is the GPU's until the CPU rewrites it, also through a second texture object over the storage; a block-compressed rewrite is uploaded though a GPU copy followed); `t_cpu_tex` with a `tex_dirty_upload` profile (a texture left to the GPU stays registered, and the CPU's next rewrite is uploaded). In the log, `registered texture written by the CPU after its first use: uploaded from its storage` for the first four such uploads and `… left to the GPU until the CPU rewrites it` for the first four left to the GPU.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on the Mac: loading a Kokiri Forest save and turning the camera (M3 Pro, the first version of the fix, which kept textures by the span alone), 127–263 textures uploaded by the poll in the first 6,600–10,600 frames, nearly all terrain tiles, and 4 kept (RG8 normal tiles the GPU had drawn; a diagnostic showed the CPU writing zeros to their level 0 only); before, every one of them was dropped. With this fix (M4 Pro, the autosave and a walk onto the village floor, 160 s): about 250 uploaded by the poll (small lookup textures, 3×3×6 R8 arrays, the tiles' 260×260 height, blend and hole maps, and RG8 normal tiles caught between the CPU's zeroing and the GPU's drawing), 17 of them made GPU textures again when the GPU drew into them, the picture whole at 60 fps; 36 long frames against 57 on main.
 
+### Storage the CPU wrote before a texture's first use (Android)
+
+- **Symptom:** on Android, surfaces missing where a game fills a texture from the CPU before it makes the texture: Ocarina of Time's terrain tiles in Kokiri Forest. The water and fog pass then tints the far depth it sees through the gaps, so they look like flat, pale teal water patches. There's no red line. A frame dump shows the tiles' maps all zero, and the scene's depth copy holds the far plane there.
+- **Cause:**
+  - **What the replay took:** at a texture's first resolution (`vt_get_`, `gfx_vk.c`), the Vulkan replay took content from storage only for a packaged layout, a linear texture or a texture marked CPU-written.
+    - The one-time fill (`tex_init_fill`) takes only a pool the CPU can't access, an uncached pool, or flushed storage.
+    - The page-protection poll (`tex_dirty_upload`) sees only writes made after `nvnTextureInitialize`.
+  - **What the game does:** Ocarina of Time writes its terrain tiles' maps into a `CPU_CACHED | GPU_CACHED` pool before it makes the textures over them, with no flush. The maps are height (260x260 R32F), blend and hole (RGBA8, one and two layers) and detail (two BC formats).
+  - **The result:** none of those paths saw the writes, so the tiles became GPU images of zeros. A new texture object over the same storage got that image back from the sharing table.
+  - **The Mac:** it takes such storage at first use (`tex_cpu_content` in `nvn_mtl.m`, [uncompressed storage the CPU wrote](#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-has-not-written)), and the replay had no counterpart.
+- **Fix:** `storage_first_use` runs at a texture's first resolution.
+  - **What's taken:** a texture whose storage can hold its content and holds data is made CPU-written. It's uploaded then and again when its pages change. The test is `tex_storage_ok`, the rule the poll's question (`mtl_tex_cpu_rewritten`) already used.
+  - **Uncompressed 2D textures:** NVN has no render-target flag, so such a texture could be a render target. It's taken only when no image the GPU wrote lies over a whole page of its storage.
+    - The replay keeps no record of GPU-written storage, so the sharing table's images stand in for one.
+    - Part of a page doesn't count ([a span's sliver](#a-spans-sliver-inside-a-texture)).
+  - **The way back:** once the GPU writes a taken texture, it becomes a GPU texture again (`vt_get_w`), so a CPU write beside it no longer uploads the storage over the drawing.
+  - **Switch:** `DM_NVN_STORAGE_FIRST_USE=0` turns the rule off, as on the Mac.
+- **Check:**
+  - The log prints `texture written by the CPU before its first use … uploaded from its storage` for the first four.
+  - At the Kokiri save on a Galaxy Z Fold 8, the tiles' height, blend, hole and detail maps are taken at their first resolution. The dirt and leaves draw where the pale patches were.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a Galaxy Z Fold 8 (Adreno 840, Qualcomm's driver).
+
 ### `ReadTexels` on a texture of a sparse pool
 
 - **Symptom:** `[RED] upload batches belong to the submit thread only: up_begin called on thread '…'`, then an abort, with `pkg_upload` ← `tex_mtl` ← `mtl_read_texels` on the stack; or `CRASH sig=10` in `nvn_deswizzle` ← `mtl_read_texels`, at an address in a sparse virtual pool's reserved range.
