@@ -1871,6 +1871,7 @@ static int rc_skips(void) {   // the clear or draw at hand is dropped
 }
 void mtl_sub_begin(void) {
     pthread_mutex_lock(&g_bk); t_bk_sub = 1; hint_note();
+    gm_lazy_tick();   // chunks of large pools placed between submissions (gfx_vk_gmem_lazy.inc)
     static __thread int placed; if (!placed) { placed = 1; void dm_android_place_thread(int done); dm_android_place_thread(0); }
     if (place_log_on()) { int c = sched_getcpu(); g_place_cpu[c >= 0 && c < 16 ? c : 15]++; g_place_n++; }
 }
