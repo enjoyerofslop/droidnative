@@ -99,7 +99,7 @@ connecting over Wi-Fi to its old address and to the address `adb mdns services` 
 as. Each step can run again, and the large copies go on from what the phone holds: the RomFS image from `RomFS.img.partial` (256 MiB pieces appended, the last
 MiB hashed on both sides), a DLC image over 256 MiB the same way, and a shader folder of more than 200 files in tar archives of about 256 MiB, each named in the
 folder's `.nxnative_manifest` once the phone has unpacked it (one archive of every file was 8.4 GB for Final Fantasy Resonance, and needed twice that free on the
-phone). More than six losses in one run stop it.
+phone). More than five losses in a row with no piece or archive copied between them stop it.
 
 ### A game app
 
