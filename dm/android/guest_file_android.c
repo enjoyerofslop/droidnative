@@ -87,18 +87,19 @@ static void *gf_watch(void *arg) {
         if (g_wsweep) g_wsweep();
         double held = 0; struct stat st; for (int i = 0; i < g_wn; i++) if (!fstat(g_wf[i], &st)) held += (double)st.st_blocks * 512.0;
         uint64_t w = kv("/proc/self/io", "write_bytes"); struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double el = (double)(t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9;
-        uint64_t anon = UINT64_MAX, file = UINT64_MAX, wb = UINT64_MAX, high = UINT64_MAX, mx = UINT64_MAX, cur = UINT64_MAX, swc = UINT64_MAX, hi_lim = UINT64_MAX, sw_lim = UINT64_MAX;
+        uint64_t anon = UINT64_MAX, file = UINT64_MAX, wb = UINT64_MAX, high = UINT64_MAX, mx = UINT64_MAX, cur = UINT64_MAX, swc = UINT64_MAX, hi_lim = UINT64_MAX, sw_lim = UINT64_MAX, sw_max = UINT64_MAX, swmaxev = UINT64_MAX;
         if (g_cg[0]) {
             snprintf(p, sizeof p, "%s/memory.stat", g_cg); anon = kv(p, "anon"); file = kv(p, "file"); wb = kv(p, "file_writeback");
             snprintf(p, sizeof p, "%s/memory.events", g_cg); high = kv(p, "high"); mx = kv(p, "max");
             snprintf(p, sizeof p, "%s/memory.current", g_cg); cur = one(p); snprintf(p, sizeof p, "%s/memory.swap.current", g_cg); swc = one(p);
             snprintf(p, sizeof p, "%s/memory.high", g_cg); hi_lim = one(p); snprintf(p, sizeof p, "%s/memory.swap.high", g_cg); sw_lim = one(p);
+            snprintf(p, sizeof p, "%s/memory.swap.max", g_cg); sw_max = one(p); snprintf(p, sizeof p, "%s/memory.swap.events", g_cg); swmaxev = kv(p, "max");   // Android 17's cap is swap.max (4 GiB on a Pixel 9 Pro XL)
         }
         uint64_t pss = kv("/proc/self/smaps_rollup", "Pss"), pa = kv("/proc/self/smaps_rollup", "Pss_Anon"), pf = kv("/proc/self/smaps_rollup", "Pss_File"), sp = kv("/proc/self/smaps_rollup", "SwapPss");
         LOG("[mem] guest file: %.2f GB on disk, %.2f GB given back as holes; the process wrote %.2f GB (%.1f MB/s over %.0f s); PSS %.2f GB (anon %.2f, file %.2f, swap %.2f); cgroup: memory %.2f GB "
-            "(high %.2f), swap %.2f GB (high %.2f), anon %.2f, file %.2f (dirty %.2f, writeback %.2f), events high %lld max %lld; %.1f GB free on its disk",
+            "(high %.2f), swap %.2f GB (high %.2f, max %.2f; swap.max events %lld), anon %.2f, file %.2f (dirty %.2f, writeback %.2f), events high %lld max %lld; %.1f GB free on its disk",
             held / G, atomic_load(g_wpunched) / G, gb(w, 1), w0 < UINT64_MAX && w < UINT64_MAX && el > 0 ? (double)(w - w0) / el / 1048576.0 : -1, el, gb(pss, 1024), gb(pa, 1024), gb(pf, 1024), gb(sp, 1024),
-            gb(cur, 1), gb(hi_lim, 1), gb(swc, 1), gb(sw_lim, 1), gb(anon, 1), gb(file, 1), gb(dirty, 1), gb(wb, 1), high < UINT64_MAX ? (long long)high : -1, mx < UINT64_MAX ? (long long)mx : -1, avail / G);
+            gb(cur, 1), gb(hi_lim, 1), gb(swc, 1), gb(sw_lim, 1), gb(sw_max, 1), swmaxev < UINT64_MAX ? (long long)swmaxev : -1, gb(anon, 1), gb(file, 1), gb(dirty, 1), gb(wb, 1), high < UINT64_MAX ? (long long)high : -1, mx < UINT64_MAX ? (long long)mx : -1, avail / G);
     }
     return NULL;
 }
