@@ -224,6 +224,9 @@ public class Launcher extends Activity {
             "Game time keeps levels timed to the music in step with the picture when the phone runs the game below its frame rate; the music can stutter.");
         s.values = new String[] {"real", "game"}; s.labels = new String[] {"Real time", "Game time"}; s.def = "real"; settings.add(s);
         s = new Setting("DM_SHOW_FPS", "toggle", "Game", "Frame-rate counter", null); s.def = "0"; settings.add(s);
+        s = new Setting("DM_PAD_ABXY", "choice", "Controls", "Controller face buttons",
+            "By label for a controller that already gives its buttons Nintendo's letters (a Retroid in its Retro layout); by position for an Xbox-style controller.");
+        s.values = new String[] {"position", "label"}; s.labels = new String[] {"By position", "By label"}; s.def = "position"; settings.add(s);   // front_android.c face_button
         s = new Setting("DM_RUMBLE", "toggle", "Controls", "Game rumble", null); s.def = "1"; settings.add(s);
         s = new Setting("DM_RUMBLE_GAIN", "range", "Controls", "Rumble strength", null); s.lo = 0; s.hi = 3; s.step = 0.1f; s.def = "1.0"; settings.add(s);
         // the touch controls' size and how far in from the sides they sit (Gamepad.java padScale, insetPx)

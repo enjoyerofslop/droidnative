@@ -111,3 +111,8 @@ First run on Android, 2026-11-10: a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Eli
 - **Sound:** `DM_AUDIO_DUMP` over the Continue start (202 s): silent on the controller screen and the Continue menu, as on the other phones; the title music and then the forest's on the front pair. No underrun in 616 reports during play or 49 after the restart.
 - **`[RED]`:** the same two kinds; no crash, no hang, and nothing wrong seen in the picture (Route 1, Viridian City, Route 2, the gatehouse, the forest's light).
 - **Not played:** Viridian Forest's trainers and its exit, Pewter City, aiming with motion.
+
+**Options → Open Pokémon GO Settings**, 2026-11-11 on the Z Flip 7 (enjoyerofslop/droidplay-core#220):
+- **Before the fix:** from the title's "Change your options" or the X menu's Options, the entry ended the game at once with `Break#1 reason=0` at `sdk+0xd989c`. The cause was `nn::bluetooth::RegisterGattOperationNotification`, which reached btm:u with no session ([Bluetooth LE at boot](../../../docs/reference/services.md#bluetooth-le-at-boot)).
+- **With the fix:** both routes show the Pokémon GO notice and then "Would you like to pair your game with a Pokémon GO account". Yes leads to "Searching for a Pokémon GO account…", which keeps searching, as a Switch with no phone nearby does, until B Quit returns to the options.
+- **After the menu:** Continue loaded `viridian_forest_flip`. The player walked, met a wild Pidgey and ran from it, opened the menu again, and made a save (`save commit #1`). There was no new `[RED]` line.

@@ -105,7 +105,7 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   pipelines saved yet. Later starts take a few seconds.
 - **In the game.** Touch controls are drawn over the picture in three layouts (2D, 3D and Tap, switched with the round button at the top); touches no control takes go
   to the game's touch screen. Their size and how far in from the sides they sit are the settings screen's choices; a game app, which has none, takes `DM_PAD_SCALE` and
-  `DM_PAD_INSET` from its `env.txt`. A physical controller works as player 1 and hides the touch controls; rumble goes to the controller or the phone, and shaking the phone
+  `DM_PAD_INSET` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
   shakes the controller. The **≡** button at the top (left of −) goes back to the launcher while the game keeps running behind it: **Play** on the same game resumes
   it, and picking another game asks before closing the running one.
 - **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; the desktop app backs them up to the computer. The log is
@@ -138,7 +138,8 @@ open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666
 
 The app copies the driver into its internal storage at start, since Android loads no code from shared storage, and copies it again when the file changes. The log
 names the driver that runs: `[vk] driver: … (DM_VK_DRIVER, through libadrenotools), not the system's: PurpleVK-public Adreno (TM) 740 …`. A driver that can't run
-(a wrong path, a build for another GPU) gets one `[RED] [vk] DM_VK_DRIVER …` line saying why, and the game runs on the system's driver. Remove the line from `env.txt`
+(a wrong path, a build for another GPU, one that loads but can't make the Vulkan device) gets one `[RED] [vk] DM_VK_DRIVER …` line saying why, and the game runs on
+the system's driver. On a phone without an Adreno GPU (Mali, Xclipse) the line is ignored, and the log says so. Remove the line from `env.txt`
 (or start it with `#`) to go back. Each driver keeps its own pipeline cache, so the first start on a new driver compiles the game's pipelines again (it can take a
 minute to the first frame, and it stutters until they are built), and the system driver's cache is still there afterwards.
 

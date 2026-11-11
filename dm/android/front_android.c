@@ -573,9 +573,23 @@ static void gamepad_reset(void) {   // the app went away: nothing stays held
     if (g_gp) { JNIEnv *e = g_env; (*e)->CallStaticVoidMethod(e, g_gp, (*e)->GetStaticMethodID(e, g_gp, "reset_", "()V")); if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e); }
     g_pad_btn = 0; memset(g_axis, 0, sizeof g_axis); pad_now(0);
 }
+// DM_PAD_ABXY: how a controller's A, B, X and Y keys become the Switch's. position (the default): by where the button sits, as Android names them after an Xbox pad
+// (A bottom, B right, X left, Y top), so the Switch's A is the right-hand button. label: A to A and so on, for a controller whose firmware already gives those keys
+// Nintendo's labels: a Retroid Pocket G2 in its "Retro" layout sends BUTTON_A from its right button, which position turned into the Switch's B (droidplay-core#247)
+static int abxy_label(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PAD_ABXY"); v = e && !strcmp(e, "label"); } return v; }
+static uint64_t face_button(int32_t code) {
+    int i = code == AKEYCODE_BUTTON_A ? 0 : code == AKEYCODE_BUTTON_B ? 1 : code == AKEYCODE_BUTTON_X ? 2 : code == AKEYCODE_BUTTON_Y ? 3 : -1;
+    if (i < 0) return 0;
+    static const uint64_t pos[] = {DM_BTN_B, DM_BTN_A, DM_BTN_Y, DM_BTN_X}, lab[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y};
+    static const char *const name[] = {"BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y"}, *const spos[] = {"B", "A", "Y", "X"}, *const slab[] = {"A", "B", "X", "Y"};
+    int label = abxy_label(); static int said;   // each key's mapping said once, so a player's log shows which button became which
+    if (!(said >> i & 1)) { said |= 1 << i; LOG("controller: Android's %s is the Switch's %s (by %s; DM_PAD_ABXY=%s maps by %s)", name[i], label ? slab[i] : spos[i],
+                                                  label ? "label" : "position", label ? "position" : "label", label ? "position" : "label"); }
+    return label ? lab[i] : pos[i];
+}
 static uint64_t key_button(int32_t code) {
-    switch (code) {   // by position: the bottom face button is the Switch's B, the right one A, the left one Y, the top one X
-        case AKEYCODE_BUTTON_A: return DM_BTN_B; case AKEYCODE_BUTTON_B: return DM_BTN_A; case AKEYCODE_BUTTON_X: return DM_BTN_Y; case AKEYCODE_BUTTON_Y: return DM_BTN_X;
+    uint64_t f = face_button(code); if (f) return f;   // A, B, X and Y: by position or by label (DM_PAD_ABXY)
+    switch (code) {
         case AKEYCODE_BUTTON_L1: return DM_BTN_L; case AKEYCODE_BUTTON_R1: return DM_BTN_R; case AKEYCODE_BUTTON_L2: return DM_BTN_ZL; case AKEYCODE_BUTTON_R2: return DM_BTN_ZR;
         case AKEYCODE_BUTTON_THUMBL: return DM_BTN_LS; case AKEYCODE_BUTTON_THUMBR: return DM_BTN_RS; case AKEYCODE_BUTTON_START: return DM_BTN_PLUS; case AKEYCODE_BUTTON_SELECT: return DM_BTN_MINUS;
         case AKEYCODE_DPAD_LEFT: return DM_BTN_LEFT; case AKEYCODE_DPAD_UP: return DM_BTN_UP; case AKEYCODE_DPAD_RIGHT: return DM_BTN_RIGHT; case AKEYCODE_DPAD_DOWN: return DM_BTN_DOWN;

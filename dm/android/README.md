@@ -223,6 +223,13 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators:
 - A driver is used only once it offers a GPU on an instance made to ask, and once its file is mapped in the process (by device and inode in `/proc/self/maps`): when the
   hook fails, libadrenotools loads the vendor's driver in its place and says so only in logcat (`hook_impl`). Anything short of that is one `[RED] [vk] DM_VK_DRIVER`
   line, and the system's driver runs.
+- Past that probe, the driver can still fail to make the instance, to offer a graphics queue or the window extensions (`VK_KHR_android_surface`, `VK_KHR_swapchain`),
+  or to make the device. Before, the game then ran with no picture: the front end had no device. Now `vk_create` destroys what the try made and tries again on the
+  system's driver (`vk_try`, `vk_driver_fallback`), with one line: `[RED] [vk] DM_VK_DRIVER <file>: no Vulkan device (vkCreateDevice: VK_ERROR_…); the system's
+  driver instead`. The driver's library stays loaded beside the system's, each in its own linker namespace. `DM_VK_DRIVER_FAIL=<step>` (`instance`, `gpu`,
+  `queue`, `extensions`, `device`) fails that step on the player's driver, to try the fallback on a phone whose driver works.
+- A phone without `/dev/kgsl-3d0` (a Mali or Xclipse GPU) doesn't open `DM_VK_DRIVER` at all, with one plain `[vk] DM_VK_DRIVER` line: Turnip drives Qualcomm's
+  kernel driver, KGSL, and `libadrenotools.so` is not loaded, so its constructor doesn't patch the linker.
 - Each driver keeps its own pipeline cache: `DM_PIPELINE_CACHE` with `.<driver file name>` after it (`gfx_vk_draw.inc` `pcache`).
 - `build_android_from_nsp.py` builds the three libraries with every host and packs them into both kinds of app (`build_apk.py --lib`).
 - Tried with Mr. Purple's Turnip T30 (Mesa 26.3.0-devel, Vulkan 1.4.359) on an Odin 2 (Adreno 740, Android 13) and a Retroid Pocket 5 (Adreno 650, Android 13), with

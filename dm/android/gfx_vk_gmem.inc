@@ -24,8 +24,8 @@
 //   log from the arena, read when its chunk completes, and the pools it names are logged (the Mac's learned pools are the next step). DM_VK_RAW_GMEM_STORE_WAIT=0: not waited for
 // Opt-in per game: DM_VK_RAW_GMEM=1, from env.txt or the game's android_defaults.txt (Frostpunk's), which front_android.c reads before the window's surface, so the device is
 // made with the extensions only for such a game. Off, nothing changes: the device is made as before, no pool is placed and the table binding reads 16 zero bytes. Only
-// Qualcomm's Adreno has run it (its own driver and Turnip); another GPU stays off unless DM_VK_RAW_GMEM_ANYGPU=1 (Mali and Xclipse would take the AHardwareBuffer route, whose
-// dma-buf mapping and CPU coherence are not shown there).
+// Qualcomm's Adreno has run it (its own driver and Turnip), and Samsung's Xclipse (its driver compiles the physical pointers, and the AHardwareBuffer route's pages read
+// cached: Frostpunk's meshes on a Galaxy Z Flip 7). Another GPU stays off unless DM_VK_RAW_GMEM_ANYGPU=1 (Mali would take the AHardwareBuffer route too, not shown there).
 #ifndef VK_EXT_map_memory_placed   // Vulkan 1.3.290; the NDK r28 headers are 1.3.275
 #define VK_EXT_map_memory_placed 1
 #define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT ((VkStructureType)1000272000)
@@ -73,8 +73,9 @@ static int gm_env(void) { static int v = -1; if (v < 0) { const char *e = getenv
 static int gm_game(void) { return gm_env(); }   // (the game's own choice, through its android_defaults.txt)
 static int gm_want(const VkExtensionProperties *e, uint32_t n) {
     if (!gm_env()) return 0;
-    { const char *a = getenv("DM_VK_RAW_GMEM_ANYGPU"); if (g_vk.props.vendorID != 0x5143 && !(a && *a == '1')) {
-        LOG("[RED] [vk] raw global memory: DM_VK_RAW_GMEM=1, but it has run only on Qualcomm's Adreno, and this GPU is vendor %#x: off, raw loads read 0 (DM_VK_RAW_GMEM_ANYGPU=1 tries it)", g_vk.props.vendorID); return 0; } }
+    { const char *a = getenv("DM_VK_RAW_GMEM_ANYGPU"); uint32_t v = g_vk.props.vendorID;   // 0x5143 Qualcomm, 0x144d Samsung
+      if (v != 0x5143 && v != 0x144d && !(a && *a == '1')) {
+        LOG("[RED] [vk] raw global memory: DM_VK_RAW_GMEM=1, but it has run only on Qualcomm's Adreno and Samsung's Xclipse, and this GPU is vendor %#x: off, raw loads read 0 (DM_VK_RAW_GMEM_ANYGPU=1 tries it)", v); return 0; } }
     g_gm_has_placed = has_ext(e, n, "VK_KHR_map_memory2") && has_ext(e, n, "VK_EXT_map_memory_placed");
     g_gm_has_ahb = has_ext(e, n, "VK_ANDROID_external_memory_android_hardware_buffer") && has_ext(e, n, "VK_EXT_queue_family_foreign");
     int ok = has_ext(e, n, "VK_KHR_buffer_device_address") && (g_gm_has_placed || g_gm_has_ahb);

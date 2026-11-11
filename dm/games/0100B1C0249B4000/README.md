@@ -13,7 +13,7 @@ Update 1.0.1 (v65536) over the base game, SDK **20.5.19** (`nnSdk-20_5_19`, `Nin
 | `sys_resource 0x0`, `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | no system resource, so no virtual address memory. `main` sets a heap of at most the pool − 64 MB, which the 3.25 GB heap region holds (`heap 3.12 GB (heap region 3.25 GB)` in the log, on the Mac and on Android) |
 | `shader_groups /=romfs` | [`game.tsv`](game.tsv) | every shader is in `common.dat` at the RomFS root. See [Shaders](#shaders) |
 | `zip_store .dat:.metallib` | [`game.tsv`](game.tsv) | the archives' entries are zstd frames and Ogg streams already |
-| `DM_VK_RAW_GMEM=1` | [`android_defaults.txt`](android_defaults.txt) | Android: raw global memory, which every solid and translucent mesh reads (see [Shaders](#shaders)). It's on by default only for Switch 2 games, and Frostpunk is a Switch 1 one |
+| `DM_VK_RAW_GMEM=1` | [`android_defaults.txt`](android_defaults.txt) | Android: raw global memory, which every solid and translucent mesh reads (see [Shaders](#shaders)). It's on by default only for Switch 2 games, and Frostpunk is a Switch 1 one. It takes effect on a Qualcomm Adreno or a Samsung Xclipse ([Android](#android)) |
 
 The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the survey, unchanged but for its comments. Its shader tables come from the Liquid archive reader. `pso_manifest.tsv` is still the empty provisional list.
 
@@ -88,6 +88,19 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 
   - T30's first start compiled every pipeline from an empty cache and still reached the city by 220 s.
   - **Not done:** played past the tutorial's first pop-up, a building placed, a night, a save and Continue. Other Adreno 7xx phones on old drivers weren't tried.
+
+- **On a Galaxy Z Flip 7, 2026-11-11: the meshes draw.** Xclipse 950 with Samsung's driver 24.0.533 (0x6000215, Vulkan 1.3.279), Android 16, open. By hand from the title through A New Home's intro into the city, the game files sent with `push_game` (`defaults.txt` holding `DM_VK_RAW_GMEM=1`).
+  - **Raw global memory:** the driver compiles every pipeline of the shaders that read it, with no `pipeline creation failed`. It takes the AHardwareBuffer route (no `VK_EXT_map_memory_placed`). The pages read at 11–18 GB/s, so they're cached. About 614–618 pieces, 345–359 MiB placed.
+  - **Red lines:** only the sky's uniform slot, and no `c255` line.
+  - **From `main` 25cdf3e1, with `DM_VK_RAW_GMEM_ANYGPU=1`** (then needed on a GPU not from Qualcomm). The off run is the same launch without it. City, in 30 s windows:
+
+  | Run | fps | Frame p50 / p95 | GPU p50 | PSS | Generator, wreckage |
+  |---|---|---|---|---|---|
+  | On | 29.4–29.5 | 33.9–34.0 / 34.5 ms | 11.9–12.4 ms | 3.13 GB | drawn |
+  | Off | 29.4–29.5 | 33.9–34.0 / 34.5 ms | 13.0–13.3 ms | 2.93 GB | missing: only the Generator's base and lights |
+
+  - **With raw global memory allowed on Samsung's Xclipse** (no env switch), the same: 29.4–29.5 fps in the city, GPU p50 12.2–13.3 ms, PSS 3.04 GB, the meshes drawn.
+  - **A camera panned low to the crater's edge** showed large flat bright faces on the cliffs. Not compared with the Mac; it may be the terrain's hull and domain shaders (Open, below).
 
 ## Found on this game
 
