@@ -22,6 +22,7 @@ enum { LZ_NO, LZ_WANT, LZ_PLACED, LZ_REFUSED };
 static gm_lz *g_lz; static int g_nlz, g_clz;   // under g_gm_pl
 static _Atomic int g_lz_any;
 static uint64_t g_lz_ptr_scans, g_lz_ptr_hits, g_lz_ptr;   // gm_lazy_ptrs: buffers scanned, words pointing into a chunked pool, chunks wanted for them
+static uint64_t g_lz_overlap;   // chunk runs refused for holding another pool's placed piece (gm_lz_run)
 static uint64_t g_lz_pools, g_lz_bind, g_lz_res, g_lz_waited, g_lz_busy, g_lz_scans, g_lz_scan_ns, g_lz_refused, g_lz_cross, g_lz_merges, g_lz_merge_ns, g_lz_merge_bytes;
 static _Atomic uint64_t g_frz_waits, g_frz_preps;
 static int gm_lazy_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_LAZY"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAW_GMEM_LAZY=0: memory pools are placed whole at their first buffer address"); } return v; }
@@ -83,6 +84,12 @@ static int gm_lz_run(gm_lz *L, uint32_t c, uint32_t e, int live, int may_wait) {
         RED_ONCE(162, "raw global memory: %.2f GiB placed and DM_VK_RAW_GMEM_MAX is %.2f GiB: chunks from %#lx+%#zx on stay anonymous, raw accesses to them read 0",
                  g_gm_bytes / 1073741824.0, g_gm_cap / 1073741824.0, (unsigned long)a, n);
         return 0; }
+    // a piece of another pool placed inside the run already (a smaller pool over the same storage, placed whole at its own buffer address): placing over it would map the
+    // range twice, and the table would list both. Refused: the placed piece serves its own range, and raw accesses to the rest of the run read 0
+    { int ov = 0; pthread_mutex_lock(&g_gm_mu); for (int i = 0; i < g_ngm && !ov; i++) ov = g_gm[i].lo < a + n && a < g_gm[i].hi; pthread_mutex_unlock(&g_gm_mu);
+      if (ov) { for (uint32_t k = c; k < e; k++) L->st[k] = LZ_REFUSED; g_lz_refused += e - c; g_lz_overlap++;
+                RED_ONCE(164, "raw global memory: chunks %#lx+%#zx of a chunked pool hold a piece of another pool placed already: not placed, raw accesses to the rest read 0", (unsigned long)a, n);
+                return 0; } }
     gm_note fail = {0}, probe = {0};
     int r = gm_swap(L->pool, a, n, live, live, may_wait, &fail, &probe);
     if (r < 0) { g_lz_waited++; return -1; }   // wanted still: the next tick waits for the write
@@ -207,9 +214,9 @@ static void gm_lazy_stat(void) {
     for (int i = 0; i < g_nlz; i++) for (uint32_t k = 0; k < g_lz[i].nch; k++) { uint64_t len = gm_lz_end(&g_lz[i], k) - (g_lz[i].lo + (uintptr_t)k * GM_CHUNK); all += len; if (g_lz[i].st[k] == LZ_PLACED) placed += len; }
     int n = g_nlz; pthread_mutex_unlock(&g_gm_pl);
     LOG("[vk] raw global memory in chunks: %d pools of %.1f MiB, %.1f MiB of them placed; chunks placed for a binding %llu, wanted for pointers %llu (%llu buffers scanned, %llu words pointing into chunked pools), wanted for written pages %llu, kept back by a pending write %llu, "
-        "refused %llu, pools merged for a binding across two pieces %llu (%.1f MiB, %.0f ms), bindings across a placed chunk %llu, placements put off (lock busy) %llu; %llu scans (%.2f ms in all); writes that waited for a swap %llu, host writes %llu; raw stores into chunks not placed "
+        "refused %llu (%llu runs over another pool's placed piece), pools merged for a binding across two pieces %llu (%.1f MiB, %.0f ms), bindings across a placed chunk %llu, placements put off (lock busy) %llu; %llu scans (%.2f ms in all); writes that waited for a swap %llu, host writes %llu; raw stores into chunks not placed "
         "(DM_VK_RAW_GMEM_SINK) %llu (cumulative; gfx_vk_gmem_lazy.inc)",
-        n, all / 1048576.0, placed / 1048576.0, (unsigned long long)g_lz_bind, (unsigned long long)g_lz_ptr, (unsigned long long)g_lz_ptr_scans, (unsigned long long)g_lz_ptr_hits, (unsigned long long)g_lz_res, (unsigned long long)g_lz_waited, (unsigned long long)g_lz_refused,
+        n, all / 1048576.0, placed / 1048576.0, (unsigned long long)g_lz_bind, (unsigned long long)g_lz_ptr, (unsigned long long)g_lz_ptr_scans, (unsigned long long)g_lz_ptr_hits, (unsigned long long)g_lz_res, (unsigned long long)g_lz_waited, (unsigned long long)g_lz_refused, (unsigned long long)g_lz_overlap,
         (unsigned long long)g_lz_merges, g_lz_merge_bytes / 1048576.0, g_lz_merge_ns / 1e6, (unsigned long long)g_lz_cross, (unsigned long long)g_lz_busy, (unsigned long long)g_lz_scans, g_lz_scan_ns / 1e6,
         (unsigned long long)atomic_load(&g_frz_waits), (unsigned long long)atomic_load(&g_frz_preps), (unsigned long long)atomic_load(&g_sink_hits));
 }
