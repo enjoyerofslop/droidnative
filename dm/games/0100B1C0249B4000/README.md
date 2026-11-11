@@ -69,6 +69,11 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 - **`[RED]` lines:** with raw global memory, only `shader 1e7e00b64456ac66 reads uniform slot 1, which has no buffer bound: it reads 0` (the sky's pixel shader, `environment/sky/physicalsky`).
 - **Picture:** the S25's screen grabs of the opening view are darker than the Mac's capture of the same view (the snow greyer, the Generator's metal near black), with or without raw global memory. Not looked into: the two are taken differently (`screencap` against `DM_NVN_SHOT`), and an earlier grab zoomed out at 09:59 is as bright as the Mac's.
 
+- **On a Moto Razr Plus 2023, 2026-11-10: blocked by the driver's compiler.** Adreno 730 with Qualcomm's driver V@0615.98 (Vulkan 1.1.128), Android 16, open. Frostpunk's host from `main` at `0cad2e47`, the game files from the build folder with `defaults.txt` holding `DM_VK_RAW_GMEM=1`.
+  - **What runs:** the title, the menu, the intro movie, the story screen and the city, with sound. Raw global memory is on (the AHardwareBuffer route, 618 pieces, 349 MiB placed), and the terrain, snow, lights and UI draw. City: 29.0 fps, frame p50 34.1 / p95 37.7 ms, GPU p50 17.8 ms (without the meshes). The sound dump runs at −17 to −32 dBFS; 1 underrun in 68,000 callbacks.
+  - **What doesn't:** the Generator, the buildings and the props, which leave only their shadows and lights. Every pipeline with one of the 1,108 shaders that read raw global memory fails (`pipeline creation failed: VkResult -13`: 32 pipelines, about 242,000 draws left out in four minutes). Logcat says why: `AdrenoVK-0: Shader compilation failed for shaderType: 0 ... INTERNAL ERROR: Instruction OpConvertUToPtr not supported`. The translator turns raw global memory into `PhysicalStorageBuffer` pointers made with `OpConvertUToPtr` from 64-bit addresses (539 vertex and 569 fragment modules).
+  - **Two rewrites tried on the device** (the modules swapped in `games/<id>/spv`, then put back): an `OpBitcast` from the 64-bit address fails `src expected to have two components`, and an `OpBitcast` through a `uvec2` (GL_EXT_buffer_reference_uvec2's form, valid by spirv-val) gets past that but crashes the compiler (`SIGSEGV in libllvm-qgl.so+0x2cc258`, building `7069f9743717cd32`). So this driver takes no physical pointer form tried; a newer driver or Turnip might, and a translation of raw global memory without pointers would.
+
 ## Found on this game
 
 - [Separate sampler bindings per stage](../../../docs/reference/nvn-objects.md#separate-sampler-bindings-per-stage): the boot crash, item 0x5F of `nvnDeviceGetInteger`.
@@ -77,7 +82,7 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 
 ## Open
 
-- **Android: raw global memory** is in enjoyerofslop/droidplay-core#150, a draft, not merged yet. Until then, the meshes are invisible on main.
+- **Android: the Adreno 730's driver (V@0615.98) compiles no raw global memory shader** (the Moto Razr Plus 2023, above): the meshes are invisible there.
 - **Android: the opening view's darker picture** and the sky shader's unbound uniform slot, above.
 - **Android: hull and domain shaders** (terrain, terrain shadow map, water and 8 `meshsolid` variants). None were seen in the first city view; a tessellated scene was not looked for.
 - **Mac: the two domain shaders' attribute clash and the 40 shaders without a texture slot**, above.
