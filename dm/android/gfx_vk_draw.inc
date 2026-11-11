@@ -362,19 +362,21 @@ done:
     return res;
 }
 // The module with each 32 lanes of a wider subgroup one warp (spv_wide.h), in *out (to free); 0 when it needs nothing: a subgroup of 32 lanes, a stage that runs
-// no subgroup operations (spv_limits'), or a module that uses none; 0 too for a stage spv_wide leaves (SPV_WIDE_STAGES: not fragment), which the log names once.
-// DM_SPV_WIDE=0 (env.txt): modules as translated
+// no subgroup operations (spv_limits'), or a module that uses none; 0 too for a stage spv_wide leaves (SPV_WIDE_STAGES: not fragment or compute), which the log
+// names once. DM_SPV_WIDE=0 (env.txt): modules as translated; DM_SPV_WIDE_CS=0: compute modules as translated
 static size_t spv_fit_wide(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
-    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_WIDE"); on = !(e && *e == '0'); }
+    static int on = -1, cs = 1;
+    if (on < 0) { const char *c = getenv("DM_SPV_WIDE_CS"); cs = !(c && *c == '0'); const char *e = getenv("DM_SPV_WIDE"); on = !(e && *e == '0'); }
     *out = NULL;
     uint32_t st = on && g_sg_size > 32 ? spv_wide_wanted(code, nw, g_sg_stages) : 0;
     if (!st) return 0;
-    if (!(st & SPV_WIDE_STAGES)) {   // a stage no device test covers yet: as translated, said once for each
+    if (!(st & SPV_WIDE_STAGES & (cs ? ~0u : ~0x20u))) {   // a stage no device test covers yet, or compute switched off: as translated, said once for each
         static _Atomic uint32_t told;
         if (!(atomic_fetch_or(&told, st) & st))
-            LOG("[RED] [vk] %s: a %s shader with Maxwell's 32-lane warp instructions on the GPU's %u-lane subgroups: spv_wide rewrites fragment shaders only, so it is "
-                "made as translated, and its lanes 32 and up may shuffle from or vote with the wrong lanes (said once for its stage)", what,
-                st == 0x20 ? "compute" : st == 0x40 ? "task" : st == 0x80 ? "mesh" : st == 0x8 ? "geometry" : st & 6 ? "tessellation" : "vertex", g_sg_size);
+            LOG("[RED] [vk] %s: a %s shader with Maxwell's 32-lane warp instructions on the GPU's %u-lane subgroups: %s, so it is made as translated, and its lanes "
+                "32 and up may shuffle from or vote with the wrong lanes (said once for its stage)", what,
+                st == 0x20 ? "compute" : st == 0x40 ? "task" : st == 0x80 ? "mesh" : st == 0x8 ? "geometry" : st & 6 ? "tessellation" : "vertex", g_sg_size,
+                st == 0x20 ? "DM_SPV_WIDE_CS=0 leaves compute shaders" : "spv_wide rewrites fragment and compute shaders only");
         return 0;
     }
     uint32_t *s = malloc(2 * (size_t)code[3] * 4), *o = NULL; size_t need = 0, k = 0; int got = 0;
