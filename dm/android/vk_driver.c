@@ -4,7 +4,9 @@
 //   device, named relative to the folder env.txt is in (or by an absolute path). Android loads no library from shared storage, so it is copied into the app's internal files
 //   (vk_driver/<name>), and opened through libadrenotools (dm/third_party/libadrenotools): a second copy of the system's libvulkan.so in a linker namespace of its own, where
 //   a hook loads the player's driver in place of the vendor's. The loader in that copy still makes the window surface and the swapchain, which Turnip on Android lacks.
-//   A driver that cannot be copied or opened, or that offers no GPU, logs one [RED] line, and the system's driver runs.
+//   A driver that cannot be copied or opened, or that offers no GPU, logs one [RED] line, and the system's driver runs. So does one that opens and then fails to make the
+//   instance, find the GPU's graphics queue or the window extensions, or make the device (gfx_vk.c vk_create, through vk_driver_fallback), or the first window's surface
+//   or swapchain (front_android.c vk_window_first): a player's choice of driver must never leave a game without a picture. On a phone without an Adreno GPU, DM_VK_DRIVER is not opened at all.
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <fcntl.h>
@@ -107,17 +109,54 @@ static PFN_vkGetInstanceProcAddr open_custom(const char *drv) {
     return g;
 }
 
-int vk_driver_load(void) {
-    const char *drv = getenv("DM_VK_DRIVER");
-    if (drv && *drv) g_gipa = open_custom(drv);
-    if (!g_gipa) {
-        void *lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-        if (!lib || !(g_gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr"))) { LOG("[RED] [vk] no Vulkan: libvulkan.so: %s", dlerror()); return 0; }
-    }
 #define VKB_LOAD_GLOBAL(f) f = (PFN_##f)g_gipa(NULL, #f);
+static int open_system(void) {
+    void *lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib || !(g_gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr"))) { LOG("[RED] [vk] no Vulkan: libvulkan.so: %s", dlerror()); return 0; }
     VKB_FNS_GLOBAL(VKB_LOAD_GLOBAL)
     if (!vkCreateInstance || !vkEnumerateInstanceExtensionProperties) { LOG("[RED] [vk] no Vulkan: the driver has no vkCreateInstance"); return 0; }
     return 1;
+}
+// Turnip, like every driver libadrenotools loads, drives Qualcomm's kernel GPU driver, KGSL. Without its device node (a Mali or Xclipse phone) such a driver has nothing to
+// run on, and libadrenotools.so's constructor (liblinkernsbypass) would patch the linker for nothing. Only a missing node counts: one SELinux keeps from a stat is still there
+static int adreno(void) { struct stat st; return !stat("/dev/kgsl-3d0", &st) || errno != ENOENT; }
+
+int vk_driver_load(void) {
+    const char *drv = getenv("DM_VK_DRIVER");
+    if (drv && *drv && !adreno()) LOG("[vk] DM_VK_DRIVER %s: not used, this GPU is not an Adreno (no /dev/kgsl-3d0) and Turnip drivers are for Adreno GPUs only: the system's driver runs", drv);
+    else if (drv && *drv) g_gipa = open_custom(drv);
+    if (g_gipa) {
+        VKB_FNS_GLOBAL(VKB_LOAD_GLOBAL)
+        if (vkCreateInstance && vkEnumerateInstanceExtensionProperties) return 1;
+        DRV_RED(g_name, "it has no vkCreateInstance; the system's driver instead"); g_name[0] = 0;
+    }
+    return open_system();
+}
+
+// DM_VK_DRIVER_FAIL=<step> (env.txt, a test): that step fails while the DM_VK_DRIVER driver runs, as if the driver had failed it, so the fallback can be tried on a phone
+// whose driver works. Steps: instance, gpu, queue, extensions, device (gfx_vk.c vk_try), swapchain (the first window's, front_android.c vk_window_up). The system's driver
+// it falls back to is left alone
+int vk_driver_fail(const char *step) {
+    const char *e = getenv("DM_VK_DRIVER_FAIL");
+    return g_name[0] && e && !strcmp(e, step);
+}
+// The DM_VK_DRIVER driver failed after the probe: the system's driver from now on, with one [RED] line saying why. 0: none was running, or the system's has no Vulkan
+int vk_driver_fallback(const char *why) {
+    if (!g_name[0]) return 0;
+    DRV_RED(g_name, "%s; the system's driver instead", why);
+    g_name[0] = 0; g_gipa = NULL;   // (its library stays loaded, as after a failed probe)
+    return open_system();
+}
+
+const char *vk_result_str(VkResult r) {
+    switch (r) {
+#define VKR(x) case x: return #x;
+        VKR(VK_SUCCESS) VKR(VK_INCOMPLETE) VKR(VK_ERROR_OUT_OF_HOST_MEMORY) VKR(VK_ERROR_OUT_OF_DEVICE_MEMORY) VKR(VK_ERROR_INITIALIZATION_FAILED) VKR(VK_ERROR_DEVICE_LOST)
+        VKR(VK_ERROR_LAYER_NOT_PRESENT) VKR(VK_ERROR_EXTENSION_NOT_PRESENT) VKR(VK_ERROR_FEATURE_NOT_PRESENT) VKR(VK_ERROR_INCOMPATIBLE_DRIVER) VKR(VK_ERROR_TOO_MANY_OBJECTS)
+        VKR(VK_ERROR_FORMAT_NOT_SUPPORTED) VKR(VK_ERROR_UNKNOWN) VKR(VK_ERROR_SURFACE_LOST_KHR) VKR(VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) VKR(VK_ERROR_OUT_OF_DATE_KHR)
+#undef VKR
+        default: { static _Thread_local char b[24]; snprintf(b, sizeof b, "VkResult %d", (int)r); return b; }
+    }
 }
 
 // The floating-point environment of the driver's compiler. The replay and its pipeline threads run on threads the game's NVN calls started, or on the game's own, so

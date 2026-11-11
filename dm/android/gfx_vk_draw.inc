@@ -1624,9 +1624,43 @@ static FILE *pk_open(const char *mode) {   // <DM_PIPELINE_CACHE>.keys4 (earlier
     const char *c = getenv("DM_PIPELINE_CACHE"); if (!c) return NULL; char p[700];
     static int old; if (!old++) for (int v = 2; v <= 3; v++) { snprintf(p, sizeof p, "%s.keys%d", c, v); remove(p); }
     snprintf(p, sizeof p, "%s.keys4", c); return fopen(p, mode); }
+// The guard against an entry whose compile never finishes (pk_guard.h): the marker <cache>.making4, which only the prewarm thread writes, and the skip list <cache>.skip4,
+// read once (pk_guard, before the first pipeline of the session) and read-only after
+static int g_pkg_fd = -1;
+static _Atomic int g_pkg_tid;   // the prewarm thread while it compiles a list entry, so the crash dump flags the marker (pb_dump)
+static nvn_hmap g_pk_skip;
+static pthread_once_t g_pkg_once = PTHREAD_ONCE_INIT;
+static void pk_guard_init(void) {
+    const char *c = getenv("DM_PIPELINE_CACHE"); if (!c) return;
+    char mk[700], sk[700]; snprintf(mk, sizeof mk, "%s.making4", c); snprintf(sk, sizeof sk, "%s.skip4", c);
+    uint8_t r[PK_REC]; int crashed; pk_head h;
+    int took = pkg_take(mk, r, PK_REC, &crashed) && (memcpy(&h, r, sizeof h), h.magic == PK_MAGIC && h.size == PK_TAIL);
+    if (took) {   // an earlier start ended during this entry's compile
+        int32_t z; memcpy(&z, r + sizeof h, 4); for (int j = 0; j < 4; j++) h.sh[j][16] = 0;
+        pkg_skip_add(sk, r, PK_REC);
+        LOG("[RED] [vk] start-up list: the entry with shaders %s %s %s %s%s %s, so it is left out from now on (%s)", h.sh[0][0] ? h.sh[0] : "-", h.sh[1][0] ? h.sh[1] : "-",
+            h.sh[2][0] ? h.sh[2] : "-", h.sh[3][0] ? h.sh[3] : "-", z ? " (vertex .z variant)" : "",
+            crashed ? "crashed the driver's shader compiler at an earlier start" : "was being compiled when an earlier start ended (a crash, a kill or a stop)", sk);
+    }
+    // the second start in a row that crashed inside the list: the whole list set aside (pk_guard.h), before anything of this session reads or appends to it
+    char st[700]; snprintf(st, sizeof st, "%s.strikes4", c);
+    if (pkg_strikes(st, took && crashed) >= 2) {
+        char ls[700], as[708]; snprintf(ls, sizeof ls, "%s.keys4", c); snprintf(as, sizeof as, "%s.aside", ls);
+        struct stat lst; long ent = stat(ls, &lst) ? -1 : (long)(lst.st_size / PK_REC);
+        if (pkg_set_aside(ls, as)) LOG("[RED] [vk] start-up list: two starts in a row crashed in it, so the whole list (%ld entries) is set aside as %s and this session starts a new one", ent, as);
+        pkg_strikes(st, 0);
+    }
+    uint8_t *all; size_t n = pkg_skip_load(sk, PK_REC, &all);
+    g_pk_skip.klen = PK_REC; for (size_t i = 0; i < n; i++) nvn_hm_put(&g_pk_skip, all + i * PK_REC, (void *)1);
+    free(all);
+    g_pkg_fd = pkg_open(mk);
+}
+static void pk_guard(void) { pthread_once(&g_pkg_once, pk_guard_init); }
+static int pk_skipped(const uint8_t *r) { return g_pk_skip.n && nvn_hm_get(&g_pk_skip, r); }
 static void pk_record(const pipe_key *k) {   // under g_bk
     if (k->tf) return;
     uint8_t r[PK_REC]; pk_rec(k, r);
+    if (pk_skipped(r)) return;   // not listed again when play makes it
     if (!g_pk_listed.klen) g_pk_listed.klen = PK_REC;
     if (nvn_hm_get(&g_pk_listed, r)) return;
     nvn_hm_put(&g_pk_listed, r, (void *)1);
@@ -1653,8 +1687,9 @@ static VkRenderPass rp_get(const rp_key *k);
 // and later, with pauses between pipelines, still for part of every frame in a level while the list ran (10,000 pipelines and more)
 static void *prewarm_thread(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-prewarm"); setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
+    pk_guard();
     FILE *f = pk_open("rb"); if (!f) return NULL;
-    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); int made = 0, had = 0, bad = 0, n = 0, rep = 0, wrong = 0;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); int made = 0, had = 0, bad = 0, n = 0, rep = 0, wrong = 0, skip = 0;
     uint8_t *all = NULL; size_t cnt = 0, cap = 0, rec = PK_REC;
     pthread_mutex_lock(&g_bk); if (!g_pk_listed.klen) g_pk_listed.klen = PK_REC; pthread_mutex_unlock(&g_bk);
     for (;;) {
@@ -1662,13 +1697,14 @@ static void *prewarm_thread(void *arg) {
         if (fread(r, rec, 1, f) != 1) break;
         memcpy(&h, r, sizeof h); if (h.magic != PK_MAGIC || h.size != PK_TAIL) break;
         n++;
+        if (pk_skipped(r)) { skip++; continue; }   // an earlier start ended during its compile (pk_guard_init): dropped from the list below
         pthread_mutex_lock(&g_bk); int seen = nvn_hm_get(&g_pk_listed, r) != NULL; if (!seen) nvn_hm_put(&g_pk_listed, r, (void *)1); pthread_mutex_unlock(&g_bk);
         if (seen) { rep++; continue; }
         if (cnt == cap) { cap = cap ? cap * 2 : 1024; all = realloc(all, cap * rec); }
         memcpy(all + cnt++ * rec, r, rec);
     }
     fclose(f);
-    if (rep) {   // written again without the repeats (records this session appended meanwhile are in g_pk_listed and the new file)
+    if (rep || skip) {   // written again without the repeats and the skipped (records this session appended meanwhile are in g_pk_listed and the new file)
         pthread_mutex_lock(&g_bk);
         if (g_pk_out) { fclose(g_pk_out); g_pk_out = NULL; }
         FILE *o = pk_open("wb"); if (o) { fwrite(all, rec, cnt, o); fclose(o); }
@@ -1681,19 +1717,23 @@ static void *prewarm_thread(void *arg) {
     for (size_t i = 0; i < cnt; i++) {
         const uint8_t *r = all + i * rec; pk_head h; int32_t z; rp_key rk;
         memcpy(&h, r, sizeof h); memcpy(&z, r + sizeof h, 4); memcpy(&rk, r + sizeof h + 4, sizeof rk);
+        // the marker holds the entry from its shader modules (sh_get, pipe_prep) to the end of its compile (pk_guard.h)
+        atomic_store(&g_pkg_tid, gettid()); pkg_begin(g_pkg_fd, r, PK_REC);
         pthread_mutex_lock(&g_bk);   // the shaders, the pass and what the pipeline shares (pipe_prep), under the lock; the compile without it
         pipe_key k; memset(&k, 0, sizeof k); int ok = 1, mk = 0;
         for (int j = 0; j < 4 && ok; j++) if (h.sh[j][0]) { h.sh[j][16] = 0; k.sh[j] = sh_get(h.sh[j]); if (!k.sh[j]) ok = 0; }
-        int slot; if (ok && !pk_stages_ok(&k, &slot)) {   // an entry the replay would never make for a draw (pk_stages_ok)
+        int slot, out = 0;   // out: left out without a continue, so the marker is emptied below (pkg_end)
+        if (ok && !pk_stages_ok(&k, &slot)) {   // an entry the replay would never make for a draw (pk_stages_ok)
             if (!wrong++) LOG("[RED] [vk] start-up list: an entry with %s shader %s in the %s slot is left out (the replay makes no such pipeline; a build that drew those shaders wrote it)",
                               sh_stage_name(k.sh[slot]->stage), k.sh[slot]->key, PK_SLOT[slot]);
-            pthread_mutex_unlock(&g_bk); continue; }
-        if (ok) { k.z = z; k.rk = rk; k.rp = rp_get(&rk); memcpy((uint8_t *)&k + pk_tail_off(), r + sizeof h + 4 + sizeof rk, PK_TAIL); if (!k.rp) ok = 0; }
-        if (ok) { if (nvn_hm_get(&g_pipes, &k)) had++; else { pipe_prep(&k); mk = 1; } } else bad++;
+            out = 1; }
+        if (ok && !out) { k.z = z; k.rk = rk; k.rp = rp_get(&rk); memcpy((uint8_t *)&k + pk_tail_off(), r + sizeof h + 4 + sizeof rk, PK_TAIL); if (!k.rp) ok = 0; }
+        if (!out) { if (!ok) bad++; else if (nvn_hm_get(&g_pipes, &k)) had++; else { pipe_prep(&k); mk = 1; } }
         pthread_mutex_unlock(&g_bk);
+        VkResult pr = VK_SUCCESS; pipe_t *pp = NULL; uint32_t ns, nva; VkPrimitiveTopology tp;
+        if (mk) { pp = calloc(1, sizeof *pp); pr = pp ? pipe_make(&k, pp, &ns, &nva, &tp) : VK_ERROR_OUT_OF_HOST_MEMORY; }
+        pkg_end(g_pkg_fd); atomic_store(&g_pkg_tid, 0);
         if (!mk) continue;
-        pipe_t *pp = calloc(1, sizeof *pp); uint32_t ns, nva; VkPrimitiveTopology tp;
-        VkResult pr = pp ? pipe_make(&k, pp, &ns, &nva, &tp) : VK_ERROR_OUT_OF_HOST_MEMORY;
         pthread_mutex_lock(&g_bk);
         if (pr == VK_SUCCESS && !nvn_hm_get(&g_pipes, &k)) { nvn_hm_put(&g_pipes, &k, pp); made++; pp = NULL; }
         else if (pr == VK_SUCCESS) had++;   // the game made it meanwhile
@@ -1703,8 +1743,8 @@ static void *prewarm_thread(void *arg) {
         usleep(1000);
     }
     free(all);
-    LOG("[vk] pipelines made again from the list: %d made, %d there already, %d failed, %d left out (a shader in the wrong slot), of the first %zu of %d records (%d repeats dropped), in %.1f s",
-        made, had, bad, wrong, cnt, n, rep, (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e9);
+    LOG("[vk] pipelines made again from the list: %d made, %d there already, %d failed, %d left out (a shader in the wrong slot), of the first %zu of %d records (%d repeats "
+        "and %d skipped dropped: an earlier start ended in their compile), in %.1f s", made, had, bad, wrong, cnt, n, rep, skip, (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e9);
     // the cache was written only when the app paused: a session that ended otherwise (killed for an update or by the system) lost what the list compiled, and the next start
     // compiled it all again (Super Mario Bros. Wonder on the Adreno 619: about 23 ms a pipeline from the stale cache, 7 from a saved one)
     if (made) vkb_pipeline_cache_save();
@@ -1729,6 +1769,7 @@ static int pb_begin(char kind, const char *const sh[4], uint8_t topo, uint8_t nc
 static void pb_end(int i) { if (i >= 0) atomic_store(&g_pb[i].tid, 0); }
 static void pb_dump(void) {   // crash.c, on the crashing thread, after its backtrace
     int me = gettid();
+    if (atomic_load(&g_pkg_tid) == me) pkg_crashed(g_pkg_fd, PK_REC);   // the start-up list's entry crashed its compile: the next start says so and skips it (pk_guard_init)
     for (int i = 0; i < PB_MAX; i++) { int t = atomic_load(&g_pb[i].tid); if (t <= 0) continue;
         char tn[32] = ""; char path[64]; snprintf(path, sizeof path, "/proc/self/task/%d/comm", t);
         int fd = open(path, O_RDONLY); if (fd >= 0) { ssize_t n = read(fd, tn, sizeof tn - 1); close(fd); if (n > 0) tn[n - (tn[n - 1] == '\n')] = 0; }
@@ -1742,6 +1783,12 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     int slot; if (!pk_stages_ok(k, &slot)) {   // never handed to the driver (pk_stages_ok): a module of another stage in a slot crashed a compiler
         RED_ONCE(178, "a pipeline with %s shader %s in its %s slot is not made (said once)", sh_stage_name(k->sh[slot]->stage), k->sh[slot]->key, PK_SLOT[slot]);
         return VK_ERROR_INITIALIZATION_FAILED; }
+    pk_guard();
+    if (g_pk_skip.n && atomic_load(&g_pkg_tid) != gettid()) {   // play needs a pipeline the start-up list skips: said, so a crash in this compile names it in the log too
+        uint8_t r[PK_REC]; pk_rec(k, r);
+        if (nvn_hm_get(&g_pk_skip, r)) { static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 8)
+            LOG("[RED] [vk] a pipeline the start-up list skips (an earlier start ended during its compile) is compiled now for a draw: shaders %s %s; if the app ends here, the driver "
+                "cannot compile it", k->sh[0] ? k->sh[0]->key : "-", k->sh[1] ? k->sh[1]->key : "-"); } }
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &g_empty_dsl); }
     VkDescriptorSetLayout sets[POOL_SET + 1] = {g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl}; uint32_t nset = 1;
     VkPipelineShaderStageCreateInfo st[4]; lmod *lms[4]; uint32_t ns = 0; VkSpecializationInfo psi; memset(&psi, 0, sizeof psi);
