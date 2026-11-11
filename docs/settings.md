@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Touch control size](#touch-control-size), [Touch control inset](#touch-control-inset), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -98,6 +98,14 @@ Shows the frames per second at the top left.
 ### Touch feedback
 
 A light tap from the phone when you press an on-screen button.
+
+### Touch control size
+
+Android. How large the on-screen controls are, from 60 to 140 %. Above 100 % they stop growing where the stick, the D-pad or the buttons would meet the shoulder buttons or each other, so on a phone they grow to about 125 %.
+
+### Touch control inset
+
+Android. How far the stick, the D-pad and the A/B/X/Y buttons sit in from the sides of the screen, for a phone whose curved edge or grip leaves the stick too far out. 0 % is the standard layout; 100 % brings the stick's group and the buttons together in the middle. The shoulder buttons and the buttons at the top stay where they are. Each game keeps its own choice, and **Reset to tested defaults** puts both back.
 
 ### Game rumble
 
@@ -275,6 +283,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
+| Touch control size (Android) | `DM_PAD_SCALE` | `0.6` to `1.4` (default `1`) |
+| Touch control inset (Android) | `DM_PAD_INSET` | `0` to `1` (default `0`) |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
