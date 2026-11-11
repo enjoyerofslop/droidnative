@@ -483,6 +483,7 @@ class Phone(Base):
         self.cmds = []; self.remote: dict[str, Any] = {}   # remote path → exists ('free': the phone's free KiB for df, 'mkdirs': what the folder script prints)
         def adb(serial, *a, log=None, check=True):
             c = [str(x) for x in a]; self.cmds.append(c)
+            if c == ['shell', ba.phone_id.ID_CMD]: return self.remote.get('props', {}).get(serial, '')   # the phone's ID (phone_key): '' gives none
             if c[:2] == ['shell', 'sh'] and c[2].endswith('nxnative_mkdirs.sh'):
                 out = self.remote.get('mkdirs', ba.MKDIRS_DONE + '\n')
                 if isinstance(out, Exception): raise out
@@ -493,7 +494,6 @@ class Phone(Base):
                 path = c[1].split("'")[1]; return 'yes\n' if self.remote.get(path) else ''
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('sha256sum '): return self.remote.get('sha', '') + '  x\n'
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('cat ') and ba.MANIFEST in c[1]: return self.remote.get('manifest', '')
-            if c == ['shell', ba.phone_id.ID_CMD]: return self.remote.get('props', {}).get(serial, '')
             return ''
         cm = mock.patch.object(ba, 'adb', adb); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
         self.game = self.tmp / 'v1'; (self.game / 'RomFS').mkdir(parents=True); (self.game / 'RomFS/a.bin').write_bytes(b'a')
