@@ -134,7 +134,7 @@ class SpvNoPtr(unittest.TestCase):
         cls.bin = NDK / 'toolchains/llvm/prebuilt' / HOST / 'bin'
         src = cls.tmp / 't.c'
         export = '__declspec(dllexport)' if os.name == 'nt' else '__attribute__((visibility("default")))'
-        src.write_text(f'#include "spv_noptr.h"\n{export} size_t run(const uint32_t *w, size_t n, uint32_t set, uint32_t *sc, uint32_t *o, size_t cap, int *why) {{ return spv_noptr(w, n, set, sc, o, cap, why); }}\n'
+        src.write_text(f'#include "spv_noptr.h"\n{export} size_t run(const uint32_t *w, size_t n, uint32_t set, int nu, uint32_t *sc, uint32_t *o, size_t cap, int *why) {{ return spv_noptr(w, n, set, nu, sc, o, cap, why); }}\n'
                        f'{export} int wanted(const uint32_t *w, size_t n) {{ return spv_noptr_wanted(w, n); }}\n')
         env = dict(os.environ, MSYS_NO_PATHCONV='1')
         if os.name == 'nt':   # no C library: a DLL linked by lld alone
@@ -146,7 +146,7 @@ class SpvNoPtr(unittest.TestCase):
             cc = ['xcrun', 'clang'] if sys.platform == 'darwin' else [shutil.which('clang') or cls.bin / 'clang']
             subprocess.run([*cc, '-shared', '-fPIC', '-O1', '-Wall', '-Wextra', '-Werror', '-I', REPO / 'dm/android', src, '-o', cls.tmp / 't.so'], check=True)
             cls.lib = ctypes.CDLL(str(cls.tmp / 't.so'))
-        cls.lib.run.restype = ctypes.c_size_t; cls.lib.run.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+        cls.lib.run.restype = ctypes.c_size_t; cls.lib.run.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
         cls.lib.wanted.argtypes = [ctypes.c_void_p, ctypes.c_size_t]   # (typed: untyped size_t arguments crashed test_spv_pool on the Linux runner)
 
     @classmethod
@@ -164,10 +164,10 @@ class SpvNoPtr(unittest.TestCase):
 
     def wanted(self, data): n = len(data) // 4; return self.lib.wanted((ctypes.c_uint32 * n).from_buffer_copy(data), n)
 
-    def run_on(self, data, cap=None, set_=5):   # → (the rewritten module or None, why)
+    def run_on(self, data, cap=None, set_=5, nu=1):   # → (the rewritten module or None, why)
         n = len(data) // 4; w = (ctypes.c_uint32 * n).from_buffer_copy(data); cap = cap or 4 * n + 1024; o = (ctypes.c_uint32 * cap)()
         sc = (ctypes.c_uint32 * (3 * words(data)[3]))(); why = ctypes.c_int(-1)
-        k = self.lib.run(w, n, set_, sc, o, cap, ctypes.byref(why))
+        k = self.lib.run(w, n, set_, nu, sc, o, cap, ctypes.byref(why))
         return (bytes(o)[:4 * k] if k else None), why.value
 
     def check_rewritten(self, out, nacc, set_=5):   # what every rewritten module has
@@ -210,6 +210,11 @@ class SpvNoPtr(unittest.TestCase):
     def test_the_array_goes_to_the_set_asked_for(self):   # a GPU that binds 4 sets at once: set 3
         out, why = self.run_on(self.asm(CS, 'set3'), set_=3); self.assertIsNotNone(out, why); assert out is not None
         self.valid(out, 'set3'); self.check_rewritten(out, 15, set_=3)
+
+    def test_without_nonuniform_decorations(self):   # the diagnostic form: the same accesses, none decorated
+        out, why = self.run_on(self.asm(CS, 'nonu'), nu=0); self.assertIsNotNone(out, why); assert out is not None
+        self.valid(out, 'nonu'); o = ops(out)
+        self.assertFalse([x for op, x in o if op == 71 and x[1] == 5300]); self.assertEqual(len([x for op, x in o if op == 65 and len(x) == 6]), 15)
 
     def test_ulong_used_elsewhere_keeps_int64(self):
         data = self.asm(CS.replace('%i0 = OpConstant %int 0\n', '%i0 = OpConstant %int 0\n%k = OpConstant %ulong 5\n').replace(

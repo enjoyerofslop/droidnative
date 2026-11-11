@@ -22,6 +22,10 @@ static _Atomic uint64_t g_np_mods, g_np_left;   // modules rewritten by spv_nopt
 static const uint32_t k_gm_probe_cs[] =
 #include "shaders/gmem_probe.comp.inc"
 ;
+// DM_VK_RAW_GMEM_NOPTR_NU=0 (env.txt, a diagnostic): the accesses without NonUniform decorations, for telling what a driver's non-uniform indexing costs; wrong where the
+// lanes of one draw reach different pieces. DM_VK_RAW_GMEM_NOPTR_SLOTS=<n> (a diagnostic): an array of at most n slots, for telling what its length costs.
+// DM_VK_RAW_GMEM_NOPTR_SET=3 (a diagnostic): the array at SPV_NOPTR_SET_LOW on a GPU that binds 6 sets, to try what a GPU that binds 4 gets
+static int gm_np_nu(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_NOPTR_NU"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAW_GMEM_NOPTR_NU=0: the pools' array is indexed without NonUniform decorations"); } return v; }
 static int gm_np_env(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_VK_RAW_GMEM_NOPTR"); v = e && *e == '1' ? 1 : e && *e == '0' ? 0 : -1; } return v; }
 // After the device's features are read (vk_try): whether it has what the array needs, and VK_EXT_descriptor_indexing to enable when the driver lists it (core from Vulkan 1.2)
 static int gm_np_take(const VkPhysicalDeviceDescriptorIndexingFeaturesEXT *d, int listed, const char **dext, uint32_t *nde) {
@@ -78,12 +82,14 @@ static void gm_np_made(void) {
     if (dp.maxPerStageUpdateAfterBindResources < lim) lim = dp.maxPerStageUpdateAfterBindResources;
     if (dp.maxUpdateAfterBindDescriptorsInAllPools < lim) lim = dp.maxUpdateAfterBindDescriptorsInAllPools;
     lim = lim > 4 * own ? lim - 4 * own : 0; if (n > lim) n = lim;
+    { const char *e = getenv("DM_VK_RAW_GMEM_NOPTR_SLOTS"); uint32_t v = e ? (uint32_t)strtoul(e, NULL, 0) : 0; if (v >= 2 && v < n) { n = v; LOG("[vk] DM_VK_RAW_GMEM_NOPTR_SLOTS=%u: the pools' array is that long", n); } }
     g_np_set = sets > SPV_NOPTR_SET ? SPV_NOPTR_SET : SPV_NOPTR_SET_LOW;
+    { const char *e = getenv("DM_VK_RAW_GMEM_NOPTR_SET"); if (e && atoi(e) == SPV_NOPTR_SET_LOW && g_np_set != SPV_NOPTR_SET_LOW) { g_np_set = SPV_NOPTR_SET_LOW; LOG("[vk] DM_VK_RAW_GMEM_NOPTR_SET=%d: the pools' array is at that set", SPV_NOPTR_SET_LOW); } }
     char probe[96]; if (gm_np_env() == 1) snprintf(probe, sizeof probe, "DM_VK_RAW_GMEM_NOPTR=1"); else snprintf(probe, sizeof probe, "the driver refuses the probe's OpConvertUToPtr (VkResult %d)", (int)pr);
     LOG("[vk] raw global memory: %s; %u descriptor sets bound at once, update-after-bind storage buffers %u a stage and %u a set, resources %u a stage, descriptors %u in all pools, "
         "maxStorageBufferRange %u MiB", probe, sets, dp.maxPerStageDescriptorUpdateAfterBindStorageBuffers, dp.maxDescriptorSetUpdateAfterBindStorageBuffers, dp.maxPerStageUpdateAfterBindResources,
         dp.maxUpdateAfterBindDescriptorsInAllPools, g_vk.props.limits.maxStorageBufferRange >> 20);
-    const char *why = sets <= SPV_NOPTR_SET_LOW ? "fewer than 4 descriptor sets bound at once" : n < 256 ? "too few update-after-bind storage buffers" : NULL;
+    const char *why = sets <= SPV_NOPTR_SET_LOW ? "fewer than 4 descriptor sets bound at once" : n < 256 && !getenv("DM_VK_RAW_GMEM_NOPTR_SLOTS") ? "too few update-after-bind storage buffers" : NULL;
     VkDescriptorSetLayoutBinding b = {SPV_NOPTR_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, n, VK_SHADER_STAGE_ALL, NULL};
     VkDescriptorBindingFlagsEXT bf = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT_EXT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT_EXT;
     VkDescriptorSetLayoutBindingFlagsCreateInfoEXT fc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, .bindingCount = 1, .pBindingFlags = &bf};
@@ -129,7 +135,7 @@ static size_t gm_np_code(const uint32_t *code, size_t nw, const char *what, int 
     uint32_t *sc = malloc(3 * (size_t)code[3] * 4); size_t k = 0; int why = 0;
     for (size_t cap = 2 * nw + 4096; sc && !k && cap <= 16 * nw + 4096; cap *= 4) {   // a vector access becomes several: rarely past twice the words
         free(*out); *out = malloc(cap * 4); if (!*out) break;
-        k = spv_noptr(code, nw, g_np_set, sc, *out, cap, &why); if (why != SPV_NOPTR_ROOM) break; }
+        k = spv_noptr(code, nw, g_np_set, gm_np_nu(), sc, *out, cap, &why); if (why != SPV_NOPTR_ROOM) break; }
     free(sc);
     if (!k) { free(*out); *out = NULL; }
     if (!first) return k;

@@ -68,9 +68,9 @@ static int spv_noptr_lit(uint32_t op, uint32_t q) {
     }
 }
 
-// The rewrite. set: the descriptor set of the pools' array; sc: 3 * bound words of scratch. → words written to out (0: left as it is; *why says why, 0 when it has no
-// pointers to rewrite)
-static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, uint32_t *sc, uint32_t *out, size_t cap, int *why) {
+// The rewrite. set: the descriptor set of the pools' array; nu: 0 leaves the NonUniform decorations out (a diagnostic: right only where every lane of a draw reaches one
+// piece); sc: 3 * bound words of scratch. → words written to out (0: left as it is; *why says why, 0 when it has no pointers to rewrite)
+static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, int nu, uint32_t *sc, uint32_t *out, size_t cap, int *why) {
     *why = 0;
     if (n < 5 || w[0] != 0x07230203) { *why = SPV_NOPTR_FORM; return 0; }
     uint32_t bound = w[3], ver = w[1];
@@ -128,7 +128,7 @@ static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, uint32_t *sc,
     const uint32_t rta = nb++, blk = nb++, rtb = nb++, prtb = nb++, pu = nb++, var = nb++, c0 = nb++, c1 = nb++, c2 = nb++, c3 = nb++;
     size_t k = 0, ann = 0; uint32_t nnu = 0;   // ann: where the NonUniform decorations go; they are listed at the top of out meanwhile, out[cap - 1 - j]
 #define NP_E(v) do { if (k + nnu >= cap) { *why = SPV_NOPTR_ROOM; return 0; } out[k++] = (uint32_t)(v); } while (0)
-#define NP_NU(id) do { if (k + nnu + 1 >= cap) { *why = SPV_NOPTR_ROOM; return 0; } out[cap - 1 - nnu++] = (id); } while (0)
+#define NP_NU(id) do { if (k + nnu + 1 >= cap) { *why = SPV_NOPTR_ROOM; return 0; } if (nu) out[cap - 1 - nnu++] = (id); } while (0)
 #define NP_ROOM(m) do { if (k + nnu + (m) >= cap) { *why = SPV_NOPTR_ROOM; return 0; } } while (0)
     for (int q = 0; q < 5; q++) NP_E(w[q]);
     int caps_done = 0;
