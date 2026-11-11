@@ -238,7 +238,7 @@ def ready_in_log(text, ready, shift):
 # answer counts as a death only when a second, independent check says so: the pid last seen gone from /proc (or another process's now, by its start time), or the
 # run's logcat saying the game's process ended. Anything less is "unknown": the run carries on, nothing is stopped, and the miss is printed and kept in result.json
 GAME_DIED = (re.compile(r'ActivityManager\s*: Process ' + re.escape(GAME_PROC) + r' \(pid (\d+)\) has died'),   # the launcher's own process is org.nxnative.android
-             re.compile(r"lmkd\s*: (?:Kill|Reclaim) '" + re.escape(GAME_PROC) + r"' \((\d+)\)"),
+             re.compile(r"(?:lmkd|lowmemorykiller)\s*: (?:Kill|Reclaim) '" + re.escape(GAME_PROC) + r"' \((\d+)\)"),   # lmkd's two tags (LMK_LINE)
              re.compile(r'Zygote\s*: Process (\d+) exited'))   # no name on this one: by the pid alone
 
 

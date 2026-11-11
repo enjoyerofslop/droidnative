@@ -251,6 +251,13 @@ class GameLiveness(unittest.TestCase):
         self.assertTrue(ba.died_in_logcat(ZYGOTE, '8294')); self.assertFalse(ba.died_in_logcat(ZYGOTE, '8295'))
         self.assertFalse(ba.died_in_logcat(DIED_AM, '9000'))   # an earlier game process's death, not this one's
 
+    def test_the_pixels_lmkd_tag(self):   # the Pixel 9 Pro XL's lmkd logs under AOSP's tag, lowmemorykiller
+        pixel = "  1794421090.200   467   467 I lowmemorykiller: Kill 'org.nxnative.android:game' (8294), uid 10160, oom_score_adj 0 to free 4000000kB rss, 0kB anon rss, " \
+                "0kB swap, 0kB dmabuf_pss, 0kB dmabuf_rss; reason: min watermark is breached\n"
+        self.assertTrue(ba.died_in_logcat(pixel, '8294')); self.assertTrue(ba.died_in_logcat(pixel, None)); self.assertFalse(ba.died_in_logcat(pixel, '8295'))
+        other = pixel.replace('org.nxnative.android:game', 'com.android.chrome')
+        self.assertFalse(ba.died_in_logcat(other, None))
+
 
 if __name__ == '__main__':
     unittest.main()
