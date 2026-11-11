@@ -2480,6 +2480,7 @@ static int ucopy(const void *src, size_t n, size_t al, VkBuffer *b, VkDeviceSize
     if (e->shadow) { memcpy(e->shadow, src, n); g_ucopy_shadow += n; e->src = src; e->n = n; e->seq = C->seq; e->b = *b; e->off = *off; } else e->src = NULL;
     return 1;
 }
+#include "gfx_vk_sbcopy.inc"   // read-only storage buffers outside placed pools: a chunk's copy bound again while the dirty tracker shows its pages unwritten
 // ---- The program-to-shader memo (vk_draw_) ----
 // Which shader each stage of a draw takes depends on the five bound programs (D.bst) alone: prog_key reads the program's key record (hle_nvn.c pk_get, found by the program's
 // address), set at SetShaders or computed once at the first draw, and sh_get's table only grows (a vshader is never freed, a failed one stays failed). Resolving it again
@@ -2631,7 +2632,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             bi[nbi] = (VkDescriptorBufferInfo){b, ao, ipr}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
             continue; }
         else if (u && u->addr && own_alias(s->key, u->addr, n, g_vk.props.limits.minStorageBufferOffsetAlignment, &b, &ao)) {}   // a range another binding of this shader wrote
-        else if (u && u->addr && !wr_) { if (!sb_keep(u->addr, n, &b, &ao) && !ucopy((const void *)(uintptr_t)u->addr, n, (n + 15) & ~(size_t)15, &b, &ao)) return 0; }   // read only: kept between frames (sb_keep), or shared as uniforms are
+        else if (u && u->addr && !wr_) { if (!sb_keep(u->addr, n, &b, &ao) && !sb_copy((const void *)(uintptr_t)u->addr, n, (n + 15) & ~(size_t)15, &b, &ao)) return 0; }   // read only: kept between frames (sb_keep), or shared as uniforms are
         else if (u && u->addr && gm_inplace_w(u->addr, n, s->stage == SH_CS, &b, &ao, &ipr)) {   // written, in a placed pool: bound there, its write-back only a note (gfx_vk_gmem_inplace.inc)
             bi[nbi] = (VkDescriptorBufferInfo){b, ao, ipr}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
             continue; }

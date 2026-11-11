@@ -193,7 +193,7 @@ python3 scripts/bench_android.py <NSP folder> [<NSP folder> ...] [-s <serial> ..
   - time to the first frame and to the ready pattern
   - frames per second, frame time p50 / p95 / p99, and the share of frames over 17.5 and 34 ms
   - GPU time per frame, memory (PSS) and temperatures
-  - how the game ended
+  - how the game ended. A run ends early only on a confirmed death: an empty `pidof` alone isn't one, since it came back empty for a live game on a device out of memory (the Odin 2). The game's pid must also be gone from `/proc`, or the run's logcat must say the game's process died; otherwise the run carries on, and the miss is printed and kept in `result.json` (`pidof_misses`)
 
   They go in `results.md` and `results.json`, beside each run's log, timing file and screenshots.
 - **Warm-up:** `--warmup` adds a first run, reported apart. The first launch after an install builds the driver's pipelines: Brilliant Diamond's first frame took 33 s there on a OnePlus Pad 3, against 10 s warm on an Odin 2.
