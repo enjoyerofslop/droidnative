@@ -22,8 +22,22 @@ No rewriter cuts of its own, no `patches.py`.
   build for it. Grey was last seen on `main` at `ee18169a`. The wide-subgroup rewrite and layered targets were ruled out as the fix: see
   [baselines.md problem 10](../../android/baselines.md#known-problems).
 
+## Android: a new game on the Retroid Pocket 5
+
+Played by hand on a Retroid Pocket 5 (SM8250, Adreno 650, Qualcomm's driver 0x802ea000, Android 13) on 2026-11-11, DroidPlay 0.7.4-21-g22522e03 as installed, adb button and stick input, a private `DM_SAVE`:
+
+- **The stretch:** the legend's movie and the title, Quest Logs, a new file, the opening (Link's dream, the "Skyward Sword" card, the flight over Skyloft, Zelda at the statue), Link's room, the Knight Academy's halls, out through the carved double door into Skyloft, then Instructor Horwell's lock-on and dash lessons up to his wooden crates. The way on to Zelda at the Statue of the Goddess is up those crates and a wall, which wasn't managed over adb.
+- **Input:** the file list's highlight follows the stick (see [Mac routes](#mac-routes)). The name entry opens Android's keyboard with "Link" filled in: DONE, then OK in the dialog. Button controls throughout; the game didn't ask about motion controls.
+- **Frame rate:** 60 fps in 308 of the first session's 311 windows of 300 frames, the other three the title card's 30; in Skyloft frame p50 16.6–16.8 ms, p95 about 19 ms, GPU about 6–7 ms, under 1 GB resident. After the cold start, 60 fps in all 100 windows. No red line and no crash in either session.
+- **Save:** the game autosaved as Link left his room and again outside the academy (23 save commits). After a cold start the Quest Logs showed the autosave, "Link", 0:20, dated 11/11/2026 9:24 a.m., and its quest ("Go meet Zelda, who is waiting by the Statue of the Goddess") loaded outside the academy.
+- **Sound:** 1,620 s of the audio renderer's stereo (`DM_AUDIO_DUMP`) through the first session, as long as the session: music and effects, no clipping. 934 underruns in the first 3,000 frames, while the game boots, and one after that; 9 in the second session.
+- **Current: parts of Skyloft drawn flat or not at all, in the session that starts the new game.** Seen there: Horwell's two wooden crates drawn as one flat grey shape, and missing from the next shot of the same place; large flat magenta and grey shapes in the area's opening shot; a flat bright-green patch where trees should be. No red line. After a cold start and Continue, the crates, the ground and the sky in the same places were drawn right.
+  - A pass dump of a frame with the grey shape on screen (`files/dump_now`): the 1920×1080 target is cleared to the grey of the shape, and in the scene pass that area keeps the clear colour, which a later pass fills; whatever should cover it isn't drawn there. The log shows no occlusion queries, no conditional rendering and one draw left out (a background pipeline build). The 64×64 targets the terrain reads have content, unlike [Rendering](#rendering)'s grey terrain of 2026-11-08.
+  - ASTC blocks that are all zero draw magenta (see `DM_NVN_ZBLOCK`), so the magenta may be textures whose data hadn't arrived; not checked.
+
 ## Open
 
+- **Android, a new game:** parts of Skyloft drawn flat or not at all in the session that starts it, right after a cold start and Continue ([Android: a new game on the Retroid Pocket 5](#android-a-new-game-on-the-retroid-pocket-5)).
 - **A torn movie picture (issue #497, not reproduced).** That report saw a horizontal band near the top of the opening movie, rows from two successive pictures, and proposes keeping a snapshot of the texture storage for each upload. On an Apple M6 here, 114 shots of `THP/Demo01_01.webm` show no row boundary that jumps across the width. Whether the race can happen here is not settled.
 - **Dash speed from a tilted stick (issue #928, not reproduced).** That report has Link running at dash speed without B at some diagonal angles, because a host stick can go outside the circle a Switch stick stays in, and proposes scaling every stick back onto the circle in `hle_hid.c`. In the Academy hall, a full diagonal for 1.2 s and the opposite diagonal on the circle for 1.2 s brought Link back to the same spot, so the game showed no extra speed at that angle. A shallower angle was inconclusive, the camera having turned. The change would reach every game, so it waits for a measurement.
 
