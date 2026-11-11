@@ -1,7 +1,8 @@
 // ---------------- A game's upscaler network replaced by a bilinear scale and a signed square (included by gfx_vk.c after gfx_vk_bcdec.inc) ----------------
 // Ocarina of Time upscales its 1440x810 scene to 1920x1080 with a neural network in one compute dispatch (agl's NDSR, fa3033d05c0a41d6: HMMA tiles through shared
-// memory). On the OnePlus Pad 3's Adreno 830 its output is noise over the whole picture once its inputs are valid storage images (#167), and Banana Native measured it at
-// 58.5 ms a frame on the Galaxy Z Fold 8's Adreno 840. DeathKhan's nx2android fork replaced it on the Odin 3's Adreno 830 (8569eeb); the idea is theirs, written anew here.
+// memory). It draws the picture right since its input is written (#193) and its warp operations fit 64-lane subgroups (#189), but it is the frame's slowest step: on the
+// OnePlus Pad 3's Adreno 830 21 of a frame's 45 ms of GPU work (Kokiri Forest 10.4 fps, 15.8 replaced), on the Galaxy Z Fold 8's Adreno 840 GPU 73 against 41-48 ms (11.0
+// fps, 16.0-17.8 replaced). DeathKhan's nx2android fork replaced it on the Odin 3's Adreno 830 (8569eeb); the idea is theirs, written anew here.
 // - Which dispatches: with DM_VK_UPSCALER_SQUARE=1 (Ocarina of Time's android_defaults.txt), a compute shader with the network's interface: one combined 2D texture, one
 //   2D storage image it loads and stores (no atomics), one read-only storage buffer, and nothing else. The game picks one of four networks by its dynamic resolution
 //   (fa3033d05c0a41d6, 7c511cc23ff85d14, b106afba1a18faa9, d99fbeeb53d38847), all of that interface, as BananaNative matches them (ndsr_iface); so do 49 more of its compute
