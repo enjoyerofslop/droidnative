@@ -186,13 +186,28 @@ def window_stats(rows, start, length):
             'draws_p50': pct([r['@draws'] for r in w if '@draws' in r], 50)}
 
 
+# The low-memory killer ended the game: a line of lmkd's that names org.nxnative.android:game ("Kill" in AOSP, "Reclaim" on the Galaxy S25 Edge) or the game's pid
+# (process_mrelease <pid> after a kill). Any other of its lines is about another app: under memory pressure it kills dozens (the launcher's own process,
+# org.nxnative.android, among them), and those don't end the run. Its tag is lmkd on the Odin 2 and the Galaxy S25 Edge (whose process_mrelease errors come under
+# lowmemorykiller), AOSP's lowmemorykiller on the Pixel 9 Pro XL, so the run's logcat takes both
+LMK_LINE = re.compile(r'\b(?:lmkd|lowmemorykiller)\s*[:(]')
+
+
+def lmk_killed_game(line, pid):
+    if not LMK_LINE.search(line): return False
+    if re.search(r"(?:Kill|Reclaim) '" + re.escape(GAME_PROC) + r"' \(", line): return True
+    return bool(pid) and re.search(r'process_mrelease ' + str(pid) + r'\b', line) is not None
+
+
 def log_facts(logcat, ready):
     def epoch(line): m = re.match(r'\s*(\d+\.\d+)', line); return float(m.group(1)) if m else None
     # shift: add to the host's times (@t_s, the log's [N s]) to make them seconds from the launch. The host counts from its process's start, and Android 16 starts
     # app processes ahead of use (the OnePlus Pad 3's ran 83 s early), so a line holding both clocks (an fs open, DM_FS=1) gives the offset to ActivityManager's start
-    lines = logcat.splitlines(); start = None; out: dict[str, Any] = {'ready_s': None, 'exit': None, 'vulkan': None, 'resident_mb': None, 'shift': 0.0}; anchored = False
+    lines = logcat.splitlines(); start = None; pid = None; out: dict[str, Any] = {'ready_s': None, 'exit': None, 'vulkan': None, 'resident_mb': None, 'shift': 0.0}; anchored = False
     for line in lines:
         if start is None and 'Start proc' in line and GAME_PROC in line: start = epoch(line)
+        m = re.search(r'Start proc (\d+):' + re.escape(GAME_PROC) + '/', line)
+        if m and pid is None: pid = m.group(1)
         m = re.search(r'\[dm\] vulkan: (.+)$', line)
         if m: out['vulkan'] = m.group(1).strip()
         m = re.search(r'\[vk\] frame \d+: resident (\d+) MB', line)
@@ -204,7 +219,7 @@ def log_facts(logcat, ready):
         if 'Fatal signal' in line and out['exit'] is None: out['exit'] = 'crash: ' + line.split('Fatal signal', 1)[1].strip()[:120]
         m = re.search(r'Process \d+ exited cleanly \((\d+)\)', line)
         if m and m.group(1) != '0' and out['exit'] is None: out['exit'] = 'exit ' + m.group(1) + (' (svcBreak: the game aborted)' if m.group(1) == '42' else '')   # 0: the stop at the run's end
-        if re.search(r'lowmemorykiller|lmkd.*Kill.*' + re.escape(GAME_PROC), line) and out['exit'] is None: out['exit'] = 'killed for memory'
+        if out['exit'] is None and lmk_killed_game(line, pid): out['exit'] = 'killed for memory'
     return out
 
 
@@ -250,7 +265,7 @@ def run_one(serial, folder, gid, route, n, out, args):
     adb(serial, 'push', str(write_tmp(d / 'env.txt', '\n'.join(env) + '\n')), f'{EXT}/env.txt')
     adb(serial, 'logcat', '-c')
     with open(d / 'logcat.txt', 'wb') as lf:
-        lc = subprocess.Popen([ADB, '-s', serial, 'logcat', '-v', 'epoch', 'DroidPlay:V', 'nxnative:V', 'ActivityManager:I', 'Zygote:I', 'DEBUG:V', 'libc:F', 'lmkd:I', '*:S'], stdout=lf)
+        lc = subprocess.Popen([ADB, '-s', serial, 'logcat', '-v', 'epoch', 'DroidPlay:V', 'nxnative:V', 'ActivityManager:I', 'Zygote:I', 'DEBUG:V', 'libc:F', 'lmkd:I', 'lowmemorykiller:I', '*:S'], stdout=lf)
         sh(serial, 'input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard')
         t0 = time.time()
         sh(serial, f'am start -n {PKG}/.Launcher --es game {gid} --ez play true')

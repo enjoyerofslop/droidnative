@@ -67,6 +67,36 @@ Automatic Brightness Controller Configuration:
 def ids(sf): return ba.re.findall(r'^Display (\d+) \(HWC display (\d+)\)', sf, ba.re.M)
 
 
+START = '  1794414500.100  2745  2803 I ActivityManager: Start proc 8294:org.nxnative.android:game/u0a160 for next-top-activity {org.nxnative.android/android.app.NativeActivity}\n'
+
+
+class MemoryKills(unittest.TestCase):   # only the low-memory killer's lines about the game make a run's exit "killed for memory"; lines from real runs (the Galaxy
+    # S25 Edge, the Odin 2, the Pixel 9 Pro XL)
+    def exit(self, *lines): return ba.log_facts(START + ''.join(lines), None)['exit']
+
+    def test_other_apps_lines_are_not_the_games(self):
+        for line in ('  1794414610.042   596   670 E lowmemorykiller: process_mrelease 16341 failed: No such process\n',   # the S25: another app's, mid-run
+                     "  1794414618.069   596   596 I lmkd    : Reclaim 'org.nxnative.android' (30238), uid 10392, oom_score_adj 900, state 16 to free 59848kB rss, "
+                     "40884kB swap; reason: low watermark is breached or filecache is low (339288kB).\n",   # the launcher's own process, not the game's
+                     "  1794421085.000   467   467 I lowmemorykiller: Kill 'com.android.chrome' (23627), uid 10209, oom_score_adj 999 to free 66732kB rss; reason: "
+                     "low watermark is breached\n",   # the Pixel: AOSP's tag, another app
+                     '  1794421085.100   596   596 W lmkd    : Failed to open /proc/8294/oom_score_adj; errno=3: process 8294 might have been killed\n',   # a maybe
+                     '  1794421085.200   596   596 I lmkd    : cached 12, sandbox(not0) 3\n'):
+            with self.subTest(line=line[30:90]): self.assertIsNone(self.exit(line))
+
+    def test_the_games_own_kill(self):
+        for line in ("  1794414700.000   596   596 I lmkd    : Reclaim 'org.nxnative.android:game' (8294), uid 10392, oom_score_adj 0, state 2 to free 5000000kB rss, "
+                     "0kB swap; reason: low watermark is breached and swap is low (11350956kB < 5033160kB)\n",   # the S25's wording
+                     "  1794414700.000   467   467 I lowmemorykiller: Kill 'org.nxnative.android:game' (8294), uid 10160, oom_score_adj 0 to free 4000000kB rss; reason: "
+                     "min watermark is breached\n",   # AOSP's
+                     '  1794414700.000   596   670 E lowmemorykiller: process_mrelease 8294 failed: No such process\n'):   # by the game's pid
+            with self.subTest(line=line[30:90]): self.assertEqual(self.exit(line), 'killed for memory')
+
+    def test_a_pid_without_the_games_start_line_names_nothing(self):   # Android 16 can start the process before the run's logcat begins
+        line = '  1794414700.000   596   670 E lowmemorykiller: process_mrelease 8294 failed: No such process\n'
+        self.assertIsNone(ba.log_facts(line, None)['exit']); self.assertIsNone(self.exit(line.replace('8294', '82941')))
+
+
 class ShotDisplay(unittest.TestCase):
     def test_states_from_the_display_devices_section_only(self):
         self.assertEqual(ba.display_states(display_dump('OFF', 'ON')), {INNER: 'OFF', COVER: 'ON'})   # not the brightness section's mState after it
