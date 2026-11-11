@@ -2103,7 +2103,7 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 ### Descriptor set writes on the replay thread with the recorder on (Android)
 
 - **Symptom:** with `DM_VK_RECORDER=1`, `vkUpdateDescriptorSets` is still in the replay thread's profile, as its largest call into the driver: 5.3 ms a frame of Mario
-  Kart World's race on a Galaxy S25 Edge (about 2,400 draws, 5,000 sets), 5.7 of Ocarina of Time's Kokiri Forest, 10.4 of the race on a OnePlus Pad 3 with raw global
+  Kart World's race on a Galaxy S25 Edge (about 2,400 draws, 5,000 sets), 5.1 to 5.7 of Ocarina of Time's Kokiri Forest, 10.4 of the race on a OnePlus Pad 3 with raw global
   memory.
 - **Cause:** the recorder took the `vkCmd*` calls and the submissions, and a set was written on the replay thread before its bind was queued.
 - **Fix:** the writes go through the ring too (`gfx_vk_rec.inc` `rec_vkUpdateDescriptorSets`, record `R_UPDDS`), packed by `rec_desc.h` (each write with its image
@@ -2120,8 +2120,9 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - Mario Kart World's race on a Galaxy S25 Edge (Adreno 830), recorder on, in the replay thread's profile: `vkUpdateDescriptorSets` 5.3 ms a frame with
     `DM_VK_REC_DESC=0`, the packing and queuing 0.6 ms with it, and no driver code left on the thread; the recorder thread used 41% of a core. The race's picture was
     right, and 4.2 million writes were queued with none made directly.
-  - Ocarina of Time's Kokiri Forest there, recorder on: the replay 20.5 ms a frame against 31.0 without the recorder, 5.0 million writes queued, the forest lit as before.
-    The frame rate stayed at 17.6 fps, held by the GPU (42 ms a frame).
+  - Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8 (Adreno 840), main's defaults: the replay 30.7 ms a frame with the recorder against 35.2 without, of which the
+    report-address set's walks (`rc_occ_has`, `rc_occ_add`) are 21.0 and 19.9; so everything else is 9.7 ms against 15.3. 17.4 against 17.8 fps: the GPU holds the frame
+    there, at 43 ms. The forest was lit as before. With `DM_VK_MID_DRAWS=512` as well it fell to 10.2 fps (the GPU 64 ms a frame), and with set reuse it stayed at 17.1.
   - Breath of the Wild's `outdoors` route there (the recorder and set reuse are its defaults; a host on the phone's installed base with this change): the replay 16.4–16.9 ms
     a frame against 18.5–18.6 with `DM_VK_REC_DESC=0` at 3,630 draws, 29.8 fps and the same picture both ways.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) and
