@@ -17,5 +17,7 @@ Three projects from Ryujinx 1.3.2: `Ryujinx.Graphics.Shader`, `Ryujinx.Common` a
 
 - `Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs` (`TryGenerateBoundedUniformLoad`), `Translation/ResourceManager.cs`, `StructuredIr/ShaderProperties.cs`, `Constants.cs` and `Translation/TranslationFlags.cs`: the Metal path (`TranslationFlags.MetalUniformBounds`) gives 0 for a read of a game uniform slot (c[3] to c[16]) past the size the game bound, as Maxwell does, comparing the word's index with the slot's size from a table in bank 25 that the host fills. Upstream relied on Vulkan's robust buffer access, which Metal does not have. See [reads past a uniform binding's size](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size), found on Paper Mario: The Thousand-Year Door (GitHub issue #1860).
 
+- `Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs`, `RemoveEmptyBlocks` (and its caller in `StructuredProgram.cs`): for SPIR-V an If inside an Else is not turned into an ElseIf, whose branch the SPIR-V generator never enters (Xenoblade Chronicles 3's cloud shaders lost a loop's exit and lost the device). From shirai91/nx2android 02e336f, carried by DeathKhan/nx2android.
+
 The shader translation tool in `dm/gfx/tools/dmsh_xlate` references them to translate the original Switch shaders to SPIR-V.
 License: MIT, see `LICENSE.txt`. Upstream: <https://github.com/Ryubing>.
