@@ -2142,6 +2142,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     }
     pthread_mutex_unlock(&g_bk);
     g_pace_per = period_s > 0 ? (uint64_t)(period_s * 1e9) : 16666667ull; g_pace_due = 1;
+    void front_frame_rate(int mhz); front_frame_rate(period_s > 0 ? (int)lround(1000.0 / period_s) : 0);   // the display's rate follows (front_android.c fr_apply)
     void front_android_present(const tex_t *t, const int crop[4]); front_android_present(t, crop);
     // DM_HITCH_DUMP (hle_thread.c) times stalls from this; only nvn_mtl.m's present set it, so on Android the dump never fired
     extern _Atomic uint64_t dm_present_ns; atomic_store(&dm_present_ns, now_ns());

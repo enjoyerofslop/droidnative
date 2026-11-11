@@ -453,6 +453,33 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
   - frame rate and frame time p50 / p95 unchanged.
 - **Not checked yet:** the Adreno 740 and the Xclipse; a fixed 120 Hz display; Animal Crossing; Super Mario Odyssey at 60 fps (untouched by design). On the Pixel 9 Pro XL (Mali-G715, variable rate) it now stays off: 17 off-beat of 248 at 30 fps, as without it.
 
+### Android's display rate told the game's frame rate, and the touch controls
+
+- **Symptom:** on a phone whose panel can switch rates, Android chose the rate with no word from the game. A frame rate the panel doesn't divide came out uneven: Divinity: Original Sin 2 at 40 fps on a OnePlus Pad 3 held at 60 Hz showed frames of 16.7 and 33.3 ms in turn. A Galaxy S25 Edge, once the frames came evenly (#131), followed a 30 fps game down to 30 Hz, and the touch controls drawn over the game refreshed at 30 too.
+- **Fix:** the game's window tells Android the present rate as a fixed source (`ANativeWindow_setFrameRate`, `front_android.c` `fr_apply`). It does so from the main thread whenever the rate, the window or the touch controls' showing changes (`Gamepad.java` `nativePadShown`).
+  - While the touch controls show, a rate under 40 Hz is told as its smallest multiple of 60 Hz or more (30 → 60). Each frame then spans two refreshes on the locked grid (`gfx_vk_vsync.inc`), and the controls refresh at 60.
+  - With a physical controller connected, the controls hide and the rate itself is told, down to the floor below.
+  - **A floor under every told rate:** `DM_WINDOW_RATE_MIN`, 60 Hz by default, as nx2android has it. A rate under it is told as its smallest multiple at or above it, so 30 and 20 fps both ask for 60, and 40 asks for 80.
+    - Why: asked for 20 Hz (Ocarina of Time's frame step at 20 fps), an Ayn Odin 3 reconfigured its display about every 3 s, and the game's vsync waits starved: an 85 s frame, then none (droidplay-core#195).
+    - Why 60 and not 30: a frame step moves between 30 and 20 fps, and a floor of 30 would still change the request at each step (30 ↔ 40). At 60, every rate up to 60 asks for the same 60.
+    - `DM_WINDOW_RATE_MIN=30` brings back the 30 Hz request with a controller connected (the S25 numbers below).
+    - The clamp wasn't run on a device; the table's numbers are from before it.
+  - `DM_VK_FRAME_RATE=0` tells nothing.
+  - The refresh the locked grid uses is read once per swapchain, at the panel's rate then (120 Hz on the S25), and kept when the panel moves to 60 or 30 Hz: each of their vsyncs is one of 120 Hz's. A test build that read it again every 30 presents made 30 fps at 30 Hz one refresh, so frames went back to the host's clock: 10 of 375 were held twice, against none.
+- **Found on:** the Galaxy S25 Edge (Adreno 830, Android 16; panel rates 120 / 80 / 60 / 48 / 30 / 24 / 10 Hz). Divinity's `hold`, one run each, about 375 frames from `dumpsys SurfaceFlinger --latency` and the panel's mode at 100, 108 and 116 s. A controller was a USB gamepad made with the shell's `hid` command.
+
+  | Case | Main (5c21a252) | With this |
+  |---|---|---|
+  | 30 fps, touch controls showing | 30 Hz; 0 of 374 held twice | 60 Hz; 0 of 378 |
+  | 30 fps, controller connected | 30 Hz; 0 of 374 | 30 Hz; 0 of 376 |
+  | 60 fps (`DM_PRESENT_INTERVAL=display`) | 60 Hz; 14 of 377 | 60 Hz; 0 of 376 |
+  | 40 fps (`DM_PRESENT_HZ=80`) | — | 80 Hz; 0 of 377 (the test build with the re-read) |
+
+  - Frame rate and frame times are the same either way.
+  - With the controller connected and then disconnected mid-run, the request went 60 → 30 → 60 and the panel followed.
+  - On the OnePlus Pad 3, Android takes the request, but the vendor's policy keeps the panel at 60 Hz.
+- **Not checked yet:** other phones, other games, and how touches feel at each rate.
+
 ## CPU cost and pacing
 
 ### Arena buffer ownership on allocation

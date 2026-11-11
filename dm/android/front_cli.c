@@ -18,4 +18,5 @@ void front_progress(const char *title, long done, long total) { if (title) LOG("
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
     (void)title; (void)sub; (void)guide; (void)initial; (void)max_chars; (void)out; (void)out_cap; return -1; }
 void front_android_present(const tex_t *t, const int crop[4]) { (void)t; (void)crop; }
+void front_frame_rate(int mhz) { (void)mhz; }   // no window to tell (front_android.c fr_apply)
 uint64_t front_vsync(uint64_t *refresh) { *refresh = 0; return 0; }   // no window: no vsyncs (front_android.c)
