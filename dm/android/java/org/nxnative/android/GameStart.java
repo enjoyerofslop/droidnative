@@ -7,6 +7,9 @@
 //   grant). Each is checked for the RomFS image's mark and the size game.json gives before the game starts. It reaches the host as DM_ROMFS=fd:<descriptor>:<offset>:<length> (dm/host/romfs_image.h romfs_image_spec), set in this process's
 //   environment before the NativeActivity starts in the same process, so the host reads it at its start; the descriptor stays open for the process's life.
 //   defaults.txt (the game language picked when packing) is set the same way, without overriding the environment; env.txt still overrides both (front_android.c).
+//   DLC the APK couldn't hold (droidplay-core issue #169) follows the RomFS in that same file, the .romfs or the OBB, as a pack (build_android_from_nsp.py make_game_app
+//   says how it is laid out); game.json gives its offset (dlc_at) and the file's whole size (data_bytes). Its images are copied out once into games/<title ID>/aoc/, where
+//   front_android.c points DM_AOC_DIR as for a launcher install (the host mounts DLC by path), before the game starts; DLC the APK holds is unpacked with the rest.
 //   The host ends the process when its activity is destroyed (front_android.c), so every start of the game comes through here again in a fresh process.
 package org.nxnative.android;
 
@@ -30,19 +33,24 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.zip.CRC32;
 import org.json.JSONObject;
 
 public class GameStart extends Activity {
     static final String ROMFS = "RomFS.img", PREF_URI = "romfs_uri";
     static final int PICK = 1;
-    String id, name; long romfsBytes; File dir;
+    String id, name; long romfsBytes, dataBytes, dlcAt; File dir;
     TextView status; TextView choose;
 
     @Override protected void onCreate(Bundle b) {
@@ -51,6 +59,7 @@ public class GameStart extends Activity {
         try { g = new JSONObject(new String(readAsset("game/game.json"), StandardCharsets.UTF_8)); }
         catch (Exception e) { fail("This app holds no game (assets/game/game.json): " + e); return; }
         id = g.optString("title_id").toUpperCase(Locale.ROOT); name = g.optString("name", id); romfsBytes = g.optLong("romfs_bytes", -1);
+        dataBytes = g.optLong("data_bytes", romfsBytes); dlcAt = g.optLong("dlc_at", 0);
         File ext = getExternalFilesDir(null); if (ext == null) ext = getFilesDir();
         dir = new File(ext, "games/" + id);
         layout();
@@ -119,20 +128,88 @@ public class GameStart extends Activity {
             if (why == null) return;
         }
         if (why != null || obb != null) say((why != null ? why : obb) + "\n\nPick " + dataName() + " again.");
-        else say("Pick " + name + "'s game data: the file " + dataName() + " that came with this app (" + gb(romfsBytes) + "). Put it anywhere on this device or its SD card first; the app reads it where it is.");
+        else say("Pick " + name + "'s game data: the file " + dataName() + " that came with this app (" + gb(dataBytes) + "). Put it anywhere on this device or its SD card first; the app reads it where it is.");
         choose.setVisibility(View.VISIBLE);
     }
 
-    // The game data opened and checked (a RomFS image of the size this app was packed with), then the game started; else why not
-    String open(ParcelFileDescriptor p, String what) {
+    // The game data opened and checked (a RomFS image, in a file of the size this app was packed with), its DLC copied out if it holds any, then the game started;
+    // else why not. The copy runs on a thread of its own, and a failure there is shown when it comes
+    String open(final ParcelFileDescriptor p, String what) {
         try {
             if (p == null) return "The game data (" + what + ") can't be opened.";
-            long size = p.getStatSize(); byte[] h = new byte[8];
+            final long size = p.getStatSize(); byte[] h = new byte[8];
             int got = Os.pread(p.getFileDescriptor(), h, 0, 8, 0);
             if (got != 8 || !new String(h, StandardCharsets.US_ASCII).equals("DMROMFS1")) { p.close(); return "That file (" + what + ") isn't " + name + "'s game data."; }
-            if (romfsBytes > 0 && size != romfsBytes) { p.close(); return String.format(Locale.ROOT, "That file (%s) is %s, but %s's game data is %s: it's another version, or not copied completely.", what, gb(size), name, gb(romfsBytes)); }
-            start(p.detachFd(), 0, size); return null;
+            if (dataBytes > 0 && size != dataBytes) { p.close(); return String.format(Locale.ROOT, "That file (%s) is %s, but %s's game data is %s: it's another version, or not copied completely.", what, gb(size), name, gb(dataBytes)); }
+            final long len = romfsBytes > 0 ? romfsBytes : size;
+            if (dlcAt <= 0) { start(p.detachFd(), 0, len); return null; }
+            new Thread(new Runnable() { public void run() {
+                String why;
+                try { why = dlc(p.getFileDescriptor()); } catch (Exception e) { why = "Couldn't copy " + name + "'s DLC out of its game data: " + e.getMessage(); }
+                if (why != null) {
+                    try { p.close(); } catch (IOException e) { /* closing */ }
+                    say(why); ui(new Runnable() { public void run() { choose.setVisibility(View.VISIBLE); } }); return;
+                }
+                final int fd = p.detachFd();
+                ui(new Runnable() { public void run() { try { start(fd, 0, len); } catch (Exception e) { fail("Couldn't start " + name + ": " + e); } } });
+            } }, "dlc").start();
+            return null;
         } catch (Exception e) { return "The game data (" + what + ") can't be read: " + e.getMessage(); }
+    }
+
+    // A DLC pack's first 16 bytes → its image count, or -1 when they aren't a pack's. Its whole header (16 + 24 per image) and the pack's length → each image's
+    // {index, offset from the pack's start, length}, or null when one lies outside the pack or past the header. Pure Java, so a JVM runs them against the packer's packs
+    // (dm/tools/tests/test_android_cli.py)
+    static int dlcCount(byte[] h) {
+        if (h.length < 16 || !new String(h, 0, 8, StandardCharsets.US_ASCII).equals("DMAOCPK1")) return -1;
+        int n = ByteBuffer.wrap(h).order(ByteOrder.LITTLE_ENDIAN).getInt(8);
+        return n >= 0 && n <= 2000 ? n : -1;
+    }
+    static long[][] dlcRecords(byte[] head, long packBytes) {
+        int n = dlcCount(head); if (n < 0 || head.length < 16 + 24 * n) return null;
+        ByteBuffer b = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN); long[][] r = new long[n][];
+        for (int i = 0; i < n; i++) {
+            long idx = b.getInt(16 + 24 * i) & 0xffffffffL, off = b.getLong(24 + 24 * i), len = b.getLong(32 + 24 * i);
+            if (idx == 0 || idx > 2000 || off < 16 + 24 * n || len < 0 || off + len > packBytes) return null;
+            r[i] = new long[] {idx, off, len};
+        }
+        return r;
+    }
+
+    // The DLC pack at dlcAt in the game data → games/<title ID>/aoc/<index>.img. Skipped when aoc/.pack holds this pack's mark (the file's size and its header's CRC) and
+    // every image is there at its size; copied whole otherwise, each image through a .part file. → null, or why not
+    String dlc(FileDescriptor fd) throws Exception {
+        byte[] h = new byte[16];
+        int n = Os.pread(fd, h, 0, 16, dlcAt) == 16 ? dlcCount(h) : -1;
+        if (n < 0) return "The game data holds no DLC where this app expects it: pick the file that came with this app.";
+        byte[] head = new byte[16 + 24 * n];
+        for (int at = 0, k; at < head.length; at += k) if ((k = Os.pread(fd, head, at, head.length - at, dlcAt + at)) <= 0) return "The DLC in the game data can't be read: it ends early.";
+        long[][] r = dlcRecords(head, dataBytes - dlcAt);
+        if (r == null) return "The DLC in the game data can't be read: an image lies outside it.";
+        int[] idx = new int[n]; long[] off = new long[n], len = new long[n]; long total = 0;
+        for (int i = 0; i < n; i++) { idx[i] = (int) r[i][0]; off[i] = r[i][1]; len[i] = r[i][2]; total += len[i]; }
+        CRC32 c = new CRC32(); c.update(head); String mark = dataBytes + ":" + Long.toHexString(c.getValue());
+        File aoc = new File(dir, "aoc"), stamp = new File(aoc, ".pack");
+        boolean have = mark.equals(readFile(stamp));
+        for (int i = 0; i < n && have; i++) have = new File(aoc, idx[i] + ".img").length() == len[i];
+        if (have) return null;
+        rm(aoc); aoc.mkdirs();
+        if (aoc.getUsableSpace() < total + (64L << 20)) return String.format(Locale.ROOT, "There isn't room on this device to copy %s's DLC out of its game data (%s).", name, gb(total));
+        byte[] buf = new byte[4 << 20]; long done = 0, shown = -1;
+        for (int i = 0; i < n; i++) {
+            File part = new File(aoc, idx[i] + ".img.part");
+            try (OutputStream o = new FileOutputStream(part)) {
+                for (long pos = dlcAt + off[i], left = len[i]; left > 0; ) {
+                    int k = Os.pread(fd, buf, 0, (int) Math.min(buf.length, left), pos);
+                    if (k <= 0) throw new IOException("the game data ends early");
+                    o.write(buf, 0, k); pos += k; left -= k; done += k;
+                    if (done / (64L << 20) != shown) { shown = done / (64L << 20); say(String.format(Locale.ROOT, "Copying %s's DLC for its first start… %s of %s", name, gb(done), gb(total))); }
+                }
+            }
+            if (!part.renameTo(new File(aoc, idx[i] + ".img"))) throw new IOException("can't name " + part);
+        }
+        try (OutputStream o = new FileOutputStream(stamp)) { o.write(mark.getBytes(StandardCharsets.UTF_8)); }
+        return null;
     }
 
     @Override protected void onActivityResult(int req, int res, Intent data) {

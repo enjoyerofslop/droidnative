@@ -55,11 +55,11 @@ jobs:
       - name: Packing, RomFS image, shader post-pass and shader rewrite tests
         working-directory: dm/tools/tests
         # test_romfs_image compiles its C with `cc`, Apple's clang where nxnative runs it; Ubuntu's cc is gcc, whose -Wmisleading-indentation (an error under the
-        # test's -Werror) rejects the one-line C the test writes, so cc is clang here as well. test_spv_limits, test_spv_pool and test_spv_wide build
-        # dm/android/spv_limits.h, spv_pool.h and spv_wide.h with clang and check their results with the NDK's spirv-val
+        # test's -Werror) rejects the one-line C the test writes, so cc is clang here as well. test_spv_limits, test_spv_narrow, test_spv_pool and test_spv_wide build
+        # dm/android/spv_limits.h, spv_narrow.h, spv_pool.h and spv_wide.h with clang and check their results with the NDK's spirv-val
         run: |
           mkdir -p "$RUNNER_TEMP/cc" && ln -sf "$(command -v clang)" "$RUNNER_TEMP/cc/cc"
-          PATH="$RUNNER_TEMP/cc:$PATH" python -m unittest -v test_android_cli test_android_desktop test_device_lock test_romfs_image test_spv_cbsize test_spv_limits test_spv_pool test_spv_wide
+          PATH="$RUNNER_TEMP/cc:$PATH" python -m unittest -v test_android_cli test_android_desktop test_device_lock test_romfs_image test_spv_alpha test_spv_cbsize test_spv_layer test_spv_limits test_spv_narrow test_spv_pool test_spv_wide
 
   # The same host build and packing tests on Windows, set up as a player's PC is (README, What you need): Python 3.14, since lz4 has no Windows wheel for 3.15 and a
   # player's PC has no compiler to build it, with UTF-8 mode on, since nxnative's scripts read and write text without naming UTF-8, which Python on Windows otherwise

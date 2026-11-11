@@ -50,6 +50,43 @@ def sh(serial, cmd, timeout=60) -> str:
     return adb(serial, 'shell', cmd, timeout=timeout)
 
 
+_displays: dict[str, list[tuple[str, str]]] = {}   # serial -> SurfaceFlinger's (display ID, HWC display) pairs
+
+
+def display_states(dump: str) -> dict[str, str]:
+    # `dumpsys display`'s Display Devices section: each screen's mUniqueId (local:<SurfaceFlinger display ID>), then its mState (ON, OFF, DOZE, ...). Other sections
+    # have mState lines of their own (the brightness controller's), so the walk stops at the next top-level heading (the heading's own underline of dashes aside)
+    states: dict[str, str] = {}; cur = None; inside = False
+    for line in dump.splitlines():
+        if line.startswith('Display Devices:'): inside = True; continue
+        if not inside: continue
+        if line and not line[0].isspace() and line.strip('-'): break
+        m = re.match(r'\s+mUniqueId=local:(\d+)', line)
+        if m: cur = m.group(1); continue
+        m = re.match(r'\s+mState=(\w+)', line)
+        if m and cur and cur not in states: states[cur] = m.group(1)
+    return states
+
+
+def shot_display(ids: list[tuple[str, str]], states: dict[str, str]) -> str | None:
+    # The screen to capture on a phone with more than one: the one that is on. A Galaxy Z Fold 8 folded, or a Flip closed, shows the game on its cover screen and turns the
+    # inner one off, so HWC display 0 (the inner screen) alone gave black shots. With none on, or both, HWC display 0, the screen the game opens on when unfolded
+    if len(ids) < 2: return None
+    on = [d for d, _ in ids if states.get(d, '').startswith('ON')]   # ON, or ON_SUSPEND
+    if len(on) == 1: return on[0]
+    first = [d for d, hwc in ids if hwc == '0' and (not on or d in on)] or on
+    return first[0] if first else None
+
+
+def screenshot(serial) -> bytes:
+    # A phone with a second screen needs screencap's -d: without it screencap writes a warning ahead of the PNG, which leaves an unreadable file, and takes whichever
+    # display it finds first. Which screen is on is asked at each shot, so folding or unfolding the phone during a bench is followed; one screen, no -d, as before
+    if serial not in _displays:
+        _displays[serial] = re.findall(r'^Display (\d+) \(HWC display (\d+)\)', sh(serial, 'dumpsys SurfaceFlinger --display-id'), re.M)
+    d = shot_display(_displays[serial], display_states(sh(serial, 'dumpsys display')) if len(_displays[serial]) > 1 else {})
+    return adb_bytes(serial, 'exec-out', 'screencap', '-p', *(['-d', d] if d else []))
+
+
 def ready_devices():
     out = subprocess.run([ADB, 'devices'], capture_output=True, text=True).stdout.splitlines()[1:]
     return [line.split()[0] for line in out if len(line.split()) > 1 and line.split()[1] == 'device']
@@ -210,7 +247,7 @@ def run_one(serial, folder, gid, route, n, out, args):
         while time.time() - t0 < end:
             time.sleep(1); el = time.time() - t0
             for at, name in list(shots.items()):
-                if el >= at: (d / f'shot_{name}.png').write_bytes(adb_bytes(serial, 'exec-out', 'screencap', '-p')); del shots[at]
+                if el >= at: (d / f'shot_{name}.png').write_bytes(screenshot(serial)); del shots[at]
             if pss is None and el >= route['start'] + route['length'] - 2:
                 m = re.search(r'TOTAL PSS:\s+(\d+)|TOTAL\s+(\d+)', sh(serial, f'dumpsys meminfo {GAME_PROC}')); pss = int(m.group(1) or m.group(2)) // 1024 if m else None
             if el > 15 and not sh(serial, f'pidof {GAME_PROC}').strip(): died = round(el, 1); break

@@ -664,7 +664,7 @@ def _cb_run(funcs, chains, consts, reg, init, glsl, sc32):
                 for s in succ[i]: lo |= live[s]
                 li = gen[i] | (lo - kill[i])
                 if li != live[i]: live[i] = li; changed = True
-        st0 = {v: init[v] for v in private if v in init} if f['entry'] else {}
+        st0 = {v: frozenset((init[v],)) for v in private if v in init} if f['entry'] else {}   # a state holds sets of values, as the stores and declarations put them
         seen = [set() for _ in blocks]; wide = [None] * len(blocks)
         work = [(0, st0)]
         def enter(i, st):

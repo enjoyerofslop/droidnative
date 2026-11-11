@@ -164,6 +164,9 @@ int main(void) {
     P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x30, &v); EXPECT("newest GPU code minor", 16, v);
     P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x2F, &v); EXPECT("oldest GPU code major", 1, v);
     P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x31, &v); EXPECT("oldest GPU code minor", 5, v);
+    // Frostpunk sizes a 32-slot binding table per stage to min(separate textures, separate samplers) and clears that many slots every frame: 4096 samplers ran it past its end
+    P(nvnDeviceGetInteger)(&dev, NVN_DEVICE_INFO_SEPARATE_TEXTURE_BINDINGS_PER_STAGE, &v); EXPECT("separate texture bindings per stage (128 measured on X1)", 128, v);
+    P(nvnDeviceGetInteger)(&dev, NVN_DEVICE_INFO_SEPARATE_SAMPLER_BINDINGS_PER_STAGE, &v); EXPECT("separate sampler bindings per stage (32, as NVN2's)", 32, v);
     // The Switch 2 table (NVN2's own constants: the newest seen, SDK 21.4.4's, as an older sdk's own switch answers its older versions through dm_sdk_nvn2_item): its GPU code range and Ampere's limits, the host's 16 vertex slots, and the run-time items
     EXPECT("NVN2: API 231.39", 231 * 100 + 39, g_devinfo2[0] * 100 + g_devinfo2[1]);
     EXPECT("NVN2: GPU code 201.0 to 201.20", 1, g_devinfo2[0x2E] == 201 && g_devinfo2[0x30] == 20 && g_devinfo2[0x2F] == 201 && g_devinfo2[0x31] == 0);
@@ -1154,6 +1157,33 @@ int main(void) {
         EXPECT("no elements: no rows", 0, nvn_tbuf_rows(0, 4, 64, &w, &h, &row));
         EXPECT("several rows whose alignment would break the wrapped address: refused", 0, nvn_tbuf_rows(20000, 4, 3, &w, &h, &row));
     }
+
+    // 9. The first-touch list (tex_flush_upload; build with a profile that has it, such as Ocarina of Time's 0400486024DEC000): a texture Finalized while a job made
+    //    before it is in flight keeps its entry until that job ends (its replay may still meet the texture first), one initialized again while live leaves it, and a
+    //    pool that goes takes its textures' entries at once
+    if (DM_GAME_TEX_FLUSH_UPLOAD) {
+        static uint8_t ftmem[1 << 18] __attribute__((aligned(16384)));
+        for (int i = 0; i < 1000 && nvn_jobs_newest(); i++) usleep(1000);   // the earlier parts' jobs end on the replay thread after their fences
+        EXPECT("first-touch: no job in flight before the checks", 0, nvn_jobs_newest());
+        NVNmemoryPoolBuilder fb; NVNmemoryPool fp; P(nvnMemoryPoolBuilderSetDevice)(&fb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&fb);
+        P(nvnMemoryPoolBuilderSetStorage)(&fb, ftmem, sizeof ftmem); P(nvnMemoryPoolBuilderSetFlags)(&fb, 0x24); P(nvnMemoryPoolInitialize)(&fp, &fb);
+        NVNtextureBuilder b; P(nvnTextureBuilderSetDevice)(&b, &dev); P(nvnTextureBuilderSetDefaults)(&b); P(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D);
+        P(nvnTextureBuilderSetSize2D)(&b, 64, 64); P(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA8); P(nvnTextureBuilderSetStorage)(&b, &fp, 0);
+        NVNtexture a, c, d; P(nvnTextureInitialize)(&a, &b); uint64_t sa = ((const tex_t *)&a)->serial;
+        EXPECT("first-touch: a texture in a CPU-cached pool is registered", 1, nvn_ft_tracked(sa));
+        nq_job *j = nq_job_new();   // a job made before the Finalize, still in flight
+        P(nvnTextureFinalize)(&a);
+        EXPECT("first-touch: Finalized under a job made before it, the entry stays", 1, nvn_ft_tracked(sa));
+        ft_del_drain(); EXPECT("first-touch: a submission starting while that job lives keeps it", 1, nvn_ft_tracked(sa));
+        nq_job_free(j); ft_del_drain(); EXPECT("first-touch: once that job ended, the next submission drops it", 0, nvn_ft_tracked(sa));
+        P(nvnTextureBuilderSetStorage)(&b, &fp, 0x10000); P(nvnTextureInitialize)(&c, &b); uint64_t sc = ((const tex_t *)&c)->serial;
+        P(nvnTextureInitialize)(&c, &b); uint64_t sc2 = ((const tex_t *)&c)->serial;
+        EXPECT("first-touch: initialized again while live (no job in flight), the old serial goes at once", 0, nvn_ft_tracked(sc));
+        EXPECT("first-touch: and the new serial is registered", 1, sc2 != sc && nvn_ft_tracked(sc2));
+        P(nvnTextureBuilderSetStorage)(&b, &fp, 0x20000); P(nvnTextureInitialize)(&d, &b); uint64_t sd = ((const tex_t *)&d)->serial;
+        P(nvnMemoryPoolFinalize)(&fp);
+        EXPECT("first-touch: the pool finalized under its textures takes their entries", 0, nvn_ft_tracked(sc2) || nvn_ft_tracked(sd));
+    } else printf("(9. the first-touch list: skipped, this profile has no tex_flush_upload)\n");
 
     printf("== %d checks, %d failed ==\n", g_n, g_fail);
     return g_fail != 0;

@@ -1,0 +1,5 @@
+# Switches this game gets on Android (build_android_from_nsp.py puts them in the game's defaults.txt; env.txt and the settings screen still win)
+# DM_VK_SET_REUSE: constant buffers as dynamic uniform buffers and descriptor sets bound again within a chunk (gfx_vk_draw.inc sr_find). On a OnePlus Pad 3, uncapped,
+# two runs each in turn (2026-11-10): the replay 9.8-10.2 ms of CPU a frame instead of 10.2-10.4 on the title screen (about 2,095 draws), 7.5-7.7 instead of 7.6-7.9 in the
+# hold (about 420); GPU and frame rate the same, and the hold's picture the same. A tester running Fort Joy on an Adreno 735 had it on with no reported change in the picture
+DM_VK_SET_REUSE=1

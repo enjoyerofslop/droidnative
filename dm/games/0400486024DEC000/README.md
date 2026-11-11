@@ -1,6 +1,6 @@
 # The Legend of Zelda: Ocarina of Time (`0400486024DEC000`)
 
-A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`, no rewriter patches. Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video. On Android (a Galaxy Z Fold 8) it reaches the title, the Load screen and Kokiri Forest, which runs at about 1.7 fps with the forest itself black: main skips the task and mesh draws of its main pass (#83, a draft), and with them the frame is still black, for a cause not found yet ([Android](#android)).
+A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`, no rewriter patches. Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video. On Android (a Galaxy Z Fold 8) it reaches the title, the Load screen and Kokiri Forest, which runs at about 1.7 fps with the forest itself black. The Vulkan replay has no raw global memory: 2,247 of the game's shaders read memory at addresses through the translator's pool table, and get 0 there. Main also skips the task and mesh draws of the main pass (#83, a draft) ([Android](#android)).
 
 ## What it needs
 
@@ -88,16 +88,21 @@ DroidPlay Core's first Switch 2 attempt, on a Galaxy Z Fold 8 (SM-F971U1: Snapdr
   - Before, the run's 103 such shaders were refused and their draws dropped (49,592 in the first minute in the forest).
   - Now none is refused. In the forest they read 12-15 IDs, the distant scenery's texture sets (a BC5 texture and two three-layer BC6H / BC7 arrays each), and each chunk's sync takes 0.33 ms on average.
   - `bench_android.tsv` route `kokiri`, two runs each, `DM_VK_POOL=0` against on: 1.6 / 1.7 fps, frame p50 640-650 / 593-611 ms, GPU p50 138.6-138.8 / 119.4-128.2 ms, PSS 10.1-10.2 / 8.5 GB.
-- The black picture is not the texture pool. The forest stays black with the pool set, and also with #83's task and mesh shaders added (main with #83 and the pool set, a local test build in which the main pass's task and mesh draws run).
-  - The main pass's fragment shader (`a1a56cf6d62ae798`) reads its textures through slots, not the pool.
+- The black picture: raw global memory ([Raw global memory is not on the Vulkan replay](../../../docs/reference/rendering.md#raw-global-memory-is-not-on-the-vulkan-replay-android)).
+  - 2,247 of the game's shaders (731 compute, 802 vertex, 605 fragment, 98 mesh and 11 task) load from addresses they read from memory. They go through the translator's raw pool table, a storage buffer in the sentinel slot 0xFF (`DMSH_GMEM_MAP_CB_SLOT`), which the Mac fills (`gmem_map`, [Global memory at an address loaded from memory](../../../docs/reference/shaders.md#global-memory-at-an-address-loaded-from-memory)).
+  - The Vulkan replay doesn't know the slot and binds 16 zero bytes there, so each such load finds no pool and reads 0. The one sign is a red line printed once, for the first such shader only: `storage buffer of shader 3a26262eee1427c9 (c255 +0) is not a bound buffer: it reads 0`.
+  - How it shows:
+    - The volumetric fog's froxel volumes (128x72x96 and 64x36x96 `B10G11R11`, serials 4279-4286) hold NaN in every texel the compute shaders `9e6b00b050e30801`, `9ed48d1011f1b48b` and `5b2bb0924ecc403b` write. The first of them reads its inputs through the table.
+    - The forward pass samples the fog, the blur and bloom passes spread the NaN to every pixel, and the tone mapping makes it black.
+    - The Mac's volumes, under the same serials in the same save, hold no NaN (`DM_CTL` `texraw`).
+  - Ruled out on the Galaxy Z Fold 8:
+    - the texture pool (#118) and the task and mesh draws (#83, which run in a local test build);
+    - the depth: dumped with the depth attachments, the scene's depth spans 0.861 to 1.0 with 2.8% sky, and its 720x405 and 360x202 copies match it (an earlier dump read the linear depth with too high a threshold and reported 30% coverage);
+    - min and max with a NaN operand (NMin / NMax);
+    - the driver folding away the translated shaders' `isnan` tests (`SignedZeroInfNanPreserve`);
+    - constant buffers copied only up to their extents.
   - The HUD (hearts, minimap, prompts, the area name) draws in every case.
-  - Where it turns black, from a `files/dump_now` dump of a forest frame (frame 1712; the test build):
-    - The 1440x810 `B10G11R11` scene target (s13685) holds only the sky and its haze after the lighting (pass 71). The linear depth at that size (pass 49) covers about 30% of the pixels.
-    - Pass 90 is 49 forward draws into that target with no blending. After it, the brightest percent of the target is NaN.
-    - The full-screen passes after it (91-101) spread the NaN until every pixel is NaN, which the tone mapping makes black.
-    - Smaller targets look wrong too: the 360x202 `R32F` target of pass 52 holds 50,000 in every pixel, and the `RGBA32F` target of pass 55 holds values in the tens of thousands.
-    - Open: which draw of pass 90 writes the NaN, and why the lit scene has no geometry in it.
-- Open, in order: why the forest's frame is black with the pool set and #83 (#83 is still a draft, and conflicts with main); the CPU's `submit+present` (about 460 ms a frame); memory (10.2 GB of the 11.3, with 4.9 GB in zram: tight once the forest draws; leads: fewer texture bytes on the GPU, a file-backed guest pool as `DM_GUEST_FILE` gives the iPhone, or guest memory as Vulkan memory, as Banana Native maps it); the GPU time (Banana Native found agl's NDSR upscaler at 58.5 ms a frame on this GPU from register spills of gathered HMMA tiles, and false colours from shader-image views made without storage use, `vt_create`); the title's movie picture without nn::ndve's network; the CPU read of indirect mesh records.
+- Open, in order: raw global memory on Vulkan. It needs the table, `VK_KHR_buffer_device_address`, guest pools the GPU reads at a device address kept in step with the CPU, and the write log for stores. The Fold has no `VK_EXT_external_memory_host`, so the pools need mirrors, or guest memory made Vulkan or dma-buf memory from the start, as Banana Native maps it. #83, the task and mesh draws, is still a draft. After those: the CPU's `submit+present` (about 460 ms a frame); memory (10.2 GB of the 11.3, with 4.9 GB in zram: tight once the forest draws; leads: fewer texture bytes on the GPU, a file-backed guest pool as `DM_GUEST_FILE` gives the iPhone, or guest memory as Vulkan memory, as Banana Native maps it); the GPU time (Banana Native found agl's NDSR upscaler at 58.5 ms a frame on this GPU from register spills of gathered HMMA tiles, and false colours from shader-image views made without storage use, `vt_create`); the title's movie picture without nn::ndve's network; the CPU read of indirect mesh records.
 - Banana Native (git.eden-emu.dev/moceure/BananaNative) runs this game on Adreno 840 phones and documents most of the above; its notes are where #85's cause came from.
 
 ## Saves
@@ -229,3 +234,4 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [`devicectl` copies a large RomFS image through the Mac's memory](../../../docs/reference/packing.md#devicectl-copies-a-large-romfs-image-through-the-macs-memory): the 26.2 GB image's pushes to an iPad filled a 16 GB Mac's swap and failed; now sent over AFC.
 - [`devicectl`'s `--remove-existing-content` empties the app's whole container](../../../docs/reference/packing.md#devicectls---remove-existing-content-empties-the-apps-whole-container): the first complete copy of the image, deleted by the DLC step after it.
 - [The texture pool read by ID on Vulkan (Android)](../../../docs/reference/rendering.md#the-texture-pool-read-by-id-on-vulkan-android): the 103 shaders of a Kokiri Forest run that read textures by ID, whose draws were dropped on Android.
+- [Raw global memory is not on the Vulkan replay (Android)](../../../docs/reference/rendering.md#raw-global-memory-is-not-on-the-vulkan-replay-android): the black Kokiri Forest on Android; 2,247 of the game's shaders read through the pool table.

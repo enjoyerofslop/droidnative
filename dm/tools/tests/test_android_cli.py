@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -114,6 +115,114 @@ class Windows(unittest.TestCase):
         self.assertFalse((stage / 'spv').is_symlink())
         self.assertEqual((stage / 'spv/vs/0001.spv').read_bytes(), b'spv')
         self.assertEqual((stage / 'icon.jpg').read_bytes(), b'jpg')
+
+
+MB = 1 << 20
+
+
+def jdk() -> 'tuple[str, str] | None':   # (javac, java) of JAVA_HOME, else of PATH, when javac runs (a Mac's /usr/bin/javac is there with no JDK behind it); else None
+    home = os.environ.get('JAVA_HOME')
+    javac, java = (str(Path(home, 'bin', 'javac')), str(Path(home, 'bin', 'java'))) if home else (shutil.which('javac'), shutil.which('java'))
+    if not javac or not java: return None
+    try: return (javac, java) if subprocess.run([javac, '-version'], capture_output=True, timeout=60).returncode == 0 else None
+    except (OSError, subprocess.SubprocessError): return None
+
+
+JDK = jdk()
+ANDROID_JAR = next(iter(sorted(Path(os.environ.get('ANDROID_HOME') or Path.home() / 'Library/Android/sdk').glob('platforms/android-*/android.jar'), reverse=True)), None)
+
+
+class GameApp(Base):   # droidplay-core issue #169: a game app whose DLC doesn't fit in the APK carries it after the RomFS, in the .romfs beside it or the XAPK's OBB
+    def test_plan_puts_the_romfs_out_first_then_the_dlc(self):
+        L = ba.GAME_APP_LIMIT
+        small = {'code': 40 * MB, 'shaders': 300 * MB, 'font': 22 * MB, 'the rest': MB}
+        self.assertEqual(ba.game_app_plan(small, 10 * MB, 500 * MB, False, L), (True, True))
+        self.assertEqual(ba.game_app_plan(small, 10 * MB, 8 << 30, False, L), (False, True))
+        self.assertEqual(ba.game_app_plan(small, 10 * MB, 500 * MB, True, L), (False, True))   # an XAPK's RomFS is always its OBB
+        # Mario Kart 8 Deluxe with the Booster Course Pass (sizes only): its shaders and DLC pass 2 GiB with no RomFS; the DLC goes beside, in either kind
+        mk8 = {'code': 90 * MB, 'shaders': 700 * MB, 'font': 22 * MB, 'the rest': 2 * MB}
+        self.assertEqual(ba.game_app_plan(mk8, 1600 * MB, 11 << 30, False, L), (False, False))
+        self.assertEqual(ba.game_app_plan(mk8, 1600 * MB, 11 << 30, True, L), (False, False))
+
+    def test_what_cant_go_beside_is_named(self):
+        with self.assertRaises(ba.BuildError) as e:
+            ba.game_app_plan({'code': 90 * MB, 'shaders': 2100 * MB, 'font': 22 * MB, 'the rest': MB}, 1600 * MB, 11 << 30, False)
+        m = str(e.exception)
+        for want in ('shaders 2.05 GiB', 'code 0.09 GiB', 'font 0.02 GiB', 'the DLC (1.56 GiB)', 'without --game-apk'): self.assertIn(want, m)
+
+    def stage(self, dlc=(1 << 20, 10)):   # a synthetic game: a small RomFS image, code, shaders, font, and DLC images of the sizes given (no game files)
+        g = self.tmp / 'g'; game = g / 'game'; game.mkdir(parents=True); (game / 'RomFS.img').write_bytes(b'DMROMFS1' + bytes(range(256)) * 9)
+        (game / 'icon.jpg').write_bytes(b'jpg'); (game / 'control.nacp').write_bytes(b'\0' * 64)
+        for d, f in (('code', 'main.fixups.tsv'), ('spv', 'vs/0001.spv'), ('font', 'standard.ttf')): (g / d / f).parent.mkdir(parents=True, exist_ok=True); (g / d / f).write_bytes(b'x' * 100)
+        aoc = g / 'aoc'; aoc.mkdir()
+        for i, n in zip((1, 3), dlc): (aoc / f'{i}.img').write_bytes(os.urandom(n))
+        return g, game, aoc
+
+    def make(self, xapk, limit):
+        g, game, aoc = self.stage(); out = self.tmp / 'out'; work = self.tmp / 'work'; (work / 'logs').mkdir(parents=True)
+        def fake_apk(cmd, *a, **k): Path(cmd[cmd.index('-o') + 1]).write_bytes(b'apk')
+        meta = {'title_id': GID, 'name': 'Test Game', 'romfs_bytes': (game / 'RomFS.img').stat().st_size}
+        with mock.patch.object(ba.bi, 'run', fake_apk), mock.patch.dict(os.environ, {'NXNATIVE_GAME_APP_LIMIT': str(limit)}):
+            made, inside = ba.make_game_app('sdk', mock.Mock(id=GID), game, g / 'code', g / 'spv', g / 'font', aoc, 'DM_LANG=en-US\n', g / 'host.so', meta, work,
+                                            work / 'logs', {}, out, xapk)
+        return made, inside, json.loads((work / 'game_app/game.json').read_text()), work / 'game_app', game, aoc
+
+    def check_data(self, data, game, aoc, info):   # the RomFS from byte 0, then the pack at dlc_at with each image at its record
+        rom = (game / 'RomFS.img').read_bytes(); at = info['dlc_at']
+        self.assertEqual(data[:len(rom)], rom); self.assertEqual(at % ba.DLC_ALIGN, 0); self.assertEqual(len(data), info['data_bytes'])
+        self.assertEqual(data[at:at + 8], ba.DLC_MAGIC)
+        n, zero = struct.unpack_from('<II', data, at + 8); self.assertEqual((n, zero), (2, 0))
+        for k, i in enumerate((1, 3)):
+            idx, _, off, size = struct.unpack_from('<IIQQ', data, at + 16 + 24 * k)
+            img = (aoc / f'{i}.img').read_bytes()
+            self.assertEqual((idx, off % ba.DLC_ALIGN, size), (i, 0, len(img))); self.assertEqual(data[at + off:at + off + size], img)
+
+    def test_dlc_too_big_for_the_apk_follows_the_romfs_beside_it(self):
+        made, inside, info, stage, game, aoc = self.make(False, 512 << 10)   # the code and such fit in 512 KB, the 1 MB of DLC doesn't
+        self.assertFalse(inside); self.assertEqual([p.name for p in made], ['Test Game.apk', 'Test Game.romfs'])
+        self.assertFalse((stage / 'aoc').exists()); self.assertNotIn('aoc/1.img', (stage / 'files.txt').read_text())
+        self.check_data(made[1].read_bytes(), game, aoc, info)
+        self.assertFalse(os.path.samefile(made[1], game / 'RomFS.img'))   # a copy (or clone) the DLC was appended to, never a link to the extraction's image
+        self.assertTrue(any('the DLC' in m for m in self.said))
+
+    def test_dlc_too_big_for_the_apk_follows_the_romfs_in_the_xapks_obb(self):
+        import zipfile
+        made, inside, info, stage, game, aoc = self.make(True, 512 << 10)
+        with zipfile.ZipFile(made[0]) as z:
+            m = json.loads(z.read('manifest.json')); obb = m['expansions'][0]['file']
+            self.check_data(z.read(obb), game, aoc, info)
+        self.assertEqual(m['total_size'], 3 + info['data_bytes'])
+
+    def test_dlc_that_fits_stays_in_the_apk(self):
+        made, inside, info, stage, game, aoc = self.make(False, 64 << 20)
+        self.assertTrue(inside); self.assertEqual(len(made), 1); self.assertNotIn('dlc_at', info)
+        self.assertEqual((stage / 'aoc/1.img').read_bytes(), (aoc / '1.img').read_bytes())
+
+    def test_a_dlc_folder_cant_go_beside(self):   # an older extraction's aoc/<index>/: a game app carries DLC beside the APK as images only
+        aoc = self.tmp / 'aoc'; (aoc / '2').mkdir(parents=True)
+        with self.assertRaises(ba.BuildError): ba.dlc_images(aoc)
+
+    @unittest.skipUnless(JDK and ANDROID_JAR, 'needs a JDK (JAVA_HOME, or javac on PATH) and the Android SDK (ANDROID_HOME, or the Mac\'s default)')
+    def test_gamestart_reads_the_packers_pack(self):   # GameStart's own parser, run on a JVM over the SDK's android.jar stubs, against a pack this script wrote
+        assert JDK is not None and ANDROID_JAR is not None   # (the skip above)
+        javac, java = JDK; jar = ANDROID_JAR
+        made, inside, info, stage, game, aoc = self.make(False, 512 << 10)
+        src = self.tmp / 'jsrc'; out = self.tmp / 'jout'; src.mkdir(); out.mkdir()
+        (src / 'PackCheck.java').write_text('''package org.nxnative.android;   // GameStart's parsers are package-private
+import java.io.RandomAccessFile;
+public class PackCheck { public static void main(String[] a) throws Exception {
+    RandomAccessFile f = new RandomAccessFile(a[0], "r"); long at = Long.parseLong(a[1]), size = Long.parseLong(a[2]);
+    byte[] h = new byte[16]; f.seek(at); f.readFully(h); int n = GameStart.dlcCount(h);
+    byte[] head = new byte[16 + 24 * n]; f.seek(at); f.readFully(head);
+    for (long[] r : GameStart.dlcRecords(head, size - at)) System.out.println(r[0] + " " + r[1] + " " + r[2]);
+    head[16] = 0; head[17] = 0; System.out.println(GameStart.dlcRecords(head, size - at) == null ? "bad index refused" : "bad index taken");
+} }
+''')
+        javas = [str(p) for p in (REPO / 'dm/android/java').rglob('*.java')] + [str(src / 'PackCheck.java')]
+        subprocess.run([javac, '-source', '8', '-target', '8', '-Xlint:none', '-nowarn', '-bootclasspath', str(jar), '-cp', str(jar), '-d', str(out), *javas], check=True, capture_output=True)
+        r = subprocess.run([java, '-cp', f'{jar}{os.pathsep}{out}', 'org.nxnative.android.PackCheck', str(made[1]), str(info['dlc_at']), str(info['data_bytes'])], check=True, capture_output=True, text=True)
+        _, recs, _ = ba.dlc_pack(ba.dlc_images(aoc))
+        self.assertEqual(r.stdout.split('\n'), [f'{i} {o} {n}' for i, o, n in recs] + ['bad index refused', ''])
 
 
 class Setup(unittest.TestCase):   # --setup (dm/android/tools/host_setup.py): what --check finds missing, installed where the script looks; nothing is downloaded here

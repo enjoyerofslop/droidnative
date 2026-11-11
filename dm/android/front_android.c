@@ -23,6 +23,7 @@
 #include <stdatomic.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <time.h>
 #include "gfx_vk.h"
 #include "game_profile.h"   // DM_GAME_PAD_LAYOUT
 #include "hle_haptics.h"
@@ -440,6 +441,39 @@ static void sc_follow_window(void) {
     LOG("window now %dx%d (swapchain %ux%u%s): swapchain made again", ww, wh, g_ext2.width, g_ext2.height, g_sc_stale ? ", out of date" : "");
     g_sc_stale = 0; vk_window_down(); vk_window_up(g_app->window); g_shown = 0;
 }
+// ---------- The display's vsyncs, for frames shown on them (VK_GOOGLE_display_timing) ----------
+// gfx_vk.c locks the host's pacing grid to the display's vsyncs and gives each frame the time it is to be shown (vkb_frame.show_at; gfx_vk_vsync.inc says why). This side
+// reads the vsyncs from the swapchain: its refresh period (vkGetRefreshCycleDurationGOOGLE) and the vsync the newest shown frame came up at (vkGetPastPresentationTimingGOOGLE),
+// on the main thread before each present, for the replay thread to read (front_vsync); and it presents each frame with its time
+static _Atomic uint64_t g_vs_at, g_vs_r;   // a vsync the swapchain reported, and the refresh period (CLOCK_MONOTONIC ns; 0 = not known)
+static PFN_vkGetRefreshCycleDurationGOOGLE g_vs_refresh; static PFN_vkGetPastPresentationTimingGOOGLE g_vs_past;
+static VkSwapchainKHR g_vs_sc; static uint32_t g_vs_id;
+static uint64_t g_vs_n[2];   // frames presented with a time, of them presented after it
+uint64_t front_vsync(uint64_t *refresh) { *refresh = atomic_load_explicit(&g_vs_r, memory_order_relaxed); return atomic_load_explicit(&g_vs_at, memory_order_relaxed); }
+static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }   // the swapchain's clock
+static void vs_read(void) {   // the main thread, before a present
+    vkb_ctx *c = vkb(); if (!c || !c->has_display_timing) return;
+    if (!g_vs_past) {
+        g_vs_refresh = (PFN_vkGetRefreshCycleDurationGOOGLE)vkGetDeviceProcAddr(g_dev, "vkGetRefreshCycleDurationGOOGLE");
+        g_vs_past = (PFN_vkGetPastPresentationTimingGOOGLE)vkGetDeviceProcAddr(g_dev, "vkGetPastPresentationTimingGOOGLE");
+        if (!g_vs_refresh || !g_vs_past) { c->has_display_timing = 0; LOG("[front] VK_GOOGLE_display_timing has no functions: frames are paced on the host's own clock"); return; }
+    }
+    if (g_vs_sc != g_sc) {   // a new swapchain (window): its refresh; no vsync known until a frame of it is shown
+        VkRefreshCycleDurationGOOGLE rc = {0}; g_vs_sc = g_sc; atomic_store(&g_vs_at, 0);
+        atomic_store(&g_vs_r, g_vs_refresh(g_dev, g_sc, &rc) == VK_SUCCESS ? rc.refreshDuration : 0);
+        LOG("[front] the swapchain reports its vsyncs (VK_GOOGLE_display_timing; DM_VK_PRESENT_TIMING=0 turns their use off): the display refreshes every %.3f ms", atomic_load(&g_vs_r) / 1e6);
+    }
+    VkPastPresentationTimingGOOGLE past[8]; uint32_t n = 8;   // VK_INCOMPLETE: the older ones are dropped next time
+    VkResult r = g_vs_past(g_dev, g_sc, &n, past);
+    if ((r == VK_SUCCESS || r == VK_INCOMPLETE) && n && past[n - 1].actualPresentTime) atomic_store_explicit(&g_vs_at, past[n - 1].actualPresentTime, memory_order_relaxed);
+}
+static uint64_t vs_show_at(uint64_t at) {   // the main thread: the present time a frame is given (its show_at; 0 = as soon as it can), counted
+    if (!at || !vkb()->has_display_timing) return 0;
+    g_vs_n[0]++; g_vs_n[1] += mono_ns() > at;
+    if (!(g_vs_n[0] % 1800)) LOG("[front] frames given a time to be shown %llu, presented after it %llu (cumulative)", (unsigned long long)g_vs_n[0], (unsigned long long)g_vs_n[1]);
+    return at;
+}
+
 static int frame_draw(void) {
     int st = atomic_load(&g_state);
     sc_follow_window();
@@ -475,8 +509,11 @@ static int frame_draw(void) {
     VkPipelineStageFlags ws = VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1, .pWaitSemaphores = &g_acq, .pWaitDstStageMask = &ws, .commandBufferCount = 1, .pCommandBuffers = &g_cb,
                        .signalSemaphoreCount = 1, .pSignalSemaphores = &g_done};
+    vs_read(); VkPresentTimeGOOGLE pt = {g_vs_id++, vs_show_at(fr.show_at)};
+    VkPresentTimesInfoGOOGLE pti = {.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &pt};
     pthread_mutex_lock(&vkb()->qmu); vkQueueSubmit(g_q, 1, &si, g_fence);
-    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &g_done, .swapchainCount = 1, .pSwapchains = &g_sc, .pImageIndices = &idx};
+    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = vkb()->has_display_timing ? &pti : NULL, .waitSemaphoreCount = 1, .pWaitSemaphores = &g_done, .swapchainCount = 1,
+                           .pSwapchains = &g_sc, .pImageIndices = &idx};
     vkQueuePresentKHR(g_q, &pi); pthread_mutex_unlock(&vkb()->qmu);
     vkWaitForFences(g_dev, 1, &g_fence, 1, UINT64_MAX);   // the texture is held until the GPU has read it
     g_shown = fr.n; vkb_frame_unlock();

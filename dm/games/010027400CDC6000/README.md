@@ -2,7 +2,7 @@
 
 Update 1.0.3.1 (v196608) over the base game, SDK 8.2.0. Larian Studios' Divinity Engine (`FW3.5/Gold/Stable` in its asserts' paths), NVN, Wwise sound, RakNet 15.03.26. Modules `main`, `subsdk0` and `sdk`: `subsdk0` and `sdk` are one build (`3ae34e68…`), the SDK twice. The RomFS is 48 files, 10.74 GB: Larian's LSPK packages (`Data/*.pak`, version 13), the voice and localization packages beside them.
 
-Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The title, the main menu, a new game (Classic mode), character creation, the opening cinematic and the first area (the Merryweather's hold, Magister Siwan's first dialogue) in play, at the game's 30 fps. Not yet played further than that; see [Open](#open).
+Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The title, the main menu, a new game (Classic mode), character creation, the opening cinematic and the first area (the Merryweather's hold, Magister Siwan's first dialogue) in play, at the game's 30 fps, and on a OnePlus Pad 3 the cabin deck after it ([First area](#first-area)). Not yet played further than that; see [Open](#open).
 
 ## What it needs
 
@@ -11,6 +11,7 @@ Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The ti
 | `net_loopback on` | [`game.tsv`](game.tsv), `hle_loopback.c` | single player is a RakNet server and a client in one process; without UDP on 127.0.0.1 a new game waits forever at the loading screen. See [New game](#new-game) |
 | `modules main subsdk0 sdk`, `mem_reserve 0x140000000`, `mem_alias 0x60000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `sys_resource 0x400000`, `depth_mode zero` | `game.tsv` | the provisional profile's values from the survey and the Mac's heap check (a 2.96 GB heap); kept as they were |
 | LSPK packages read by the shader split | `dm/gfx/tools/shader_split.py` `lspk_shaders` | the shaders are in the `.bshd` files of `Data/*.pak`: 11,578 of them, where a plain scan found `main`'s 73 and every frame was black ([shaders](../../../docs/reference/shaders.md)) |
+| `DM_VK_SET_REUSE=1` | [`android_defaults.txt`](android_defaults.txt) | Android: descriptor sets bound again within a chunk; 2–3% of the replay's CPU time on the Pad 3, the picture the same (the file says what was measured) |
 
 ## New game
 
@@ -44,13 +45,33 @@ Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The ti
 
 - `tohold`: a fresh save through New Game, character creation, the opening cinematic and Magister Siwan's first lines, then Quick Save in the hold at about 205 s. With `--keep-save <game folder>/saves/hold` it makes the save `hold` starts from (`Story - QuickSave_0`, 3.7 MB).
 - `hold`: Continue from that save (in the hold 6 s after the press), a short walk, then idling; measured from 96 s for 30 s. Odin 2, warm-up and 2 runs (2026-11-10): 30.0 fps, frame p50 33.3 / p95 33.9 / p99 34.2 ms, GPU 5.9 ms, PSS 1.38 GB, the same in all three.
+- `long`: the hold from the same save for 25 minutes, walking up and down every 20 s, for slowdowns that build up over time.
+- `walk`: the hold from the same save, the left stick down for 1 s at 84 s (and right at 95 s, which a camera tutorial box stops); where the first walk ends, in the shot at 90 s, shows whether the game moves by time or by frames.
+- `cc`: a fresh save into character creation, for profiles of the title screen, the main menu and character creation.
+- `saves/cabin` (not a route yet): a Quick Save on the cabin deck next to the murder room, past Magister Siwan's second dialogue, made by hand on the Pad 3; the way to the top deck from there is not found yet.
 
 ## Frame rate
 
+Measured on a OnePlus Pad 3 (Adreno 830, Android 16; its 144 Hz panel runs Divinity at 60 Hz), 2026-11-10, for issue #113:
+
+- **40 fps: `DM_PRESENT_HZ=80`** (`env.txt`). The host paces the game's interval 2 in ticks of the present rate, so 80 Hz gives 25 ms frames: 40.0 fps in the hold, frame p50 25.0 / p95 26.4–29.7 ms, GPU 10.1 ms. `DM_FPS_TARGET` does not do it: it takes 30, 60 or 120, and needs a frame step or an engine limiter the host writes, which this game has neither of. On a 60 Hz display 40 fps comes out uneven, each frame on screen for 16.7 or 33.3 ms in turn (64 and 61 of 126 in `dumpsys SurfaceFlinger --latency`); an even 40 needs the display at 120 Hz, which the Pad 3 kept from it.
+- **Uncapped: `DM_PRESENT_INTERVAL=display`**, one frame per 60 Hz tick: 60 fps in the hold, frame p50 16.7 / p95 19.4–20.0 ms, GPU 8.3–10 ms. The front end's FIFO present holds the game's frame, so 60 Hz is the ceiling even with `DM_PRESENT_HZ=0`.
+- **The game moves by the time that really passed:** after the `walk` route's 1 s walk the character stands at the same spot at 30, 40 and 60 fps (minimap x:5 y:-304 in each), and the ambient line at 75 s comes at the same time.
+- **The display's cadence:** at 60 fps every frame stays 16.7 ms (124 of 124); at 30 fps 122 of 126 stay 33.3 ms, with two 16.7 + 50 ms pairs in about 4 s, as the host's 33.3 ms grid is not tied to the display's vsync.
+- **25 minutes uncapped (`long`):** 60.0 fps in every minute; GPU p50 9.9 ms falling to 6.2 ms, the replay 6.5–7.7 ms of CPU a frame, 378 draws, resident 1.55–1.56 GB, thermal status 0 and the display at 60 Hz throughout, the battery 28.6 → 29.1 °C. Nothing built up; frames over 25 ms went from none to 15–30 a minute after 20 minutes (p99 21 → 24.5 ms), all minutes still at 60.0.
+- **`DM_VK_SET_REUSE=1`** in the hold, uncapped, two runs each in turn: the replay 7.5–7.7 ms of CPU a frame instead of 7.6–7.9, about 420 draws; 60 fps both ways.
+- **The log** writes about a dozen timing lines every 10 s in play (and a line per long frame); the benches' tens of thousands of lines are their own `DM_FS=1` file-open lines.
+
 - 30 fps, the game's own: it asks for present interval 2 (`WindowInitialize swap chain 2 textures, interval 2`), at 1600x900 cropped to 1280x720 in handheld mode.
+
+## Shadows
+
+- **`DM_VK_SKIP_SHADOWS=1` leaves the shadows out** (`env.txt`; off by default), for a cheaper frame on a slower phone: the profile's `vk_shadow_rt square512` names the game's shadow maps, and the replay drops the draws of depth-only passes on a square target of 512 or more (`gfx_vk_shadow.inc`). The game's own clears of the map still run, so every lookup reads "nothing in front" and the scene is lit throughout. A tester asked for it (issue #113): their own patch, which left out square depth passes of 512 or more, ran Fort Joy faster on an Adreno 735, with the battery under 40 °C instead of 47 °C.
+- **Where the game draws them:** a 1536x1536 D16 map (`vk124`), with one empty colour slot beside it: on the title screen and the main menu behind it about 970 draws a frame in four passes, in character creation about 200; the hold and the cabin deck, lit by lanterns below deck, draw none (pass profiles, `files/prof_now`). Fort Joy's maps are not measured yet: with the switch on, the log's `shadow map … set as the target` lines name each shape caught.
+- **Measured on the title screen** (`boot`, uncapped with `DM_PRESENT_INTERVAL=display`, OnePlus Pad 3, Adreno 830, two runs each in turn, 2026-11-10): the shadow passes are 915 of the frame's 2,094 draws and 3.4 ms of its 11.4–11.6 ms of pass time on the GPU (one profiled frame each). Left out: 1,123–1,132 draws a frame, the replay's CPU time 8.6–9.0 ms a frame instead of 10.0–10.4, GPU p50 9.75–9.9 ms instead of 10.2–10.5; 60 fps both ways (the display's rate). Every surface is lit instead of shaded; nothing else in the picture changed.
 
 ## Open
 
 - On a cold pipeline cache, 25 draws of a new game's first minutes are left out while their pipelines build in the background (`[vk] draws not made: … pipeline 25`, `pipeline built in the background … draws left out meanwhile`); with the cache warm, `hold` leaves out none.
 - `[nvn] [RED] SetRenderEnableConditional: the host draws anyway for now`, from the title on.
-- Further into the game (Fort Joy, the first fights, saving and loading) is not played yet.
+- Further into the game (the top deck, the first fights, Fort Joy) is not played yet.
