@@ -231,6 +231,10 @@ shaders. Super Mario 3D All-Stars still builds, since its launcher draws with NV
 The games the script refuses are in the Doesn't run tier. Street Fighter 30th Anniversary Collection stopped at its first EGL call on a Retroid Pocket 5
 before the script refused it ([its note](dm/games/0100024008310000/README.md#android)).
 
+Games that keep their shaders in archives compressed with the game's own Oodle cannot be built for Android yet either: Pokémon Legends: Arceus, Pokémon
+Legends: Z-A, Bayonetta 3, Batman: Arkham Knight and EA SPORTS FC 27. Only the Mac host runs that decoder for the shader split, so the packing script stops
+on these at the start and says so ([#310](https://github.com/enjoyerofslop/droidplay-core/issues/310) follows the fix: decoding them on the phone).
+
 ## Help and reports
 
 - **Ask in the [DroidPlay Discord](https://discord.gg/3r92f8wmh7):** #help for a problem, #compatibility for how a game runs on your device. Its rules are
