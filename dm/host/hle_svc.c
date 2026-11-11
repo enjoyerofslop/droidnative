@@ -203,6 +203,10 @@ static void *guest_file_thread(void *arg) {
 #elif defined(__ANDROID__)   // the files' Linux parts are in dm/android/guest_file_android.c (DM_GUEST_FILE=1 on Android)
 int dm_android_guest_file_punch(int fd, size_t off, size_t len);
 static void guest_file_sweep(void);
+// The guest block's regions, for guest_file_android.c's DM_GUEST_FILE_HOT (set by mem_init_once right after the files are mapped)
+void dm_guest_regions(uint8_t **as, size_t *reserve, uint8_t **heap, size_t *heap_cap, uint8_t **stack, size_t *stack_cap, uint8_t **alias, size_t *alias_cap) {
+    *as = g_as; *reserve = g_reserve; *heap = g_heap; *heap_cap = g_heap_cap; *stack = g_stack; *stack_cap = g_stack_cap; *alias = g_alias; *alias_cap = g_alias_cap;
+}
 static void guest_file_punch(uintptr_t lo, uintptr_t hi) {
     while (lo < hi) {
         size_t off = lo - (uintptr_t)g_as, k = off / g_gf_chunk, in = off - k * g_gf_chunk, fsz = (int)k == g_gf_n - 1 ? g_reserve - k * g_gf_chunk : g_gf_chunk;

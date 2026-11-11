@@ -7,6 +7,7 @@
 // The files are made in DM_GUEST_FILE_DIR (front_android.c: the app's internal storage, guestmem; external storage is a FUSE mount, where shared writable mappings are slow
 // or refused), unnamed (O_TMPFILE) or unlinked at once, sparse, and mapped over the reservation at the same addresses, as on the Mac and iPhone (hle_svc.c guest_files_map)
 #include "../host/dm.h"
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/falloc.h>
@@ -71,8 +72,67 @@ static void cg_find(void) {
     FILE *f = fopen("/proc/self/cgroup", "r"); char line[512];
     if (f) { while (fgets(line, sizeof line, f)) if (!strncmp(line, "0::", 3)) { line[strcspn(line, "\n")] = 0; snprintf(g_cg, sizeof g_cg, "/sys/fs/cgroup%s", line + 3); break; } fclose(f); }
 }
+
+// ---- DM_GUEST_FILE_HOT=1 (a diagnostic): which parts of the guest block the game keeps rewriting ----
+// Every 2 s the dirty file pages of each 64 MiB slice of the block (/proc/self/smaps Private_Dirty and Shared_Dirty of the files' mappings). arm64 Android kernels have no soft-dirty bits, and a page a game writes once is
+// written out within a few seconds (dirty_expire), so a slice dirty in most samples is one the game rewrites: the hot set the files must leave out. Neighbouring slices get
+// different readahead advice (MADV_RANDOM every other one), so the kernel keeps them separate mappings; the host's mprotect splits them further. Every 30 s one line per region
+// and the hottest slices
+enum { HOT_SLICE = 64u << 20 };
+static uint32_t *g_hot_n, *g_hot_kb; static uint32_t g_hot_samples; static size_t g_hot_ns;   // per slice: samples it had over 1 MB dirty, and its dirty kB summed over samples
+void dm_guest_regions(uint8_t **as, size_t *reserve, uint8_t **heap, size_t *heap_cap, uint8_t **stack, size_t *stack_cap, uint8_t **alias, size_t *alias_cap);   // hle_svc.c
+static void hot_split(void) {
+    uint8_t *as, *hp, *st, *al; size_t rs, hc, sc, ac; dm_guest_regions(&as, &rs, &hp, &hc, &st, &sc, &al, &ac);
+    g_hot_ns = (rs + HOT_SLICE - 1) / HOT_SLICE; g_hot_n = calloc(g_hot_ns, sizeof *g_hot_n); g_hot_kb = calloc(g_hot_ns, sizeof *g_hot_kb);
+    if (!g_hot_n || !g_hot_kb) { g_hot_ns = 0; return; }
+    for (size_t k = 1; k < g_hot_ns; k += 2) { size_t len = rs - k * HOT_SLICE < HOT_SLICE ? rs - k * HOT_SLICE : HOT_SLICE; madvise(as + k * HOT_SLICE, len, MADV_RANDOM); }
+    LOG("[mem] guest file hot: %zu slices of %u MiB watched every 2 s (DM_GUEST_FILE_HOT)", g_hot_ns, HOT_SLICE >> 20);
+}
+static void hot_sample(void) {
+    uint8_t *as, *hp, *st, *al; size_t rs, hc, sc, ac; dm_guest_regions(&as, &rs, &hp, &hc, &st, &sc, &al, &ac);
+    FILE *f = fopen("/proc/self/smaps", "r"); if (!f) return;
+    static uint32_t *now; if (!now && !(now = calloc(g_hot_ns, sizeof *now))) { fclose(f); return; } memset(now, 0, g_hot_ns * sizeof *now);
+    char line[512]; uintptr_t lo = 0, hi = 0; int in = 0;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long a, b, ino = 0;
+        // a mapping's line (a field's key never parses as start-end); only the files' mappings count (an inode): the block's anonymous pieces are dirty all the time
+        if (isxdigit((unsigned char)line[0]) && sscanf(line, "%lx-%lx %*s %*s %*s %lu", &a, &b, &ino) >= 2) { lo = a; hi = b; in = ino && lo >= (uintptr_t)as && hi <= (uintptr_t)as + rs; continue; }
+        // a file page only this process maps counts as private in smaps though the mapping is shared; one a virtual pool aliases as shared
+        int sd = !strncmp(line, "Shared_Dirty:", 13), pd = !strncmp(line, "Private_Dirty:", 14);
+        if (in && (sd || pd)) {
+            unsigned long kb = strtoul(line + (sd ? 13 : 14), NULL, 10); if (!kb) continue;
+            size_t k0 = (lo - (uintptr_t)as) / HOT_SLICE, k1 = (hi - 1 - (uintptr_t)as) / HOT_SLICE;   // split: one slice, or spread over the few it covers
+            for (size_t k = k0; k <= k1 && k < g_hot_ns; k++) now[k] += (uint32_t)(kb / (k1 - k0 + 1));
+        }
+    }
+    fclose(f);
+    for (size_t k = 0; k < g_hot_ns; k++) { if (now[k] > 1024) g_hot_n[k]++; g_hot_kb[k] += now[k]; }
+    g_hot_samples++;
+}
+static void hot_report(void) {
+    uint8_t *as, *hp, *st, *al; size_t rs, hc, sc, ac; dm_guest_regions(&as, &rs, &hp, &hc, &st, &sc, &al, &ac);
+    if (!g_hot_samples) return;
+    const char *rn[4] = {"front", "heap", "stack", "alias"}; double avg[4] = {0}, hotmb[4] = {0}, hotshare[4] = {0}, all = 0;
+    for (size_t k = 0; k < g_hot_ns; k++) {
+        uint8_t *a = as + k * HOT_SLICE; int r = a < hp ? 0 : a < st ? 1 : a < al ? 2 : 3;
+        double mb = g_hot_kb[k] / 1024.0 / g_hot_samples; avg[r] += mb; all += mb;
+        if (g_hot_n[k] * 2 >= g_hot_samples) { hotmb[r] += HOT_SLICE >> 20; hotshare[r] += mb; }
+    }
+    LOG("[mem] guest file hot, %u samples: dirty MB on average (in slices dirty in half the samples or more: their MiB, their share of the dirty) front %.0f (%.0f, %.0f%%), heap %.0f (%.0f, %.0f%%), stack %.0f (%.0f, %.0f%%), alias %.0f (%.0f, %.0f%%)",
+        g_hot_samples, avg[0], hotmb[0], all > 0 ? 100 * hotshare[0] / all : 0, avg[1], hotmb[1], all > 0 ? 100 * hotshare[1] / all : 0, avg[2], hotmb[2], all > 0 ? 100 * hotshare[2] / all : 0, avg[3], hotmb[3], all > 0 ? 100 * hotshare[3] / all : 0);
+    for (int t = 0; t < 12; t++) {   // the hottest slices by dirty MB on average
+        size_t best = (size_t)-1; double bm = 0;
+        for (size_t k = 0; k < g_hot_ns; k++) { double mb = g_hot_kb[k] / 1024.0 / g_hot_samples; if (mb > bm && !(g_hot_n[k] & 0x80000000u)) { bm = mb; best = k; } }
+        if (best == (size_t)-1 || bm < 1) break;
+        uint8_t *a = as + best * HOT_SLICE; int r = a < hp ? 0 : a < st ? 1 : a < al ? 2 : 3; uint8_t *rb = r == 0 ? as : r == 1 ? hp : r == 2 ? st : al;
+        LOG("[mem] guest file hot:   %p (%s +%#zx): %.1f MB dirty on average, over 1 MB in %u of %u samples", (void *)a, rn[r], (size_t)(a - rb), bm, g_hot_n[best], g_hot_samples);
+        g_hot_n[best] |= 0x80000000u;   // listed: skipped by the next pick (cleared below)
+    }
+    for (size_t k = 0; k < g_hot_ns; k++) g_hot_n[k] &= 0x7fffffffu;
+}
 static void *gf_watch(void *arg) {
     (void)arg; const double G = 1073741824.0; char p[600]; cg_find();
+    const char *ho = getenv("DM_GUEST_FILE_HOT"); int hot = ho && *ho == '1'; if (hot) hot_split(); hot = hot && g_hot_ns;
     uint64_t w0 = kv("/proc/self/io", "write_bytes"); struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
     LOG("[mem] guest file: watching; cgroup %s", g_cg[0] ? g_cg : "(none found)");
     for (unsigned sec = 1;; sec++) {
@@ -84,6 +144,8 @@ static void *gf_watch(void *arg) {
             LOG("[RED] [mem] guest file: %.1f GB free on its disk, %.1f GB of it still to be taken by dirty pages: under %.1f GB left, stopping the game", avail / G, need / G, g_wmin / G);
             _exit(87);
         }
+        if (hot && sec % 2 == 0) hot_sample();
+        if (hot && sec % 30 == 0) hot_report();
         if (sec % 10) continue;
         if (g_wsweep) g_wsweep();
         double held = 0; struct stat st; for (int i = 0; i < g_wn; i++) if (!fstat(g_wf[i], &st)) held += (double)st.st_blocks * 512.0;
