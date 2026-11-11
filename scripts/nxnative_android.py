@@ -39,6 +39,7 @@ import build_android_from_nsp as ba   # noqa: E402  (data_dir, library: the host
 import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, which the script put on the path: a phone's ID, which outlives a Wi-Fi port)
 sys.path.insert(0, str(REPO / 'dm' / 'android' / 'desktop'))
 import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop, put on the path here: the Get started checklist's steps, Qt-free so its tests run without PySide6)
+import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (what adb pair, connect and mdns say over Wi-Fi, in plain words)
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]  (plain words for what went wrong, and the report for #help)
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]  (how to connect a phone, by brand; its battery and free space)
 import update as upd   # noqa: E402  # pyright: ignore[reportMissingImports]  (the newest release, and its Setup downloaded and checked)
@@ -901,12 +902,87 @@ class PhoneGuide(QDialog):   # how to connect a phone, by brand (dm/android/desk
         self.seen.setText(f'<span style="color:{c}">{text}</span>')
 
 
+class PairDialog(QDialog):   # Pair over Wi-Fi: the phones showing a pairing code, found on the network by adb (mDNS) with their address filled in, so the player
+    # types only the code; then the phone's connection, which adb makes by itself or DroidPlay makes to the address the phone offers. It asked for two addresses
+    # by hand before, the second one easy to get wrong (the Wireless debugging screen's, not the pairing one's)
+    WAIT = 10   # seconds after pairing for adb to connect to the phone by itself, before DroidPlay connects to it, or asks for the address
+    def __init__(self, win):
+        super().__init__(win); self.win = win; self.setWindowTitle('Pair over Wi-Fi'); self.setStyleSheet(STYLE + f'QDialog {{ background: {PANEL}; }}'); self.setMinimumWidth(560)
+        lay = QVBoxLayout(self); lay.setContentsMargins(28, 24, 28, 22); lay.setSpacing(12)
+        lay.addWidget(label('Pair over Wi-Fi', 'h2'))
+        steps = label('<ol style="margin: 0">' + ''.join(f'<li style="margin-bottom: 6px">{x}</li>' for x in wifi.STEPS) + '</ol>', wrap=True); steps.setTextFormat(Qt.RichText); lay.addWidget(steps)
+        self.list = QListWidget(); self.list.setMaximumHeight(110); lay.addWidget(self.list)
+        self.addr = QLineEdit(); self.addr.setPlaceholderText('Not listed? The IP address & port shown with the code, e.g. 192.168.1.20:37123'); lay.addWidget(self.addr)
+        row = QHBoxLayout(); row.addWidget(label('Pairing code', 'meta')); self.code = QLineEdit(); self.code.setMaxLength(6); self.code.setPlaceholderText('6 digits'); self.code.setFixedWidth(120)
+        row.addWidget(self.code); row.addStretch(); lay.addLayout(row)
+        self.status = label('', 'meta', wrap=True); self.status.setTextFormat(Qt.RichText); lay.addWidget(self.status)
+        foot = QHBoxLayout(); foot.addStretch(); cancel = QPushButton('Cancel'); cancel.clicked.connect(self.reject); foot.addWidget(cancel)
+        self.go = QPushButton('Pair'); self.go.setDefault(True); self.go.clicked.connect(self.pair); foot.addWidget(self.go); lay.addLayout(foot)
+        for w in (self.code, self.addr): w.textChanged.connect(self.ready)
+        self.list.currentItemChanged.connect(self.ready); self.code.returnPressed.connect(self.pair)
+        self.busy, self.found, self.deadline, self.target = False, [], 0.0, ('', None)
+        self.t = QTimer(self); self.t.timeout.connect(self.look); self.t.start(2000); self.look(); self.ready()
+    def look(self):   # the pairing services on the network, every 2 s while the dialog is open
+        if not self.busy: bg(lambda: adb_run(None, 'mdns', 'services', timeout=8)[1], self.listed)
+    def listed(self, out):
+        if isinstance(out, Exception) or self.busy: return
+        found = wifi.pairing(out)
+        if found == self.found and self.list.count(): return
+        keep = self.list.currentItem().data(Qt.UserRole) if self.list.currentItem() else None
+        self.found = found; self.list.blockSignals(True); self.list.clear()
+        for text, addr in found:
+            it = QListWidgetItem(text); it.setData(Qt.UserRole, addr); self.list.addItem(it)
+            if addr == keep or len(found) == 1: self.list.setCurrentItem(it)
+        if not found:
+            it = QListWidgetItem('Looking for a phone showing a pairing code…'); it.setFlags(Qt.NoItemFlags); self.list.addItem(it)
+        self.list.blockSignals(False); self.ready()
+    def address(self):
+        typed = self.addr.text().strip()
+        return typed or (self.list.currentItem().data(Qt.UserRole) if self.list.currentItem() else None)
+    def ready(self, *_): self.go.setEnabled(not self.busy and bool(self.address()) and re.fullmatch(r'\d{6}', self.code.text().strip()) is not None)
+    def say(self, text, colour=TEXT2): self.status.setText(f'<span style="color:{colour}">{text}</span>')
+    def pair(self):
+        addr, code = self.address(), self.code.text().strip()
+        if not self.go.isEnabled() or not addr: return
+        self.busy = True; self.ready(); self.say('Pairing…', BUILD)
+        bg(lambda: adb_run(None, 'pair', addr, code, timeout=30), lambda r: self.paired(addr, r))
+    def paired(self, addr, r):
+        ok, sn, text = wifi.pair_result(*r) if not isinstance(r, Exception) else (False, None, str(r))
+        if not ok: self.busy = False; self.ready(); self.say(text, ERR); return
+        self.say('Paired. Connecting…', BUILD); self.deadline = time.time() + self.WAIT; self.target = (addr.rsplit(':', 1)[0], sn); self.connect_paired()
+    def connect_paired(self):   # adb connects a paired phone by itself when it sees it on the network; else the phone's own address is asked for its connection
+        ip, sn = self.target
+        def look():
+            listed = wifi.listed(adb_run(None, 'devices', timeout=10)[1], sn, ip)
+            if listed: return True, f'connected to {listed}'
+            to = wifi.connect_target(adb_run(None, 'mdns', 'services', timeout=8)[1], sn, ip)
+            return wifi.connect_result(*adb_run(None, 'connect', to, timeout=15)) + (to,) if to else None
+        def got(r):
+            if isinstance(r, Exception): r = None
+            if r and r[0]: self.connected(); return
+            if time.time() < self.deadline: QTimer.singleShot(1500, self.connect_paired); return
+            self.ask_address(ip)
+        bg(look, got)
+    def ask_address(self, ip):   # neither adb nor the network offered the phone's connection: the Wireless debugging screen's address, by hand
+        addr, ok = QInputDialog.getText(self, 'Connect', 'Paired. Now the IP address & port on the phone\'s Wireless debugging screen itself (not the pairing one):', text=f'{ip}:')
+        if not ok or not addr.strip(): self.busy = False; self.ready(); self.say('Paired, not connected: <b>Connect…</b> on the Phones page takes the address later.', BUILD); return
+        self.say('Connecting…', BUILD)
+        def got(r):
+            ok2, text = wifi.connect_result(*r) if not isinstance(r, Exception) else (False, str(r))
+            if ok2: self.win.st.setValue('wifi', addr.strip()); self.connected()
+            else: self.busy = False; self.ready(); self.say(text, ERR)
+        bg(lambda: adb_run(None, 'connect', addr.strip(), timeout=30), got)
+    def connected(self):   # not done(): that is QDialog's own, which accept() calls
+        self.t.stop(); self.win.refresh_devices(); self.win.toast('Connected over Wi-Fi: the phone is in the list at the top'); self.accept()
+
+
 class PhonesPage(QWidget):
     def __init__(self, win):
         super().__init__(); self.win = win; self.setObjectName('page')
         lay = QVBoxLayout(self); lay.setContentsMargins(48, 32, 48, 24); lay.setSpacing(16)
         lay.addWidget(label('Phones', 'h1'))
-        lay.addWidget(label('Over Wi-Fi: on the phone, Developer options → Wireless debugging. "Pair device with pairing code" gives an address and a code for Pair; '
+        lay.addWidget(label('Over Wi-Fi (Android 11 and later): turn on Developer options › Wireless debugging and open "Pair device with pairing code"; Pair over Wi-Fi… '
+                            'then finds the phone and asks only for its code. For Connect… by hand, '
                             'the address on the Wireless debugging screen itself is the one to Connect to (its port changes when wireless debugging restarts).', 'muted', wrap=True))
         self.table = QTableWidget(0, 7); self.table.setHorizontalHeaderLabels(['Device', 'Model', 'Android', 'Battery', 'Free', 'Connection', 'State'])
         hh = self.table.horizontalHeader(); hh.setSectionResizeMode(QHeaderView.Stretch); hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -956,17 +1032,15 @@ class PhonesPage(QWidget):
         for gid, meta in games.items():
             it = QListWidgetItem(f'{meta.get("name") or gid}     {gid} · {meta.get("display") or meta.get("version") or "?"}'); it.setData(Qt.UserRole, gid); self.games.addItem(it)
         if legacy: self.games.addItem('A one-game install (files/game, before the launcher): Move the old one-game install puts it in the launcher, its save copied over')
-    def pair(self):
-        addr, ok = QInputDialog.getText(self, 'Pair over Wi-Fi', 'Address and port from "Pair device with pairing code" (e.g. 192.168.1.125:37123):')
-        if not ok or not addr: return
-        code, ok = QInputDialog.getText(self, 'Pair over Wi-Fi', 'Pairing code:')
-        if not ok or not code: return
-        bg(lambda: adb_run(None, 'pair', addr.strip(), code.strip(), timeout=30), lambda r: (self.win.toast(r[1] if not isinstance(r, Exception) else str(r)), self.connect()))
+    def pair(self): PairDialog(self.win).exec()
     def connect(self):
         addr, ok = QInputDialog.getText(self, 'Connect', 'Address and port from the Wireless debugging screen (e.g. 192.168.1.125:39973):', text=self.win.st.value('wifi', ''))
         if not ok or not addr: return
         self.win.st.setValue('wifi', addr.strip())
-        bg(lambda: adb_run(None, 'connect', addr.strip(), timeout=30), lambda r: (self.win.toast(r[1] if not isinstance(r, Exception) else str(r)), self.win.refresh_devices()))
+        def got(r):   # adb's words in plain ones: it exits 0 from a failed connect too
+            ok2, text = wifi.connect_result(*r) if not isinstance(r, Exception) else (False, str(r))
+            self.win.toast(f'Connected to {addr.strip()}' if ok2 else re.sub(r'<[^>]+>', '', text)); self.win.refresh_devices()
+        bg(lambda: adb_run(None, 'connect', addr.strip(), timeout=30), got)
     def discover(self):
         def got(r):
             text = r[1] if not isinstance(r, Exception) else str(r)

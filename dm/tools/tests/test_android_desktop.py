@@ -14,6 +14,7 @@ import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]
 sys.path.insert(0, str(REPO / 'dm/android/tools'))
 import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above)
+import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop)
 
 ROWS_OK = [{'name': n, 'ok': True, 'detail': '', 'fix': ''} for n in ('Python module lz4', '.NET SDK 10', 'Android SDK', 'NDK', 'CMake', 'build-tools 36.0.0',
                                                                        'platform android-35', 'adb', 'JDK keytool', 'JDK javac', 'signing key', 'game hosts')]
@@ -172,6 +173,50 @@ class PhoneId(unittest.TestCase):   # one phone, one name: over USB, over Wi-Fi 
         self.assertEqual(phone_id.find(picker, [None, '', '192.168.1.20:37123', '10.0.0.7:5555'], ids), 0)   # the first key that names a listed phone
         self.assertEqual(phone_id.find(picker, ['192.168.1.20:37123'], ids), -1)
         self.assertEqual(phone_id.find(['R5CY51ZLGKH'], ['192.168.1.20:41011', ids['192.168.1.20:41011']], ids), 0)   # the Phones page's Wi-Fi row picks the cable entry
+
+
+class WiFi(unittest.TestCase):   # PairDialog and Connect…: adb's mDNS list, pair and connect replies as adb 35 prints them, in plain words (wifi.py)
+    MDNS = ('List of discovered mdns services\n'
+            'adb-e7879cce-DkIYY8\t_adb-tls-pairing._tcp\t192.168.50.66:41234\n'
+            'adb-e7879cce-DkIYY8\t_adb-tls-connect._tcp\t192.168.50.66:37853\n'
+            'adb-R5CY51ZLGKH-AbCdEf\t_adb-tls-pairing._tcp.\t192.168.50.20:39001\n'
+            'studio-xh3Kq9\t_adb-tls-pairing._tcp\t192.168.50.30:40000\n'
+            'adb-GF518M0010960000\t_adb._tcp\t192.168.50.92:5555\n')
+
+    def test_the_services_on_the_network(self):   # the Pad 3 offered both at once (q215); a QR code's pairing service is named studio-…
+        self.assertEqual(phone_id.services(self.MDNS)[0], ('adb-e7879cce-DkIYY8', 'pairing', '192.168.50.66:41234'))
+        self.assertEqual([k for _, k, _ in phone_id.services(self.MDNS)], ['pairing', 'connect', 'pairing', 'pairing', 'tcp'])
+        self.assertEqual(phone_id.mdns_services(self.MDNS), [('e7879cce', '192.168.50.66:37853')])
+        for name in ('adb-e7879cce-DkIYY8', 'adb-e7879cce-DkIYY8._adb-tls-pairing._tcp', 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp.'):
+            self.assertEqual(phone_id.serialno_of(name), 'e7879cce', name)
+        self.assertIsNone(phone_id.serialno_of('studio-xh3Kq9'))
+
+    def test_phones_showing_a_pairing_code_are_listed_with_their_address(self):
+        self.assertEqual(wifi.pairing(self.MDNS), [('e7879cce · 192.168.50.66:41234', '192.168.50.66:41234'), ('R5CY51ZLGKH · 192.168.50.20:39001', '192.168.50.20:39001'),
+                                                   ('studio-xh3Kq9 · 192.168.50.30:40000', '192.168.50.30:40000')])
+        self.assertEqual(wifi.pairing('List of discovered mdns services\n'), [])
+
+    def test_pairing_replies_in_plain_words(self):
+        self.assertEqual(wifi.pair_result(True, 'Successfully paired to 192.168.50.66:41234 [guid=adb-e7879cce-DkIYY8]'), (True, 'e7879cce', 'Paired'))
+        ok, _, text = wifi.pair_result(False, 'Failed: Wrong password or connection was dropped.')
+        self.assertFalse(ok); self.assertIn("code didn't match", text)
+        for raw in ('Failed: Unable to start pairing client.', 'failed to connect to 192.168.50.66:41234', 'error: connect failed: Connection refused'):
+            self.assertIn("couldn't reach the phone", wifi.pair_result(False, raw)[2], raw)
+        self.assertIn('Pairing failed: something new', wifi.pair_result(False, 'something new')[2])   # adb's own words when they're new
+
+    def test_connect_replies_in_plain_words(self):   # adb connect exits 0 when it fails too: the words decide
+        self.assertTrue(wifi.connect_result(True, 'connected to 192.168.50.66:37853')[0]); self.assertTrue(wifi.connect_result(True, 'already connected to 192.168.50.66:37853')[0])
+        ok, text = wifi.connect_result(True, 'failed to connect to 192.168.50.66:5555'); self.assertFalse(ok); self.assertIn('No phone answered there', text)
+        self.assertIn('pair it first', wifi.connect_result(True, 'failed to authenticate to 192.168.50.66:37853')[1])
+        self.assertIn('not one adb can use', wifi.connect_result(False, "cannot resolve host 'pad' and port 5555: nodename nor servname provided")[1])
+
+    def test_after_pairing_the_phones_connection_is_found(self):   # adb's own connection by mDNS name, or the service the phone offers at the same address
+        devs = 'List of devices attached\nR5CY51ZLGKH\tdevice\nadb-e7879cce-DkIYY8._adb-tls-connect._tcp\tdevice\n'
+        self.assertEqual(wifi.listed(devs, 'e7879cce', '192.168.50.66'), 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp')
+        self.assertEqual(wifi.listed('List of devices attached\n192.168.50.66:37853\toffline\n', 'e7879cce', '192.168.50.66'), None)   # not ready: not connected
+        self.assertEqual(wifi.connect_target(self.MDNS, 'e7879cce', '192.168.50.66'), '192.168.50.66:37853')
+        self.assertEqual(wifi.connect_target(self.MDNS, None, '192.168.50.66'), '192.168.50.66:37853')   # a guid adb didn't print: by the address
+        self.assertIsNone(wifi.connect_target(self.MDNS, 'R5CY51ZLGKH', '192.168.50.20'))   # paired, but not offering a connection yet
 
 
 class Game(unittest.TestCase):
