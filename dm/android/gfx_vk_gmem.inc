@@ -160,7 +160,7 @@ typedef struct { int what; VkResult r; size_t n; uintptr_t lo; void *q; double m
 // word, which the completion thread writes when its chunk completes. Only then is the GPU waited for before the swap. The GPU itself reaches a pool's pages only once it
 // is placed, and what the chunks in flight read of it was copied when they were recorded. A swap waited for everything before (all_wait): Kokiri Forest places pools all
 // the way through, about 2,000 pieces a minute on the Fold, and each wait emptied the GPU's queue
-static uint64_t g_gm_waits;   // swaps that waited
+static uint64_t g_gm_waits, g_gm_resident;   // swaps that waited; bytes of the pools placed that were resident before (mincore)
 static int gm_pend_in(const chunk *c, uintptr_t lo, uintptr_t hi) {
     if (chunk_hits(c, lo, hi, 1)) return 1;
     for (int i = 0; i < c->npost; i++) { const post_op *o = &c->post[i]; uintptr_t a = o->kind == 1 ? (uintptr_t)o->val : (uintptr_t)o->addr; if (a + 32 > lo && a < hi) return 1; }
@@ -303,6 +303,8 @@ static void gm_place(const void *mem, uint64_t size, int live) {   // live: the 
     if (g_gm_cap && g_gm_bytes + size > g_gm_cap) { g_gm_capped++; pthread_mutex_unlock(&g_gm_pl); RED_ONCE(162, "raw global memory: %.2f GiB placed and DM_VK_RAW_GMEM_MAX is %.2f GiB: pools from %#lx+%#llx on stay anonymous, raw accesses to them read 0",
                                                                                                 g_gm_bytes / 1073741824.0, g_gm_cap / 1073741824.0, (unsigned long)lo, (unsigned long long)size); return; }
     // in use: the GPU idle and the replay held first, then the tracker (its fault handler may be what the completion thread would wait in); lock order g_gm_pl, g_bk, the tracker's
+    { size_t np = (size_t)(size >> 12); unsigned char *v = malloc(np ? np : 1);   // how much of the pool the game had touched: the rest is committed by placing it
+      if (v && !mincore((void *)lo, (size_t)size, v)) { size_t r = 0; for (size_t i = 0; i < np; i++) r += v[i] & 1; g_gm_resident += (uint64_t)r << 12; } free(v); }
     int bk = live && !t_bk_sub; if (bk) pthread_mutex_lock(&g_bk);
     if (live) { if (gm_pending(lo, hi)) { all_wait(); g_gm_waits++; } nvn_dirty_open(mem, size); }
     gm_note fail = {0}, probe = {0}; int placed = 0;
@@ -451,9 +453,9 @@ static void gm_stat(void) {
         pthread_mutex_unlock(&g_pool_mu);
         LOG("[vk] raw global memory: memory pools by the addresses taken in them: a buffer's %llu (%.1f MiB), only a texture's %llu (%.1f MiB), none %llu (%.1f MiB); the largest (MiB, b/t/-):%s",
             (unsigned long long)nb[1], by[1] / 1048576.0, (unsigned long long)nb[2], by[2] / 1048576.0, (unsigned long long)nb[0], by[0] / 1048576.0, t); }
-    LOG("[vk] raw global memory: %d placed pieces, %.1f MiB (peak %.1f), placing took %.0f ms, giving back %.0f ms (%llu given back, %llu kept placed); pools not placed: %llu over DM_VK_RAW_GMEM_MAX, %llu overlapping, "
+    LOG("[vk] raw global memory: %d placed pieces, %.1f MiB (peak %.1f; %.1f MiB of the pools were resident when placed), placing took %.0f ms, giving back %.0f ms (%llu given back, %llu kept placed); pools not placed: %llu over DM_VK_RAW_GMEM_MAX, %llu overlapping, "
         "%llu failed; %llu swaps waited for the GPU; %llu tables built (%llu buffers made); %llu bindings of the table, %llu of a write log (%llu logs with stores, %llu entry bits, %llu CPU reads that met their chunk); draws that met pending write-backs: %llu as they were, %llu landed first (cumulative)",
-        g_ngm, g_gm_bytes / 1048576.0, g_gm_peak / 1048576.0, g_gm_place_ns / 1e6, g_gm_give_ns / 1e6, (unsigned long long)g_gm_given, (unsigned long long)g_gm_kept, (unsigned long long)g_gm_capped,
+        g_ngm, g_gm_bytes / 1048576.0, g_gm_peak / 1048576.0, g_gm_resident / 1048576.0, g_gm_place_ns / 1e6, g_gm_give_ns / 1e6, (unsigned long long)g_gm_given, (unsigned long long)g_gm_kept, (unsigned long long)g_gm_capped,
         (unsigned long long)g_gm_overlap, (unsigned long long)g_gm_failed, (unsigned long long)g_gm_waits, (unsigned long long)g_gm_tabs, (unsigned long long)g_gm_tab_new, (unsigned long long)g_gm_draws, (unsigned long long)g_gm_stdraws, (unsigned long long)g_gm_logs,
         (unsigned long long)g_gm_logbits, (unsigned long long)g_gm_store_hits, (unsigned long long)g_gm_unsynced, (unsigned long long)g_gm_synced);
 }
