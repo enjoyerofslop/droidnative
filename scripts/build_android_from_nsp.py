@@ -61,7 +61,7 @@ VK_DRIVER_LIBS = ('libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so')
 # Ocarina of Time) and Menus (Mario Kart World), and the rows from before the nxnative merge (†: Super Mario Bros. Wonder, Super Mario 3D World + Bowser's Fury),
 # which current code hasn't run
 ANDROID_TESTED = {
-    '01008DB008C2C000',   # Pokémon Shield (Playable – minor issues through the first battle, into the Slumbering Weald)
+    '01008DB008C2C000',   # Pokémon Shield (Playable – minor issues through Route 2 into Professor Magnolia's house)
     '010027400CDC6000',   # Divinity: Original Sin 2 - Definitive Edition (Playable – major issues through the first combat)
     '010003F003A34000',   # Pokémon: Let's Go, Pikachu! (Playable – minor issues through the rival's first battle)
     '0100000011D90000',   # Pokémon Brilliant Diamond (Playable – minor issues through Lake Verity's first battle)

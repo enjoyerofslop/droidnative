@@ -109,3 +109,17 @@ First run on Android, 2026-11-10: a Samsung Galaxy S25 Edge (SM-S937U1: Snapdrag
 - **Sound:** `DM_AUDIO_DUMP` over the Continue start (105 s, one 6-channel output): the title and Postwick's music in the front pair, at −22 to −31 dBFS RMS. Peaks on notes (440 / 880 Hz, 659 Hz), no clipping. No underrun during play; one 12 ms gap during the Continue start.
 - **`[RED]`:** the same single line; no crash, no hang.
 - **Not played:** Route 2, Professor Magnolia's house, the Wild Area.
+
+**Through Route 2 into Professor Magnolia's house on the Retroid Pocket 5**, the same day (job q112). The phone's own APK as before (main `5736949c`), started from the save above (`saves/after_weald_rp5`, in Hop's garden). Played by hand with adb input, 42 minutes:
+
+- **The stretch:**
+  - Route 1 to Wedgehurst: Hop stops the player once more. Sleeping Wooloo block the path, and "the long way round" goes through the tall grass east of it.
+  - Wedgehurst: Leon leads the way into the Pokémon Research Lab, where Sonia gives the Pokédex, and a man outside gives a Potion. Hop's Pokémon Center tutorial follows, then his talk about the Gym Challenge.
+  - Route 2: Leon's catching lesson (his Rookidee and a wild Wooloo). Then a wild Chewtle, beaten with Scorbunny at 2 HP and healed with a Potion from the Bag, and three trainers on the way to the lake, all won: one with a Skwovet, Lass Lauren's Chewtle, and Youngster Benjamin with a Nickit. Scorbunny reached Lv 9.
+  - **Professor Magnolia's house:** she meets Leon and Hop at her door, and her scene plays indoors. It stopped there, before the battle in her garden that decides Leon's endorsement.
+- **Saves and Continue:** four commits, the last in Magnolia's house (filed under "Route 2", play time 1:47). A cold start's Continue loaded it there. Kept as `saves/magnolia_house_rp5`.
+- **30 fps throughout:** 253 windows of 300 frames, frame p50 33.0–35.1 ms (median 33.3), p95 median 36.2 ms. GPU p50 median 22.1 ms, at most 27.1.
+- **First visits:** the longest frames were 1.7 s and 1.4 s, as the lab and Route 2 built their pipelines on this phone for the first time (86 pipelines and 172 libraries in the longer one). On the Continue start the longest was 87 ms.
+- **Sound:** `DM_AUDIO_DUMP` over the Continue start (68 s): the title music, then the house's, in the front pair. No underrun in 337 reports during play or 8 after the restart.
+- **`[RED]`:** the same single line; no crash, no hang, and nothing wrong seen in the picture (Wedgehurst, the lab, the Pokémon Center, Route 2's lake, the manor inside).
+- **Not played:** the battle in Magnolia's garden, Motostoke, the Wild Area.
