@@ -421,6 +421,26 @@ static size_t spv_fit_narrow(const uint32_t *code, size_t nw, const char *what, 
         LOG("[RED] [vk] %s: a whole-warp reduction step past the GPU's %u-lane subgroup whose result spv_narrow does not follow: left as translated (its shuffle reads the lane's own value)", what, g_sg_size);
     *out = o; return k;
 }
+// The module with Maxwell's FMUL and FADD kept unfused (NoContraction), for a module of a stage that places vertices (spv_precise.h), in *out (to free); 0 when it
+// needs nothing (a fragment or compute shader, or nothing to mark). On every GPU: Maxwell rounds them apart, so the driver may not fuse them either, and two vertex
+// shaders that compute one position give one depth. DM_SPV_PRECISE=0 (env.txt): modules as translated, the driver contracting as it likes
+static size_t spv_fit_precise(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_PRECISE"); on = !(e && *e == '0'); }
+    *out = NULL;
+    if (!on || !spv_precise_wanted(code, nw)) return 0;
+    uint32_t *s = malloc(((size_t)code[3] + 31) / 32 * 4 + 4), *o = NULL; size_t need = 0, k = 0; int got = 0;
+    if (!s) return 0;
+    spv_precise(code, nw, s, NULL, 0, &need, &got);
+    if (need && (o = malloc(need * 4))) k = spv_precise(code, nw, s, o, need, &need, &got);
+    free(s);
+    if (!k) { free(o); return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1))
+        LOG("[vk] vertex, tessellation and geometry shaders keep Maxwell's unfused FMUL and FADD (NoContraction), so a depth pre-pass and a later pass with another "
+            "vertex shader get the same depths (DM_SPV_PRECISE=0: the driver may fuse them). First: %s, %d", what, got);
+    if (vk_debug()) LOG("[vk] %s: %d results kept unfused", what, got);
+    *out = o; return k;
+}
 // The module with its layer and viewport output made ordinary outputs, on a GPU that has no such output from vertex shaders (spv_layer.h): no
 // VK_EXT_shader_viewport_index_layer, Vulkan 1.1. Its compiler crashed on them (the Adreno 730's driver V@0615.98). In *out (to free); 0 when it needs nothing.
 // DM_SPV_LAYER=0 (env.txt): modules as translated
