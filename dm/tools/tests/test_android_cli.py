@@ -725,6 +725,44 @@ class VkDriverPush(Phone):
         self.assertNotIn('DM_VK_DRIVER', defaults); self.assertTrue(any('needs Android API 30' in m for m in self.said), self.said)
 
 
+class VkDriverGameApp(Base):   # --game-apk --vk-driver: the driver and its NOTICE in assets/game/vk_driver/, named in the app's defaults.txt
+    def test_a_game_app_carries_the_driver(self):
+        import types
+        game = self.tmp / 'game'; game.mkdir(); (game / 'RomFS.img').write_bytes(b'romfs'); (game / 'control.nacp').write_bytes(b'nacp')
+        so = self.tmp / f'libdmhost_{GID}.so'; so.write_bytes(b'host')
+        vk = vkpkg().read(make_pkg(self.tmp)); staged = {}
+        def run(cmd, log, env=None):   # build_apk.py: what the stage holds when the APK is packed
+            stage = Path(cmd[cmd.index('--game-dir') + 1])
+            staged.update({f.relative_to(stage).as_posix(): f.read_bytes() for f in stage.rglob('*') if f.is_file()})
+            Path(cmd[cmd.index('-o') + 1]).write_bytes(b'apk')
+        with mock.patch.object(ba.bi, 'run', run), mock.patch.object(ba.bi.rfs, 'source', lambda g: g / 'RomFS.img'), mock.patch.object(ba.bi.rfs, 'is_image', lambda p: True):
+            ba.make_game_app(Path('sdk'), types.SimpleNamespace(id=GID), game, None, None, None, self.tmp / 'aoc', 'DM_LANG=en-US\n', so, {'name': 'G'},
+                             self.tmp / 'work', self.tmp, {}, self.tmp / 'out', False, vk, ['TU_DEBUG=sysmem'])
+        self.assertEqual(staged[f'vk_driver/{vk.name}'], vk.data)
+        self.assertIn(vk.sha256, staged['vk_driver/NOTICE'].decode()); self.assertIn('MIT licence', staged['vk_driver/NOTICE'].decode())
+        self.assertEqual(staged['defaults.txt'].decode(), f'DM_LANG=en-US\nDM_VK_DRIVER=games/{GID}/vk_driver/{vk.name}\nDM_VK_DRIVER_SHA256={vk.sha256}\nTU_DEBUG=sysmem\n')
+        self.assertIn(f'vk_driver/{vk.name}', staged['files.txt'].decode().split('\n'))   # GameStart unpacks what files.txt lists
+
+    def test_the_notice_claims_no_terms_the_builder_didnt_give(self):   # Mesa's core is MIT; a builder's patches are its own (T30's repository has no licence at all)
+        v = vkpkg(); d = v.read(make_pkg(self.tmp))
+        n = v.notice(d); self.assertIn("Mesa's core is under the MIT licence", n); self.assertIn("the builder's to state", n); self.assertNotIn('apply to this copy', n)
+        self.assertIn('records their terms: MIT (the repository and its patches)', v.notice(d, 'MIT (the repository and its patches)'))
+
+    def test_a_proprietary_driver_stays_out_of_game_apps(self):
+        v = vkpkg(); meta = {'schemaVersion': 1, 'name': 'Q', 'description': '', 'author': 'Q', 'packageVersion': '1', 'vendor': 'Qualcomm', 'driverVersion': '891',
+                             'minApi': 33, 'libraryName': 'vulkan.adreno.so'}
+        q = v.read(make_pkg(self.tmp, 'q.zip', 'vulkan.adreno.so', meta=meta)); self.assertIn('Qualcomm', v.proprietary(q))
+        so = self.tmp / 'vulkan.adreno.so'; so.write_bytes(elf(needed=('libc.so', 'libgsl.so', 'libllvm-qgl.so')))   # a bare .so: told by what it needs
+        self.assertIn('libgsl.so', v.proprietary(v.read(so)))
+        self.assertEqual(v.proprietary(v.read(make_pkg(self.tmp))), '')
+        with self.assertRaises(ba.BuildError): ba.game_app_driver(q)
+        ba.game_app_driver(v.read(make_pkg(self.tmp)))   # a Mesa build goes in
+
+    def test_gamestart_clears_an_old_driver_at_an_update(self):   # a rebuild without --vk-driver leaves no 19 MB driver behind
+        src = (REPO / 'dm/android/java/org/nxnative/android/GameStart.java').read_text()
+        self.assertRegex(src, r'new String\[\] \{[^}]*"vk_driver"[^}]*\}\) rm\(')
+
+
 class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop app's updates: the newest release read, its Setup downloaded and checked; a local server is GitHub
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)

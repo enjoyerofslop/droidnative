@@ -79,14 +79,14 @@ public class GameStart extends Activity {
         } catch (Exception e) { fail("Couldn't unpack " + name + ": " + e); }
     }
 
-    // assets/game/** except the RomFS → games/<title ID>/, the folders the host reads replaced whole (an update can drop files); the player's own files there
-    // (env.txt, launcher.txt) stay
+    // assets/game/** except the RomFS → games/<title ID>/, the folders the host reads replaced whole (an update can drop files, as one built without a Vulkan driver drops
+    // vk_driver/, 19 MB the host would no longer name); the player's own files there (env.txt, launcher.txt) stay
     void unpack(File mark, String stamp) throws Exception {
         AssetManager am = getAssets(); List<String> files = new ArrayList<>();
         // the packer's list of the files (a lookup per entry would ask the APK's index once for each of tens of thousands of shaders); a walk without one
         try { for (String l : new String(readAsset("game/files.txt"), StandardCharsets.UTF_8).split("\n")) if (!l.isEmpty()) files.add("game/" + l); }
         catch (java.io.FileNotFoundException none) { list(am, "game", files); }
-        for (String top : new String[] {"code", "spv", "font", "aoc"}) rm(new File(dir, top));
+        for (String top : new String[] {"code", "spv", "font", "aoc", "vk_driver"}) rm(new File(dir, top));
         dir.mkdirs(); byte[] buf = new byte[1 << 16]; int n = 0;
         for (String f : files) {
             if (++n % 200 == 1 || n == files.size()) say(String.format(Locale.ROOT, "Preparing %s for its first start… %d of %d files", name, n, files.size()));

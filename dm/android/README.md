@@ -106,6 +106,12 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   update, where `front_android.c` finds the game, then starts `GameActivity` in its own process. The translated shaders are one entry, `spv.zip` (a stored ZIP of
   the `spv` folder, which GameStart unpacks into `spv/`), because an APK without ZIP64 holds at most 65,535 entries and a game's shaders are files of their own
   (Mario Kart 8 Deluxe's passed that, issue #169); the other files are counted against that limit before packing.
+- **A Vulkan driver** (`--game-apk --vk-driver <package>`): the driver goes in as `assets/game/vk_driver/<stem>-<sha8>.so` with a `NOTICE` (what it is, who built it,
+  Mesa's MIT notice for its core, and the builder's own terms only as far as they are known: `vk_driver_pkg.notice`). A proprietary driver (a `meta.json` vendor other
+  than Mesa, or one that needs Qualcomm's `libgsl.so` and the like: `vk_driver_pkg.proprietary`) is refused, since a game app is made to share; it goes with an install
+  only. `defaults.txt` names it, `DM_VK_DRIVER=games/<id>/vk_driver/<name>` with `DM_VK_DRIVER_SHA256`. GameStart unpacks it with the
+  rest and clears `vk_driver/` at an update, so a rebuild without one leaves no driver behind. The phone is not known when a game app is built: on one without an Adreno
+  GPU the host ignores the line, and the system's driver runs. To change the driver, build the app again.
 - **The RomFS is read where it lies, never copied.** GameStart opens it and sets `DM_ROMFS=fd:<descriptor>:<offset>:<length>` in the process's environment, which
   `dm/host/romfs_image.h` (`romfs_image_spec`) reads as that part of an open file. It looks in order:
   1. a stored entry of the APK, `assets/game/RomFS.img`, packed when the APK stays under 2 GiB (Python's zipfile writes no bigger ZIP without ZIP64, which `apksigner` can't read);

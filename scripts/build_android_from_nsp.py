@@ -10,7 +10,7 @@
 #   python scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys> --game-apk [--xapk] [--out <folder>]   the game in an app of its own, to install anywhere (make_game_app)
 #   --vk-driver <package or .so | system> [--vk-driver-env K=V ...]: with an install or --push-only, the game runs on that Vulkan driver (a Turnip build, DM_VK_DRIVER on an
 #   Adreno phone): checked first (dm/android/tools/vk_driver_pkg.py), copied to files/vk_drivers/ and named in the game's defaults.txt with its SHA-256. Without it (or
-#   with system), defaults.txt names none, so each install writes the choice again
+#   with system), defaults.txt names none, so each install writes the choice again. With --game-apk, the app carries it (assets/game/vk_driver/, with a NOTICE)
 #   --progress json: newline-delimited JSON events on stdout (build_ipa_from_nsp.py Progress), for the desktop app (scripts/nxnative_android.py)
 #   Every build also writes those events to a journal, <data>/builds/<time>-<pid>.jsonl (start and exit events around them), whatever its --progress: the desktop app
 #   shows a build started from a console too
@@ -449,7 +449,7 @@ def defaults_text(g, lang):
     return ''.join(ln + '\n' for ln in lines)
 
 
-def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, work, logs, env, out_dir, xapk):
+def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, work, logs, env, out_dir, xapk, vk=None, vk_env=()):
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import build_apk   # pyright: ignore[reportMissingImports]  # dm/android/tools, put on the path here
     pkg = build_apk.game_package(g.id)
     rom = bi.rfs.source(game)
@@ -461,6 +461,13 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
     if spv and Path(spv).is_dir(): bi.PROG.set(step='packing the shaders into one file'); pack_spv(spv, stage / SPV_ZIP)
     for f in ('icon.jpg', 'control.nacp'):
         if (game / f).is_file(): stage_link(stage / f, (game / f).resolve())
+    if vk:   # --vk-driver: GameStart unpacks it to games/<title ID>/vk_driver/ (and clears that folder at an update), and the host copies it in from there. The host
+        # ignores it on a phone without an Adreno GPU: a game app goes to phones this computer never sees
+        sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
+        (stage / 'vk_driver').mkdir(); (stage / 'vk_driver' / vk.name).write_bytes(vk.data)
+        (stage / 'vk_driver' / 'NOTICE').write_text(vkpkg.notice(vk), encoding='utf-8', newline='\n')
+        defaults += ''.join(ln + '\n' for ln in vkpkg.defaults_lines(f'games/{g.id}/vk_driver/{vk.name}', vk.sha256, vk_env))
+        say(f'Vulkan driver: {vk.describe()}, in the app as vk_driver/{vk.name} (sha256 {vk.sha256[:12]}…); used on Adreno phones, the phone\'s own driver elsewhere')
     (stage / 'defaults.txt').write_text(defaults, encoding='utf-8', newline='\n')   # \n on Windows too, as the phone's files are
     staged = [(f.relative_to(stage).as_posix(), n) for f, n in walk(stage)]
     parts = {'code': 0, 'shaders': 0, 'font': 0, 'the rest': 4096 + sum(len(f) + 1 for f, _ in staged)}   # the rest: icon, control data, defaults; game.json and files.txt
@@ -871,6 +878,13 @@ def vk_driver_arg(a):   # --vk-driver / --vk-driver-env → (vk_driver_pkg.Drive
     except vkpkg.PackageError as e: raise BuildError(f'--vk-driver: {e}') from None
 
 
+def game_app_driver(vk):   # a game app is a file to share: a proprietary driver (Qualcomm's, from another device) has no licence to pass on, so it goes with an install only
+    sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
+    why = vkpkg.proprietary(vk)
+    if why: raise BuildError(f'--game-apk: {vk.library} looks like a proprietary driver ({why}). A game app is made to share, and such a driver may not be passed on: '
+                             'install it on your own phone with --vk-driver instead')
+
+
 def push_vk_driver(serial, vk, env, logs):
     """The driver → files/vk_drivers/<its name> (not again when the phone has it); → the lines for the game's defaults.txt, or none on a phone it can't run on"""
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
@@ -1046,7 +1060,7 @@ def main(argv):
     ap.add_argument('--game-apk', action='store_true', help='the game in an app of its own, to install on any device (no phone needed; the DroidPlay app is left as it is)')
     ap.add_argument('--xapk', action='store_true', help='with --game-apk: one .xapk (the APK with the RomFS as its OBB file) for an XAPK installer')
     ap.add_argument('--out', help='with --game-apk: the folder for the app (default: the NSP folder)')
-    ap.add_argument('--vk-driver', metavar='PACKAGE', help="with an install or --push-only: run the game on this Vulkan driver (an AdrenoTools .zip or .so, Adreno phones only), or 'system'")
+    ap.add_argument('--vk-driver', metavar='PACKAGE', help="with an install, --push-only or --game-apk: run the game on this Vulkan driver (an AdrenoTools .zip or .so, Adreno phones only), or 'system'")
     ap.add_argument('--vk-driver-env', action='append', metavar='K=V', help="with --vk-driver: one of Mesa's switches the driver needs (TU_DEBUG, FD_DEV_FEATURES); repeatable")
     ap.add_argument('--setup', action='store_true', help='install what --check finds missing (Windows: the JDK, the .NET SDK and the Android SDK)')
     ap.add_argument('--accept-android-licenses', action='store_true', help="with --setup: you accept the Android SDK License (https://developer.android.com/studio/terms)")
@@ -1067,7 +1081,8 @@ def main(argv):
         print(json.dumps(out, indent=1)); return
     if a.setup: setup(a.sdk, a.accept_android_licenses); return
     vk, vk_env = vk_driver_arg(a)
-    if vk and (a.game_apk or a.no_push or a.apk_only or a.migrate or a.update_shaders): raise BuildError('--vk-driver goes with an install to a phone or --push-only')
+    if vk and (a.apk_only or a.migrate or a.update_shaders or (a.no_push and not a.game_apk)): raise BuildError('--vk-driver goes with an install to a phone, --push-only or --game-apk')
+    if vk and a.game_apk: game_app_driver(vk)
     if a.apk_only or a.migrate:
         logs = data_dir() / 'logs'; logs.mkdir(parents=True, exist_ok=True)
         serial = a.serial or os.environ.get('ANDROID_SERIAL') or pick_device()
@@ -1215,7 +1230,7 @@ def main(argv):
                 'romfs_bytes': Path(rom).stat().st_size if bi.rfs.is_image(rom) else None}
         bi.PROG.stage('game app')
         made, inside = make_game_app(sdk, g, game, patched, spv, font, work / 'aoc', defaults, so, meta, work, logs, env,
-                                     Path(a.out).expanduser().resolve() if a.out else nsp_dir, a.xapk)
+                                     Path(a.out).expanduser().resolve() if a.out else nsp_dir, a.xapk, vk, vk_env)
         bi.PROG.end(str(made[0]))
         if a.xapk: say(f'done: {made[0]}. Install it with an XAPK installer on the device; it puts the game data in Android/obb. Or unzip it, install the APK and copy Android/obb/ to the device')
         elif inside: say(f'done: {made[0]}, the game with its data inside. Install it on any Android device (arm64, Vulkan)')
