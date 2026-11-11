@@ -93,7 +93,11 @@ static struct {
     int (*target)(APerformanceHintSession *, int64_t);
     int (*report)(APerformanceHintSession *, int64_t);
     void (*close)(APerformanceHintSession *);
+    // API 35: a report with the frame's CPU and GPU parts (DM_VK_ADPF_GPU=1, a test switch): a power HAL that takes GPU durations may raise the GPU's clock for the work
+    int (*report2)(APerformanceHintSession *, void *); void *(*wd_create)(void); void (*wd_release)(void *);
+    void (*wd_start)(void *, int64_t), (*wd_total)(void *, int64_t), (*wd_cpu)(void *, int64_t), (*wd_gpu)(void *, int64_t);
 } g_ph;
+static int hint_gpu_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ADPF_GPU"); v = e && atoi(e); } return v; }
 enum { HINT_MAXT = 6, HINT_STABLE = 60, HINT_TRIES = 6 };
 static pthread_mutex_t g_hint_mu = PTHREAD_MUTEX_INITIALIZER;   // everything below; a session is not thread-safe
 static int g_hint_on;   // 0 = not looked at yet (nothing declared), 1 = sessions can be made, −1 = none (DM_VK_ADPF=0, Android before 13, no manager, a power HAL without
@@ -119,7 +123,11 @@ static int hint_load(void) {   // under g_hint_mu
 #define PH_SYM(f, name) g_ph.f = h ? (__typeof__(g_ph.f))dlsym(h, name) : NULL
     PH_SYM(manager, "APerformanceHint_getManager"); PH_SYM(create, "APerformanceHint_createSession"); PH_SYM(rate, "APerformanceHint_getPreferredUpdateRateNanos");
     PH_SYM(target, "APerformanceHint_updateTargetWorkDuration"); PH_SYM(report, "APerformanceHint_reportActualWorkDuration"); PH_SYM(close, "APerformanceHint_closeSession");
+    PH_SYM(report2, "APerformanceHint_reportActualWorkDuration2"); PH_SYM(wd_create, "AWorkDuration_create"); PH_SYM(wd_release, "AWorkDuration_release");
+    PH_SYM(wd_start, "AWorkDuration_setWorkPeriodStartTimestampNanos"); PH_SYM(wd_total, "AWorkDuration_setActualTotalDurationNanos");
+    PH_SYM(wd_cpu, "AWorkDuration_setActualCpuDurationNanos"); PH_SYM(wd_gpu, "AWorkDuration_setActualGpuDurationNanos");
 #undef PH_SYM
+    if (hint_gpu_on()) LOG("[hint] DM_VK_ADPF_GPU=1: the frame's GPU time goes in the report%s", g_ph.report2 && g_ph.wd_create && g_ph.wd_gpu ? "" : " (not on this Android: no APerformanceHint_reportActualWorkDuration2, it came with API 35)");
     if (!g_ph.manager || !g_ph.create || !g_ph.rate || !g_ph.target || !g_ph.report || !g_ph.close) {
         LOG("[hint] no performance hint session: Android API %d has no APerformanceHint (it came with 33)", android_get_device_api_level()); return 0; }
     if (!(g_hint_mgr = g_ph.manager())) { LOG("[hint] no performance hint session: APerformanceHint_getManager returned none"); return 0; }
@@ -221,7 +229,7 @@ void dm_android_place_thread(int done) {   // gfx_vk.c, once per thread: done = 
 int dm_thermal_now(void);
 // gfx_vk.c hint_frame, on the present thread once per present: the frame's work (0 = none to report), the other threads that acquired or replayed it, the frame step's target
 // (0 = it does not decide the hold) and whether its thermal cap holds 30 fps
-void dm_android_hint_frame(uint64_t work_ns, const int32_t *tids, int n, uint64_t hold_ns, int thermal) {
+void dm_android_hint_frame(uint64_t work_ns, const int32_t *tids, int n, uint64_t hold_ns, int thermal, uint64_t gpu_ns) {
     pthread_mutex_lock(&g_hint_mu);
     if (g_hint_on > 0) { g_hint_hold = hint_hold_on() ? (int64_t)hold_ns : 0; hint_retarget(); }
     if (g_hint_on > 0 && g_hint_target > 0) {
@@ -249,7 +257,13 @@ void dm_android_hint_frame(uint64_t work_ns, const int32_t *tids, int n, uint64_
             if (g_hint_same >= HINT_STABLE && hint_due()) hint_make(w, nw);
         } else g_hint_same = 0;
         if (g_hint && work_ns) {
-            int r = g_ph.report(g_hint, (int64_t)work_ns);
+            int r;
+            if (hint_gpu_on() && g_ph.report2 && g_ph.wd_create && g_ph.wd_gpu && gpu_ns) {   // the frame's GPU time with it: the chunks completed since the last present (gfx_vk.c hint_frame)
+                void *wd = g_ph.wd_create(); struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); int64_t now = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+                g_ph.wd_start(wd, now - (int64_t)work_ns); g_ph.wd_total(wd, (int64_t)work_ns); g_ph.wd_cpu(wd, (int64_t)work_ns); g_ph.wd_gpu(wd, (int64_t)gpu_ns);
+                r = g_ph.report2(g_hint, wd); g_ph.wd_release(wd);
+                static unsigned ng; if (ng++ < 2) LOG("[hint] GPU time reported with the frame's work: %.2f ms of %.2f ms (%d)", gpu_ns / 1e6, work_ns / 1e6, r);
+            } else r = g_ph.report(g_hint, (int64_t)work_ns);
             if (r && g_hint_err++ < 4) LOG("[hint] reporting the frame's work failed (%d)", r);
             static unsigned nf, over; static double sum, mx;
             if (hint_log_on()) { double ms = work_ns / 1e6; sum += ms; if (ms > mx) mx = ms; over += (int64_t)work_ns > g_hint_target;

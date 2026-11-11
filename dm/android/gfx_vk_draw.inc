@@ -1085,20 +1085,23 @@ static VkImageViewType view_type_of(int st) {   // Ryujinx's SamplerType
 #include "gfx_vk_fileback.inc"   // memory pools backed by a file (DM_VK_POOL_FILEBACK)
 
 // ---------------- Render passes and framebuffers ----------------
-typedef struct { VkFormat color[8]; VkFormat depth; uint32_t ncolor, samples; } rp_key;
+// clr: the attachments the pass begins by clearing (bit i: colour slot i, bit 8: depth, bit 9: stencil; DM_VK_CLEAR_LOAD): a full clear of a bound target before the pass's
+// first draw is its load op, instead of loading the target's tiles and clearing them (clear_color_pass). Load and store ops do not enter render pass compatibility, so
+// the framebuffers and pipelines made for the loading pass serve the clearing one
+typedef struct { VkFormat color[8]; VkFormat depth; uint32_t ncolor, samples, clr; } rp_key;
 static nvn_hmap g_rps = {.klen = sizeof(rp_key)}, g_fbs = {.klen = 9 * sizeof(VkImageView) + 12};
 static VkRenderPass rp_get(const rp_key *k) {
     VkRenderPass rp = nvn_hm_get(&g_rps, k); if (rp) return rp;
     VkAttachmentDescription at[9]; VkAttachmentReference cr[8], dr; uint32_t na = 0;
     for (uint32_t i = 0; i < k->ncolor; i++) {
         if (!k->color[i]) { cr[i] = (VkAttachmentReference){VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_GENERAL}; continue; }
-        at[na] = (VkAttachmentDescription){0, k->color[i], (VkSampleCountFlagBits)k->samples, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        at[na] = (VkAttachmentDescription){0, k->color[i], (VkSampleCountFlagBits)k->samples, k->clr >> i & 1 ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                                            VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL};
         cr[i] = (VkAttachmentReference){na++, VK_IMAGE_LAYOUT_GENERAL};
     }
     if (k->depth) {
-        at[na] = (VkAttachmentDescription){0, k->depth, (VkSampleCountFlagBits)k->samples, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_LOAD,
-                                           VK_ATTACHMENT_STORE_OP_STORE, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL};
+        at[na] = (VkAttachmentDescription){0, k->depth, (VkSampleCountFlagBits)k->samples, k->clr >> 8 & 1 ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
+                                           k->clr >> 9 & 1 ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL};
         dr = (VkAttachmentReference){na++, VK_IMAGE_LAYOUT_GENERAL};
     }
     VkSubpassDescription sp = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = k->ncolor, .pColorAttachments = cr, .pDepthStencilAttachment = k->depth ? &dr : NULL};
@@ -1109,8 +1112,11 @@ static VkRenderPass rp_get(const rp_key *k) {
     nvn_hm_put(&g_rps, k, rp);
     return rp;
 }
-static struct { int active, layered; VkRenderPass rp; rp_key key; uint32_t w, h, layers; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8];
-                uint8_t *snap[8]; size_t snap_cap[8], snap_n[8]; uint8_t *snap_dst[8]; VkImage snap_img[8]; } P;   // snap: a linear target's guest bytes at rp_prepare (lsnap_take), until its write-back takes them
+static struct { int active, layered, pending; VkRenderPass rp; rp_key key; uint32_t w, h, layers; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8]; VkClearValue clrv[9];
+                uint8_t *snap[8]; size_t snap_cap[8], snap_n[8]; uint8_t *snap_dst[8]; VkImage snap_img[8]; } P;   // snap: a linear target's guest bytes at rp_prepare (lsnap_take), until its write-back takes them; pending: full clears wait for the pass to begin (key.clr, clrv by slot, 8: depth-stencil; clear_load_on)
+static uint64_t g_clear_loads, g_clear_only;   // passes begun by clearing (DM_VK_CLEAR_LOAD), and those that held no draw
+static int rp_start(void);
+static int clear_load_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CLEAR_LOAD"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_CLEAR_LOAD=1: a full clear before a pass's first draw is its load op"); } return v; }
 static uint64_t g_passes;
 // DM_VK_DUMP=<frame>: every render pass of that frame (counted in presents from 1) has its colour targets copied out when it ends, written to
 // $DM_DUMP_DIR/f<frame>_p<pass>_a<attachment>_<w>x<h>_vk<format>_s<serial>.raw once the frame is presented, with a log line per draw (shaders, viewport, textures)
@@ -1179,8 +1185,9 @@ static void occl_begin(void) {   // a draw while samples passed are counted: ins
     vkCmdBeginQuery(C->cb, C->qp, (uint32_t)g_q_act, g_vk_feat.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
 }
 // ---- GPU time per render pass: a file named prof_now beside $DM_DUMP_DIR profiles the frame two presents later (the log lists its passes, costliest first) ----
-typedef struct { chunk *c; int s0, s1, draws, ncolor, depth; uint32_t w, h; VkFormat f0; uint64_t t0, t1, seq, verts, big; const char *bigvs, *bigfs; } prof_rec;   // verts: vertices drawn (indices × instances); big: the largest draw's, and its shaders (a dispatch: groups in w, h, draws; its compute shader in bigfs)
+typedef struct { chunk *c; int s0, s1, draws, ncolor, depth, cont; uint32_t w, h; VkFormat f0; uint64_t t0, t1, seq, verts, big; const char *bigvs, *bigfs; VkFramebuffer fb; } prof_rec;   // verts: vertices drawn (indices × instances); big: the largest draw's, and its shaders (a dispatch: groups in w, h, draws; its compute shader in bigfs); cont: a piece of the pass before it (the same framebuffer, begun again after a chunk was sent)
 static prof_rec g_prof[1024]; static int g_nprof, g_prof_cur = -1; static long g_prof_at = -1; static uint64_t g_prof_seq;
+static chunk *g_csb_chunk; static uint64_t g_csb_barriers, g_csb_passes, g_csb_merged; static int g_csb_ndraw;   // DM_VK_CS_BARRIER (vk_dispatch): the state after the last dispatch's barrier, and the barriers left out
 static int prof_on(void) { return g_prof_at > 0 && (long)atomic_load(&g_presents) + 1 == g_prof_at; }
 static void prof_poll(uint64_t presents) {
     const char *dir = getenv("DM_DUMP_DIR"); if (!dir || presents % 30) return;
@@ -1191,7 +1198,8 @@ static void prof_pass_begin(void) {
     if (!prof_on() || !C || !C->pq || C->npq + 2 > 512 || g_nprof >= 1024) return;
     prof_rec *r = &g_prof[g_nprof]; memset(r, 0, sizeof *r); r->c = C; r->s0 = C->npq++; r->s1 = -1; r->w = P.w; r->h = P.h; r->ncolor = (int)P.key.ncolor; r->depth = P.key.depth != 0;
     for (uint32_t i = 0; i < P.key.ncolor; i++) if (P.key.color[i]) { r->f0 = P.key.color[i]; break; }
-    r->seq = g_prof_seq++;
+    r->seq = g_prof_seq++; r->fb = P.fb;
+    for (int i = g_nprof - 1; i >= 0; i--) if (g_prof[i].ncolor >= 0) { r->cont = g_prof[i].fb == P.fb && g_prof[i].seq + 1 == r->seq; break; }   // the record before it is a pass of the same framebuffer: a piece
     vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->pq, (uint32_t)r->s0); g_prof_cur = g_nprof++;
 }
 static void prof_pass_end(void) {
@@ -1213,11 +1221,24 @@ static void prof_write(void) {
     for (int i = 0; i < g_nprof; i++) if (g_prof[i].t1 > g_prof[i].t0) { sum += (g_prof[i].t1 - g_prof[i].t0) * per / 1e3; if (g_prof[i].t0 < lo) lo = g_prof[i].t0; if (g_prof[i].t1 > hi) hi = g_prof[i].t1; n++; }
     int unclosed = 0, unread = 0, ncs = 0; double cs = 0;
     for (int i = 0; i < g_nprof; i++) { if (g_prof[i].s1 < 0) unclosed++; else if (g_prof[i].c) unread++; if (g_prof[i].ncolor < 0 && g_prof[i].t1 > g_prof[i].t0) { ncs++; cs += (g_prof[i].t1 - g_prof[i].t0) * per / 1e3; } }
-    LOG("[prof] frame %ld: %d records (%d not closed, %d not read), %d timed, %.0f us in them (%d dispatches %.0f us), first start to last end %.0f us", g_prof_at, g_nprof, unclosed, unread, n, sum, ncs, cs, hi > lo ? (hi - lo) * per / 1e3 : 0.0);
+    int npieces = 0; double pieces = 0;   // passes begun again on the same framebuffer after a chunk was sent in their middle (mtl_exec MID_DRAWS): each loads and stores its targets again
+    for (int i = 0; i < g_nprof; i++) if (g_prof[i].ncolor >= 0 && g_prof[i].cont && g_prof[i].t1 > g_prof[i].t0) { npieces++; pieces += (g_prof[i].t1 - g_prof[i].t0) * per / 1e3; }
+    LOG("[prof] frame %ld: %d records (%d not closed, %d not read), %d timed, %.0f us in them (%d dispatches %.0f us; %d passes continued after a cut, %.0f us in them), first start to last end %.0f us; so far: dispatch barriers left out %llu (DM_VK_CS_BARRIER), passes begun by clearing %llu, of them %llu with no draw (DM_VK_CLEAR_LOAD), mid-pass cuts %llu made %llu left out (DM_VK_MID_IDLE), GPU fills %llu in %.0f ms (DM_VK_GPU_FILL)",
+        g_prof_at, g_nprof, unclosed, unread, n, sum, ncs, cs, npieces, pieces, hi > lo ? (hi - lo) * per / 1e3 : 0.0, (unsigned long long)g_csb_merged, (unsigned long long)g_clear_loads, (unsigned long long)g_clear_only,
+        (unsigned long long)g_mid_cuts, (unsigned long long)g_mid_skips, (unsigned long long)g_fill.n, g_fill.ns / 1e6);
+    // the passes with their pieces together, by framebuffer in record order (a target drawn again later in the frame is another pass)
+    { struct { VkFramebuffer fb; uint64_t seq; int draws, pieces; double us; uint64_t verts; uint32_t w, h; } g[256]; int ng = 0;
+      for (int i = 0; i < g_nprof; i++) { prof_rec *r = &g_prof[i]; if (r->ncolor < 0 || r->t1 <= r->t0) continue;
+          if (r->cont && ng && g[ng - 1].fb == r->fb) { g[ng - 1].draws += r->draws; g[ng - 1].pieces++; g[ng - 1].us += (r->t1 - r->t0) * per / 1e3; g[ng - 1].verts += r->verts; continue; }
+          if (ng == 256) break;
+          g[ng].fb = r->fb; g[ng].seq = r->seq; g[ng].draws = r->draws; g[ng].pieces = 1; g[ng].us = (r->t1 - r->t0) * per / 1e3; g[ng].verts = r->verts; g[ng].w = r->w; g[ng].h = r->h; ng++; }
+      for (int a = 0; a < ng; a++) for (int b = a + 1; b < ng; b++) if (g[b].us > g[a].us) { __typeof__(g[0]) t = g[a]; g[a] = g[b]; g[b] = t; }
+      for (int i = 0; i < ng && i < 16; i++) LOG("[prof] whole pass from #%llu: %7.0f us  %ux%u  %d pieces  draws %d  vertices %llu", (unsigned long long)g[i].seq, g[i].us, g[i].w, g[i].h, g[i].pieces, g[i].draws, (unsigned long long)g[i].verts); }
     qsort(g_prof, (size_t)g_nprof, sizeof *g_prof, prof_cmp);
-    for (int i = 0; i < g_nprof && i < 40; i++) { prof_rec *r = &g_prof[i]; if (r->t1 <= r->t0) continue;
+    for (int i = 0; i < g_nprof; i++) { prof_rec *r = &g_prof[i]; if (r->t1 <= r->t0) continue;   // every record, costliest first (DM_VK_PROF_TOP=<n> for fewer)
+        static int top = -1; if (top < 0) { const char *e = getenv("DM_VK_PROF_TOP"); top = e ? atoi(e) : 1024; } if (i >= top) break;
         if (r->ncolor < 0) LOG("[prof] %7.0f us  dispatch #%llu  %ux%ux%u groups  cs %s", (r->t1 - r->t0) * per / 1e3, (unsigned long long)r->seq, r->w, r->h, (unsigned)r->draws, r->bigfs ? r->bigfs : "-");
-        else LOG("[prof] %7.0f us  pass #%llu  %ux%u  colour %d (vk%d) depth %d  draws %d  vertices %llu (largest draw %llu: vs %s fs %s)", (r->t1 - r->t0) * per / 1e3, (unsigned long long)r->seq, r->w, r->h,
+        else LOG("[prof] %7.0f us  pass #%llu%s  %ux%u  colour %d (vk%d) depth %d  draws %d  vertices %llu (largest draw %llu: vs %s fs %s)", (r->t1 - r->t0) * per / 1e3, (unsigned long long)r->seq, r->cont ? " (piece)" : "", r->w, r->h,
                  r->ncolor, r->f0, r->depth, r->draws, (unsigned long long)r->verts, (unsigned long long)r->big, r->bigvs ? r->bigvs : "-", r->bigfs ? r->bigfs : "-"); }
     g_nprof = 0; g_prof_at = -1;
 }
@@ -1321,8 +1342,8 @@ static void lin_writeback(int i) {   // attachment i of the pass that ends
     static int nlog; if (nlog++ < 4) LOG("[vk] linear render target s%llu %ux%u (format %#x) written back to guest memory after its pass", (unsigned long long)v->serial, v->w, v->h, v->desc.format);
 }
 static void rp_end(void) {
-    if (!P.active) return;
-    occl_end(); prof_pass_end(); vkCmdEndRenderPass(C->cb); P.active = 0; if (dump_on()) dump_pass_end();
+    if (!P.active) { if (P.pending) { P.pending = 0; if (rp_start()) { g_clear_only++; rp_end(); } } return; }   // full clears that waited for a draw which never came: a pass of the clears alone
+    occl_end(); vkCmdEndRenderPass(C->cb); prof_pass_end(); P.active = 0; if (dump_on()) dump_pass_end();   // the profile's end timestamp after the pass: on a tiler the tiles' stores are part of it (a timestamp inside a pass is written per tile, the last tile's draws kept)
     for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) {
         if (g_bcrt_pend[i].base->conv) bcd_decode(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly);   // decoded on the GPU into the image the game samples
         else bcrt_copy(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly, 1);
@@ -1415,6 +1436,8 @@ static int rp_prepare_(int layered) {
     layered = layered && layered_on();
     if (P.active && (P.layered || !layered)) return 1;
     if (P.active) rp_end();   // a draw that writes the layer, in a pass of one layer: the pass again, layered
+    __typeof__(P) pend; int had_pend = P.pending;   // full clears waiting for this pass (clear_load_on): kept when it is the same framebuffer, else made a pass of their own first
+    if (had_pend) { pend = P; memset(pend.snap, 0, sizeof pend.snap); P.pending = 0; }
     lsnap_drop_all();   // an earlier rp_prepare's that no pass used
     if (!R.has_rt) { RED_ONCE(83, "draw with no render target set"); return 0; }
     memset(P.cv, 0, sizeof P.cv); P.dv = NULL; memset(g_bcrt_pend, 0, sizeof g_bcrt_pend); g_dup_mask = 0;
@@ -1478,13 +1501,20 @@ static int rp_prepare_(int layered) {
         nvn_hm_put(&g_fbs, &fk, fb);
     }
     P.rp = rp; P.key = k; P.w = w; P.h = h; P.layers = layers; P.fb = fb; P.layered = layered; if (layers > 1) g_layered_passes++;
+    if (had_pend) {
+        if (pend.fb == fb && pend.layers == layers) { P.key.clr = pend.key.clr; memcpy(P.clrv, pend.clrv, sizeof P.clrv); VkRenderPass cr = rp_get(&P.key); if (cr) { P.rp = cr; P.pending = 1; } else P.key.clr = 0; }
+        else { __typeof__(P) now = P; P = pend; if (rp_start()) { g_clear_only++; rp_end(); } P = now; }   // other targets: the clears' pass first, as the commands were ordered
+    }
     return 1;
 }
 static int rp_prepare(void) { return rp_prepare_(0); }
 static int rp_start(void) {
     if (P.active) return 1;
+    P.pending = 0;   // before cb(): its rp_end would begin the pass for the waiting clears itself
     VkCommandBuffer c = cb(); if (!c) return 0;
-    VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = P.rp, .framebuffer = P.fb, .renderArea = {{0, 0}, {P.w, P.h}}};
+    VkClearValue cv[9]; uint32_t na = 0;   // the clears the pass begins with, in attachment order (rp_get): by colour slot, then depth-stencil (P.clrv[8])
+    if (P.key.clr) { for (uint32_t i = 0; i < P.key.ncolor; i++) if (P.key.color[i]) cv[na++] = P.clrv[i]; if (P.key.depth) cv[na++] = P.clrv[8]; g_clear_loads++; }
+    VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = P.rp, .framebuffer = P.fb, .renderArea = {{0, 0}, {P.w, P.h}}, .clearValueCount = na, .pClearValues = na ? cv : NULL};
     if (prof_on()) prof_pass_begin();
     vkCmdBeginRenderPass(c, &bi, VK_SUBPASS_CONTENTS_INLINE); bf_reset(); crumb('p', NULL, NULL, P.w, P.h);
     P.active = 1; g_passes++;
@@ -3354,7 +3384,15 @@ static int vk_dispatch(const p_dispatch *dp) {
     if (s->upsq && upsq_run(s)) { g_dispatches++; C->ndraw++; return 1; }   // a game's upscaler network replaced (gfx_vk_upsq.inc)
     if (g_e5_need) { cpipe_t *ce = cpipe_e5(s, g_e5_need); if (!ce) return 0; cp = ce; }   // E5B9G9R9 storage images: the pipeline that packs RGB9E5 into their R32_UINT views
     VkCommandBuffer c = cb(); if (!c) return 0;
-    cb_barrier();
+    // DM_VK_CS_BARRIER (a test switch): 1: one barrier between two dispatches with nothing else recorded between them (the one after the first), instead of its barrier
+    // after and the next one's before; 2: the same, with the dispatch's side of each barrier the compute stage alone rather than every stage
+    static int csb = -1; if (csb < 0) { const char *e = getenv("DM_VK_CS_BARRIER"); csb = e ? atoi(e) : 0; if (csb) LOG("[vk] DM_VK_CS_BARRIER=%d: dispatch barriers %s", csb, csb == 2 ? "merged, compute stage" : "merged"); }
+    int merged = csb && C == g_csb_chunk && g_barriers == g_csb_barriers && g_passes == g_csb_passes && C->ndraw == g_csb_ndraw;   // nothing recorded since the last dispatch's barrier after it
+    if (!merged) {
+        if (csb == 2) { VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+                       vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL); g_barriers++; }
+        else cb_barrier();
+    } else g_csb_merged++;
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p);
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pl, 0, 1, &set, s->ndyn, dyn);
     if (s->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pl)) return 0;
@@ -3365,8 +3403,11 @@ static int vk_dispatch(const p_dispatch *dp) {
     vkCmdDispatch(c, g[0], g[1], g[2]); crumb(dp->ind ? 'C' : 'c', s->key, NULL, g[0], g[1] * g[2]);
     bc_end(c, bcid);
     if (pr_i >= 0) { g_prof[pr_i].s1 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->pq, (uint32_t)g_prof[pr_i].s1); }
-    cb_barrier();
+    if (csb == 2) { VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+                   vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL); g_barriers++; }
+    else cb_barrier();
     g_dispatches++; C->ndraw++;
+    g_csb_chunk = C; g_csb_barriers = g_barriers; g_csb_passes = g_passes; g_csb_ndraw = C->ndraw;   // what the next dispatch checks before leaving out its barrier before (DM_VK_CS_BARRIER)
     return 1;
 }
 
@@ -3449,7 +3490,15 @@ static VkClearRect clear_rect_layers(VkRect2D r) { return (VkClearRect){r, 0, P.
 // A colour clear of target idx limited by the scissor and / or a channel mask (gfx_vk.c clear_color takes the full ones)
 static void clear_color_pass(const p_clear_color *cc) {
     bf_reset();   // its pipeline and dynamic state are set behind the bind filter (bf_*)
-    uint32_t nl; if (!clear_rp_prepare(cc->index, (cc->mask & 0xf) == 0xf, &nl) || !rp_start()) return;
+    uint32_t nl; if (!clear_rp_prepare(cc->index, (cc->mask & 0xf) == 0xf, &nl)) return;
+    if (clear_load_on() && !P.active && (cc->mask & 0xf) == 0xf) {   // a full clear before the pass's first draw: the pass's load op for that slot (rp_start), nothing recorded now
+        VkRect2D fr = clear_rect(); int fi = dup_slot(cc->index);
+        if (!fr.offset.x && !fr.offset.y && fr.extent.width == P.w && fr.extent.height == P.h && nl <= P.layers && fi >= 0 && fi < 8 && P.key.color[fi]) {
+            uint32_t old = P.key.clr; P.key.clr |= 1u << fi; P.clrv[fi].color = clear_value(P.key.color[fi], cc->rgba);
+            VkRenderPass cr = rp_get(&P.key); if (cr) { P.rp = cr; P.pending = 1; return; }
+            P.key.clr = old; }
+    }
+    if (!rp_start()) return;
     VkRect2D r = clear_rect(); if (!r.extent.width || !r.extent.height) return;
     int ci = dup_slot(cc->index); VkFormat f = P.key.color[ci];
     if (nl > 1 && P.layers < nl) RED_ONCE(172, "clear of colour slot %d in a pass of %u layers, its view %u: the layers past the pass are not cleared", cc->index, P.layers, nl);
@@ -3469,10 +3518,19 @@ static void clear_color_pass(const p_clear_color *cc) {
 // A depth-stencil clear limited by the scissor and / or a partial stencil mask
 static void clear_ds_pass(const p_clear_ds *cd, VkImageAspectFlags a) {
     bf_reset();   // as clear_color_pass
-    uint32_t nl; if (!clear_rp_prepare(-1, !(a & VK_IMAGE_ASPECT_STENCIL_BIT) || (cd->stencil_mask & 0xff) == 0xff, &nl) || !rp_start() || !P.key.depth) return;
+    uint32_t nl; if (!clear_rp_prepare(-1, !(a & VK_IMAGE_ASPECT_STENCIL_BIT) || (cd->stencil_mask & 0xff) == 0xff, &nl)) return;
+    uint32_t sm = (uint32_t)cd->stencil_mask & 0xff;
+    if (clear_load_on() && !P.active && P.key.depth && (!(a & VK_IMAGE_ASPECT_STENCIL_BIT) || sm == 0xff)) {   // as clear_color_pass: the pass's load op for depth and / or stencil
+        VkRect2D fr = clear_rect();
+        if (!fr.offset.x && !fr.offset.y && fr.extent.width == P.w && fr.extent.height == P.h && nl <= P.layers) {
+            uint32_t old = P.key.clr; P.key.clr |= ((a & VK_IMAGE_ASPECT_DEPTH_BIT) ? 1u << 8 : 0) | ((a & VK_IMAGE_ASPECT_STENCIL_BIT) ? 1u << 9 : 0);
+            if (a & VK_IMAGE_ASPECT_DEPTH_BIT) P.clrv[8].depthStencil.depth = cd->depth; if (a & VK_IMAGE_ASPECT_STENCIL_BIT) P.clrv[8].depthStencil.stencil = (uint32_t)cd->stencil;
+            VkRenderPass cr = rp_get(&P.key); if (cr) { P.rp = cr; P.pending = 1; return; }
+            P.key.clr = old; }
+    }
+    if (!rp_start() || !P.key.depth) return;
     if (nl > 1 && P.layers < nl) RED_ONCE(172, "depth-stencil clear in a pass of %u layers, its view %u: the layers past the pass are not cleared", P.layers, nl);
     VkRect2D r = clear_rect(); if (!r.extent.width || !r.extent.height) return;
-    uint32_t sm = (uint32_t)cd->stencil_mask & 0xff;
     if (!(a & VK_IMAGE_ASPECT_STENCIL_BIT) || sm == 0xff) {
         VkClearAttachment at = {a, 0, {.depthStencil = {cd->depth, (uint32_t)cd->stencil}}};
         VkClearRect cr = clear_rect_layers(r); vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;

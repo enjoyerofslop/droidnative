@@ -468,10 +468,12 @@ static VkCommandBuffer cb(void) {
 }
 // Every transfer / clear is ordered after everything before it (the images stay in GENERAL; one full barrier between operations; a chunk also ends with one, which
 // orders it before every later submission on the queue)
+static uint64_t g_barriers;   // full barriers recorded (gfx_vk_draw.inc vk_dispatch counts them to tell whether anything was recorded between two dispatches)
+static uint64_t g_mid_cuts, g_mid_skips;   // chunks sent in the middle of a pass, and cuts left out because chunks were still in flight (DM_VK_MID_IDLE, mid_cut_ok)
 static void cb_barrier(void) {
     if (!C || !C->open) return;
     VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
-    vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL); g_barriers++;
 }
 // ---------------- Staging: slices of pooled blocks ----------------
 // A transfer's staging lives until its chunk completes: an upload's bytes are read by the GPU in the chunk's command buffer, a readback's (texture-to-buffer copies,
@@ -1001,13 +1003,45 @@ static void chunk_done(chunk *c) {
 }
 static _Atomic uint64_t g_fence, g_done, g_presents;
 static pthread_mutex_t g_fmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_fcv = PTHREAD_COND_INITIALIZER;
+// DM_VK_GPU_FILL=<MiB> (a test switch, not a fix): while no chunk is in flight, the completion thread has the GPU fill a buffer of that many MiB over and over, so the clock
+// governor (msm-adreno-tz sizes the Adreno's clock to its busy share) sees a busy GPU through the game's CPU-bound gaps. A test of the clock's part in the frame's GPU time
+static struct { int on; VkBuffer buf; VkDeviceMemory mem; VkCommandPool pool; VkCommandBuffer cb; VkFence fence; uint64_t n, ns; } g_fill;
+static int fill_init(void) {
+    static int tried; if (tried) return g_fill.on; tried = 1;
+    const char *e = getenv("DM_VK_GPU_FILL"); int mb = e ? atoi(e) : 0; if (mb <= 0) return 0;
+    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)mb << 20, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    if (vkCreateBuffer(g_vk.dev, &bc, NULL, &g_fill.buf) != VK_SUCCESS) return 0;
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g_vk.dev, g_fill.buf, &mr);
+    uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); if (mt == UINT32_MAX) mt = vkb_mem_type(mr.memoryTypeBits, 0);
+    VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt};
+    if (mt == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ma, NULL, &g_fill.mem) != VK_SUCCESS || vkBindBufferMemory(g_vk.dev, g_fill.buf, g_fill.mem, 0) != VK_SUCCESS) return 0;
+    VkCommandPoolCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = g_vk.qf};
+    if (vkCreateCommandPool(g_vk.dev, &pc, NULL, &g_fill.pool) != VK_SUCCESS) return 0;
+    VkCommandBufferAllocateInfo ca = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_fill.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+    if (vkAllocateCommandBuffers(g_vk.dev, &ca, &g_fill.cb) != VK_SUCCESS) return 0;
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(g_fill.cb, &bi); vkCmdFillBuffer(g_fill.cb, g_fill.buf, 0, VK_WHOLE_SIZE, 0); vkEndCommandBuffer(g_fill.cb);
+    VkFenceCreateInfo fc = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (vkCreateFence(g_vk.dev, &fc, NULL, &g_fill.fence) != VK_SUCCESS) return 0;
+    g_fill.on = 1; LOG("[vk] DM_VK_GPU_FILL=%d: the GPU fills %d MiB over and over while no chunk is in flight (a clock test)", mb, mb);
+    return 1;
+}
+static void fill_once(void) {   // the completion thread, the FIFO empty: one fill, waited for
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &g_fill.cb};
+    vkResetFences(g_vk.dev, 1, &g_fill.fence);
+    pthread_mutex_lock(&g_vk.qmu); VkResult r = vkQueueSubmit(g_vk.q, 1, &si, g_fill.fence); pthread_mutex_unlock(&g_vk.qmu);
+    if (r != VK_SUCCESS) { g_fill.on = 0; LOG("[vk] the GPU filler's submit failed (%d): off", r); return; }
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); vkWaitForFences(g_vk.dev, 1, &g_fill.fence, VK_TRUE, UINT64_MAX); g_fill.ns += clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0; g_fill.n++;
+}
 static void *chunk_thread(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-done");
     uint64_t last = 0;   // the GPU time the previous chunk ended (g_fgpu: each chunk counts its span after it)
     void dm_android_hint_thread(int32_t tid); dm_android_hint_thread(gettid());   // in the performance hint session (plat_android.c): the replay waits for its write-backs
     void dm_android_place_thread(int done); dm_android_place_thread(1);   // the placement experiment (DM_VK_PIN_DONE, DM_VK_UCLAMP_MIN), off by default
     for (;;) {
-        pthread_mutex_lock(&g_cmu); while (!g_fifo_n) pthread_cond_wait(&g_ccv, &g_cmu); chunk *c = g_fifo[0]; pthread_mutex_unlock(&g_cmu);
+        pthread_mutex_lock(&g_cmu);
+        while (!g_fifo_n) { if (fill_init()) { pthread_mutex_unlock(&g_cmu); fill_once(); pthread_mutex_lock(&g_cmu); } else pthread_cond_wait(&g_ccv, &g_cmu); }   // (fill_once: DM_VK_GPU_FILL, a clock test)
+        chunk *c = g_fifo[0]; pthread_mutex_unlock(&g_cmu);
         rec_wait_submitted(c->rq_ticket);   // a deferred submission reached the queue first (gfx_vk_rec.inc); before w0, so the recorder's lag is not taken for GPU time
         uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
         VkResult fr = vkWaitForFences(g_vk.dev, 1, &c->fence, VK_TRUE, UINT64_MAX);
@@ -2065,13 +2099,14 @@ void dm_acquire_paced(uint64_t ns) { atomic_fetch_add_explicit(&g_hint_paced, ns
 // would settle just above what the fit trial accepts and stay boosted at hold k. The frame step sees that cost once its own cost leaves the present's sleep out (plan A1).
 // Without the frame step (no cap, the game's own step) the target is the declared period. *thermal: the thermal cap holds 30 fps (plat_android.c closes the session then)
 static void hint_frame(uint64_t now, uint64_t from) {   // the present thread, before its pacing sleep; from: when the last one ended (0 = no present yet)
-    void dm_android_hint_frame(uint64_t work_ns, const int32_t *tids, int n, uint64_t hold_ns, int thermal);
+    void dm_android_hint_frame(uint64_t work_ns, const int32_t *tids, int n, uint64_t hold_ns, int thermal, uint64_t gpu_ns);
     uint64_t nvn_fstep_hold(int *k, int *kmin, int *thermal);
+    static uint64_t gpu_last; uint64_t gpu_now = atomic_load(&g_gpu_ns), gpu = gpu_now - gpu_last; gpu_last = gpu_now;   // the GPU busy time of the chunks completed since the last present (DM_VK_ADPF_GPU)
     int32_t t[4]; pthread_mutex_lock(&g_hint_mu); int n = g_hint_ntid; memcpy(t, g_hint_tid, sizeof t); g_hint_ntid = 0; pthread_mutex_unlock(&g_hint_mu);
     atomic_fetch_add_explicit(&g_hint_gen, 1, memory_order_relaxed);
     uint64_t paced = atomic_exchange_explicit(&g_hint_paced, 0, memory_order_relaxed), span = from && now > from ? now - from : 0;
     int k, kmin, th; uint64_t vs = nvn_fstep_hold(&k, &kmin, &th), hold = vs ? (uint64_t)(FSTEP_FIT * (k - 1 > kmin ? k - 1 : kmin) * (double)vs) : 0;
-    dm_android_hint_frame(span > paced && span < 1000000000ull ? span - paced : 0, t, n, hold, th);   // a second or more since the last present (loading, the app in the background) is no frame
+    dm_android_hint_frame(span > paced && span < 1000000000ull ? span - paced : 0, t, n, hold, th, gpu < 1000000000ull ? gpu : 0);   // a second or more since the last present (loading, the app in the background) is no frame
 }
 // DM_VK_PLACE_LOG=1: the CPUs the replay ran on, sampled at each submit and logged every 300 presents (mtl_present); the placement experiment's switches: plat_android.c
 static int place_log_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PLACE_LOG"); v = e && atoi(e); } return v; }
@@ -2152,6 +2187,13 @@ static void mid_poll(uint64_t presents) {
     int v = 0; if (fscanf(f, "%d", &v) == 1 && v > 0 && v != g_mid_draws) { LOG("[vk] chunks sent in the middle of a pass after %d draws (was %d)", v, g_mid_draws); g_mid_draws = v; }
     fclose(f);
 }
+// DM_VK_MID_IDLE=<n> (a test switch): a chunk is sent in the middle of a pass only while fewer than n chunks are in flight on the GPU (1: none). On a tiler the cut
+// costs a store and a load of the pass's targets; it is worth it only when the GPU would otherwise wait for the pass to end
+static int mid_cut_ok(void) {
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_MID_IDLE"); v = e ? atoi(e) : 0; if (v) LOG("[vk] DM_VK_MID_IDLE=%d: chunks sent in the middle of a pass only with fewer than %d in flight", v, v); }
+    if (!v || g_fifo_n < v) { g_mid_cuts++; return 1; }
+    g_mid_skips++; return 0;
+}
 static uint64_t g_op_warned;   // ops this replay does not handle, logged once each
 static uint64_t g_mesh_skipped;   // task / mesh draws skipped (OP_DRAW with DM_PRIM_MESH_TASKS)
 void mtl_exec(const uint8_t *p) {
@@ -2205,13 +2247,13 @@ void mtl_exec(const uint8_t *p) {
             case OP_CLEAR_DS: if (!rc_skips()) clear_ds((const p_clear_ds *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
             case OP_DRAW: if (rc_skips() || shadow_skips()) break;
-                if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
+                if (C && C->ndraw >= g_mid_draws && !vk_safe() && mid_cut_ok()) flush();
                 { p_draw t; const p_draw *dw = draw_rec(a, h.size, &t);   // short records: draw_rec (nvn_obj.h)
                   if (dw->prim == DM_PRIM_MESH_TASKS) {   // NVN2's DrawMeshTasks: the Adreno 740's driver (Vulkan 1.3.128) has no VK_EXT_mesh_shader, and no lowering is ported (nvn_mtl.m runs them as Metal mesh draws)
                       RED_ONCE(131, "task / mesh shader draws (NVN2 DrawMeshTasks) are skipped: no mesh shaders on this replay (Mario Kart World's roadside bushes and grass tufts)"); g_mesh_skipped++; break; }
                   if (!vk_draw(dw, NULL)) g_draws_dropped++; break; }
             case OP_DRAW_IDX: if (rc_skips() || shadow_skips()) break;
-                if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
+                if (C && C->ndraw >= g_mid_draws && !vk_safe() && mid_cut_ok()) flush();
                 { p_draw_idx t; if (!vk_draw(NULL, draw_idx_rec(a, h.size, &t))) g_draws_dropped++; break; }
             case OP_DISPATCH: if (!vk_dispatch((const p_dispatch *)a)) g_draws_dropped++; break;
             case OP_BARRIER: case OP_VP_SWIZZLE: case OP_BEGIN: break;   // the replay's own syncs stand for barriers; viewport swizzles are not replayed (as before the unhandled-op line)
