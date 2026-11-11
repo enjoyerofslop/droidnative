@@ -6,6 +6,8 @@
 // - when a word in a storage or uniform buffer that a shader binding the raw pool table reads points into a chunk, or a word in the first 4 KiB at such a pointer does
 //   (gm_lazy_ptrs, from stage_set): that chunk and the next, placed at once (a buffer is scanned again at most every 100 ms). Uniform buffers too: with storage buffers alone,
 //   Link and the Mad Scrubs went dark in a fight in Ocarina of Time's Sacred Grove, lit with every written chunk placed (DM_VK_RAW_GMEM_WRITTEN=1);
+// - in a pool a scanned pointer reached, every 200 ms the chunks the CPU has written (a page present or swapped out): a shader may index far into a pool from one pointer
+//   (an array of light probes, say), past the two chunks placed for it;
 // - every 200 ms or so at a submission's start (gm_lazy_tick), those a binding or a pointer wanted placed but which a pending write kept back (the swap waits for it there;
 //   inside stage_set it may not).
 // Chunks the CPU wrote but nothing binds or points to stay unplaced: a raw load from one reads 0. Placing every chunk the game had written (a page present or swapped out,
@@ -18,11 +20,11 @@
 // host write in gm_frz_prep (a system call writing a read-only page fails rather than faults). This is the design of nx2android's lazy pool backing and its freeze window
 // (vk_pool_of, nvn_dirty_freeze), written anew; it backs a chunk at its first GPU use as well, and backs every addressed pool once a shader uses raw memory, where this
 // places what a binding or a pointer reaches. DM_VK_RAW_GMEM_LAZY=0 (env.txt): whole pools at their first buffer address, as before
-typedef struct { uintptr_t lo, hi; const void *pool; uint8_t *st; uint32_t nch; int merge, want; } gm_lz;   // st: each chunk's state (LZ_*); merge: a binding crossed two of its pieces; want: a chunk of it is LZ_WANT (gm_lazy_tick visits only those)
+typedef struct { uintptr_t lo, hi; const void *pool; uint8_t *st; uint32_t nch; int merge, want, raw; } gm_lz;   // st: each chunk's state (LZ_*); merge: a binding crossed two of its pieces; raw: a scanned pointer reached it (its written chunks placed too); want: a chunk of it is LZ_WANT (gm_lazy_tick visits only those)
 enum { LZ_NO, LZ_WANT, LZ_PLACED, LZ_REFUSED };
 static gm_lz *g_lz; static int g_nlz, g_clz;   // under g_gm_pl
 static _Atomic int g_lz_any;
-static uint64_t g_lz_ptr_scans, g_lz_ptr_hits, g_lz_ptr, g_lz_ptr_ns;   // gm_lazy_ptrs: buffers scanned, words pointing into a chunked pool, chunks wanted for them
+static uint64_t g_lz_ptr_scans, g_lz_ptr_hits, g_lz_ptr, g_lz_ptr_ns, g_lz_raw_pools;   // g_lz_raw_pools: pools a pointer reached   // gm_lazy_ptrs: buffers scanned, words pointing into a chunked pool, chunks wanted for them
 static uint64_t g_lz_overlap;   // chunk runs refused for holding another pool's placed piece (gm_lz_run)
 static uint64_t g_lz_pools, g_lz_bind, g_lz_res, g_lz_waited, g_lz_busy, g_lz_scans, g_lz_scan_ns, g_lz_refused, g_lz_cross, g_lz_merges, g_lz_merge_ns, g_lz_merge_bytes;
 static _Atomic uint64_t g_frz_waits, g_frz_preps;
@@ -84,8 +86,8 @@ static int gm_lz_touched(uintptr_t a, uintptr_t z) {
     return 0;
 }
 static int gm_lz_written(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_WRITTEN"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_RAW_GMEM_WRITTEN=1: chunks the CPU wrote are placed too"); } return v; }
-static void gm_lz_scan(gm_lz *L) {   // DM_VK_RAW_GMEM_WRITTEN=1: the chunks not placed with a page written: wanted
-    if (!gm_lz_written()) return;
+static void gm_lz_scan(gm_lz *L) {   // the chunks not placed with a page written: wanted. Every pool with DM_VK_RAW_GMEM_WRITTEN=1; else only those a pointer reached (L->raw)
+    if (!gm_lz_written() && !L->raw) return;
     uint64_t t0 = gm_now();
     for (uint32_t c = 0; c < L->nch; c++) if (L->st[c] == LZ_NO && gm_lz_touched(L->lo + (uintptr_t)c * GM_CHUNK, gm_lz_end(L, c))) { L->st[c] = LZ_WANT; L->want = 1; g_lz_res++; }
     g_lz_scans++; g_lz_scan_ns += gm_now() - t0;
@@ -165,6 +167,7 @@ static void gm_lz_ptr_scan(uintptr_t addr, size_t n, int depth, gm_lz **hit, int
     for (size_t k = 0; k < nw; k++) {
         uint64_t v = w[k]; gm_lz *L = v >> 40 ? NULL : gm_lz_of((uintptr_t)v); if (!L) continue;
         g_lz_ptr_hits++; uint32_t c = (uint32_t)(((uintptr_t)v - L->lo) / GM_CHUNK); int got = 0;
+        if (!L->raw) { L->raw = 1; g_lz_raw_pools++; L->want = 1; }   // the shader may index anywhere in the pool from here: its written chunks go at the next tick (gm_lz_scan)
         for (uint32_t x = c; x < L->nch && x <= c + 1; x++) if (L->st[x] == LZ_NO) { L->st[x] = LZ_WANT; L->want = 1; g_lz_ptr++; got = 1; }
         if (got) { int dup = 0; for (int i = 0; i < *nhit && !dup; i++) dup = hit[i] == L; if (!dup && *nhit < 8) hit[(*nhit)++] = L; }
         if (!depth) gm_lz_ptr_scan((uintptr_t)v, L->hi - (uintptr_t)v, 1, hit, nhit);
@@ -221,8 +224,8 @@ static void gm_lazy_tick(void) {
     if (!atomic_load(&g_lz_any)) return;
     static uint64_t last; uint64_t now = gm_now(); int scan = now - last > 200000000ull;
     if (pthread_mutex_trylock(&g_gm_pl)) { g_lz_busy++; return; }
-    int wr = scan && gm_lz_written();   // the written-pages scan (DM_VK_RAW_GMEM_WRITTEN=1) visits every pool; otherwise only those with a merge or a wanted chunk (thousands of pools)
-    for (int i = 0; i < g_nlz; i++) { gm_lz *L = &g_lz[i]; if (L->merge) { gm_lz_merge(L); continue; } if (wr) gm_lz_scan(L); if (L->want) gm_lz_place(L, 1, 1); }
+    int wr = scan && gm_lz_written();   // the written-pages scan: every pool with DM_VK_RAW_GMEM_WRITTEN=1; otherwise the pools a pointer reached, and only pools with a merge or a wanted chunk are placed (thousands of pools)
+    for (int i = 0; i < g_nlz; i++) { gm_lz *L = &g_lz[i]; if (L->merge) { gm_lz_merge(L); continue; } if (wr || (scan && L->raw)) gm_lz_scan(L); if (L->want) gm_lz_place(L, 1, 1); }
     if (scan) last = now;
     pthread_mutex_unlock(&g_gm_pl);
 }
@@ -232,10 +235,10 @@ static void gm_lazy_stat(void) {
     uint64_t placed = 0, all = 0; pthread_mutex_lock(&g_gm_pl);
     for (int i = 0; i < g_nlz; i++) for (uint32_t k = 0; k < g_lz[i].nch; k++) { uint64_t len = gm_lz_end(&g_lz[i], k) - (g_lz[i].lo + (uintptr_t)k * GM_CHUNK); all += len; if (g_lz[i].st[k] == LZ_PLACED) placed += len; }
     int n = g_nlz; pthread_mutex_unlock(&g_gm_pl);
-    LOG("[vk] raw global memory in chunks: %d pools of %.1f MiB, %.1f MiB of them placed; chunks placed for a binding %llu, wanted for pointers %llu (%llu buffers scanned in %.0f ms with the placements they made, %llu words pointing into chunked pools), wanted for written pages %llu, kept back by a pending write %llu, "
+    LOG("[vk] raw global memory in chunks: %d pools of %.1f MiB, %.1f MiB of them placed; chunks placed for a binding %llu, wanted for pointers %llu (%llu buffers scanned in %.0f ms with the placements they made, %llu words pointing into chunked pools, %llu pools reached), wanted for written pages %llu, kept back by a pending write %llu, "
         "refused %llu (%llu runs over another pool's placed piece), pools merged for a binding across two pieces %llu (%.1f MiB, %.0f ms), bindings across a placed chunk %llu, placements put off (lock busy) %llu; %llu scans (%.2f ms in all); writes that waited for a swap %llu, host writes %llu; raw stores into chunks not placed "
         "(DM_VK_RAW_GMEM_SINK) %llu (cumulative; gfx_vk_gmem_lazy.inc)",
-        n, all / 1048576.0, placed / 1048576.0, (unsigned long long)g_lz_bind, (unsigned long long)g_lz_ptr, (unsigned long long)g_lz_ptr_scans, g_lz_ptr_ns / 1e6, (unsigned long long)g_lz_ptr_hits, (unsigned long long)g_lz_res, (unsigned long long)g_lz_waited, (unsigned long long)g_lz_refused, (unsigned long long)g_lz_overlap,
+        n, all / 1048576.0, placed / 1048576.0, (unsigned long long)g_lz_bind, (unsigned long long)g_lz_ptr, (unsigned long long)g_lz_ptr_scans, g_lz_ptr_ns / 1e6, (unsigned long long)g_lz_ptr_hits, (unsigned long long)g_lz_raw_pools, (unsigned long long)g_lz_res, (unsigned long long)g_lz_waited, (unsigned long long)g_lz_refused, (unsigned long long)g_lz_overlap,
         (unsigned long long)g_lz_merges, g_lz_merge_bytes / 1048576.0, g_lz_merge_ns / 1e6, (unsigned long long)g_lz_cross, (unsigned long long)g_lz_busy, (unsigned long long)g_lz_scans, g_lz_scan_ns / 1e6,
         (unsigned long long)atomic_load(&g_frz_waits), (unsigned long long)atomic_load(&g_frz_preps), (unsigned long long)atomic_load(&g_sink_hits));
 }
