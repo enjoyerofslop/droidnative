@@ -249,7 +249,7 @@ typedef struct chunk {
     uint64_t gf; int gtag;   // gtag: its GPU time counts toward frame gf's (g_fgpu, mtl_gpu_ms)
     stg_t *stg; int nstg, capstg; wb_t *wb; int nwb, capwb, nfwd; post_op *post; int npost, cappost; dead_t *dead; int ndead, capdead; cop_t *cop; int ncop, capcop;
     stg_t *sb; int nsb, csb;   // the staging pool blocks it took while recorded, the last one being cut (stg_take); back to the free list in chunk_done
-    arena_blk *ar; int nar, car, ar_cur, ar_last; uint8_t ar_hw[64]; uint32_t ar_hn;   // gfx_vk_draw.inc; ar_hw: the blocks each of its last 64 recordings used (ar_trim)
+    arena_blk *ar; int nar, car, ar_cur, ar_last;   // gfx_vk_draw.inc
     stg_t rb;   // its arena write-backs' GPU copies, read by the completion thread (gfx_vk_readback.inc): kept and grown, used the bytes copied in its last recording
     VkDescriptorPool *dp; int ndp, cdp, dp_cur; VkBufferView *bv; int nbv, cbv;
     VkDescriptorSet *dsc; int ndsc, cdsc, dsc_used;   // the depth-stencil copies' sets (gfx_vk_dscopy.inc dsc_set): made from its pools, handed out again once it completes
@@ -277,7 +277,7 @@ static void crumb(char kind, const char *a, const char *b, uint32_t n, uint32_t 
 static _Atomic uint64_t g_chunk_wait_ns;   // the replay's time in cur() waiting for a free chunk
 static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ccv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_seq, g_seq_done; static _Atomic int g_inflight_wb, g_inflight_cop, g_inflight_fwd; static int g_drawing;   // g_drawing: a draw is being made (its resources are in C)
-static void ar_trim(chunk *c); static void rp_end(void); static void views_drop(VkImage img); static void draw_chunk_reset(chunk *c); static void bf_reset(void); static int ds_recycle(void);   // gfx_vk_draw.inc
+static void rp_end(void); static void views_drop(VkImage img); static void draw_chunk_reset(chunk *c); static void bf_reset(void); static int ds_recycle(void);   // gfx_vk_draw.inc
 static void *chunk_thread(void *arg); static int stg_pool_on(void);
 // ---------------- Occlusion queries (NVN_COUNTER_TYPE_SAMPLES_PASSED) ----------------
 // NVN's samples passed is a counter on the queue: ResetCounter zeroes it, every draw after adds its samples, ReportCounter writes the sum at that point when the GPU gets
@@ -352,7 +352,6 @@ static chunk *cur(void) {   // the chunk being recorded: a free one is taken (wa
     if (t0) atomic_fetch_add(&g_chunk_wait_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0);
     C->busy = 1; C->seq = ++g_seq; C->nvn_fence = 0; C->ndraw = 0; C->ncr = 0;
     pthread_mutex_unlock(&g_cmu);
-    ar_trim(C);   // (gfx_vk_draw.inc: nothing reads its arena now, so blocks it no longer needs can go)
     return C;
 }
 // ---------------- Query resets ----------------

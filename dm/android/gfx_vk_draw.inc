@@ -590,7 +590,7 @@ static uint32_t ar_mem_type(uint32_t bits) {
 #define AR_USAGE (VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | \
                   VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT)   // also gfx_vk_readback.inc rb_speed
 // the current chunk's (gfx_vk.c): blocks kept and reused when it completes
-static uint64_t g_ar_bytes, g_ar_blocks, g_ar_trimmed;   // every chunk's arena blocks together (the raw memory line reports them); the bytes ar_trim freed
+static uint64_t g_ar_bytes, g_ar_blocks;   // every chunk's arena blocks together (they are kept: the raw memory line reports them)
 static int ar_new(VkDeviceSize n) {
     if (C->nar == C->car) { C->car = C->car ? 2 * C->car : 8; C->ar = realloc(C->ar, C->car * sizeof *C->ar); }
     arena_blk *a = &C->ar[C->nar]; memset(a, 0, sizeof *a);
@@ -602,16 +602,6 @@ static int ar_new(VkDeviceSize n) {
     if (mt == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ma, NULL, &a->m) != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, a->b, NULL); return 0; }
     vkBindBufferMemory(g_vk.dev, a->b, a->m, 0); vkMapMemory(g_vk.dev, a->m, 0, n, 0, (void **)&a->p); a->n = n; C->nar++; g_ar_bytes += n; g_ar_blocks++;
     return 1;
-}
-// DM_VK_ARENA_TRIM=1 (env.txt; being measured): a chunk's arena blocks were kept for good, so whatever was once copied in one recording (a load, a scene's copies before its pools were
-// placed) stayed committed in all eight chunks. When a chunk is taken to be recorded again (cur: nothing reads its arena any more), the blocks beyond the most any of its last 64
-// recordings used are freed. Its completion notes how many blocks each recording used (draw_chunk_reset)
-static int ar_trim_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ARENA_TRIM"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_ARENA_TRIM=1: arena blocks a chunk's last 64 recordings did not use are freed"); } return v; }
-static void ar_trim(chunk *c) {
-    if (!ar_trim_on() || c->ar_hn < 64 || !c->nar) return;
-    int keep = 1; for (int i = 0; i < 64; i++) if (c->ar_hw[i] > keep) keep = c->ar_hw[i];
-    for (int i = keep; i < c->nar; i++) { vkDestroyBuffer(g_vk.dev, c->ar[i].b, NULL); vkFreeMemory(g_vk.dev, c->ar[i].m, NULL); g_ar_bytes -= c->ar[i].n; g_ar_trimmed += c->ar[i].n; g_ar_blocks--; }
-    if (c->nar > keep) c->nar = keep;
 }
 // n bytes aligned to 256 (the largest minimum uniform / storage offset alignment); the arena's blocks are reused after each submission completes
 static uint8_t *ar_alloc(VkDeviceSize n, VkBuffer *b, VkDeviceSize *off) {
@@ -1364,7 +1354,6 @@ static int rp_start(void) {
 // sets free again for its next recording (ds_chunk_done; DM_VK_SET_RECYCLE=0: its pools reset)
 static void ds_chunk_done(chunk *c);
 static void draw_chunk_reset(chunk *c) {
-    { int hw = 0; for (int i = 0; i < c->nar; i++) if (c->ar[i].used) hw = i + 1; c->ar_hw[c->ar_hn++ & 63] = (uint8_t)(hw > 255 ? 255 : hw); }   // (ar_trim)
     for (int i = 0; i < c->nar; i++) c->ar[i].used = 0; c->ar_cur = 0;
     if (ds_recycle()) ds_chunk_done(c);
     else { for (int i = 0; i < c->ndp; i++) vkResetDescriptorPool(g_vk.dev, c->dp[i], 0); c->dp_cur = 0; c->ndsc = 0; c->nbcd = 0; }   // the reset freed the copies' and decodes' sets too

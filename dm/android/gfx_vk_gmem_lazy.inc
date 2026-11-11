@@ -171,7 +171,7 @@ static void gm_lazy_tick(void) {
     pthread_mutex_unlock(&g_gm_pl);
 }
 static void gm_lazy_stat(void) {
-    LOG("[vk] arena blocks kept by the chunks: %llu, %.1f MiB; %.1f MiB freed by DM_VK_ARENA_TRIM (gfx_vk_draw.inc ar_new, ar_trim)", (unsigned long long)g_ar_blocks, g_ar_bytes / 1048576.0, g_ar_trimmed / 1048576.0);
+    LOG("[vk] arena blocks kept by the chunks: %llu, %.1f MiB (gfx_vk_draw.inc ar_new)", (unsigned long long)g_ar_blocks, g_ar_bytes / 1048576.0);
     if (!g_lz_pools) return;
     uint64_t placed = 0, all = 0; pthread_mutex_lock(&g_gm_pl);
     for (int i = 0; i < g_nlz; i++) for (uint32_t k = 0; k < g_lz[i].nch; k++) { uint64_t len = gm_lz_end(&g_lz[i], k) - (g_lz[i].lo + (uintptr_t)k * GM_CHUNK); all += len; if (g_lz[i].st[k] == LZ_PLACED) placed += len; }
