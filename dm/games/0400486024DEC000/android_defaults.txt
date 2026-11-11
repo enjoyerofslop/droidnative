@@ -1,0 +1,5 @@
+# Switches this game gets on Android (build_android_from_nsp.py puts them in the game's defaults.txt; env.txt and the settings screen still win)
+# DM_VK_UPSCALER_SQUARE_CS: the game's upscaler network (compute fa3033d05c0a41d6, agl's NDSR: its 1440x810 scene to 1920x1080) is replaced by a bilinear scale and a
+# signed square (gfx_vk_upsq.inc). On the OnePlus Pad 3's Adreno 830 the network drew noise over the whole of Kokiri Forest; DeathKhan's nx2android fork replaced it
+# the same way on the Odin 3's Adreno 830, and Banana Native measured it at 58.5 ms a frame on the Galaxy Z Fold 8. No network detail is added
+DM_VK_UPSCALER_SQUARE_CS=fa3033d05c0a41d6
