@@ -1992,6 +1992,19 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** a test build that crashed the 40th pipeline build on purpose, Super Mario Odyssey on an Ayn Odin 2: `[dm] CRASH sig=11 … thread 12790 "vk-prewarm"`, then `[dm] pipeline being built by the crashing thread: thread 12790 "vk-prewarm", graphics, shaders 384597a04ae3928e 12bd959fa3ef29ce - - (vertex .z variant), topology 3, 6 colour targets`.
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) on a Retroid Pocket 5 ([Android baselines](../../dm/android/baselines.md), problem 2): its pipeline led to [subgroup operations in a stage the Adreno 650 runs none in](#subgroup-operations-rewritten-for-stages-the-gpu-runs-none-in).
 
+### A start-up list entry with a mesh shader in its vertex slot
+
+- **Symptom:** Android only: every start crashes a few seconds in, soon after the 30th frame, in the driver's shader compiler (`libllvm-qgl.so`), with `[dm] pipeline being built by the crashing thread: thread … "vk-prewarm", graphics, shaders <A> <B> - - (vertex .z variant)`. Shader A's `res.json` says `"stage": "ms"` (or `ts`, `tc`, `te`), and with `DM_VK_PREWARM=0` the game plays. Ocarina of Time on a OnePlus Pad 3: `CRASH sig=11` at `libllvm-qgl.so+0x63a4e4`, shaders `0c1ffecd02018fb0` and `7ad8843afe105a32`, with raw global memory on or off.
+- **Cause:** a pipeline Vulkan forbids, built by the replay; not a driver bug.
+  - `sh_get` makes every stage the replay doesn't draw (task, mesh, tessellation) `SH_TS`, with the vertex stage bit. A draw with one is skipped before it has a key (`vk_draw__`), so play never builds such a pipeline.
+  - The start-up list (`prewarm_thread`, [the pipeline cache written during play](#the-pipeline-cache-written-during-play)) makes its entries from their recorded shader keys alone. The list on that Pad 3 held an entry another build had written, with Ocarina of Time's mesh shader `0c1ffecd02018fb0` in the vertex slot; test builds of task and mesh shaders as compute had run there.
+  - Made as a vertex stage, the `MeshEXT` module crashed the compiler at every start.
+- **Fix:** `pk_stages_ok` (`gfx_vk_draw.inc`): each shader of a key must be its slot's stage (vertex, fragment, geometry; the fourth slot empty, as tessellation draws are skipped).
+  - The start-up list leaves out an entry that isn't, with one red line naming the shader, and counts them in its `pipelines made again from the list` line.
+  - `pipe_make` refuses such a key from any caller (`[RED] [vk] a pipeline with … shader … in its … slot is not made`).
+- **Check:** in Ocarina of Time's packed shaders on the Mac, `0c1ffecd02018fb0.res.json` has stage `ms`, and its `.spv` is a `MeshEXT` entry point (SPIR-V 1.4, `SPV_EXT_mesh_shader`). On the Pad 3, from its own list: `main` crashed as above, and with this check Kokiri played (4.0 fps, raw global memory off). The list logged `an entry with task, mesh or tessellation shader d4171cf9adf0504b in the vertex slot is left out`, and its summary said `755 made, … 45 failed, 32 left out (a shader in the wrong slot), of the first 832 of 833 records`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a OnePlus Pad 3.
+
 ### A GPU hang names the submission it was in
 
 - **Symptom:** Android only: `[RED] [vk] vkQueueSubmit failed: -4` (`VK_ERROR_DEVICE_LOST`), after which the picture stays as it was (a loading screen for good) and the GPU time reads 0, with a frame of about 3 s just before it and nothing else in the log to say where.
@@ -2165,6 +2178,24 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Fix:** `vk_driver_instance` wraps the calls that compile: `vkCreateDevice`, `vkCreateShaderModule`, `vkCreateGraphicsPipelines`, `vkCreateComputePipelines`, and `vkQueueSubmit`, where a driver may compile what it deferred. Each runs with FPCR 0 and gives the caller's back after, so every caller is covered, the start-up list and the pipeline threads too, and the game's own threads keep their FPCR. The pipeline cache's file is named apart (`pipeline.cache.fp0`), so pipelines compiled under flush-to-zero aren't taken from the old one. `DM_VK_FP_HOST=0` compiles with the caller's FPCR, as before. The log says the inherited value once ("the calling thread's FPCR is 0x1000000").
 - **Check:** OnePlus Pad 3 (Adreno 830, Qualcomm's driver), Ocarina of Time's `kokiri` route on a test build with #191, #193 and #189. With this change Kokiri Forest is lit as it should be: rocks, moss, lanterns, Navi, a Kokiri, leaves and fog. With `DM_VK_FP_HOST=0`, the same run is the yellow-white blow-out. 3.7 against 3.8 fps, GPU 47 against 46 ms: no cost.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Ocarina of Time's upscaler network, replaced for speed (Android)
+
+- **Symptom:** Android, Ocarina of Time in Kokiri Forest on a OnePlus Pad 3 (Adreno 830): the frame's tail is one compute dispatch, the upscaler network, 21 ms of the frame's 45 ms of GPU work, and the game waits for it in `nvnSyncWait` (stream C, q99, raw global memory on). Before #193 and #189 its output was streak noise.
+- **Cause:** the game upscales its 1440x810 scene to 1920x1080 with a neural network in one compute dispatch (agl's NDSR: HMMA tiles through shared memory, emulated). It picks one of four networks by its dynamic resolution: `fa3033d05c0a41d6`, `7c511cc23ff85d14`, `b106afba1a18faa9` and `d99fbeeb53d38847`.
+  - Its noise was not the network's: its input, `a335c1db6270c355`'s E5B9G9R9 texture, was never written ([An E5B9G9R9 texture bound to a compute shader's image slot](#an-e5b9g9r9-texture-bound-to-a-compute-shaders-image-slot-android), #193), and its warp operations ran on 64-lane subgroups ([Maxwell's 32-lane warps in a wider subgroup](#maxwells-32-lane-warps-in-a-wider-subgroup), #189). With both, the network draws the picture right.
+  - What is left is its cost.
+- **Fix:** an opt-in swap, the game's default through its `android_defaults.txt` (`DM_VK_UPSCALER_SQUARE=1`): the network is replaced by a bilinear scale and a signed square (`gfx_vk_upsq.inc`, `shaders/upscale_square.comp`), DeathKhan's nx2android idea written anew. No network detail is added.
+  - **Which shaders:** by interface, as BananaNative matches them (`ndsr_iface`): one combined 2D texture, one 2D storage image loaded and stored (no atomics), one read-only storage buffer, nothing else (`upsq_match`). All four networks have it, and so do 49 more of the game's compute shaders, other networks. `DM_VK_UPSCALER_SQUARE_CS` still lists keys besides.
+  - **Which dispatches:** only one whose input is E5B9G9R9 and whose output is a larger B10G11R11 image (`upsq_run`). E5B9G9R9 is the networks' square-root input; a B10G11R11 input is linear (BananaNative), and the square would be wrong for it. Any other dispatch of those shaders runs as the game made it.
+  - **What:** it samples the input at each output texel's centre, writes `x * |x|` into an RGBA16F intermediate and blits that into the output.
+  - `DM_VK_UPSCALER_SQUARE=0` (or `DM_VK_UPSCALER_SQUARE_CS=0`) runs the network. A GPU that can't filter, store or blit those formats runs it too, with a red line (129).
+- **Check:** Kokiri Forest with raw global memory on (#150).
+  - OnePlus Pad 3 (Adreno 830): replaced, the frame goes from 103 to 62 ms (10.4 to 15.8 fps), and `nvnSyncWait` from 21 to 1 ms (stream C, q99).
+  - Galaxy Z Fold 8 (Adreno 840), on Ocarina of Time's opt-in tree (#217): the network 11.0 fps (frame p50 88 ms, GPU 73 ms); replaced 17.8 and 16.0 fps over two launches (frame p50 54 and 63 ms, GPU 41 and 48 ms). The log names `fa3033d05c0a41d6`, "replaced (by its interface)".
+  - The picture: the same scene, lit and coloured alike (mean difference 6.4 / 255 at the route's end, within the 7.0 between two replaced launches, which differ by falling leaves and Navi), and softer: the network adds detail the bilinear scale does not (mean gradient 8.5 against 4.5–4.7).
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2).
+
 ### A render pass with colour slot 0 empty hangs a later pass on the Adreno 830 (Android)
 
 - **Symptom:** Breath of the Wild loses the GPU on a OnePlus Pad 3 (Adreno 830, driver 0x8032004a) at its first frame in the field: `vkQueueSubmit` gives -4 and the loading screen stays up. Before that, one submission a frame takes 250–340 ms on the GPU with its end timestamp never written: the driver's hang recovery. The hang report names one draw, a vertical blur into a 640×360 RGBA8 target (vertex `2decd3e894b3736a`, fragment `26ae1640f3448ba4`). An Ayn Odin 2 (Adreno 740) runs the same frames.
