@@ -66,7 +66,7 @@ ANDROID_TESTED = {
     '010003F003A34000',   # Pokémon: Let's Go, Pikachu! (Playable – minor issues through the rival's first battle)
     '0100000011D90000',   # Pokémon Brilliant Diamond (Playable – minor issues through Lake Verity's first battle)
     '0100DCD01525A000',   # Persona 3 Portable (Playable – minor issues through the first battle)
-    '01006F8002326000',   # Animal Crossing: New Horizons
+    '01006F8002326000',   # Animal Crossing: New Horizons (Playable – major issues through the first night)
     '0100000000010000',   # Super Mario Odyssey
     '01006A800016E000',   # Super Smash Bros. Ultimate
     '01006BB00C6F0000',   # The Legend of Zelda: Link's Awakening
