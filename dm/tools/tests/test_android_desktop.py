@@ -391,3 +391,8 @@ class VkCatalog(unittest.TestCase):   # the Vulkan driver catalog (dm/android/vk
         self.assertEqual(vk_catalog.check([e], lambda url: rel(f'sha256:{e["zip_sha256"]}')), [])
         self.assertIn('has changed', vk_catalog.check([e], lambda url: rel('sha256:' + '0' * 64))[0])
         self.assertIn('no longer', vk_catalog.check([e], lambda url: rel('x', 'other.zip'))[0])
+
+    def test_a_report_names_the_driver_and_its_last_start(self):   # every "it doesn't work on Turnip" report needs the driver named
+        h = ex.header({'version': '0.8.0', 'phone': 'Odin2', 'android': '13', 'gpu': 'Adreno (TM) 740', 'vk_driver': 'Mr. Purple Turnip T30', 'vk_result': 'fell back no Vulkan device'})
+        self.assertIn('Vulkan driver: Mr. Purple Turnip T30 (last start: fell back no Vulkan device)', h)
+        self.assertFalse(any('Vulkan driver' in x for x in ex.header({'phone': 'Odin2'})))

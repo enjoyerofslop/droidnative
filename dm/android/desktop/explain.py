@@ -119,13 +119,14 @@ def redact(text, home):   # bug_report's rules; Windows spells the home folder w
     return bug_report.redact(text, home)[0]
 
 
-def header(info):   # info: version, title, stage, k, n, game, game_id, game_version, phone, android, gpu
+def header(info):   # info: version, title, stage, k, n, game, game_id, game_version, phone, android, gpu, vk_driver, vk_result
     st = info.get('stage') or ''
     lines = [f'**DroidPlay {info.get("version") or "?"}** on {system_name()}',
              f'**{info.get("title") or "A build"}** stopped' + (f' at {stage_name(st)} (`{st}`' + (f', stage {info["k"]} of {info["n"]}' if info.get('k') else '') + ')' if st else '')]
     if info.get('game_id'): lines.append(f'Game: {info.get("game") or "?"} `{info["game_id"]}`' + (f' v{info["game_version"]}' if info.get('game_version') else ''))
     if info.get('phone'):
         lines.append('Phone: ' + ' · '.join(x for x in (info['phone'], f'Android {info["android"]}' if info.get('android') else '', info.get('gpu') or '') if x))
+    if info.get('vk_driver'): lines.append(f'Vulkan driver: {info["vk_driver"]}' + (f' (last start: {info["vk_result"]})' if info.get('vk_result') else ''))   # DM_VK_DRIVER: a Turnip report needs it
     return lines
 
 

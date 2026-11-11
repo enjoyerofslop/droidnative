@@ -129,7 +129,17 @@ carries the game, so never share it. How it is packed: [A game app](../dm/androi
 
 On a phone with an Adreno GPU, a game can run on a Vulkan driver you put on the phone instead of the system's, as in Switch emulators: usually a build of Mesa's
 open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666/purple-turnip/releases). The app carries what loads it
-([libadrenotools](../dm/third_party/libadrenotools/README.md)), so trying one needs no new build:
+([libadrenotools](../dm/third_party/libadrenotools/README.md)), so trying one needs no new build.
+
+**In DroidPlay for Windows:** the game's options (the gear beside Play) › **Advanced options** › **Vulkan driver**. It lists the phone's own driver (the default)
+and the drivers in DroidPlay's catalog (`dm/android/vk_drivers.json`): Turnip builds pinned by their checksums, each marked for the picked phone's GPU: ✓ tested by
+DroidPlay on that Adreno, with what was run; ○ listed by its builder, not tested here; or not for this GPU. A driver downloads from its builder's own release the
+first time you pick it (the app asks first, and checks it). **Add your own…** takes a driver package (`.adpkg.zip`, `.zip`) or `.so` after checking it is an Android
+arm64 driver; it can't check what the code does, so add only drivers from builders you trust. The choice reaches the phone with the game's next install, or at once
+with **Apply to phone now** (no rebuild); the dialog also says which driver the phone's copy uses and how its last start went. A game app (**Build a game app…**)
+carries the driver chosen in its dialog. On a phone without an Adreno GPU none of this applies, and the game runs on the phone's own driver.
+
+**By hand:**
 
 1. Unzip the driver package (`turnip_mrpurple_T30-toasted.adpkg.zip`, say). It holds a `.so` (`vulkan.purple.so`) and a `meta.json` that names it.
 2. Copy the `.so` into `Android/data/org.nxnative.android/files/`, beside `env.txt`: `adb push vulkan.purple.so /sdcard/Android/data/org.nxnative.android/files/`.
