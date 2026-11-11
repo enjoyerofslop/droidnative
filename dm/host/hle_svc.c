@@ -83,6 +83,7 @@ static int g_gf_n;                 // how many; 0 while the guest is anonymous. 
 static size_t g_gf_chunk;          // each file's size; the last one holds the rest of the block
 static uint64_t g_gf_min_free;     // DM_GUEST_FILE_MIN_FREE in bytes: the free space on the files' disk, less what the dirty pages may still take, under which the game is stopped; 0 = never
 static int g_gf_punch = 1;         // DM_GUEST_FILE_PUNCH=0: what the game gives back keeps its disk blocks (only PROT_NONE), as before
+static int g_gf_alias_now;         // DM_GUEST_FILE_ALIAS_NOW=1 (Android): the alias region's given-back pages punched at once, not by the 10-s sweep (guest_release)
 static _Atomic uint64_t g_gf_punched;   // bytes given back as holes (guest_file_punch)
 
 #ifdef __APPLE__   // the guest in files is for the iPhone and the Mac: Android keeps it anonymous (guest_file_init)
@@ -303,8 +304,12 @@ static void guest_file_init(void) {
     if (!dm_android_guest_files_map(g_as, g_reserve, chunk, n, g_gf_tab, g_gf_min_free, why, sizeof why)) { LOG("[RED] [mem] guest memory: anonymous (DM_GUEST_FILE: %s)", why); return; }
     g_gf_n = n; g_gf_chunk = chunk;
     { const char *pu = getenv("DM_GUEST_FILE_PUNCH"); if (pu && *pu) g_gf_punch = atoi(pu) > 0; }
-    LOG("[mem] guest memory: %d files of %.2f GB in %s (unnamed or unlinked, sparse, shared), %.2f GB in all; holes punched where the game gives memory back: %s",
-        n, chunk / G, getenv("DM_GUEST_FILE_DIR"), g_reserve / G, g_gf_punch ? "on" : "off (DM_GUEST_FILE_PUNCH=0)");
+    // Linux writes a dirty page out after vm.dirty_expire_centisecs (2 s on a Galaxy Z Fold 8), and most of what Ocarina of Time dirties in the files is the alias region's
+    // pages it writes and gives back again soon after (a Pixel 9 Pro XL, DM_GUEST_FILE_HOT): punched at once, such a page is dropped before it is written out. A page mapped
+    // again then faults in from a hole, a zero-filled page cache page; the Mac waits a sweep for that reason
+    { const char *an = getenv("DM_GUEST_FILE_ALIAS_NOW"); g_gf_alias_now = an && atoi(an) > 0; }
+    LOG("[mem] guest memory: %d files of %.2f GB in %s (unnamed or unlinked, sparse, shared), %.2f GB in all; holes punched where the game gives memory back: %s%s",
+        n, chunk / G, getenv("DM_GUEST_FILE_DIR"), g_reserve / G, g_gf_punch ? "on" : "off (DM_GUEST_FILE_PUNCH=0)", g_gf_punch && g_gf_alias_now ? ", the alias region's at once (DM_GUEST_FILE_ALIAS_NOW=1)" : "");
     dm_android_guest_file_watch(g_gf_tab, g_gf_n, g_gf_min_free, guest_file_sweep, &g_gf_punched);
 #elif !defined(__APPLE__)
     const char *e = getenv("DM_GUEST_FILE"); if (e && atoi(e) > 0) LOG("[RED] [mem] guest memory: anonymous (DM_GUEST_FILE is not supported on this system)");
@@ -531,7 +536,7 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 static int guest_release(uintptr_t lo, uintptr_t hi, int alias) {
     if (g_gf_n) {
         if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);
-        if (g_gf_punch && !alias) guest_file_punch(lo, hi);
+        if (g_gf_punch && (!alias || g_gf_alias_now)) guest_file_punch(lo, hi);
         else if (g_gf_punch) { size_t pg = (size_t)getpagesize(); for (uint64_t h = (lo - (uintptr_t)g_alias) / pg, e = (hi - (uintptr_t)g_alias) / pg; h < e; h++) g_alias_rel[h >> 6] |= UINT64_C(1) << (h & 63); }
         return 0;
     }
