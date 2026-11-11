@@ -1055,9 +1055,11 @@ static void gm_place(const void *mem, uint64_t size, int live), gm_unplace(const
 static __thread const void *t_pf_mem; static __thread int t_pf_flags;
 void mtl_pool_flags(const void *mem, uint64_t size, int flags) { (void)size; t_pf_mem = mem; t_pf_flags = flags; }
 static int gm_code_skip(int flags);   // gfx_vk_gmem.inc
+static void fb_take(const void *mem, uint64_t size, int flags); static void fb_gone(const void *mem); static void fb_stat(void);   // gfx_vk_fileback.inc
 void mtl_pool_add(const void *mem, uint64_t size) {
     int flags = t_pf_mem == mem ? t_pf_flags : 0;
     if (!gm_code_skip(flags)) gm_place(mem, size, 0);   // a pool made again where one had a buffer address: placed now, before the replay knows the range (gfx_vk_gmem.inc)
+    fb_take(mem, size, flags);   // backed by a file (DM_VK_POOL_FILEBACK, gfx_vk_fileback.inc), before the dirty tracker protects it
     pthread_mutex_lock(&g_pool_mu);
     if (g_npool == g_cappool) { g_cappool = g_cappool ? 2 * g_cappool : 64; g_pools = realloc(g_pools, g_cappool * sizeof *g_pools); }
     int at = g_npool; while (at > 0 && g_pools[at - 1].lo > (const uint8_t *)mem) at--;   // pools come and go rarely: a move keeps the order
@@ -1072,6 +1074,7 @@ void mtl_pool_del(const void *mem) {
     atomic_fetch_add_explicit(&g_pool_gen, 1, memory_order_release);
     pthread_mutex_unlock(&g_pool_mu);
     gm_unplace(mem);
+    fb_gone(mem);
 }
 static int pool_find(const uint8_t *a, uint64_t len) {   // under g_pool_mu: the pool holding [a, a + len), or -1
     int lo = 0, hi = g_npool - 1, hit = -1;   // the last pool whose start ≤ a
@@ -2483,7 +2486,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     frame, mb, g_tex.n, (unsigned long long)g_pkg_uploads, (unsigned long long)g_pkg_reuploads, (unsigned long long)(g_up_bytes >> 20), (unsigned long long)g_lsnap, (unsigned long long)g_lsnap_stale,
     (unsigned long long)atomic_load(&g_lwb_whole), (unsigned long long)atomic_load(&g_lwb_diff), (unsigned long long)(atomic_load(&g_lwb_bytes) >> 10), (unsigned long long)atomic_load(&g_lwb_same),
     atomic_load(&g_lwb_ns) / 1e6, (unsigned long long)atomic_load(&g_ab_taken), (unsigned long long)atomic_load(&g_ab_noted), (unsigned long long)atomic_load(&g_ab_clean), (unsigned long long)atomic_load(&g_ab_differ), (unsigned long long)atomic_load(&g_ab_refused));
-    ev_stat();
+    ev_stat(); fb_stat();
     if (wb_revert_on()) rv_stat(frame);
     {   static unsigned long long f0; static uint64_t n0, b0, r0, t0;   // since the last line, a frame on average
         uint64_t n = atomic_load(&g_awb_n), b = atomic_load(&g_awb_bytes), r = atomic_load(&g_awb_rb), t = atomic_load(&g_wb_ns); double fr = frame > f0 ? (double)(frame - f0) : 1;
