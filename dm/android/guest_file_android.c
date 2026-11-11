@@ -2,7 +2,8 @@
 // otherwise, and Android 17's per-app MemoryLimiter on a Pixel 9 Pro XL (16 GB) killed Ocarina of Time before Kokiri Forest in 3 of 3 runs at 8 GiB resident and 4 GiB of swap
 // ("MemoryLimiter:AnonSwap"), its 6.2 GB heap alone about 6.4 GB once touched; 12 GB phones end it under lmkd at 10.4-11.3 GB of total PSS with 4-6 GB of it in zram. Pages of a
 // file mapped shared are page cache instead: the kernel writes dirty ones out and drops clean ones rather than swapping them. The cost is the writes: dirty pages go to flash
-// after vm.dirty_expire_centisecs whatever the memory state (the 10-s line counts them).
+// after vm.dirty_expire_centisecs whatever the memory state (the 10-s line counts them). Measured on a Galaxy Z Fold 8 (dirty_expire 2 s), Ocarina of Time in Kokiri Forest: swap
+// 0.19 GB against 4-5 GB anonymous, but about 100 MB/s written in play, some 360 GB an hour: a test, not for play, until only memory the game leaves alone goes in the files.
 // The files are made in DM_GUEST_FILE_DIR (front_android.c: the app's internal storage, guestmem; external storage is a FUSE mount, where shared writable mappings are slow
 // or refused), unnamed (O_TMPFILE) or unlinked at once, sparse, and mapped over the reservation at the same addresses, as on the Mac and iPhone (hle_svc.c guest_files_map)
 #include "../host/dm.h"
