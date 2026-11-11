@@ -133,6 +133,7 @@ typedef struct {
     uint8_t dsbig;   // bit tf: one set of its layout (dsl, dsl_tf) does not fit an empty pool (sh_get ds_fits, else ds_alloc_n, RED 93): ds_get gives none for it, without making another pool
     uint8_t cbdyn[18], ndyn;   // set_reuse: cb[i] a dynamic uniform buffer, its offset at cbdyn[i] of the bind's (0xff: a plain one, its offset in the set); ndyn of them
     uint8_t pool;   // reads the texture pool by ID: its modules read the pool set (gfx_vk_pool.inc), which its pipelines' layouts take at POOL_SET
+    uint64_t e5; void *cpe5;   // compute: the storage image bindings bound to E5B9G9R9 textures, and its pipeline with those packed (cpipe_e5, spv_e5.h)
 } vshader;
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
 // never matched the draw before, and stage_set wrote every set of every stage: Breath of the Wild about 7,500 a frame, vkUpdateDescriptorSets 3.4 ms a frame of the
@@ -2140,7 +2141,8 @@ static VkFormat view_format(const vtex *v, const view_t *vv) {
     if (!v->mutable_ || !fmt_bytes(f) || fmt_bytes(f) != fmt_bytes(v->fmt)) { RED_ONCE(118, "texture view in format %d over an image of format %d: read in the image's", f, v->fmt); return VK_FORMAT_UNDEFINED; }
     return f;
 }
-static int g_bind_bad;   // set by stage_set when a binding has no valid descriptor: the draw / dispatch is skipped
+static int g_bind_bad;
+static uint64_t g_e5_need;   // compute: the storage image bindings stage_set bound to E5B9G9R9 textures (vk_dispatch takes cpipe_e5 for them)   // set by stage_set when a binding has no valid descriptor: the draw / dispatch is skipped
 // An image slot's texture made without storage use takes it (vt_storage_up), unless it is a target of the pass a draw prepared (rp_prepare ran before stage_set): rp_start would
 // begin that pass's framebuffer, made on the image the upgrade replaces. A dispatch's copy ends the pass, and the next rp_prepare makes the targets' views again
 // DM_VK_STORAGE_UP (env.txt): 0 leaves such a texture as before (bound as it is, an sRGB one skipped). 1 (default) upgrades one whose own format the GPU stores to, and still
@@ -2150,8 +2152,12 @@ static int st_up_mode(void) { static int m = -1; if (m < 0) { const char *e = ge
 static int img_up(vtex *v, int compute) {
     int m = st_up_mode(); if (!m) return 1;
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, v->fmt, &fp);
-    if (m == 1 && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
-        RED_ONCE(125, "texture ser=%llu %ux%u format %d, made without storage use, is bound to an image slot in a format the GPU cannot store to: skipped (DM_VK_STORAGE_UP=2 stores it through its UNORM twin)", (unsigned long long)v->serial, v->w, v->h, v->fmt);
+    int e5 = v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && e5_store_on();   // stored through an R32_UINT view (vt_storage_up, spv_e5.h)
+    if (e5 && !compute) { RED_ONCE(126, "texture ser=%llu %ux%u E5B9G9R9 is bound to an image slot of a draw: only compute shaders are rewritten to pack it (spv_e5.h), skipped", (unsigned long long)v->serial, v->w, v->h); return 0; }
+    if (m == 1 && !e5 && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {   // said once for each format: a later one, once hidden behind the first, can be another cause
+        static uint8_t told[256]; static int other; int f_ = (int)v->fmt;
+        if (f_ >= 0 && f_ < 256 ? !told[f_] : !other) { if (f_ >= 0 && f_ < 256) told[f_] = 1; else other = 1;
+            LOG("[RED] [vk] texture ser=%llu %ux%u format %d, made without storage use, is bound to an image slot in a format the GPU cannot store to: skipped (DM_VK_STORAGE_UP=2 stores an sRGB one through its UNORM twin; said once for each format)", (unsigned long long)v->serial, v->w, v->h, v->fmt); }
         return 0; }
     if (!compute) { int hit = P.dv == v; for (int i = 0; i < 8; i++) hit |= P.cv[i] == v;
         if (hit) { RED_ONCE(124, "texture ser=%llu, made without storage use, is bound to an image slot of a draw that renders to it: skipped", (unsigned long long)v->serial); return 0; } }
@@ -2167,6 +2173,11 @@ static VkImageView storage_view(vtex *v, const view_t *vv, VkImageViewType vt, V
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && srgb_twin(f)) {
         VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, srgb_twin(f), &tp);
         if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = srgb_twin(f); fp = tp; }
+    }
+    // E5B9G9R9, which no GPU here stores to, through an R32_UINT view: the compute shader bound to it packs RGB9E5 (cpipe_e5, spv_e5.h)
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && e5_store_on()) {
+        VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, VK_FORMAT_R32_UINT, &tp);
+        if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = VK_FORMAT_R32_UINT; fp = tp; }
     }
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || v->conv) { RED_ONCE(104, "image format %d is not storage-capable here: skipped", f); return VK_NULL_HANDLE; }
     g_view_fmt = f == v->fmt ? VK_FORMAT_UNDEFINED : f;
@@ -2526,6 +2537,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             VkImageView iv = VK_NULL_HANDLE; vtex *v = !ri ? NULL : ce ? ce->v : vt_get(&ri->t);
             if (v && !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !img_up(v, s->stage == SH_CS)) { g_bind_bad = 1; v = NULL; }   // made without storage use (vt_storage_up)
             if (v) { iv = storage_view(v, ri->has_v ? &ri->v : NULL, vt, t->fmt); if (!iv) g_bind_bad = 1; }
+            if (iv && v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && s->stage == SH_CS) { if (t->binding < 64) g_e5_need |= 1ull << t->binding; else g_bind_bad = 1; }   // its pipeline packs RGB9E5 there (cpipe_e5)
             if (!iv) iv = dummy_storage(vt, t->fmt);
             if (!iv) g_bind_bad = 1;
             ii[nii + e] = (VkDescriptorImageInfo){VK_NULL_HANDLE, iv, VK_IMAGE_LAYOUT_GENERAL};
@@ -3066,9 +3078,24 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
 typedef struct { VkPipeline p; VkPipelineLayout pl; } cpipe_t;
 static nvn_hmap g_cpipes = {.klen = 8};
 static uint64_t g_dispatches;
+static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod);
 static cpipe_t *cpipe_get(vshader *s) {
     cpipe_t *cp = nvn_hm_get(&g_cpipes, &s); if (cp) return cp->p ? cp : NULL;
     cp = calloc(1, sizeof *cp); nvn_hm_put(&g_cpipes, &s, cp);
+    return cpipe_make(s, cp, &s->mod);
+}
+// The compute pipeline whose storage images at the bindings of mask are E5B9G9R9 textures bound through R32_UINT views (stage_set's g_e5_need): its module packs RGB9E5 there
+// (spv_e5.h). Same layout as cpipe_get's, so the set stage_set wrote binds to it. One kept per shader, made again when the bindings change; NULL: it cannot be (red in lm_code)
+static cpipe_t *cpipe_e5(vshader *s, uint64_t mask) {
+    cpipe_t *cp = s->cpe5;
+    if (cp && s->e5 == mask) return cp->p ? cp : NULL;
+    if (cp && s->e5 != mask) { cp = NULL; }   // another set of bindings: a new one (the old pipeline stays, as cpipe_get's never go)
+    char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
+    lmod *m = lm_new_e(p, 0, 0, mask, NULL);
+    cp = calloc(1, sizeof *cp); s->cpe5 = cp; s->e5 = mask; if (!cp || !m) return NULL;
+    return cpipe_make(s, cp, &m);
+}
+static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo ec = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &ec, NULL, &g_empty_dsl); }
     VkDescriptorSetLayout sl[POOL_SET + 1] = {s->dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, g_pool_dsl};   // the pool set after empty ones (gfx_vk_pool.inc)
     VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = s->pool ? POOL_SET + 1 : 1, .pSetLayouts = sl};
@@ -3076,7 +3103,7 @@ static cpipe_t *cpipe_get(vshader *s) {
     VkComputePipelineCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = cp->pl,
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .pName = "main"}};   // its module: lm_pipeline
     const char *pbk[4] = {s->key, NULL, NULL, NULL}; int pb = pb_begin('c', pbk, 0, 0, 0, 0);
-    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); VkResult pr = lm_pipeline(NULL, &pc, &pc.stage, &s->mod, 1, &cp->p);
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); VkResult pr = lm_pipeline(NULL, &pc, &pc.stage, mod, 1, &cp->p);
     pb_end(pb);
     atomic_fetch_add(&g_cpso_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); atomic_fetch_add(&g_cpso_made, 1);
     if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] compute pipeline of shader %s failed", s->key); cp->p = VK_NULL_HANDLE; return NULL; }
@@ -3116,11 +3143,12 @@ static int vk_dispatch(const p_dispatch *dp) {
     memcpy(g_cdim, g, sizeof g_cdim);
     VkDescriptorSet set; int ok; uint32_t dyn[18];
     for (int t = 0;; t++) {   // t 1: the set taken again from the chunk recorded now when a sync inside stage_set closed the one it came from (ds_moved)
-        g_bind_bad = 0; if (!cur()) return 0; uint64_t dseq = C->seq; int got = stage_set(s, 0, &set, dyn, pr, pst, 0, dseq); ok = got && !g_bind_bad;
+        g_bind_bad = 0; g_e5_need = 0; if (!cur()) return 0; uint64_t dseq = C->seq; int got = stage_set(s, 0, &set, dyn, pr, pst, 0, dseq); ok = got && !g_bind_bad;
         if (got || !ds_moved(dseq)) break;
         if (ds_again(t, 2)) return 0;
     }
     if (!ok) return 0;
+    if (g_e5_need) { cpipe_t *ce = cpipe_e5(s, g_e5_need); if (!ce) return 0; cp = ce; }   // E5B9G9R9 storage images: the pipeline that packs RGB9E5 into their R32_UINT views
     VkCommandBuffer c = cb(); if (!c) return 0;
     cb_barrier();
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p);

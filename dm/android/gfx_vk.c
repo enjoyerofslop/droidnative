@@ -31,6 +31,7 @@
 #include "spv_layer.h"   // layer and viewport output made ordinary outputs on a GPU that has none (gfx_vk_draw.inc spv_fit_layer)
 #include "spv_pool.h"
 #include "spv_wide.h"
+#include "spv_e5.h"   // E5B9G9R9 storage images through R32_UINT views, RGB9E5 packed by the shader (vt_storage_up, gfx_vk_draw.inc cpipe_e5)
 #include "spv_narrow.h"   // each subgroup of a GPU narrower than 32 lanes a warp of its own (gfx_vk_draw.inc spv_fit_narrow)
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
@@ -1229,6 +1230,9 @@ static vtex *vt_create(const tex_t *t) {
 // - A format the GPU cannot store to (sRGB) takes STORAGE for views in its UNORM twin alone (EXTENDED_USAGE, ext_store), which storage_view then makes.
 // Under g_bk; cb() ends an open render pass. 0: it cannot be (a decoded BC texture, multisample, depth or stencil, no format of it the GPU stores to)
 static uint64_t g_st_up;
+// An E5B9G9R9 texture bound to an image slot: no GPU here stores to a shared-exponent format, so it is stored through an R32_UINT view, the shader packing each texel
+// into RGB9E5 (spv_e5.h), and the texture keeps its format and its bits. DM_VK_E5_STORE=0 (env.txt): skipped, as before
+static int e5_store_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_E5_STORE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_E5_STORE=0: an E5B9G9R9 texture bound to an image slot is skipped"); } return v; }
 static int vt_storage_up(vtex *v) {
     if (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) return 1;
     VkFormat f = v->fmt, sf = f; VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
@@ -1236,7 +1240,8 @@ static int vt_storage_up(vtex *v) {
                             (v->type == VK_IMAGE_TYPE_3D && (v->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0);   // as vt_create makes them
     int ext = 0;
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {   // EXTENDED_USAGE is Vulkan 1.1's
-        VkFormatProperties tp = {0}; sf = srgb_twin(f); if (sf) vkGetPhysicalDeviceFormatProperties(g_vk.pd, sf, &tp);
+        VkFormatProperties tp = {0}; sf = srgb_twin(f); if (!sf && f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && e5_store_on()) sf = VK_FORMAT_R32_UINT;   // its views: R32_UINT, packed by the shader
+        if (sf) vkGetPhysicalDeviceFormatProperties(g_vk.pd, sf, &tp);
         if (!sf || !(tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || (VK_API_VERSION_MAJOR(g_vk.props.apiVersion) == 1 && VK_API_VERSION_MINOR(g_vk.props.apiVersion) < 1)) sf = VK_FORMAT_UNDEFINED;
         else { ext = 1; cf |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT; }
     }
@@ -1273,7 +1278,7 @@ static int vt_storage_up(vtex *v) {
     views_drop(v->img); dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem);
     v->img = img; v->mem = mem; v->usage = u; v->ext_store = ext; v->mutable_ = 1; v->fixed_fmt = 0; g_vt_gen++;
     if (g_st_up++ < 8) LOG("[vk] texture ser=%llu %ux%u format %d bound to an image slot without storage use: made again with it%s (%llu so far)", (unsigned long long)v->serial, v->w, v->h, f,
-                           ext ? ", stored through its UNORM twin" : "", (unsigned long long)g_st_up);
+                           ext ? (f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 ? ", stored through an R32_UINT view, RGB9E5 packed by the shader" : ", stored through its UNORM twin") : "", (unsigned long long)g_st_up);
     return 1;
 }
 // Upload a texture's guest storage (deswizzled on the CPU; BC decoded when the GPU lacks it). The dirty-page stamp is taken and the pages protected before reading (nvn_mtl.m pkg_upload_)
