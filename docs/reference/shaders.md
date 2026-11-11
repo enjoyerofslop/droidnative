@@ -1253,7 +1253,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Compute shared memory past the GPU's limit on Vulkan
 
-- **Symptom:** Android only, on Qualcomm's Adreno 830 driver (0x80320001): a compute dispatch that never ends. Three submissions in a row run about 250 ms until the driver's hang recovery cuts them short, then `vkQueueSubmit failed: -4` (the device lost), with fault addresses that look like floats (`0x3f800580`) or null plus an offset. GPU breadcrumbs (`DM_VK_BC`) name the dispatch, begun and never ended.
+- **Symptom:** Android only, on Qualcomm's Adreno 830 driver (0x80320001 on a Galaxy S25 Edge, 0x8032004a on a OnePlus Pad 3): a compute dispatch that never ends. Three submissions in a row run about 250 ms until the driver's hang recovery cuts them short, then `vkQueueSubmit failed: -4` (the device lost), with fault addresses that look like floats (`0x3f800580`) or null plus an offset. GPU breadcrumbs (`DM_VK_BC`) name the dispatch, begun and never ended.
 - **Cause:** the translator declares Maxwell's shared memory as a Workgroup array of 32-bit words at its full size, up to 48 KB. A Vulkan module may declare at most `maxComputeSharedMemorySize`, which is 32,768 bytes on that driver. Qualcomm's compiler takes the module anyway, and the dispatch runs in 0.2 ms when it is the only work. In the game it hangs. Turnip on the same GPU and Samsung's Xclipse 950 driver run the same module. The Mac moves such memory out ([Compute shared memory past 32 KB](#compute-shared-memory-past-32-kb)); the Android path left it in place.
 - **Fix:** `spv_tgspill.h`, run in `lm_code` (`gfx_vk_draw.inc` `spv_fit_tgs`) only on a module whose Workgroup storage is past the GPU's limit (`DM_VK_SHARED_MAX` sets a smaller one; `DM_SPV_TGSPILL=0` turns it off):
   - Each Workgroup array gets a place in one storage buffer at binding `SPV_TGS_BINDING` (110): a region per workgroup at the workgroup's index in the dispatch's grid, from `WorkgroupId` and `NumWorkgroups`, computed at the entry point's start into a Private variable. Each array has its own offset in the region.
@@ -1264,7 +1264,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:**
   - `dm/tools/tests/test_spv_tgspill.py`: the rewritten module passes `spirv-val`, has no Workgroup storage left, binds the buffer at 110, adds `NumWorkgroups` to the interface, gives the barrier's and the atomic's semantics UniformMemory, and places the second array at its offset. Arrays of vectors, and a whole-array use, are left alone.
   - With `DM_SPV_DIR` set to Mario Kart World's packed shaders: all 168 of its compute modules past 32 KB are rewritten and valid.
-- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) on a Galaxy S25 Edge: `2a89b6d4df731b8d`, a 24-bone skeleton's animation, then `a8310cf7c7acd0fe`, both among the 168 kernels of `DrivePassShaderDefault` that declare 48 KB.
+  - Mario Kart World on a OnePlus Pad 3 with Qualcomm's driver: about 11 minutes through the attract drive, the menus and a race with no slow submission or GPU loss. With `DM_SPV_TGSPILL=0`, the GPU was lost 17 s in.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) on a Galaxy S25 Edge and a OnePlus Pad 3: `2a89b6d4df731b8d`, a 24-bone skeleton's animation, then `a8310cf7c7acd0fe`, both among the 168 kernels of `DrivePassShaderDefault` that declare 48 KB.
 
 ### Uniform references past the first kilobyte
 
