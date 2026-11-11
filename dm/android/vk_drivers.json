@@ -52,7 +52,11 @@
    "min_api": 30,
    "mesa": "26.3.0-devel",
    "gpus": [[610, 699], [702, 799], [800, 899]],
-   "tested": [],
+   "tested": [
+    {"gpu": 730, "device": "Moto Razr Plus 2023", "android": 16, "date": "2026-11-11",
+     "games": {"0100000011D90000": "Brilliant Diamond: 60 fps in its language menu, after about 3 minutes building its pipelines at the first start with this driver",
+               "0100B1C0249B4000": "Frostpunk: the Generator and the buildings draw, as on T30; the city at 29.5 fps"}}
+   ],
    "mesh_shaders": false,
    "env": [],
    "licence": "MIT (the repository and its patches)",
@@ -78,7 +82,7 @@
    "mesh_shaders": null,
    "env": [],
    "licence": "GPL-3.0 (the repository's build scripts); Mesa's core is MIT",
-   "notes": "For the Adreno 8xx only (Gen8). Mesa 27.0 per the release's title (Turnip v27.0.0-R2). Experimental, as Adreno 8xx Turnip builds are: one has been seen to wedge a GPU until a reboot. Whether it has VK_EXT_mesh_shader isn't checked."
+   "notes": "For the Adreno 8xx only (Gen8). Mesa 27.0 per the release's title (Turnip v27.0.0-R2). Experimental, as Adreno 8xx Turnip builds are: one has been seen to wedge a GPU until a reboot. Whether it has VK_EXT_mesh_shader isn't checked. On 2026-11-11 it also ran Brilliant Diamond (60 fps in its language menu) and Frostpunk (as faux123 does) on a Razr Plus 2023's Adreno 730, which the builder doesn't list: the catalog offers it for the 8xx only, where it hasn't been tested yet."
   }
  ]
 }
