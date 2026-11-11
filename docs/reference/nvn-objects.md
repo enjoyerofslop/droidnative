@@ -201,6 +201,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** it grows in blocks of 1,024 (`nvn_dirty.c`, up to 262,144).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the phone reached 4,006 pools (found while fixing GitHub issue #9: [Deferred-release drain without an autorelease pool](memory.md#deferred-release-drain-without-an-autorelease-pool)).
 
+### A pool registered over memory an earlier pool held counts older stamps as written
+
+- **Symptom:** Android, Skyward Sword HD from a new game on a Retroid Pocket 5: once out in Skyloft, Horwell's wooden crates are one flat grey shape or missing, the area's opening shot has large flat green, grey or magenta shapes, and patches of sky are flat grey, with no red line. After a cold start and Continue the same places draw right. `DM_VK_GEOCACHE=0` (or `DM_VK_SAFE=1`) draws them right too; `DM_VK_ASYNC_PIPE=0` does not.
+- **Cause:** the geometry cache (`gfx_vk_draw.inc` `gc_get`) keeps a range of vertex or index bytes on the GPU while `nvn_dirty_since` says no page of it was written since its stamp. When the game destroys a pool, `nvn_dirty_remove_range` makes its pages writable and retires the range; the game then writes the next area's meshes into that memory with no fault, and registers a new pool over it, which reuses the slot with every page's generation back at 0. A stamp from the old pool's time then saw no newer generation and the old copy was drawn: the opening's geometry under Skyloft's draws. A cold start loads Skyloft into memory no earlier pool held.
+- **Fix:** each range keeps the clock at its registration (`born`, `nvn_dirty.c`), and `nvn_dirty_since_cached` and `nvn_dirty_since_except` count a stamp older than it as written, through a kept handle too. A content check made after the registration is unaffected.
+- **Check:** `make -C dm/gfx/tests GAME=<id> t_dirty_slots`: a pool destroyed, a write with no pool registered, and a new pool over the same memory: the older stamp is dirty through `nvn_dirty_since`, a kept handle and `nvn_dirty_since_except` (all three clean before the fix), and a stamp taken after the new registration is clean. On the Retroid Pocket 5, a new game with this change and default settings drew the crates, the ground and the sky in Skyloft's opening shot right; the geometry cache still served 3.55 million bindings, replay CPU 4.25 ms a frame (6.17 with it off).
+- **Found on:** [The Legend of Zelda: Skyward Sword HD](../../dm/games/01002DA013484000/README.md).
+
 ### Dead texture serials kept in a ghost table
 
 - **Symptom:** the serial table grows by about 10 entries a frame (276,000 after 25,000 frames).
