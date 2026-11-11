@@ -1059,7 +1059,57 @@ static VkFormat vk_of_mtl(uint32_t m) {
     return VK_FORMAT_UNDEFINED;
 }
 // BC decoded on the CPU when the GPU has no BC: the format the decoder writes
-enum { CONV_NONE, CONV_BC1, CONV_BC2, CONV_BC3, CONV_BC4, CONV_BC4S, CONV_BC5, CONV_BC5S, CONV_BC6H, CONV_BC6HS, CONV_BC7 };
+enum { CONV_NONE, CONV_BC1, CONV_BC2, CONV_BC3, CONV_BC4, CONV_BC4S, CONV_BC5, CONV_BC5S, CONV_BC6H, CONV_BC6HS, CONV_BC7, CONV_U16H, CONV_S16H };
+// A 16-bit normalized colour format the GPU cannot filter linearly, made as the 16-bit float format of its channels where that one filters (and draws, and blends where
+// the normalized one does): the Xclipse 950 filters none of R16_UNORM, R16G16_UNORM, R16G16B16A16_UNORM and their SNORM forms (no SAMPLED_IMAGE_FILTER_LINEAR), and
+// the Adreno 830 and Mali-G715 filter them all. A Maxwell sampler filters them, and games count on it: Brilliant Diamond's water simulation steps its R16G16_UNORM
+// height field by reading the neighbours 1.5 texels away through a linear sampler, between texels on purpose, so the filter is part of its stencil. Point sampled (the
+// Xclipse's answer, and what Vulkan's NEAREST gives) the field diverged to 0 and 1 in a checkerboard, a grid of white dashes on Twinleaf's pond. The float format holds
+// the texels to 11 significant bits instead of 16; uploads convert (bc_decode), and so do CPU reads (mtl_read_texels, n16_back). A texture-to-buffer copy of such an
+// image is not made, as one of a BC image decoded on the CPU is not (copy_t2b, a red line).
+// DM_VK_N16_HALF=0 (env.txt): the normalized formats, as before
+static VkFormat n16_twin(VkFormat f, int *conv, int *px) {   // the float format of a 16-bit normalized one, its conversion and texel size (0: not one)
+    switch (f) {
+        case VK_FORMAT_R16_UNORM: *conv = CONV_U16H; *px = 2; return VK_FORMAT_R16_SFLOAT; case VK_FORMAT_R16_SNORM: *conv = CONV_S16H; *px = 2; return VK_FORMAT_R16_SFLOAT;
+        case VK_FORMAT_R16G16_UNORM: *conv = CONV_U16H; *px = 4; return VK_FORMAT_R16G16_SFLOAT; case VK_FORMAT_R16G16_SNORM: *conv = CONV_S16H; *px = 4; return VK_FORMAT_R16G16_SFLOAT;
+        case VK_FORMAT_R16G16B16A16_UNORM: *conv = CONV_U16H; *px = 8; return VK_FORMAT_R16G16B16A16_SFLOAT;
+        case VK_FORMAT_R16G16B16A16_SNORM: *conv = CONV_S16H; *px = 8; return VK_FORMAT_R16G16B16A16_SFLOAT;
+        default: return VK_FORMAT_UNDEFINED;
+    }
+}
+static VkFormat n16_half(VkFormat f, int *conv, int *px) {   // n16_twin where the GPU needs it (above); 0: the format as it is
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_N16_HALF"); on = !(e && *e == '0'); }
+    int c = 0, p = 0; VkFormat h = on ? n16_twin(f, &c, &p) : VK_FORMAT_UNDEFINED; if (!h) return VK_FORMAT_UNDEFINED;
+    VkFormatProperties a, b; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &a); vkGetPhysicalDeviceFormatProperties(g_vk.pd, h, &b);
+    VkFormatFeatureFlags fa = a.optimalTilingFeatures, fb = b.optimalTilingFeatures, need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+        (fa & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT));
+    if (!(fa & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) || (fa & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) || (fb & need) != need) return VK_FORMAT_UNDEFINED;
+    static _Atomic uint32_t told; if (!(atomic_fetch_or(&told, 1u << (f & 31)) & (1u << (f & 31))))
+        LOG("[vk] VkFormat %d is not filtered linearly on this GPU: its sampled images are made as %d, which is (DM_VK_N16_HALF=0: as they are)", (int)f, (int)h);
+    *conv = c; *px = p; return h;
+}
+static float h2f(uint16_t h) {   // an IEEE half as a float
+    uint32_t s = (uint32_t)(h & 0x8000) << 16, e = (h >> 10) & 0x1f, m = h & 0x3ff, u;
+    if (!e) { if (!m) u = s; else { int k = -1; do { k++; m <<= 1; } while (!(m & 0x400)); u = s | (uint32_t)(112 - k) << 23 | (m & 0x3ff) << 13; } }
+    else if (e == 31) u = s | 0x7f800000 | m << 13;
+    else u = s | (e + 112) << 23 | m << 13;
+    float f; memcpy(&f, &u, 4); return f;
+}
+static void n16_back(int conv, uint8_t *p, size_t n) {   // halves (n16_half) back to the 16-bit normalized texels the game reads, in place
+    for (size_t i = 0; i + 2 <= n; i += 2) {
+        uint16_t q; memcpy(&q, p + i, 2); float f = h2f(q);
+        if (conv == CONV_U16H) { f = f != f || f < 0 ? 0 : f > 1 ? 1 : f; q = (uint16_t)(f * 65535.0f + 0.5f); }
+        else { f = f != f ? 0 : f < -1 ? -1 : f > 1 ? 1 : f; q = (uint16_t)(int16_t)lrintf(f * 32767.0f); }
+        memcpy(p + i, &q, 2);
+    }
+}
+static uint16_t f2h(float x) {   // a float as IEEE half, rounded to nearest even (the values here are in [-1, 1])
+    uint32_t u; memcpy(&u, &x, 4); uint32_t s = (u >> 16) & 0x8000, e = (u >> 23) & 0xff, m = u & 0x7fffff;
+    if (e < 103) return (uint16_t)s;   // under half's smallest subnormal: signed zero
+    if (e < 113) { m |= 0x800000; uint32_t sh = 126 - e, r = m >> sh, rem = m & ((1u << sh) - 1), half = 1u << (sh - 1); if (rem > half || (rem == half && (r & 1))) r++; return (uint16_t)(s | r); }
+    uint32_t r = ((e - 112) << 10) | (m >> 13), rem = m & 0x1fff; if (rem > 0x1000 || (rem == 0x1000 && (r & 1))) r++;
+    return (uint16_t)(s | (r > 0x7bff ? 0x7c00 : r));
+}
 static VkFormat bc_target(VkFormat f, int *conv, int *px) {
     switch (f) {
         case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: *conv = CONV_BC1; *px = 4; return VK_FORMAT_R8G8B8A8_UNORM;
@@ -1081,6 +1131,17 @@ static VkFormat bc_target(VkFormat f, int *conv, int *px) {
 }
 // Decode a w×h (texels) region of BC blocks (rows of src_pitch bytes) into px-byte texels (rows of dst_pitch bytes); edge blocks are clipped
 static void bc_decode(int conv, const uint8_t *src, size_t src_pitch, uint32_t w, uint32_t h, uint8_t *dst, size_t dst_pitch, int px) {
+    if (conv == CONV_U16H || conv == CONV_S16H) {   // 16-bit normalized texels as halves (n16_half): rows of w texels of px bytes
+        for (uint32_t y = 0; y < h; y++) {
+            const uint8_t *s = src + y * src_pitch; uint8_t *d = dst + y * dst_pitch;
+            for (size_t i = 0; i < (size_t)w * px / 2; i++) {
+                uint16_t q; memcpy(&q, s + 2 * i, 2);
+                float f = conv == CONV_U16H ? q / 65535.0f : ((int16_t)q < -32767 ? -1.0f : (int16_t)q / 32767.0f);
+                uint16_t hv = f2h(f); memcpy(d + 2 * i, &hv, 2);
+            }
+        }
+        return;
+    }
     size_t bsz = conv == CONV_BC1 || conv == CONV_BC4 || conv == CONV_BC4S ? 8 : 16;
     uint8_t blk[4 * 4 * 8];
     for (uint32_t by = 0; by < (h + 3) / 4; by++) for (uint32_t bx = 0; bx < (w + 3) / 4; bx++) {
@@ -1182,6 +1243,7 @@ static vtex *vt_create(const tex_t *t) {
     VkFormat nf = vk_of_mtl(m), f = nf; int conv = CONV_NONE, px = 0;
     if (nf == VK_FORMAT_UNDEFINED) { RED_ONCE(12, "Metal format %u not mapped to Vulkan (NVN format %#x)", m, t->d.format); return NULL; }
     if (nf >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && nf <= VK_FORMAT_BC7_SRGB_BLOCK && !g_vk.has_bc) f = bc_target(nf, &conv, &px);
+    else if (!is_linear(t) && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && t->d.samples <= 1) { VkFormat h = n16_half(nf, &conv, &px); if (h) f = h; }   // not a storage image: shaders declare those formats
     if (nf >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && nf <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK && !g_vk.has_astc) { RED_ONCE(13, "ASTC texture on a GPU without ASTC: not decoded yet"); return NULL; }
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
     VkFormatFeatureFlags ff = fp.optimalTilingFeatures;
@@ -1633,7 +1695,7 @@ static void copy_b2t(const p_copy_b2t *c) {
 static void copy_t2b(const p_copy_b2t *c) {
     vtex *v = vt_get(c->tex); if (!v) return;
     unsigned level, layer0; if (!tex_level_layer(v, &c->view, c->has_view, &level, &layer0)) return;
-    if (v->conv) { RED_ONCE(42, "texture→buffer copy of a BC texture decoded on the CPU: not copied"); return; }
+    if (v->conv) { RED_ONCE(42, "texture→buffer copy of a texture converted on upload (BC decoded on the CPU, or 16-bit normalized made as halves: n16_half): not copied"); return; }
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh); if (!bpb) return;
     size_t rb = (size_t)((c->r.width + bw - 1) / bw) * bpb, rows = (c->r.height + bh - 1) / bh;
     size_t row = S.row ? (size_t)S.row : rb, img = S.img ? (size_t)S.img : row * rows;
@@ -1720,7 +1782,8 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
         free(lin); pthread_mutex_unlock(&g_bk); return;
     }
     vtex *v = vt_get(t);
-    if (!v || v->conv) { pthread_mutex_unlock(&g_bk); for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memset(dst + (size_t)z * img + y * row, 0, wb); return; }
+    int half = v && (v->conv == CONV_U16H || v->conv == CONV_S16H);   // read back and converted (n16_back)
+    if (!v || (v->conv && !half)) { pthread_mutex_unlock(&g_bk); for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memset(dst + (size_t)z * img + y * row, 0, wb); return; }
     stg_sl s = stg_take(wb * hb * nz, bpb); stg_zero_ds(s, wb * hb * nz, v); VkCommandBuffer cbuf = cb();
     if (s.p && cbuf) {
         for (int z = 0; z < nz; z++) {
@@ -1730,6 +1793,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
         }
         for (int z = 0; z < nz; z++) { wb_t *w = wb_add(); if (w) *w = (wb_t){s.st, (size_t)s.off + (size_t)z * wb * hb, wb, hb, wb, row, dst + (size_t)z * img, NULL}; }   // copied out by the completion thread
         submit_wait();
+        if (half) for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) n16_back(v->conv, dst + (size_t)z * img + y * row, wb);
     }
     pthread_mutex_unlock(&g_bk);
 }
@@ -2412,7 +2476,7 @@ static void bound_preserve(void) {
 
 // The rest of the interface Metal gives and Android does not need yet
 void mtl_tex_gpu_written(const tex_t *t) { (void)t; }   // Metal's record of GPU-written storage (tex_cpu_content); tex_init_fill here decides by the pool's flags
-static int gm_game(void);   // gfx_vk_gmem.inc: a Switch 2 game's, or DM_VK_RAW_GMEM=1
+static int gm_game(void);   // gfx_vk_gmem.inc: the game turned raw global memory on (DM_VK_RAW_GMEM=1)
 void mtl_pool_addressed(const void *mem, uint64_t size) {   // raw global memory: which pools the game took a GPU address in (counted in gfx_vk_gmem.inc gm_stat); nothing for a game without it
     if (!gm_game()) return;
     pthread_mutex_lock(&g_pool_mu);
