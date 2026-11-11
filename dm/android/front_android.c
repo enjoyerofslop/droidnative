@@ -264,7 +264,13 @@ static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; s
 static VkSurfaceKHR g_surf; static VkSwapchainKHR g_sc; static VkImage g_img[8]; static uint32_t g_nimg; static VkFormat g_fmt; static VkExtent2D g_ext2;
 static VkCommandPool g_cpool; static VkCommandBuffer g_cb; static VkBuffer g_stg; static VkDeviceMemory g_stgm; static void *g_stgp; static VkDeviceSize g_stg_sz;
 static VkFence g_fence; static VkSemaphore g_acq, g_done;
-#define VKC(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { LOG("[RED] Vulkan: %s = %d", #x, r_); return 0; } } while (0)
+static char g_vk_why[160];   // the call that failed last, for the fallback's line (vk_window_first)
+static int vk_bad(const char *call, VkResult r) {
+    LOG("[RED] Vulkan: %s = %d", call, r);
+    snprintf(g_vk_why, sizeof g_vk_why, "%.*s: %s", (int)strcspn(call, "("), call, vk_result_str(r));
+    return 0;
+}
+#define VKC(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) return vk_bad(#x, r_); } while (0)
 
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
 // What the NVN replay will need from this GPU (BC textures, bindless descriptor pools, geometry and transform feedback, border colors)
@@ -297,7 +303,7 @@ static void vk_probe(void) {
 static int vk_init(void) {   // the NVN replay's device (gfx_vk.c vkb): the window's swapchain and the game's textures are on one queue
     if (g_inst) return 1;
     vkb_ctx *c = vkb();
-    if (!c || !c->has_surface || !c->has_swapchain) { LOG("[RED] Vulkan: no device with a window surface"); return 0; }
+    if (!c || !c->has_surface || !c->has_swapchain) { LOG("[RED] Vulkan: no device with a window surface"); snprintf(g_vk_why, sizeof g_vk_why, "no device with a window surface"); return 0; }
     g_inst = c->inst; g_pd = c->pd; g_dev = c->dev; g_q = c->q; g_qf = c->qf;
     vk_probe();
     VkCommandPoolCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = g_qf};
@@ -319,7 +325,8 @@ static int vk_window_up(ANativeWindow *w) {
     if (!vk_init()) return 0;
     VkAndroidSurfaceCreateInfoKHR si = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = w};
     VKC(vkCreateAndroidSurfaceKHR(g_inst, &si, NULL, &g_surf));
-    VkBool32 ok = 0; vkGetPhysicalDeviceSurfaceSupportKHR(g_pd, g_qf, g_surf, &ok); if (!ok) { LOG("[RED] Vulkan: the queue cannot present"); return 0; }
+    VkBool32 ok = 0; vkGetPhysicalDeviceSurfaceSupportKHR(g_pd, g_qf, g_surf, &ok);
+    if (!ok) { LOG("[RED] Vulkan: the queue cannot present"); snprintf(g_vk_why, sizeof g_vk_why, "the queue cannot present"); return 0; }
     VkSurfaceCapabilitiesKHR cap; VKC(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, g_surf, &cap));
     uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surf, &nf, NULL);
     VkSurfaceFormatKHR fm[32]; if (nf > 32) nf = 32; vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surf, &nf, fm);
@@ -333,6 +340,7 @@ static int vk_window_up(ANativeWindow *w) {
         .imageFormat = g_fmt, .imageColorSpace = cs, .imageExtent = g_ext2, .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = xf, .compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR, .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = 1};
     if (!(cap.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)) sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (vk_driver_fail("swapchain")) { snprintf(g_vk_why, sizeof g_vk_why, "DM_VK_DRIVER_FAIL=swapchain"); return 0; }   // a test, with the surface made: its teardown is tried too
     VKC(vkCreateSwapchainKHR(g_dev, &sc, NULL, &g_sc));
     g_nimg = 8; VKC(vkGetSwapchainImagesKHR(g_dev, g_sc, &g_nimg, g_img));
     // Staging buffer the status picture is drawn into (host visible), copied to the swapchain image each refresh
@@ -346,6 +354,27 @@ static int vk_window_up(ANativeWindow *w) {
     VKC(vkAllocateMemory(g_dev, &ma, NULL, &g_stgm)); VKC(vkBindBufferMemory(g_dev, g_stg, g_stgm, 0)); VKC(vkMapMemory(g_dev, g_stgm, 0, g_stg_sz, 0, &g_stgp));
     LOG("window %ux%u, swapchain %u images, format %d", g_ext2.width, g_ext2.height, g_nimg, g_fmt);
     return 1;
+}
+static void vk_front_down(void) {   // everything vk_init and vk_window_up made, so the device can be made again (vk_window_first)
+    vk_window_down();
+    if (g_dev) {
+        if (g_acq) vkDestroySemaphore(g_dev, g_acq, NULL);
+        if (g_done) vkDestroySemaphore(g_dev, g_done, NULL);
+        if (g_fence) vkDestroyFence(g_dev, g_fence, NULL);
+        if (g_cpool) vkDestroyCommandPool(g_dev, g_cpool, NULL);   // and g_cb with it
+    }
+    g_acq = g_done = VK_NULL_HANDLE; g_fence = VK_NULL_HANDLE; g_cpool = VK_NULL_HANDLE; g_cb = VK_NULL_HANDLE;
+    g_inst = VK_NULL_HANDLE; g_pd = VK_NULL_HANDLE; g_dev = VK_NULL_HANDLE; g_q = VK_NULL_HANDLE;
+}
+// The first window comes before the host starts (on_cmd), so the front end's are the only Vulkan objects yet. When a DM_VK_DRIVER driver makes the device but can't put a
+// picture on the window (a surface or swapchain it fails), they, the device and the instance are destroyed and made again on the system's driver (gfx_vk.c vkb_fallback):
+// before this, the game ran with no picture. A later window can't do this, as the game's textures, buffers and pipelines live on the device by then
+static void vk_window_first(ANativeWindow *w) {
+    g_vk_why[0] = 0;
+    if (vk_window_up(w) || !vk_driver_name()) return;
+    char why[200]; snprintf(why, sizeof why, "the first window failed (%s)", g_vk_why[0] ? g_vk_why : "the line above says where");
+    vk_front_down();
+    if (vkb_fallback(why)) vk_window_up(w);
 }
 
 // ---------- Status picture: text drawn with android.graphics (JNI) into a bitmap, copied into the staging buffer ----------
@@ -647,7 +676,10 @@ static int g_started;
 static void on_cmd(struct android_app *app, int32_t cmd) {
     int game = atomic_load(&g_state) == ST_GAME;
     switch (cmd) {
-        case APP_CMD_INIT_WINDOW: if (app->window) vk_window_up(app->window); if (!g_started) { g_started = 1; start_host(); gamepad_start(); } break;
+        case APP_CMD_INIT_WINDOW:
+            if (app->window) { if (g_started) vk_window_up(app->window); else vk_window_first(app->window); }
+            if (!g_started) { g_started = 1; start_host(); gamepad_start(); }
+            break;
         case APP_CMD_TERM_WINDOW: vk_window_down(); break;
         case APP_CMD_GAINED_FOCUS: if (game) dm_focus_set(1); break;
         case APP_CMD_LOST_FOCUS: gamepad_reset(); if (game) dm_focus_set(2); break;

@@ -66,7 +66,7 @@ static void pb_dump(void);   // gfx_vk_draw.inc: the pipelines being built, for 
 static int g_stencil_export;   // VK_EXT_shader_stencil_export enabled: a fragment shader writes the stencil test's value (gfx_vk_dscopy.inc)
 static int g_nonuni, g_null_desc;   // for the texture pool by ID (gfx_vk_pool.inc): VK_EXT_descriptor_indexing's non-uniform sampled image indexing; VK_EXT_robustness2's null descriptors
 static int g_pool_texn;   // the IDs of the game's texture pools in the host table (mtl_set_tex_pool_n, hle_nvn.c): the pool set's image count (gfx_vk_pool.inc)
-static vkb_ctx g_vk; static pthread_once_t g_vk_once = PTHREAD_ONCE_INIT; static int g_vk_ok;
+static vkb_ctx g_vk; static pthread_mutex_t g_vk_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic int g_vk_made; static int g_vk_ok;   // vkb; vkb_fallback makes it again
 #include "gfx_vk_rec.inc"   // the vkCmd* calls below go through its wrappers (DM_VK_RECORDER)
 // Query resets (the chunks' query pools, "Query resets" below). DM_VK_QRESET_USED=0 (env.txt): every pool is reset whole in the command buffer at every chunk begin, as before
 // (no host resets either); DM_VK_HOST_QRESET=0: VK_EXT_host_query_reset is not enabled, and the used queries are reset in the command buffer at the chunk's next begin
@@ -229,9 +229,7 @@ static int vk_try(char *why, size_t nwhy) {
 }
 // A DM_VK_DRIVER driver opens only if it offers a GPU (vk_driver.c), but it can still fail any step after that. Each such failure tries again on the system's driver, with a
 // [RED] line saying why (vk_driver_fallback): before this, the game ran with no picture, as the front end had no device to draw with
-static void vk_create(void) {
-    pthread_mutex_init(&g_vk.qmu, NULL);
-    if (!vk_driver_load()) return;
+static void vk_make(void) {
     for (;;) {
         char why[200];
         if (vk_try(why, sizeof why)) { g_vk_ok = 1; return; }
@@ -241,7 +239,19 @@ static void vk_create(void) {
         if (!vk_driver_fallback(why)) return;
     }
 }
-vkb_ctx *vkb(void) { pthread_once(&g_vk_once, vk_create); return g_vk_ok ? &g_vk : NULL; }
+// Made at the first call, under g_vk_mu rather than a pthread_once, since vkb_fallback (after gfx_vk_draw.inc) can make it once more
+vkb_ctx *vkb(void) {
+    if (!atomic_load_explicit(&g_vk_made, memory_order_acquire)) {
+        pthread_mutex_lock(&g_vk_mu);
+        if (!atomic_load_explicit(&g_vk_made, memory_order_relaxed)) {
+            pthread_mutex_init(&g_vk.qmu, NULL);
+            if (vk_driver_load()) vk_make();
+            atomic_store_explicit(&g_vk_made, 1, memory_order_release);
+        }
+        pthread_mutex_unlock(&g_vk_mu);
+    }
+    return g_vk_ok ? &g_vk : NULL;
+}
 uint32_t vkb_mem_type(uint32_t bits, VkMemoryPropertyFlags want) {
     for (uint32_t i = 0; i < g_vk.mp.memoryTypeCount; i++) if ((bits >> i & 1) && (g_vk.mp.memoryTypes[i].propertyFlags & want) == want) return i;
     return UINT32_MAX;
@@ -1972,6 +1982,21 @@ static void clear_tex(const p_clear_tex *ct) {
 
 static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip);   // below (the pass dump's PNGs)
 #include "gfx_vk_draw.inc"
+
+// The front end's first window failed on a DM_VK_DRIVER driver (front_android.c vk_window_first), which has destroyed what it made: the device and instance are destroyed
+// too and made again on the system's driver. Only while nothing else holds objects of them, before the host starts: no texture, buffer, pipeline or cache yet. Here,
+// after gfx_vk_draw.inc, for raw global memory's state (g_gm_on). 0: no DM_VK_DRIVER driver was running, or no device was made
+int vkb_fallback(const char *why) {
+    if (!vk_driver_name()) return 0;
+    pthread_mutex_lock(&g_vk_mu);
+    if (g_vk_ok) { vkDeviceWaitIdle(g_vk.dev); vkDestroyDevice(g_vk.dev, NULL); }
+    if (g_vk.inst) vkDestroyInstance(g_vk.inst, NULL);
+    g_vk_ok = 0; g_qreset = NULL; g_fault_info = NULL; g_smid = NULL; g_gm_on = 0;
+    pthread_mutex_destroy(&g_vk.qmu); memset(&g_vk, 0, sizeof g_vk); pthread_mutex_init(&g_vk.qmu, NULL);
+    if (vk_driver_fallback(why)) vk_make();
+    pthread_mutex_unlock(&g_vk_mu);
+    return g_vk_ok;
+}
 #include "gfx_vk_dscopy.inc"
 #include "gfx_vk_bcdec.inc"   // a GPU block encoder's blocks decoded into a BC texture the CPU decoded (bcd_decode)
 #include "gfx_vk_upsq.inc"   // a game's upscaler network replaced by a bilinear scale and a signed square (upsq_run)

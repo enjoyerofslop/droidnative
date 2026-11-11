@@ -227,7 +227,11 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators:
   or to make the device. Before, the game then ran with no picture: the front end had no device. Now `vk_create` destroys what the try made and tries again on the
   system's driver (`vk_try`, `vk_driver_fallback`), with one line: `[RED] [vk] DM_VK_DRIVER <file>: no Vulkan device (vkCreateDevice: VK_ERROR_…); the system's
   driver instead`. The driver's library stays loaded beside the system's, each in its own linker namespace. `DM_VK_DRIVER_FAIL=<step>` (`instance`, `gpu`,
-  `queue`, `extensions`, `device`) fails that step on the player's driver, to try the fallback on a phone whose driver works.
+  `queue`, `extensions`, `device`, `swapchain`) fails that step on the player's driver, to try the fallback on a phone whose driver works.
+- The first window's surface and swapchain (`front_android.c` `vk_window_first`) come before the host starts, so the front end's are the only Vulkan objects then. When
+  one of them fails on the player's driver, the front end destroys what it made, `vkb_fallback` destroys the device and the instance, and both are made again on the
+  system's driver, in the same process (`vkb()` is made under a mutex, not a `pthread_once`, for this). A later window (after the app comes back) can't: the game's
+  textures and pipelines are on the device by then.
 - A phone without `/dev/kgsl-3d0` (a Mali or Xclipse GPU) doesn't open `DM_VK_DRIVER` at all, with one plain `[vk] DM_VK_DRIVER` line: Turnip drives Qualcomm's
   kernel driver, KGSL, and `libadrenotools.so` is not loaded, so its constructor doesn't patch the linker.
 - Each driver keeps its own pipeline cache: `DM_PIPELINE_CACHE` with `.<driver file name>` after it (`gfx_vk_draw.inc` `pcache`).

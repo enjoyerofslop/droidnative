@@ -5,8 +5,8 @@
 //   (vk_driver/<name>), and opened through libadrenotools (dm/third_party/libadrenotools): a second copy of the system's libvulkan.so in a linker namespace of its own, where
 //   a hook loads the player's driver in place of the vendor's. The loader in that copy still makes the window surface and the swapchain, which Turnip on Android lacks.
 //   A driver that cannot be copied or opened, or that offers no GPU, logs one [RED] line, and the system's driver runs. So does one that opens and then fails to make the
-//   instance, find the GPU's graphics queue or the window extensions, or make the device (gfx_vk.c vk_create, through vk_driver_fallback): a player's choice of driver
-//   must never leave a game without a picture. On a phone without an Adreno GPU, DM_VK_DRIVER is not opened at all.
+//   instance, find the GPU's graphics queue or the window extensions, or make the device (gfx_vk.c vk_create, through vk_driver_fallback), or the first window's surface
+//   or swapchain (front_android.c vk_window_first): a player's choice of driver must never leave a game without a picture. On a phone without an Adreno GPU, DM_VK_DRIVER is not opened at all.
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <fcntl.h>
@@ -134,7 +134,8 @@ int vk_driver_load(void) {
 }
 
 // DM_VK_DRIVER_FAIL=<step> (env.txt, a test): that step fails while the DM_VK_DRIVER driver runs, as if the driver had failed it, so the fallback can be tried on a phone
-// whose driver works. Steps: instance, gpu, queue, extensions, device (gfx_vk.c vk_try). The system's driver it falls back to is left alone
+// whose driver works. Steps: instance, gpu, queue, extensions, device (gfx_vk.c vk_try), swapchain (the first window's, front_android.c vk_window_up). The system's driver
+// it falls back to is left alone
 int vk_driver_fail(const char *step) {
     const char *e = getenv("DM_VK_DRIVER_FAIL");
     return g_name[0] && e && !strcmp(e, step);

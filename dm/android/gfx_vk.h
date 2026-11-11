@@ -19,8 +19,9 @@
     X(vkCreateDescriptorSetLayout) X(vkCreateDevice) X(vkCreateFence) X(vkCreateFramebuffer) X(vkCreateGraphicsPipelines) X(vkCreateImage) \
     X(vkCreateImageView) X(vkCreatePipelineCache) X(vkCreatePipelineLayout) X(vkCreateQueryPool) X(vkCreateRenderPass) X(vkCreateSampler) \
     X(vkCreateSemaphore) X(vkCreateShaderModule) X(vkCreateSwapchainKHR) X(vkDestroyBuffer) X(vkDestroyBufferView) X(vkDestroyCommandPool) X(vkDestroyDescriptorPool) \
+    X(vkDestroyDevice) \
     X(vkDestroyDescriptorSetLayout) X(vkDestroyFence) X(vkDestroyFramebuffer) X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyInstance) X(vkDestroyPipeline) X(vkDestroyPipelineLayout) \
-    X(vkDestroyShaderModule) X(vkDestroySurfaceKHR) X(vkDestroySwapchainKHR) \
+    X(vkDestroySemaphore) X(vkDestroyShaderModule) X(vkDestroySurfaceKHR) X(vkDestroySwapchainKHR) \
     X(vkDeviceWaitIdle) X(vkEndCommandBuffer) X(vkEnumerateDeviceExtensionProperties) X(vkEnumeratePhysicalDevices) X(vkFlushMappedMemoryRanges) X(vkFreeMemory) \
     X(vkGetBufferMemoryRequirements) X(vkGetDeviceProcAddr) X(vkGetDeviceQueue) X(vkGetImageMemoryRequirements) X(vkGetPhysicalDeviceFeatures) \
     X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceFormatProperties) X(vkGetPhysicalDeviceImageFormatProperties) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceProperties) \
@@ -53,6 +54,7 @@ typedef struct {
     pthread_mutex_t qmu;   // every vkQueueSubmit / vkQueuePresentKHR / vkQueueWaitIdle on q
 } vkb_ctx;
 vkb_ctx *vkb(void);        // made at first use; NULL when the device has no usable Vulkan
+int vkb_fallback(const char *why);   // a DM_VK_DRIVER driver's device and instance made again on the system's driver, before the host starts (0: none was running, or no device)
 
 // The window texture the game presented last (NVN QueuePresentTexture), for the front end to draw: always in VK_IMAGE_LAYOUT_GENERAL.
 // vkb_frame_lock holds it (the texture is not destroyed meanwhile) until vkb_frame_unlock; 0 = no frame yet
