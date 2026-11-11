@@ -215,8 +215,11 @@ The host does not link `libvulkan.so`. Every `vk*` function the replay and the f
 driver the player put beside `env.txt` (a Turnip build, as for Switch emulators: [Another Vulkan driver](../../docs/android.md#another-vulkan-driver-turnip)).
 
 - The file is copied into the internal files (`vk_driver/<name>`, read-only, again when its size or time changes): Android maps no code from shared storage.
-- `DM_VK_DRIVER_SHA256=<hex>` (the packing script writes it into `defaults.txt`): the driver loads only if its internal copy has that SHA-256, so a file replaced on shared
-  storage (any app with the storage permission could on Android 10) never runs. The copy's hash is taken as it is copied and kept beside it (`<copy>.sha256`, which only
+- `DM_VK_DRIVER_SHA256=<hex>` (the packing script writes it into `defaults.txt`): the driver loads only if its internal copy has that SHA-256. It is an integrity check,
+  not a security boundary: it catches a driver file that changed or was replaced in `vk_drivers/` since it was chosen (any app with the storage permission could write
+  there on Android 10), but an app that can write there can write `env.txt` and `defaults.txt` too. The hash belongs to its own file's `DM_VK_DRIVER`: when `env.txt`'s
+  driver wins, `defaults.txt`'s hash is left out (`front_android.c` `env_file`), and `env.txt` naming a driver without a hash drops one a game app set before it.
+  The copy's hash is taken as it is copied and kept beside it (`<copy>.sha256`, which only
   the app can write), so a start that copies nothing reads it instead of hashing the driver (about 19 MB) again; a copy without one is hashed once.
 - It is opened through libadrenotools ([dm/third_party/libadrenotools](../third_party/libadrenotools/README.md)): `adrenotools_open_libvulkan` loads a second copy of
   the system's `libvulkan.so` in a linker namespace of its own, whose hook (`libmain_hook.so`, `libhook_impl.so`) loads the player's driver where that loader would load
