@@ -48,6 +48,7 @@ public final class Gamepad extends View {
     static native void nativeLog(String s);
     static native String nativeEnv(String name);   // the host's environment (env.txt is read after the VM starts: System.getenv does not see it)
     static native long nativeFrames();         // frames the game presented (front_android.c): the frame-rate counter
+    static native void nativePadShown(boolean on);   // the touch controls shown or hidden (front_android.c fr_apply: the display's rate follows)
 
     static final int B_A = 0, B_B = 1, B_X = 2, B_Y = 3, B_LS = 4, B_RS = 5, B_L = 6, B_R = 7, B_ZL = 8, B_ZR = 9, B_PLUS = 10, B_MINUS = 11,
                      B_LEFT = 12, B_UP = 13, B_RIGHT = 14, B_DOWN = 15, B_N = 16;   // the bits of dm_input.h
@@ -395,7 +396,7 @@ public final class Gamepad extends View {
         }
         return false;
     }
-    void padsChanged() { boolean any = anyPad(); if (any != padOff) { padOff = any; reset(); invalidate(); nativeLog("gamepad: " + (any ? "a controller is connected: the touch controls hide" : "no controller: touch controls")); } }
+    void padsChanged() { boolean any = anyPad(); if (any != padOff) { padOff = any; reset(); invalidate(); nativePadShown(!any); nativeLog("gamepad: " + (any ? "a controller is connected: the touch controls hide" : "no controller: touch controls")); } }
 
     // ---- Start (front_android.c, from the native thread) ----
     static Gamepad view; static PopupWindow popup;
@@ -415,7 +416,7 @@ public final class Gamepad extends View {
                 public void onInputDeviceRemoved(int id) { view.padsChanged(); }
                 public void onInputDeviceChanged(int id) { view.padsChanged(); }
             }, h);
-            view.padsChanged();
+            view.padsChanged(); nativePadShown(!view.padOff);   // told once at the start too: the native side may hold a state from an earlier view
             shakeStart(a);
             nativeLog("gamepad: touch controls shown (" + (view.tap ? "Tap" : view.full ? "3D" : "2D") + ")");
             if ("1".equals(nativeEnv("DM_SHOW_FPS"))) view.fpsTick(h);

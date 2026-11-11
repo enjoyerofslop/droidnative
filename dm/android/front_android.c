@@ -458,6 +458,9 @@ static void vs_read(void) {   // the main thread, before a present
         g_vs_past = (PFN_vkGetPastPresentationTimingGOOGLE)vkGetDeviceProcAddr(g_dev, "vkGetPastPresentationTimingGOOGLE");
         if (!g_vs_refresh || !g_vs_past) { c->has_display_timing = 0; LOG("[front] VK_GOOGLE_display_timing has no functions: frames are paced on the host's own clock"); return; }
     }
+    // The refresh is read once per swapchain, at the panel's rate then (120 Hz on a Galaxy S25 Edge), and kept when fr_apply's request moves the panel to 60 or 30 Hz: each of
+    // their vsyncs is one of 120 Hz's, so 30 fps stays 4 refreshes on the locked grid (gfx_vk_vsync.inc). Read again every 30 presents, 30 fps at 30 Hz was 1 refresh and went
+    // back to the host's clock: 10 frames of 375 held twice, against none
     if (g_vs_sc != g_sc) {   // a new swapchain (window): its refresh; no vsync known until a frame of it is shown
         VkRefreshCycleDurationGOOGLE rc = {0}; g_vs_sc = g_sc; atomic_store(&g_vs_at, 0);
         atomic_store(&g_vs_r, g_vs_refresh(g_dev, g_sc, &rc) == VK_SUCCESS ? rc.refreshDuration : 0);
@@ -553,6 +556,8 @@ static jint JNICALL n_opmode(JNIEnv *e, jclass c) { (void)e; (void)c; return dm_
 static jint JNICALL n_layout(JNIEnv *e, jclass c) { (void)e; (void)c; return DM_GAME_PAD_LAYOUT; }
 static jstring JNICALL n_env(JNIEnv *e, jclass c, jstring n) { (void)c; const char *u = (*e)->GetStringUTFChars(e, n, NULL); const char *v = u ? getenv(u) : NULL; (*e)->ReleaseStringUTFChars(e, n, u); return v ? (*e)->NewStringUTF(e, v) : NULL; }
 static jlong JNICALL n_frames(JNIEnv *e, jclass c) { (void)e; (void)c; return (jlong)atomic_load(&g_frames); }   // the frame-rate counter (DM_SHOW_FPS, Gamepad.java)
+static _Atomic int g_pad_shown = 1;   // the touch controls are on screen (Gamepad.java padsChanged: they hide while a physical controller is connected); fr_apply reads it
+static void JNICALL n_pad_shown(JNIEnv *e, jclass c, jboolean on) { (void)e; (void)c; atomic_store_explicit(&g_pad_shown, on ? 1 : 0, memory_order_relaxed); }
 static void JNICALL n_log(JNIEnv *e, jclass c, jstring s) { (void)c; const char *u = (*e)->GetStringUTFChars(e, s, NULL); LOG("%s", u ? u : ""); (*e)->ReleaseStringUTFChars(e, s, u); }
 // The Java side from the APK's classes.dex (java/, tools/build_apk.py), through the activity's class loader (a native thread's FindClass sees only the system's)
 static void gamepad_start(void) {
@@ -563,7 +568,8 @@ static void gamepad_start(void) {
     if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionDescribe(e); (*e)->ExceptionClear(e); c = NULL; }
     if (!c) { LOG("[RED] no Java side in the app (classes.dex): no touch controls, no text input"); return; }
     static const JNINativeMethod nm[] = {{"nativeTouchPad", "(JIIII)V", (void *)n_touchpad}, {"nativeGameTouch", "([I[F[FI)V", (void *)n_gametouch},
-        {"nativeShake", "(Z)V", (void *)n_shake}, {"nativeOpMode", "()I", (void *)n_opmode}, {"nativeDefaultLayout", "()I", (void *)n_layout}, {"nativeLog", "(Ljava/lang/String;)V", (void *)n_log}, {"nativeEnv", "(Ljava/lang/String;)Ljava/lang/String;", (void *)n_env}, {"nativeFrames", "()J", (void *)n_frames}};
+        {"nativeShake", "(Z)V", (void *)n_shake}, {"nativeOpMode", "()I", (void *)n_opmode}, {"nativeDefaultLayout", "()I", (void *)n_layout}, {"nativeLog", "(Ljava/lang/String;)V", (void *)n_log}, {"nativeEnv", "(Ljava/lang/String;)Ljava/lang/String;", (void *)n_env}, {"nativeFrames", "()J", (void *)n_frames},
+        {"nativePadShown", "(Z)V", (void *)n_pad_shown}};
     if ((*e)->RegisterNatives(e, c, nm, sizeof nm / sizeof *nm)) { (*e)->ExceptionClear(e); LOG("[RED] Gamepad natives not registered"); return; }
     g_gp = (*e)->NewGlobalRef(e, c);
     void dm_haptics_android_init(JavaVM *vm, jclass cls, JNIEnv *e); dm_haptics_android_init(g_app->activity->vm, g_gp, e);
@@ -635,23 +641,33 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
 // 40 fps (DM_PRESENT_HZ=80) on a OnePlus Pad 3 held at 60 Hz stayed on screen 16.7 and 33.3 ms in turn (SurfaceFlinger's frame times, 64 and 61 of 126), and 30 or 60 fps
 // on a 144 Hz panel would be so too. Told the rate as a fixed source (ANativeWindow_setFrameRate, API 30, through dlsym: the build targets 29), Android may pick a display rate
 // it divides, 120 Hz for 40, where it can switch seamlessly. On the Pad 3 it took the request (the layer's requestedFrameRate 40 Hz ExactOrMultiple) and kept 60 Hz all the
-// same: the vendor's refresh-rate policy decides there. DM_VK_FRAME_RATE=0 tells nothing, as before
+// same: the vendor's refresh-rate policy decides there. DM_VK_FRAME_RATE=0 tells nothing, as before.
+// The touch controls (Gamepad.java's window over the game's) refresh with the display: told a fixed-source 30, a Galaxy S25 Edge ran its panel at 30 Hz, the controls with
+// it. While they show, a rate under 40 Hz is told as its smallest multiple of 60 Hz or more (30 → 60): each frame spans two refreshes, which the vsync-locked grid
+// (gfx_vk_vsync.inc) shows as evenly, and the controls keep 60. The rate itself is told only with a physical controller connected, the controls hidden, and told again
+// whenever they show or hide. 40 fps and up are told as they are
 static _Atomic int g_fr_want;   // the host's present rate in millihertz (0 = none to tell); the present thread's (front_frame_rate)
 void front_frame_rate(int mhz) { atomic_store_explicit(&g_fr_want, mhz > 0 ? mhz : 0, memory_order_relaxed); }
-static void fr_apply(void) {   // the main thread, between frames: the window is told when the rate or the window changes
+static int fr_told(int want, int pad) {   // the rate Android is told for a present rate of want (mHz) with the touch controls shown (pad) or not
+    if (!pad || want <= 0 || want >= 40000) return want;
+    return want * ((59000 + want - 1) / want);   // the multiple reaching 59 Hz: 2% short of 60, so 29.97 fps is told 59.94, not 89.91
+}
+static void fr_apply(void) {   // the main thread, between frames: the window is told when the rate, the controls' showing or the window changes
     static int32_t (*set)(ANativeWindow *, float, int8_t); static int on = -1, told; static ANativeWindow *told_win; static unsigned nlog;
-    ANativeWindow *w = g_app->window; int want = atomic_load_explicit(&g_fr_want, memory_order_relaxed);
-    if (!w || (w == told_win && want == told)) return;
+    ANativeWindow *w = g_app->window; int want = atomic_load_explicit(&g_fr_want, memory_order_relaxed), pad = atomic_load_explicit(&g_pad_shown, memory_order_relaxed);
+    int tell = fr_told(want, pad);
+    if (!w || (w == told_win && tell == told)) return;
     if (on < 0) {
         const char *e = getenv("DM_VK_FRAME_RATE"); on = !(e && !strcmp(e, "0"));
         void *h = on ? dlopen("libandroid.so", RTLD_NOW) : NULL; set = h ? (int32_t (*)(ANativeWindow *, float, int8_t))dlsym(h, "ANativeWindow_setFrameRate") : NULL;
         if (!on) LOG("[front] DM_VK_FRAME_RATE=0: Android is not told the frame rate");
         else if (!set) LOG("[front] Android API %d cannot be told the frame rate (ANativeWindow_setFrameRate came with 30)", android_get_device_api_level());
     }
-    int fresh = w != told_win; told_win = w; told = want;
-    if (!set || (fresh && !want)) return;   // a new window has no rate until one is told
-    int32_t r = set(w, want / 1000.0f, want ? 1 : 0);   // 1: ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE; 0 fps: no preference again
-    if (nlog++ < 16) LOG("[front] Android told the frame rate is %.3f fps (a fixed source): %s%s", want / 1000.0, r ? strerror(-r) : "accepted",
+    int fresh = w != told_win; told_win = w; told = tell;
+    if (!set || (fresh && !tell)) return;   // a new window has no rate until one is told
+    int32_t r = set(w, tell / 1000.0f, tell ? 1 : 0);   // 1: ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE; 0 fps: no preference again
+    const char *why = tell != want ? ", a multiple of the game's rate while the touch controls show" : want && !pad ? ", the touch controls hidden" : "";
+    if (nlog++ < 16) LOG("[front] Android told the frame rate is %.3f fps (a fixed source%s): %s%s", tell / 1000.0, why, r ? strerror(-r) : "accepted",
                          nlog == 16 ? "; further changes not logged" : "");
 }
 
