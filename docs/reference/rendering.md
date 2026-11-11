@@ -2228,6 +2228,14 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - `DM_VK_DUP_SLOTS=0` attaches the image at every slot, as before.
 - **Check:** Breath of the Wild's `outdoors` save on a Galaxy S25 Edge (Adreno 830, Samsung's driver 0x80320001): the Shrine is drawn as on the Odin 2, with no write lost, and the GPU time drops from 21.4 to 20.5 ms. With `DM_VK_DUP_SLOTS=0` it is dark as before. On the Pad 3 a local test leaving the later slot of each pair unused drew it right too. A Galaxy Z Fold 8 (Adreno 840) draws it right either way, and with the fix its GPU time drops from 30.3 to 29.6 ms.
 
+### An sRGB window texture shown through a UNORM swapchain is a gamma too dark (Android)
+
+- **Symptom:** Link's Awakening on Android is drawn far too dark on screen: Mabe Village outside Marin's house looks like night (the screenshot's mean colour about 0.04–0.06 of full scale), the title and the menus duller than on the Mac. Frame dumps look right: the dump's `present.png` of the same frame is bright, as on the Mac.
+- **Cause:** the game presents a 1920×1080 `RGBA8_SRGB` window texture (vk43), and the front end's swapchain was `R8G8B8A8_UNORM` (format 37, chosen whenever the surface lists it). The front end puts the frame on the screen with `vkCmdBlitImage`, and a blit converts as sampling and rendering do: it decodes an sRGB source to linear and stores into a UNORM destination without encoding. So the swapchain got linear values, which the display shows as sRGB: every channel raised to about the power 2.2. The texture's bytes were right, which is why the dump, a copy of them, showed no fault (its mean 0.355 against the screen's 0.10: 0.355^2.2 = 0.10).
+- **Fix:** the swapchain is made in the presented frame's encoding (`front_android.c` `sc_encoding`): `R8G8B8A8_SRGB` for an sRGB frame, where the surface lists it, so the blit decodes and encodes again and carries the frame's bytes; `R8G8B8A8_UNORM` for the rest, as before. When the encoding changes, the swapchain is made again before the next frame, with a `[front]` line. `DM_VK_SC_SRGB=0` keeps the UNORM swapchain.
+- **Check:** Link's Awakening on a OnePlus Pad 3 (Adreno 830, Android 16): the swapchain is made again in format 43 at the first frame. Mabe Village's mean colour goes from about (0.04, 0.06, 0.02) to (0.16, 0.24, 0.13), and the title's from (0.37, 0.48, 0.85) to (0.54, 0.67, 0.92). Frames in UNORM, such as other games' windows, see no change.
+- **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#android).
+
 ### Clears in a layered pass clear every layer (Android)
 
 - **Symptom:** Android, a 3D or array render target drawn a slice at a time by draws that write the layer (a layered pass) and cleared each frame keeps, in every slice but the first, what earlier frames drew there. With additive blending it grows or flickers from frame to frame.
