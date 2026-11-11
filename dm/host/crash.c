@@ -132,7 +132,7 @@ void dm_backtrace(uint64_t fp) {
 // ---------- Page fault hooks (write-protect dirty page tracking) ----------
 // Called in registration order before on_crash prints the crash state; returning 1 = handled (return directly and re-execute the faulting instruction); the crash path is taken only when all return 0.
 // Hooks run in signal handler context: only table lookups / atomic operations / mprotect are allowed, no memory allocation and no locking.
-#define MAX_FAULT_HOOK 4
+#define MAX_FAULT_HOOK 8   // the sandbox check, the dirty tracker, raw global memory's and the pool file's freeze windows, DM_PROBE_WATCH
 static int (*g_fault_hook[MAX_FAULT_HOOK])(void *addr, int is_write, void *uc);
 static void (*g_write_prep[MAX_FAULT_HOOK])(void *addr, size_t len);
 static int g_nfault_hook, g_nwrite_prep;
