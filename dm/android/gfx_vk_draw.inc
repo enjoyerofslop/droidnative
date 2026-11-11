@@ -1936,7 +1936,10 @@ static const uint8_t c_bases[6] = {0x11, 0x51, 0x41, 0, 0, 0x31};   // c0 storag
 static uint32_t g_cdim[3];   // the current dispatch's group counts (c0 + 0x200 for compute)
 static void bank_c0(int nst, uint8_t *b, uint32_t base_inst) {
     memset(b, 0, 0x800);
-    if (nst == 5) { memcpy(b + 0x200, g_cdim, 12);   // compute: the group counts, then the uniform buffer table (0x210 + 16 r)
+    if (nst == 5) { memcpy(b + DMSH_C0_DISPATCH, g_cdim, 12);   // compute: the group counts, then the uniform buffer table (0x210 + 16 r)
+        // NVN2 compute also reads them at the start of the segment, as nvn_mtl.m's encode_args_ writes them: Ocarina of Time's fog takes its sample count from x · y · 32 · 32
+        // (21d9f83e6027c565), and at zero divided by it, which put NaN in the fog's froxel volumes and left Kokiri Forest black
+        if (dm_sdk_ounce()) memcpy(b + DMSH_C0_DISPATCH_NVN2, g_cdim, 12);
         for (int r = 0; r < 16; r++) { uint64_t a = D.ubo[5][r].addr; uint32_t n = (uint32_t)D.ubo[5][r].size; memcpy(b + 0x210 + 16 * r, &a, 8); memcpy(b + 0x218 + 16 * r, &n, 4); } }
     uint32_t o = (uint32_t)c_bases[nst] << 4;
     for (int r = 0; r < 16 && o && o + 16 * r + 12 <= 0x800; r++) { uint64_t a = D.ssbo[nst][r].addr; uint32_t n = (uint32_t)D.ssbo[nst][r].size; memcpy(b + o + 16 * r, &a, 8); memcpy(b + o + 16 * r + 8, &n, 4); }
