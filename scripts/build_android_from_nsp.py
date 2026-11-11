@@ -28,7 +28,7 @@
 #      A one-game install of the same game (files/game, the layout before the launcher) is moved there instead of copied again, and its save is copied by the app
 # The picture comes from the Vulkan replay of NVN (dm/android/gfx_vk.c).
 # Needs: Python with lz4, capstone, fonttools and backports.zstd (not on Python 3.14), the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
-import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, re, shutil, struct, subprocess, sys, tarfile, tempfile, time
+import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, platform, re, shutil, struct, subprocess, sys, tarfile, tempfile, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -231,14 +231,15 @@ def standard_font(font):   # <font>/standard.ttf: a hinted TrueType font; withou
     if not dst.is_file() or dst.stat().st_size != Path(src).stat().st_size: shutil.copyfile(src, dst)
 
 
-def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derived=''):
+def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derived='', oodle=None):
     """The game's NVN shaders for the Vulkan replay: the split (build_ipa_from_nsp.py split_shaders, checked against the profile's tables), then
     dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. Returns that folder (None when there are none) and the profile.
     A registered profile's tables may differ from the split in two ways the iPhone build accepts as well: installed DLC's own shaders, and compute kernels a newer reader decodes
     from the registered build (compute_reader_additions). derive(reason) then makes the shader-only derived profile that the translation and the rest of the build use. Any other
     failure of a registered profile's split stops the build: packed without shaders, AI: The Somnium Files played its sound over a black screen (droidplay-core#218).
     derived: why main packs from a profile derived from a registered one ('' for a registered or provisional profile). Its split failing stops the build too, though the profile
-    is outside dm/games: its game has the shaders the registered tables list (Pokémon Pokopia's split failed on Windows, and the build packed it without them, droidplay-core#307)"""
+    is outside dm/games: its game has the shaders the registered tables list (Pokémon Pokopia's split failed on Windows, and the build packed it without them, droidplay-core#307).
+    oodle: build_ipa_from_nsp.py split_shaders' (a Mac host for the game's Oodle, mac_decoder), which puts the host in the split's inputs"""
     if not sv: return None, g
     sh = work / 'shader'
     own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional or derived profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
@@ -249,7 +250,7 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
     dd = (lambda: promote('the installed DLC shader content differs from the registered tables')) if derive and not own else None
     dc = (lambda: promote('the reader decoded additional compute kernels from this registered build')) if derive and not own else None
     try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own,   # its own stage (a DLC's shaders too)
-                          dlc_roms=dlc_roms, derive_dlc=dd, derive_compute=dc)
+                          oodle=oodle, dlc_roms=dlc_roms, derive_dlc=dd, derive_compute=dc)
     except BuildError as e:
         if not own: raise BuildError(f'{e}\nThe game is not packed: without its shaders it would play its sound over a black screen. Check that the folder holds the versions game profile '
                                      f'{g.id} registers (its game.tsv); if it does, report this build with {logs / "shader_split.log"}') from e
@@ -288,13 +289,7 @@ def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, 
         raise BuildError('the game\'s Unreal shaders are Oodle-compressed, and only the game\'s own decoder undoes them: it runs on the phone here, so connect one (or build once without '
                          '--no-push, or build the game in DroidPlay for Mac first)')
     bi.PROG.set(step='the game\'s host and code to the phone, where its own Oodle decodes the shaders')
-    so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
-    library_add(g.id, so, loader, st, {'title_id': g.id, 'name': bi.nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
-                                       'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
-    install(serial, make_apk(sdk, logs, env), logs)
-    dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
-    push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
-    phone = android_oodle.Phone(adb, serial, g.id, REMOTE, PKG, work, logs, say)
+    phone = oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env)
     t0, total = time.time(), 0
     for v, d in todo.items():
         bi.PROG.set(step=f'{v}: decoding the shaders with the game\'s Oodle on the phone')
@@ -306,6 +301,72 @@ def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, 
         (out / 'stamp').write_text(bi.ue_stamp(d)); bi.swap_in(out, d / 'ue_shaders'); bi.rmtree(jd)
         total += n + sum(x['shaders'] for x in listing if x['compression'] == 'IoStore, decoded')
     bi.PROG.end(f'{total:,} shaders in {bi.hms(time.time() - t0)}, {phone.jobs} job(s) on the phone')
+
+
+def oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env):
+    """The game's host into the app and its rewritten code to the phone, for the jobs of scripts/android_oodle.py Phone (ue_decode, oodle_decode): the host does not depend on the
+    shaders, which do not exist yet. Only the code goes: a job reads no RomFS"""
+    import android_oodle   # pyright: ignore[reportMissingImports]
+    so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
+    library_add(g.id, so, loader, st, {'title_id': g.id, 'name': bi.nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
+                                       'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
+    install(serial, make_apk(sdk, logs, env), logs)
+    dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
+    push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
+    return android_oodle.Phone(adb, serial, g.id, REMOTE, PKG, work, logs, say)
+
+
+def mac_decoder(nsp_dir, work, g, pkg_ver, game, env):
+    """DM_OODLE_HOST / DM_OODLE_MODULES for the shader split's Oodle on this computer, or None: set by hand, or on an Apple-silicon Mac the Mac host and the Apple-rewritten modules
+    of DroidPlay for Mac's build of the same main (<game>/<title ID>_build beside the NSP folder, or this build's own folder when the Mac's NSP script ran on it too). The Android
+    build's own modules cannot stand in: they reach their thread slots through x18 (dm/tools/nso_asm.py), where the Mac host gives them through tpidrro_el0"""
+    if env.get('DM_OODLE_HOST') and env.get('DM_OODLE_MODULES'): return {k: env[k] for k in ('DM_OODLE_HOST', 'DM_OODLE_MODULES')}
+    if sys.platform != 'darwin' or platform.machine() != 'arm64' or os.environ.get('DM_UE_DECODE') == 'phone': return None
+    bid = bi.build_id(game / 'ExeFS/main')
+    for b in (nsp_dir.parent / f'{g.id}_build', work):
+        host, fx = b / 'tools/dmhost', b / f'patched_{pkg_ver}' / 'main.fixups.tsv'
+        if host.is_file() and fx.is_file() and f'# BUILD_ID\t{bid}' in fx.read_text(errors='replace').splitlines()[:20]:
+            say(f'the game\'s Oodle for the shader split: the Mac host of the Mac build in {b}')
+            return {'DM_OODLE_HOST': str(host), 'DM_OODLE_MODULES': str(fx.parent)}
+    return None
+
+
+def oodle_decode(roms, mains, dlc_roms, game, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk):
+    """The streams of the game's Oodle-compressed archives (profile_guess.py oodle_packs) decoded with the game's own Oodle on the phone before the shader split, into
+    <extraction>/oodle_cache, which the split then reads in place of the Mac host (DM_OODLE_CACHE; scripts/android_oodle.py fill). Pokémon Legends: Arceus's split failed on all
+    678 GFPAKs without it (issue #310). The record runs list what the split reads (the whole split each, decoding nothing); the phone is set up only when one lists a stream the
+    cache lacks. A cache that last ended on the same files, split code and decoder is taken as it is → its folder"""
+    import android_oodle   # pyright: ignore[reportMissingImports]
+    bi.PROG.add(1); bi.PROG.stage('Oodle decode')
+    cache = android_oodle.Cache(game / 'oodle_cache', hashlib.sha256((game / 'ExeFS/main').read_bytes()).hexdigest())   # streams are keyed by content; the decoder is main's
+    key = bi.fingerprint('oodle-record-v1', ('files', bi.python_tool_files(REPO, 'dm/gfx/tools/shader_split.py', ('dm/gfx/tools', 'dm/tools', 'dm/games'))), *[('tree', r) for r in roms],
+                         ('files', list(mains)), *[x for r in dlc_roms for x in (('dlc', Path(r).name), ('stat', r))])
+    if cache.done(key): bi.PROG.end(f'reused: {len(cache):,} streams'); return cache.d
+    runs, held = [0], contextlib.ExitStack()
+    def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
+        if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): bi.PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
+    def record(want):
+        runs[0] += 1; out = work / 'tmp/oodle_record'; bi.rmtree(out); out.mkdir(parents=True)
+        bi.PROG.set(step=f'run {runs[0]}: listing the streams the shader split reads')
+        cmd = [sys.executable, REPO / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), out / 'pkg'] + [out / n for n in ('map.tsv', 'facts.tsv', 'pairs.tsv', 'pso.tsv')]
+        # a failed run's listed streams still count, and the real split says again whatever else went wrong
+        bi.run(cmd + ([','.join(map(str, dlc_roms))] if dlc_roms else []), logs / 'oodle_record.log', env=dict(env, DM_OODLE_CACHE=str(cache.d), DM_OODLE_RECORD=str(want)),
+               on_line=counted, fatal=False)
+        bi.rmtree(out)
+    def decoder():
+        if not serial:
+            raise BuildError('the game\'s shaders are in archives compressed with its own Oodle, which only the game\'s own decoder reads: it runs on the phone here, so connect one '
+                             'and build without --no-push or --game-apk (or build the game in DroidPlay for Mac first)')
+        held.enter_context(phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Oodle archives'))   # only while the phone works: the record runs take minutes
+        bi.PROG.set(step='the game\'s host and code to the phone, where its own Oodle decodes the archives')
+        return oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env)
+    t0 = time.time()
+    with held:
+        try: _, n = android_oodle.fill(cache, record, decoder, work / 'tmp/oodle_want')
+        except ValueError as e: raise BuildError(str(e)) from e   # the phone's job (its log named), or a split that kept asking
+    cache.finish(key)
+    bi.PROG.end(f'{n:,} streams decoded on the phone in {bi.hms(time.time() - t0)}' if n else f'{len(cache):,} streams, none new ({runs[0]} run(s))')
+    return cache.d
 
 
 # ---------------- The library of game hosts ----------------
@@ -927,13 +988,14 @@ def unsupported_graphics(gfx, name):   # why a game cannot be built for Android,
             f'so this game cannot be built for Android yet')
 
 
-def undecodable_packs(packs, name, env):   # why a game's shaders cannot be split here, from profile_guess.build_sources' oodle_packs; None when the split can read them
-    # The shader split decodes these archives with the game's own Oodle in the Mac host (shader_split.py oodle_ask, DM_OODLE_HOST), which the Android build never sets up:
-    # Pokémon Legends: Arceus's split failed on all 678 GFPAKs after about 220 s, then the build stopped (issue #310). ue_legacy is left out, as Python reads its Zlib and LZ4 paks
+def undecodable_packs(packs, name, decoder):   # why a game's shaders cannot be split here, from profile_guess.build_sources' oodle_packs; None when the split can read them
+    # Only the game's own Oodle reads these archives: the phone (oodle_decode), a Mac host (mac_decoder), or what an earlier build with the phone decoded. Without one, Pokémon
+    # Legends: Arceus's split failed on all 678 GFPAKs after about 220 s, then the build stopped (issue #310). ue_legacy is left out, as Python reads its Zlib and LZ4 paks
     on, why = packs
-    if not on or (env.get('DM_OODLE_HOST') and env.get('DM_OODLE_MODULES')): return None
-    return (f'{name} keeps its shaders in files compressed with the game\'s own Oodle ({why.split(", Oodle-compressed")[0]}). The Android build cannot decode those yet, '
-            'so this game cannot be built for Android yet: https://github.com/enjoyerofslop/droidplay-core/issues/310 follows the fix')
+    if not on or decoder: return None
+    return (f'{name} keeps its shaders in files compressed with the game\'s own Oodle ({why.split(", Oodle-compressed")[0]}), which only the game\'s own decoder reads. '
+            'An Android build runs it on the phone: connect one and build without --no-push or --game-apk (later builds and game apps take what it decoded), '
+            'or build the game in DroidPlay for Mac first')
 
 
 def games_table():   # {title ID: {engine, graphics, build, sdk}} from dm/games/README.md's Games table
@@ -1121,6 +1183,7 @@ def main(argv):
         bi.PROG.plan((0 if a.update_shaders else 3) + 2 * bool(new) + bool(a.update_shaders))
         if new:   # the split again with the new captures, and the new ones translated (the others are kept)
             aoc = work / 'aoc'; dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc.is_dir() else []
+            if (game / 'oodle_cache/complete').is_file(): env['DM_OODLE_CACHE'] = str(game / 'oodle_cache')   # what the full build decoded on the phone (oodle_decode)
             spv = build_shaders(g.words('shader_versions') or [pkg_ver], {pkg_ver: game}, work, logs, env, g, dlc_roms)[0] or spv
         if a.update_shaders:
             if not new: say('no new run-time shaders on the phone'); bi.PROG.end(); return
@@ -1143,7 +1206,8 @@ def main(argv):
             return bi.extract(nx, keys, ex, v, b, u, None, logs, g, app)
         game = extract(pkg_ver)
         src, name = bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main']), nacp.name(game / 'control.nacp') or g.get('name', '') or g.id
-        why = unsupported_graphics(src['graphics'], name) or (undecodable_packs(src['oodle_packs'], name, env) if sv else None)
+        mac_oodle = mac_decoder(nsp_dir, work, g, pkg_ver, game, env) if src['oodle_packs'][0] else None   # not only with sv: a build mismatch below sets it
+        why = unsupported_graphics(src['graphics'], name) or (undecodable_packs(src['oodle_packs'], name, mac_oodle or serial or (game / 'oodle_cache/complete').is_file()) if sv else None)
         if why: raise BuildError(why)   # before the rewrite and the shaders, which take minutes and make an app that cannot start (or no app at all)
         bad = [] if derived or prov else bi.build_mismatch(game, pkg_ver, g)
         if bad:   # files of another build under a registered version's tag: packed like any other version
@@ -1168,6 +1232,9 @@ def main(argv):
         if sv and bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['ue_decode'][0]:   # Unreal's Oodle-compressed shaders (ue_decode)
             with phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Unreal shaders') if serial else contextlib.nullcontext():
                 ue_decode(sdirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game)
+        if sv and src['oodle_packs'][0] and not mac_oodle:   # the archives' Oodle streams, decoded on the phone before the split
+            env['DM_OODLE_CACHE'] = str(oodle_decode([bi.rfs.source(sdirs[v]) for v in sv], [sdirs[v] / 'ExeFS/main' for v in sv], dlc_roms, game, pkg_ver, nsp_dir, patched,
+                                                     work, logs, env, g, serial, sdk))
         def derive_shader_tables(reason):   # build_ipa_from_nsp.py main's: the registered profile with the split's shader tables, everything else as registered
             assert g is not None   # main stopped earlier without a profile; a nested function keeps no narrowing
             pdir = work / 'profile'
@@ -1177,7 +1244,7 @@ def main(argv):
             dg = gamemod.load(g.id)
             say(f'{reason}: using a shader-only derived profile at {dg.dir}; registered module fixes are preserved')
             return dg
-        spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables, derived)
+        spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables, derived, (lambda: mac_oodle) if mac_oodle else None)
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         if not a.game_apk: library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                             'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})

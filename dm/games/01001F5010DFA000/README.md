@@ -42,6 +42,7 @@ Open: the cause; the crash is worked around ([GitHub issue #712](https://github.
 
 - RomFS 6.0 GB, 19,101 files: effects (`bin/effect`, 2.5 GB), 678 GFPAK archives under `bin/archive` (1.6 GB, every entry Oodle Kraken: [Oodle entries of GFPAK archives](../../../docs/reference/shaders.md#oodle-entries-of-gfpak-archives)), Wwise banks (`bin/sound/NX64/wwise/bank/Default.pck` is the `romfs_marker`), message tables, compiled scripts (`bin/haxe`, `.blua`), and Trinity-style model files (`.trmdl`, `.trmsh`, `.trmtr`). The game probes `arc/data.trpfd` and `arc/data.trfmd` (Trinity's pack index), which it does not ship.
 - Shaders: 12,851, by where each first appears: 11,352 in the effects' particle files (`.ptcl`), 1,386 in the loose BNSH files of `system_resource/gfx2/shader` (materials, terrain, water, grass, lighting, shadows, post effects), 73 in the GFPAKs, 40 in `main`. 6,156 pixel shaders, 5,474 of them write exactly colours 0 and 1.
+- **Android:** the 73 GFPAK shaders need the game's own Oodle. An Android build decodes those streams on the phone before the split, or with the Mac host of a DroidPlay for Mac build of the same version: [Oodle-compressed archives decoded on the phone for an Android build](../../../docs/reference/shaders.md#oodle-compressed-archives-decoded-on-the-phone-for-an-android-build). Not run on Android by us yet (droidplay-core#310).
 
 ## Mac routes
 
@@ -53,6 +54,7 @@ Open: the cause; the crash is worked around ([GitHub issue #712](https://github.
 
 General changes first needed here; each applies to every game:
 
+- **The split's Oodle streams decoded on the phone for an Android build** (`build_android_from_nsp.py` `oodle_decode`, `scripts/android_oodle.py` `fill`, `shader_split.py` `oodle_cached`): [Oodle-compressed archives decoded on the phone for an Android build](../../../docs/reference/shaders.md#oodle-compressed-archives-decoded-on-the-phone-for-an-android-build).
 - **Function-matched cuts take branches inside the matched function, and read the trap word `0xe7ffdefe`** (`nso_match.py`): [Function-matched cuts](../../../docs/reference/rewriter.md#function-matched-cuts-for-unregistered-builds).
 - **The node area and 32 MB region alignment cuts of `sdk` `b39add63…`, and the SDK 11.4.0 implementation of the SDK-wide alignment patch** (`sdk_patches.py` `MATCH_CUTS`; the build's row was removed on 2026-10-29, as the rules give the same cuts): [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - **Dual-source blending for NVN shaders** (`dmsh_build.py` `fs_dual`, `main0_d`, the profile's `dual_want.tsv`, `DM_NVN_DUAL_WANT`; `pso_desc` `pso_reads_src1`): [A written secondary blend source (NVN dual-source blending)](../../../docs/reference/rendering.md#a-written-secondary-blend-source-nvn-dual-source-blending).
