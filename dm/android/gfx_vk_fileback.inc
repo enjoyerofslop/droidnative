@@ -14,6 +14,8 @@
 //   rewriting its heap; pools written once per area load should cost a load's worth of writes.
 #include "pool_fileback.h"   // the rules, checked on the host (dm/tools/tests/test_pool_fileback.py)
 #include <sys/syscall.h>
+#define FB_AUTO_GIB 14
+#define FB_AUTO_STR "14"
 static pthread_mutex_t g_fb_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_fb_fd = -1, g_fb_pm = -1; static uint64_t g_fb_next;   // the file and the next offset in it (never reused); /proc/self/pagemap
 static fb_piece *g_fb; static uint32_t g_fb_n, g_fb_cap;   // the file-backed pieces (under g_fb_mu)
@@ -21,8 +23,14 @@ static uint64_t g_fb_pools, g_fb_in, g_fb_copied, g_fb_cut, g_fb_back, g_fb_fail
 static int fb_kinds(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_VK_POOL_FILEBACK"); v = 0;
-                 if (e && *e && *e != '0') { v = strstr(e, "shader") ? 1 : 0; if (strstr(e, "texture") || !strcmp(e, "1")) v |= 2; if (!strcmp(e, "all")) v = 3; }
-                 if (v) LOG("[vk] DM_VK_POOL_FILEBACK=%s: %s%s%s pools backed by a file in DM_TEMP", e, v & 1 ? "shader-code" : "", v == 3 ? " and " : "", v & 2 ? "texture" : ""); }
+                 if (e && !strcmp(e, "auto")) {   // the texture kind on a phone under FB_AUTO_GIB of RAM: on the 11.3 GB Galaxy Z Fold 8 it kept Ocarina of Time alive in Saria's scene (lmkd
+                     // killed it 1 run of 2 without), while on the 16 GB Pixel 9 Pro XL, which never swapped, it only cost frame rate (6.3 against 9.0 fps)
+                     int fd = open("/proc/meminfo", O_RDONLY | O_CLOEXEC); char b[256] = ""; ssize_t n = fd >= 0 ? read(fd, b, sizeof b - 1) : -1; if (fd >= 0) close(fd); if (n > 0) b[n] = 0;
+                     const char *m = strstr(b, "MemTotal:"); uint64_t kb = m ? strtoull(m + 9, NULL, 10) : 0;
+                     v = kb && kb < (uint64_t)FB_AUTO_GIB << 20 ? 2 : 0;
+                     LOG("[vk] DM_VK_POOL_FILEBACK=auto: %.1f GiB of RAM: texture pools %s", kb / 1048576.0, v ? "backed by a file" : "stay anonymous (under " FB_AUTO_STR " GiB only)");
+                 } else if (e && *e && *e != '0') { v = strstr(e, "shader") ? 1 : 0; if (strstr(e, "texture") || !strcmp(e, "1")) v |= 2; if (!strcmp(e, "all")) v = 3; }
+                 if (v && strcmp(e, "auto")) LOG("[vk] DM_VK_POOL_FILEBACK=%s: %s%s%s pools backed by a file in DM_TEMP", e, v & 1 ? "shader-code" : "", v == 3 ? " and " : "", v & 2 ? "texture" : ""); }
     return v;
 }
 static uint64_t fb_min(void) { static uint64_t m; if (!m) { const char *e = getenv("DM_VK_POOL_FILEBACK_MB"); long v = e ? atol(e) : 64; m = (uint64_t)(v > 0 ? v : 64) << 20; } return m; }
@@ -52,8 +60,12 @@ static int fb_open(void) {   // under g_fb_mu
     if (fd < 0) { char p[512]; snprintf(p, sizeof p, "%s/poolfile_XXXXXX", d); fd = mkostemp(p, O_CLOEXEC); if (fd >= 0) unlink(p); }
     if (fd < 0) { LOG("[RED] [vk] pool file backing: no file in %s (errno %d)", d, errno); return 0; }
     g_fb_fd = fd; g_fb_pm = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC); g_fb_io0 = fb_io_written();
+    if (g_fb_pm >= 0) {   // the copy skips pages pagemap calls never touched: trusted only if a page just written reads as present (a process may get its entries masked)
+        static volatile uint8_t probe[8192]; uintptr_t pg = ((uintptr_t)probe + 4095) & ~(uintptr_t)4095; *(volatile uint8_t *)pg = 1;
+        uint64_t e = 0; if (pread(g_fb_pm, &e, 8, (off_t)((pg >> 12) * 8)) != 8 || !(e >> 63)) { close(g_fb_pm); g_fb_pm = -1; }
+    }
     dm_fault_hook_register(fb_frz_hook); dm_guest_write_prep_register(fb_frz_prep);
-    LOG("[vk] pool file backing: one unlinked file in %s%s", d, g_fb_pm < 0 ? "; /proc/self/pagemap unreadable: every page not all zero is copied" : "");
+    LOG("[vk] pool file backing: one unlinked file in %s%s", d, g_fb_pm < 0 ? "; /proc/self/pagemap unreadable or masked: every page not all zero is copied" : "; /proc/self/pagemap tells pages never touched");
     return 1;
 }
 static int fb_zero(const uint8_t *p) { const uint64_t *q = (const uint64_t *)p; for (int i = 0; i < 512; i++) if (q[i]) return 0; return 1; }
@@ -69,7 +81,7 @@ static void fb_take(const void *mem, uint64_t size, int flags) {
     if (!kind || !size || ((lo | size) & 4095) || fb_overlaps_placed(lo, hi)) return;
     pthread_mutex_lock(&g_fb_mu);
     if (!fb_open() || (g_fb_n == g_fb_cap && !(g_fb = realloc(g_fb, (g_fb_cap = g_fb_cap ? 2 * g_fb_cap : 64) * sizeof *g_fb)))) { g_fb_fail++; pthread_mutex_unlock(&g_fb_mu); return; }
-    uint64_t off = g_fb_next, t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC), copied = 0, w0 = 0, w1 = 0, held0 = atomic_load(&g_fbz_waits); const char *why = NULL;
+    uint64_t off = g_fb_next, t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC), copied = 0, looked = 0, w0 = 0, w1 = 0, held0 = atomic_load(&g_fbz_waits); const char *why = NULL;
     void *f = MAP_FAILED;
     if (fallocate(g_fb_fd, 0, (off_t)off, (off_t)size)) why = "no room for it";
     else if ((f = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, g_fb_fd, (off_t)off)) == MAP_FAILED) why = "no mapping of the file";
@@ -82,7 +94,7 @@ static void fb_take(const void *mem, uint64_t size, int flags) {
                 size_t k = pages - i < 512 ? pages - i : 512; int have = g_fb_pm >= 0 && pread(g_fb_pm, pm, k * 8, (off_t)(((lo >> 12) + i) * 8)) == (ssize_t)(k * 8);
                 for (size_t j = 0; j < k; j++) {
                     if (have && !(pm[j] >> 62)) continue;   // never touched: reads 0, a hole in the file
-                    const uint8_t *src = (const uint8_t *)(lo + ((i + j) << 12)); if (fb_zero(src)) continue;
+                    const uint8_t *src = (const uint8_t *)(lo + ((i + j) << 12)); looked++; if (fb_zero(src)) continue;
                     memcpy((uint8_t *)f + ((i + j) << 12), src, 4096); copied += 4096;
                 }
             }
@@ -98,8 +110,8 @@ static void fb_take(const void *mem, uint64_t size, int flags) {
     else {
         g_fb[g_fb_n++] = (fb_piece){lo, hi, off, mem}; g_fb_next += size; g_fb_pools++; g_fb_in += size; g_fb_copied += copied;
         sync_file_range(g_fb_fd, (off_t)off, (off_t)size, SYNC_FILE_RANGE_WRITE);   // to flash now, not in a burst under pressure
-        static int nl; if (nl++ < 16) LOG("[vk] pool file backing: pool %p, %.0f MiB (%s, flags %#x): %.0f MiB of it copied to the file in %.0f ms; writers held for %.0f ms, %llu writes waited", mem, size / 1048576.0,
-                                          kind == 1 ? "shader code" : "texture", flags, copied / 1048576.0, (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6, (w1 - w0) / 1e6,
+        static int nl; if (nl++ < 16) LOG("[vk] pool file backing: pool %p, %.0f MiB (%s, flags %#x): %llu pages looked at, %.0f MiB of them copied to the file in %.0f ms; writers held for %.0f ms, %llu writes waited", mem,
+                                          size / 1048576.0, kind == 1 ? "shader code" : "texture", flags, (unsigned long long)looked, copied / 1048576.0, (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6, (w1 - w0) / 1e6,
                                           (unsigned long long)(atomic_load(&g_fbz_waits) - held0));
     }
     pthread_mutex_unlock(&g_fb_mu);
