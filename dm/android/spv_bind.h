@@ -2,14 +2,14 @@
 // one at 1,048,576 or more (2,101,266 = 0x201012 in its Kokiri fragment shaders) use no numbers in between. Samsung's Xclipse driver (24.0.533) keeps 64 bytes per
 // binding number up to a layout's highest, in every set layout and again in every pipeline layout made with it: 128 MB for one uniform buffer at 2,101,266 (0 at 7),
 // and about 9 GB over Kokiri Forest's pipelines on a Galaxy Z Flip 7, before the game was killed. So each binding at SPV_BIND_FROM or past it gets a number in the
-// order of the old ones, from just past the set's other bindings (and past the capture variant's feedback buffers at 100-103); the layout (sh_get) and the module's
+// order of the old ones, from just past the set's other bindings (and past the capture variant's feedback buffers at 100-103 and the compute spill buffer at 110, spv_tgspill.h); the layout (sh_get) and the module's
 // OpDecorate Binding (lm_code) take the same map, so nothing on disk changes. Self-contained (no libc) for dm/tools/tests/test_spv_bind.py.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
 
 #define SPV_BIND_FROM 1024u   // bindings at or past this are numbered again
-#define SPV_BIND_BASE 128u    // the first new number, unless the set's own bindings reach past it
+#define SPV_BIND_BASE 128u    // the first new number (past 100-103 and 110), unless the set's own bindings reach past it
 enum { SPV_BIND_MAX = 32 };   // a stage's constant and storage buffers, textures and images numbered again at most (more: the map is left empty)
 typedef struct { uint32_t n; uint32_t from[SPV_BIND_MAX], to[SPV_BIND_MAX]; } spv_bmap;
 

@@ -112,6 +112,11 @@ Packed for Android as its own game app (`--game-apk`, the 21.9 GB RomFS as the d
   - Run alone in a standalone test with that dispatch's captured inputs (uniform and storage buffers at their bound sizes, its 24×636 texture, the replay's memory types and image flags), it finished in 0.2 ms, even 64 workgroups at once. In the game it never ends.
   - With the three shaders' arrays declared at 32 KB (they use about 4.5 KB for a 24-bone skeleton), Qualcomm's driver ran 150 s with no GPU loss. The next dispatch to stop was `a8310cf7c7acd0fe`, another of the 168.
   - Turnip and the Xclipse 950 run them as they are, so presumably with a higher limit (not read there).
+- **OnePlus Pad 3 (Adreno 830, Qualcomm's driver 0x8032004a), 2026-11-11, with shared memory past the limit taken from a storage buffer** ([Compute shared memory past the GPU's limit on Vulkan](../../../docs/reference/shaders.md#compute-shared-memory-past-the-gpus-limit-on-vulkan)):
+  - No slow submission and no GPU loss in about 11 minutes, through the world map, the attract drive on the desert highway, L+R to the main menu, Single Player → Grand Prix → Mario → Standard Kart → Mushroom Cup → 50cc → OK, and a race at Mario Bros. Circuit: A held through the countdown (a rocket start), driving, steering, an item box.
+  - The 168 modules were rewritten as they were made, `a8310cf7c7acd0fe` first, with no red line from the rewrite.
+  - Frame times: the attract drive 178–209 ms a frame (the GPU 28–31 ms), the menus 26–37 ms, the race 236–303 ms (the GPU 32–38 ms). The replay's CPU holds the 3D scenes, as on Turnip.
+  - With the rewrite off (`DM_SPV_TGSPILL=0`) the same build lost the GPU 17 s in, after three submissions cut short, each with `2a89b6d4df731b8d` among its dispatches.
 - **Frame times on Turnip:** menus and the movie 28–41 ms a frame; 3D scenes, the race included, 300–500 ms, of which the GPU is 21–45 ms and the replay's submit and present the rest. The track's surface is untextured (15 sparse images over the image limit), roadside bushes are missing (mesh draws skipped), and "virtual pool remap … failed" is logged several thousand times a run (Android cannot alias the private memory a virtual pool maps).
 
 ## Open

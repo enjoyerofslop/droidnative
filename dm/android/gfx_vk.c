@@ -36,6 +36,7 @@
 #include "ds_texels.h"   // depth / stencil readbacks rebuilt in NVN's layouts (mtl_read_texels, copy_t2b)
 #include "spv_narrow.h"   // each subgroup of a GPU narrower than 32 lanes a warp of its own (gfx_vk_draw.inc spv_fit_narrow)
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
+#include "spv_tgspill.h"   // compute shared memory past the GPU's limit from a storage buffer (gfx_vk_draw.inc spv_fit_tgs)
 #include "spv_precise.h"   // Maxwell's FMUL and FADD unfused in the shaders that place vertices (gfx_vk_draw.inc spv_fit_precise)
 #include "spv_bind.h"   // a set's far-apart binding numbers made dense, for drivers that size a layout by its highest (gfx_vk_draw.inc sh_get, gfx_vk_lmod.inc lm_code)
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
@@ -1043,19 +1044,24 @@ static void *chunk_thread(void *arg) {
 // Kept sorted by start, found by binary search, and remembered per thread (the last PC_RECENT pools found, valid while g_pool_gen is unchanged: every add and removal bumps it),
 // as nvn_mtl.m's pool index does. Every uniform and storage buffer of every draw asks here whether it lies in a pool; a scan of every pool under the lock took 20% of Breath of
 // the Wild's render thread on an Ayn Odin 2 (mtl_addr inlined into stage_set, about 3,300 draws a frame)
-typedef struct { const uint8_t *lo, *hi; uint8_t how; } pool_rng;   // how: the GPU addresses the game took in it (mtl_pool_addressed): bit 0 a buffer's (the whole pool), bit 1 a texture's
+typedef struct { const uint8_t *lo, *hi; uint8_t how; int flags; } pool_rng;   // how: the GPU addresses the game took in it (mtl_pool_addressed): bit 0 a buffer's (the whole pool), bit 1 a texture's; flags: NVN's
 static pool_rng *g_pools; static int g_npool, g_cappool; static pthread_mutex_t g_pool_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_pool_gen = 1;
 enum { PC_RECENT = 8 };
 static __thread struct { uint64_t gen; unsigned next; pool_rng r[PC_RECENT]; } t_pc;   // an empty entry has hi NULL
 static void gm_place(const void *mem, uint64_t size, int live), gm_unplace(const void *mem);   // raw global memory (gfx_vk_gmem.inc): the pool's pages as placed Vulkan memory, with DM_VK_RAW_GMEM=1
+// The pool's NVN flags, which hle_nvn.c gives just before mtl_pool_add on the same thread (a weak hook there): raw global memory leaves shader-code pools unplaced (gfx_vk_gmem.inc)
+static __thread const void *t_pf_mem; static __thread int t_pf_flags;
+void mtl_pool_flags(const void *mem, uint64_t size, int flags) { (void)size; t_pf_mem = mem; t_pf_flags = flags; }
+static int gm_code_skip(int flags);   // gfx_vk_gmem.inc
 void mtl_pool_add(const void *mem, uint64_t size) {
-    gm_place(mem, size, 0);   // a pool made again where one had a buffer address: placed now, before the replay knows the range (gfx_vk_gmem.inc)
+    int flags = t_pf_mem == mem ? t_pf_flags : 0;
+    if (!gm_code_skip(flags)) gm_place(mem, size, 0);   // a pool made again where one had a buffer address: placed now, before the replay knows the range (gfx_vk_gmem.inc)
     pthread_mutex_lock(&g_pool_mu);
     if (g_npool == g_cappool) { g_cappool = g_cappool ? 2 * g_cappool : 64; g_pools = realloc(g_pools, g_cappool * sizeof *g_pools); }
     int at = g_npool; while (at > 0 && g_pools[at - 1].lo > (const uint8_t *)mem) at--;   // pools come and go rarely: a move keeps the order
     memmove(g_pools + at + 1, g_pools + at, (size_t)(g_npool - at) * sizeof *g_pools); g_npool++;
-    g_pools[at] = (pool_rng){mem, (const uint8_t *)mem + size};
+    g_pools[at] = (pool_rng){mem, (const uint8_t *)mem + size, 0, flags};
     atomic_fetch_add_explicit(&g_pool_gen, 1, memory_order_release);
     pthread_mutex_unlock(&g_pool_mu);
 }
@@ -1989,6 +1995,7 @@ static void clear_tex(const p_clear_tex *ct) {
 }
 
 static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip);   // below (the pass dump's PNGs)
+#include "gfx_vk_posrows.inc"   // the vertex shaders whose position reads its constant buffer rows at run time (vk_pos_rows)
 #include "gfx_vk_draw.inc"
 
 // The front end's first window failed on a DM_VK_DRIVER driver (front_android.c vk_window_first), which has destroyed what it made: the device and instance are destroyed
@@ -2091,6 +2098,7 @@ static int rc_skips(void) {   // the clear or draw at hand is dropped
 }
 void mtl_sub_begin(void) {
     pthread_mutex_lock(&g_bk); t_bk_sub = 1; hint_note();
+    gm_lazy_tick();   // chunks of large pools placed between submissions (gfx_vk_gmem_lazy.inc)
     static __thread int placed; if (!placed) { placed = 1; void dm_android_place_thread(int done); dm_android_place_thread(0); }
     if (place_log_on()) { int c = sched_getcpu(); g_place_cpu[c >= 0 && c < 16 ? c : 15]++; g_place_n++; }
 }
@@ -2620,7 +2628,7 @@ void mtl_pool_addressed(const void *mem, uint64_t size) {   // raw global memory
     if (!gm_game()) return;
     pthread_mutex_lock(&g_pool_mu);
     int i = pool_find((const uint8_t *)mem, size ? size : 1);
-    int whole = i >= 0 && (const uint8_t *)mem == g_pools[i].lo && (const uint8_t *)mem + size >= g_pools[i].hi, first = whole && !(g_pools[i].how & 1);
+    int whole = i >= 0 && (const uint8_t *)mem == g_pools[i].lo && (const uint8_t *)mem + size >= g_pools[i].hi, first = whole && !(g_pools[i].how & 1) && !gm_code_skip(g_pools[i].flags);
     if (i >= 0) g_pools[i].how |= whole ? 1 : 2;
     pthread_mutex_unlock(&g_pool_mu);
     if (first) gm_place(mem, size, 1);   // a buffer's address: raw pointers may reach the pool from now on, so its pages become placed Vulkan memory before the game has it

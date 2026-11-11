@@ -110,6 +110,7 @@ static uint64_t gm_size_env(const char *name) {   // bytes, or whole K / M / G; 
     char *end; unsigned long long v = strtoull(s, &end, 0); int sh = *end == 'G' || *end == 'g' ? 30 : *end == 'M' || *end == 'm' ? 20 : *end == 'K' || *end == 'k' ? 10 : 0;
     return (uint64_t)v << sh;
 }
+static void gm_frz_register(void);   // gfx_vk_gmem_lazy.inc
 static const char *gm_cap_str(void) { static char b[96]; snprintf(b, sizeof b, ", at most %.2f GiB placed (DM_VK_RAW_GMEM_MAX%s)", g_gm_cap / 1073741824.0, getenv("DM_VK_RAW_GMEM_MAX") ? "" : "; a quarter of the device's memory"); return b; }
 static void gm_device_made(void) {   // the device has the extensions: their entry points, the allocation limits and the memory type a pool's pages take
     g_gm_map2 = (PFN_vkMapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkMapMemory2KHR"); g_gm_unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkUnmapMemory2KHR");
@@ -132,6 +133,7 @@ static void gm_device_made(void) {   // the device has the extensions: their ent
     else if (g_gm_mt == UINT32_MAX) { LOG("[RED] [vk] raw global memory: no host-visible, coherent and cached memory type for the pools (of the types %#x): off", mr.memoryTypeBits); return; }
     // Unset, the cap is a quarter of the device's memory: placed memory is committed whole, and Ocarina of Time places about 2 GiB in Kokiri Forest (PSS 8.7 → 10.8 GB on a
     // Fold with 10.8 GB). A pool past it stays anonymous and is copied as before, and raw accesses to it read 0 (red line 162), rather than the low-memory killer ending the game
+    gm_frz_register();   // the freeze window's hooks (gfx_vk_gmem_lazy.inc), before any pool is placed
     g_gm_cap = gm_size_env("DM_VK_RAW_GMEM_MAX");
     if (!g_gm_cap) { long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE); if (pages > 0 && psz > 0) g_gm_cap = (uint64_t)pages * (uint64_t)psz / 4; }
     g_gm_on = 1;
@@ -286,8 +288,44 @@ static void gm_note_log(const gm_note *g) {   // t_gn, outside the swap
     case 9: LOG("%s[vk] raw global memory: placed pages read at %.0f MB/s (a 16 MiB sweep); placing %zu MiB took %.1f ms", g->mbs < 2000 ? "[RED] " : "", g->mbs, g->n >> 20, g->ms); break;
     default: break; }
 }
+// [lo, lo + n) of the pool made placed memory, in pieces of at most g_gm_piece, each a segment; caller holds g_gm_pl. live: the range may be in use, so with g_bk held (the
+// replay records nothing meanwhile), the GPU waited for when a write still to land overlaps it (gm_pending; may_wait 0: then nothing is done, -1), and inside
+// nvn_dirty_open / nvn_dirty_close. freeze: game threads may be writing the range (a chunk placed long after its pool's first buffer address), so it is read-only from the
+// copy to the placed map and a write meanwhile waits in gm_frz_hook (gfx_vk_gmem_lazy.inc). → the pieces placed; fail / probe: what to log once outside
+static int gm_frz_begin(uintptr_t lo, uintptr_t hi); static void gm_frz_end(uintptr_t lo, uintptr_t hi);   // gfx_vk_gmem_lazy.inc
+static int gm_swap(const void *pool, uintptr_t lo, size_t n, int live, int freeze, int may_wait, gm_note *fail, gm_note *probe) {
+    uintptr_t hi = lo + n;
+    int bk = live && !t_bk_sub; if (bk) pthread_mutex_lock(&g_bk);
+    if (live && gm_pending(lo, hi)) { if (!may_wait) { if (bk) pthread_mutex_unlock(&g_bk); return -1; } all_wait(); g_gm_waits++; }
+    if (live) nvn_dirty_open((const void *)lo, n);
+    int frz = freeze && gm_frz_begin(lo, hi);
+    int placed = 0; uintptr_t a = lo;
+    for (; a < hi && gm_on(); a += g_gm_piece) {   // pieces placed before a failure stay placed: each is an entry of its own
+        size_t k = hi - a < g_gm_piece ? (size_t)(hi - a) : (size_t)g_gm_piece; gm_seg s;
+        int ok = g_gm_mode == 2 ? gm_place1_ahb(a, k, &s) : gm_place1(a, k, &s); if (t_gn.what == 9) *probe = t_gn;
+        if (!ok) { *fail = t_gn; g_gm_failed++; break; }
+        s.pool = pool; s.rd = calloc((k + 4095) >> 12, sizeof *s.rd); placed++;
+        pthread_mutex_lock(&g_gm_mu); gm_seg_insert(&s); g_gm_bytes += k; if (g_gm_bytes > g_gm_peak) g_gm_peak = g_gm_bytes; atomic_fetch_add(&g_gm_gen, 1); pthread_mutex_unlock(&g_gm_mu);
+    }
+    if (frz) { if (a < hi) mprotect((void *)a, hi - a, PROT_READ | PROT_WRITE); gm_frz_end(lo, hi); }   // what was not placed is anonymous and writable again
+    if (live) nvn_dirty_close();
+    if (bk) pthread_mutex_unlock(&g_bk);
+    return placed;
+}
 static uintptr_t (*g_gm_addr)[2]; static int g_ngma, g_cgma;   // ranges of pools the game took a buffer address in, kept after they are given back (under g_gm_pl)
 static int gm_was_addressed(uintptr_t lo, uintptr_t hi) { for (int i = 0; i < g_ngma; i++) if (g_gm_addr[i][0] < hi && lo < g_gm_addr[i][1]) return 1; return 0; }
+// Shader-code pools (NVN_MEMORY_POOL_FLAGS_SHADER_CODE) are left unplaced: the replay runs translated shaders and reads a program's own constants on the CPU, and no raw
+// pointer reaches shader code. Ocarina of Time has 205 of them, 345 MiB that would be committed and unswappable (BananaNative found it and leaves them out by default,
+// DM_VK_PLACE_SHADER_POOLS, after Anka Native). DM_VK_RAW_GMEM_CODE=1 (env.txt): placed as other pools
+static uint64_t g_gm_code_skipped;
+static int gm_code_skip(int flags) {
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_CODE"); v = !(e && *e == '1'); if (!v) LOG("[vk] DM_VK_RAW_GMEM_CODE=1: shader-code pools are placed as other pools"); }
+    if (v && (flags & NVN_MEMORY_POOL_FLAGS_SHADER_CODE)) { g_gm_code_skipped++; return 1; }
+    return 0;
+}
+enum { GM_CHUNK = 2u << 20 };   // pools are placed in chunks of GM_CHUNK as they are used (gfx_vk_gmem_lazy.inc); one under it is a single chunk
+static uint64_t gm_lazy_min(void);   // the smallest pool placed in chunks: every pool, or DM_VK_RAW_GMEM_LAZY_MIN (gfx_vk_gmem_lazy.inc)
+static int gm_lazy_on(void); static void gm_lazy_add(const void *pool, uintptr_t lo, size_t size, int live); static void gm_lazy_drop(const void *pool);
 static void gm_place(const void *mem, uint64_t size, int live) {   // live: the pool is in use (mtl_pool_addressed); 0: at its Initialize, before anything uses it
     if (!size || !gm_game() || !vkb() || !gm_on()) return;   // (the game first: for another game the device is not made here, earlier than it would be)
     { static int said; if (!said++) LOG("[vk] raw global memory: memory pools are placed at their first buffer address"); }
@@ -300,23 +338,13 @@ static void gm_place(const void *mem, uint64_t size, int live) {   // live: the 
     if (same) { pthread_mutex_unlock(&g_gm_pl); return; }   // placed already
     if ((lo | size) & (g_gm_align - 1)) { g_gm_failed++; pthread_mutex_unlock(&g_gm_pl); RED_ONCE(161, "raw global memory: a memory pool at %#lx+%#llx is not aligned to %llu bytes: not placed, raw accesses to it read 0", (unsigned long)lo, (unsigned long long)size, (unsigned long long)g_gm_align); return; }
     if (over) { g_gm_overlap++; pthread_mutex_unlock(&g_gm_pl); static int nl; if (nl++ < 4) LOG("[vk] raw global memory: the memory pool at %#lx+%#llx overlaps a placed one: not placed (the placed one's pages serve both)", (unsigned long)lo, (unsigned long long)size); return; }
-    if (g_gm_cap && g_gm_bytes + size > g_gm_cap) { g_gm_capped++; pthread_mutex_unlock(&g_gm_pl); RED_ONCE(162, "raw global memory: %.2f GiB placed and DM_VK_RAW_GMEM_MAX is %.2f GiB: pools from %#lx+%#llx on stay anonymous, raw accesses to them read 0",
-                                                                                                g_gm_bytes / 1073741824.0, g_gm_cap / 1073741824.0, (unsigned long)lo, (unsigned long long)size); return; }
-    // in use: the GPU idle and the replay held first, then the tracker (its fault handler may be what the completion thread would wait in); lock order g_gm_pl, g_bk, the tracker's
     { size_t np = (size_t)(size >> 12); unsigned char *v = malloc(np ? np : 1);   // how much of the pool the game had touched: the rest is committed by placing it
       if (v && !mincore((void *)lo, (size_t)size, v)) { size_t r = 0; for (size_t i = 0; i < np; i++) r += v[i] & 1; g_gm_resident += (uint64_t)r << 12; } free(v); }
-    int bk = live && !t_bk_sub; if (bk) pthread_mutex_lock(&g_bk);
-    if (live) { if (gm_pending(lo, hi)) { all_wait(); g_gm_waits++; } nvn_dirty_open(mem, size); }
-    gm_note fail = {0}, probe = {0}; int placed = 0;
-    for (uintptr_t a = lo; a < hi && gm_on(); a += g_gm_piece) {   // pieces placed before a failure stay placed: each is an entry of its own
-        size_t n = hi - a < g_gm_piece ? (size_t)(hi - a) : (size_t)g_gm_piece; gm_seg s;
-        int ok = g_gm_mode == 2 ? gm_place1_ahb(a, n, &s) : gm_place1(a, n, &s); if (t_gn.what == 9) probe = t_gn;
-        if (!ok) { fail = t_gn; g_gm_failed++; break; }
-        s.pool = mem; s.rd = calloc((n + 4095) >> 12, sizeof *s.rd); placed++;
-        pthread_mutex_lock(&g_gm_mu); gm_seg_insert(&s); g_gm_bytes += n; if (g_gm_bytes > g_gm_peak) g_gm_peak = g_gm_bytes; atomic_fetch_add(&g_gm_gen, 1); pthread_mutex_unlock(&g_gm_mu);
-    }
-    if (live) nvn_dirty_close();
-    if (bk) pthread_mutex_unlock(&g_bk);
+    if (gm_lazy_on() && size >= gm_lazy_min()) { gm_lazy_add(mem, lo, (size_t)size, live); pthread_mutex_unlock(&g_gm_pl); return; }   // in chunks, as they are used (gfx_vk_gmem_lazy.inc)
+    if (g_gm_cap && g_gm_bytes + size > g_gm_cap) { g_gm_capped++; pthread_mutex_unlock(&g_gm_pl); RED_ONCE(162, "raw global memory: %.2f GiB placed and DM_VK_RAW_GMEM_MAX is %.2f GiB: pools from %#lx+%#llx on stay anonymous, raw accesses to them read 0",
+                                                                                                g_gm_bytes / 1073741824.0, g_gm_cap / 1073741824.0, (unsigned long)lo, (unsigned long long)size); return; }
+    gm_note fail = {0}, probe = {0};
+    int placed = gm_swap(mem, lo, (size_t)size, live, 0, 1, &fail, &probe);
     pthread_mutex_unlock(&g_gm_pl);
     if (fail.what) gm_note_log(&fail);
     if (probe.what) gm_note_log(&probe);
@@ -326,41 +354,52 @@ static void gm_place(const void *mem, uint64_t size, int live) {   // live: the 
 }
 
 // ---- Giving a pool back (mtl_pool_del, nvnMemoryPoolFinalize) ----
+// One placed piece back to anonymous pages at its range, the bytes kept (zero pages left untouched, so uncommitted). The GPU must be done with it. Logs nothing (it runs inside a
+// lazy pool's merge window too). → 0 when no room was found: the piece stays placed and is listed again
+static int gm_seg_giveback(const gm_seg *s) {
+    size_t len = s->hi - s->lo;
+    uint8_t *t = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (t == MAP_FAILED) {   // no room: the piece stays placed, and listed again, so its memory is still accounted and in the table
+        g_gm_kept++; pthread_mutex_lock(&g_gm_mu); gm_seg_insert(s); g_gm_bytes += len; atomic_fetch_add(&g_gm_gen, 1); pthread_mutex_unlock(&g_gm_mu); return 0; }
+    for (uintptr_t a = s->lo; a < s->hi; a += 4096) {
+        const uint64_t *w = (const uint64_t *)a; uint64_t o = 0; for (int j = 0; j < 512 && !o; j++) o |= w[j];
+        if (o) memcpy(t + (a - s->lo), (const void *)a, 4096); }
+    if (!s->ahb) {   // a placed map: the free takes the range down, so it comes before the pages move in
+        VkMemoryUnmapInfoKHR ui = {.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .flags = g_gm_mpq.memoryUnmapReserve ? VK_MEMORY_UNMAP_RESERVE_BIT_EXT : 0, .memory = s->m};
+        g_gm_unmap2(g_vk.dev, &ui);
+        vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); }
+    if (mremap(t, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)s->lo) != (void *)s->lo) {
+        void *a = mmap((void *)s->lo, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (a != (void *)s->lo) die("raw global memory: pool memory %#lx+%#zx could not be given back (errno %d)", (unsigned long)s->lo, len, errno);
+        memcpy(a, t, len); munmap(t, len); }
+    if (s->ahb) { vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); AHardwareBuffer_release(s->ahb); }   // the mapping is ours: the pages replaced it first
+    free(s->rd);
+    g_gm_given++;
+    return 1;
+}
+// The pool's pieces out of the list (g_gm_mu taken here): into *got (grown), → how many. A chunked pool has one per run of chunks placed together
+static int gm_seg_take(const void *mem, uintptr_t lo, uintptr_t hi, gm_seg **got, int *cap) {
+    int n = 0;
+    pthread_mutex_lock(&g_gm_mu);
+    for (int i = 0; i < g_ngm;) if (g_gm[i].pool == mem && g_gm[i].lo >= lo && g_gm[i].hi <= hi) {
+        if (n == *cap) { *cap = *cap ? 2 * *cap : 64; *got = realloc(*got, (size_t)*cap * sizeof **got); if (!*got) die("raw global memory: the pieces given back"); }
+        (*got)[n++] = g_gm[i]; g_gm_bytes -= g_gm[i].hi - g_gm[i].lo; memmove(g_gm + i, g_gm + i + 1, (size_t)(--g_ngm - i) * sizeof *g_gm); } else i++;
+    if (n) atomic_fetch_add(&g_gm_gen, 1);   // a draw recorded from here takes a table without them
+    pthread_mutex_unlock(&g_gm_mu);
+    return n;
+}
 static void gm_unplace(const void *mem) {
     if (!gm_on() && !g_ngm) return;
     pthread_mutex_lock(&g_gm_pl);
-    static gm_seg *got; static int cap; int n = 0;   // (g_gm_pl) every piece of the pool
-    pthread_mutex_lock(&g_gm_mu);
-    for (int i = 0; i < g_ngm;) if (g_gm[i].pool == mem) {
-        if (n == cap) { cap = cap ? 2 * cap : 64; got = realloc(got, (size_t)cap * sizeof *got); if (!got) die("raw global memory: the pieces given back"); }
-        got[n++] = g_gm[i]; g_gm_bytes -= g_gm[i].hi - g_gm[i].lo; memmove(g_gm + i, g_gm + i + 1, (size_t)(--g_ngm - i) * sizeof *g_gm); } else i++;
-    if (n) atomic_fetch_add(&g_gm_gen, 1);   // a draw recorded from here takes a table without it
-    pthread_mutex_unlock(&g_gm_mu);
+    static gm_seg *got; static int cap;   // (g_gm_pl)
+    int n = gm_seg_take(mem, 0, UINTPTR_MAX, &got, &cap);
+    gm_lazy_drop(mem);
     if (!n) { pthread_mutex_unlock(&g_gm_pl); return; }
     // The GPU first: a chunk recorded or in flight may still read through the old table (the game finalizes a pool once its own GPU work is done, so this is short). The replay stays
     // held through the give-back: on the placed route a piece's range is unmapped between its free and the pages moving in, and nothing of the replay may read it then
     uint64_t t0 = gm_now(); int kept = 0;
     BK_LOCK(); all_wait();
-    for (int k = 0; k < n; k++) {
-        const gm_seg *s = &got[k]; size_t len = s->hi - s->lo;
-        uint8_t *t = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (t == MAP_FAILED) {   // no room: the piece stays placed, and listed again, so its memory is still accounted and in the table
-            kept++; g_gm_kept++; pthread_mutex_lock(&g_gm_mu); gm_seg_insert(s); g_gm_bytes += len; atomic_fetch_add(&g_gm_gen, 1); pthread_mutex_unlock(&g_gm_mu); continue; }
-        for (uintptr_t a = s->lo; a < s->hi; a += 4096) {   // zero pages stay untouched, so uncommitted
-            const uint64_t *w = (const uint64_t *)a; uint64_t o = 0; for (int j = 0; j < 512 && !o; j++) o |= w[j];
-            if (o) memcpy(t + (a - s->lo), (const void *)a, 4096); }
-        if (!s->ahb) {   // a placed map: the free takes the range down, so it comes before the pages move in
-            VkMemoryUnmapInfoKHR ui = {.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .flags = g_gm_mpq.memoryUnmapReserve ? VK_MEMORY_UNMAP_RESERVE_BIT_EXT : 0, .memory = s->m};
-            g_gm_unmap2(g_vk.dev, &ui);
-            vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); }
-        if (mremap(t, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)s->lo) != (void *)s->lo) {
-            void *a = mmap((void *)s->lo, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-            if (a != (void *)s->lo) die("raw global memory: pool memory %#lx+%#zx could not be given back (errno %d)", (unsigned long)s->lo, len, errno);
-            memcpy(a, t, len); munmap(t, len); }
-        if (s->ahb) { vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); AHardwareBuffer_release(s->ahb); }   // the mapping is ours: the pages replaced it first
-        free(s->rd);
-        g_gm_given++;
-    }
+    for (int k = 0; k < n; k++) kept += !gm_seg_giveback(&got[k]);
     BK_UNLOCK();
     g_gm_give_ns += gm_now() - t0;
     pthread_mutex_unlock(&g_gm_pl);
@@ -388,6 +427,8 @@ static int gm_tab_new(gm_tab *t) {   // a new table buffer, host-visible and map
     if (vkMapMemory(g_vk.dev, t->m, 0, VK_WHOLE_SIZE, 0, (void **)&t->p) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, t->m, NULL); vkDestroyBuffer(g_vk.dev, t->b, NULL); t->b = VK_NULL_HANDLE; return 0; }
     g_gm_tab_new++; return 1;
 }
+static int gm_sink_ranges(uint64_t (**seg)[3], int *cap, int n); static int gm_sink_is(const uint64_t e[3]); static _Atomic uint64_t g_sink_hits;   // gfx_vk_gmem_lazy.inc
+static int gm_seg_cmp(const void *x, const void *y) { uint64_t a = *(const uint64_t *)x, b = *(const uint64_t *)y; return a < b ? -1 : a > b; }
 static int gm_table(void) {
     uint64_t gen = atomic_load(&g_gm_gen);
     if (g_gt.b && g_gt.gen == gen) return 1;
@@ -401,6 +442,7 @@ static int gm_table(void) {
     if (g_ngm > cseg) { cseg = g_ngm + 256; seg = realloc(seg, (size_t)cseg * sizeof *seg); if (!seg) die("raw global memory: the table's ranges"); }
     for (int i = 0; i < g_ngm; i++) { seg[n][0] = g_gm[i].lo; seg[n][1] = g_gm[i].hi; seg[n++][2] = g_gm[i].gpu - g_gm[i].lo; }
     pthread_mutex_unlock(&g_gm_mu);
+    { int n0 = n; n = gm_sink_ranges(&seg, &cseg, n); if (n > n0) qsort(seg, (size_t)n, sizeof *seg, gm_seg_cmp); }   // DM_VK_RAW_GMEM_SINK (gfx_vk_gmem_lazy.inc)
     n = gmem_table_fill(t.p, (const uint64_t (*)[3])seg, n, &over);
     if (over) RED_ONCE(163, "raw global memory: %d more placed pieces than the %d entries of the pool table: addresses in them are not reached", over, DMSH_GMEM_MAP_ENTRIES - 1);
     if (g_gt.b) { g_gt.seq = C ? C->seq : g_seq;   // the chunk recorded now may read it
@@ -426,7 +468,8 @@ static void gm_chunk_done(chunk *c) {
     for (int i = 0; i < c->ngml; i++) {
         const uint32_t *w = (const uint32_t *)(c->ar[c->gml[i].blk].p + c->gml[i].off); const uint8_t *t = c->gml[i].tab; int any = 0;
         for (int j = 0; j < GM_LOG_BYTES / 4; j++) for (uint32_t bits = w[j]; bits; bits &= bits - 1) {
-            uint64_t e[2]; memcpy(e, t + (size_t)(j * 32 + __builtin_ctz(bits)) * DMSH_GMEM_MAP_ENTRY, sizeof e); any = 1; g_gm_logbits++;
+            uint64_t e[3]; memcpy(e, t + (size_t)(j * 32 + __builtin_ctz(bits)) * DMSH_GMEM_MAP_ENTRY, sizeof e); any = 1; g_gm_logbits++;
+            if (gm_sink_is(e)) { static int ns; if (atomic_fetch_add(&g_sink_hits, 1) < 1 || ns < 16) { ns++; LOG("[RED] [vk] raw global memory: raw stores reached %#llx-%#llx, a chunk not placed: they went to the sink (DM_VK_RAW_GMEM_SINK)", (unsigned long long)e[0], (unsigned long long)e[1]); } continue; }
             int known = 0; for (int k = 0; k < nseen && !known; k++) known = seen[k][0] == e[0] && seen[k][1] == e[1];
             if (!known && nseen < GM_SEEN) { seen[nseen][0] = (uintptr_t)e[0]; seen[nseen++][1] = (uintptr_t)e[1];
                 if (nseen <= 16) LOG("[vk] raw global memory: stores reached %#llx-%#llx (%llu KiB), pool range %d seen so far", (unsigned long long)e[0], (unsigned long long)e[1], (unsigned long long)((e[1] - e[0]) >> 10), nseen); }
@@ -447,10 +490,10 @@ static int gm_view(vshader *const sh[4]) {   // 1: everything pending landed (cp
     if (!gm_sync()) { g_gm_unsynced++; return 0; }
     g_gm_synced++; cpu_view(); return 1;
 }
-static void gm_ip_stat(void);   // gfx_vk_gmem_inplace.inc
+static void gm_ip_stat(void); static void gm_lazy_stat(void);   // gfx_vk_gmem_inplace.inc, gfx_vk_gmem_lazy.inc
 static void gm_stat(void) {
     if (!gm_on() && !g_ngm) return;
-    gm_ip_stat();
+    gm_ip_stat(); gm_lazy_stat();
     {   uint64_t by[4] = {0}, nb[4] = {0}; const pool_rng *big[8] = {0};   // the pools by the addresses the game took in them (mtl_pool_addressed), and the largest
         pthread_mutex_lock(&g_pool_mu);
         for (int i = 0; i < g_npool; i++) { const pool_rng *p = &g_pools[i]; int c = p->how & 1 ? 1 : p->how & 2 ? 2 : 0; by[c] += (uint64_t)(p->hi - p->lo); nb[c]++;
@@ -460,10 +503,11 @@ static void gm_stat(void) {
         LOG("[vk] raw global memory: memory pools by the addresses taken in them: a buffer's %llu (%.1f MiB), only a texture's %llu (%.1f MiB), none %llu (%.1f MiB); the largest (MiB, b/t/-):%s",
             (unsigned long long)nb[1], by[1] / 1048576.0, (unsigned long long)nb[2], by[2] / 1048576.0, (unsigned long long)nb[0], by[0] / 1048576.0, t); }
     LOG("[vk] raw global memory: %d placed pieces, %.1f MiB (peak %.1f; %.1f MiB of the pools were resident when placed), placing took %.0f ms, giving back %.0f ms (%llu given back, %llu kept placed); pools not placed: %llu over DM_VK_RAW_GMEM_MAX, %llu overlapping, "
-        "%llu failed; %llu swaps waited for the GPU; %llu tables built (%llu buffers made); %llu bindings of the table, %llu of a write log (%llu logs with stores, %llu entry bits, %llu CPU reads that met their chunk); draws that met pending write-backs: %llu as they were, %llu landed first (cumulative)",
+        "%llu failed, %llu shader-code pools left out; %llu swaps waited for the GPU; %llu tables built (%llu buffers made); %llu bindings of the table, %llu of a write log (%llu logs with stores, %llu entry bits, %llu CPU reads that met their chunk); draws that met pending write-backs: %llu as they were, %llu landed first (cumulative)",
         g_ngm, g_gm_bytes / 1048576.0, g_gm_peak / 1048576.0, g_gm_resident / 1048576.0, g_gm_place_ns / 1e6, g_gm_give_ns / 1e6, (unsigned long long)g_gm_given, (unsigned long long)g_gm_kept, (unsigned long long)g_gm_capped,
-        (unsigned long long)g_gm_overlap, (unsigned long long)g_gm_failed, (unsigned long long)g_gm_waits, (unsigned long long)g_gm_tabs, (unsigned long long)g_gm_tab_new, (unsigned long long)g_gm_draws, (unsigned long long)g_gm_stdraws, (unsigned long long)g_gm_logs,
+        (unsigned long long)g_gm_overlap, (unsigned long long)g_gm_failed, (unsigned long long)g_gm_code_skipped, (unsigned long long)g_gm_waits, (unsigned long long)g_gm_tabs, (unsigned long long)g_gm_tab_new, (unsigned long long)g_gm_draws, (unsigned long long)g_gm_stdraws, (unsigned long long)g_gm_logs,
         (unsigned long long)g_gm_logbits, (unsigned long long)g_gm_store_hits, (unsigned long long)g_gm_unsynced, (unsigned long long)g_gm_synced);
 }
 #include "gfx_vk_gmem_check.inc"   // DM_VK_RAW_GMEM_TEST and DM_VK_RAW_GMEM_CHECK: the self-test on the GPU and the pointers the shaders read
+#include "gfx_vk_gmem_lazy.inc"   // large pools placed in chunks as they are used (DM_VK_RAW_GMEM_LAZY)
 #include "gfx_vk_gmem_inplace.inc"   // storage buffers bound in their placed pools (DM_VK_INPLACE)

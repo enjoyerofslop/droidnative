@@ -17,5 +17,7 @@ Three projects from Ryujinx 1.3.2: `Ryujinx.Graphics.Shader`, `Ryujinx.Common` a
 
 - `Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs` (`TryGenerateBoundedUniformLoad`), `Translation/ResourceManager.cs`, `StructuredIr/ShaderProperties.cs`, `Constants.cs` and `Translation/TranslationFlags.cs`: the Metal path (`TranslationFlags.MetalUniformBounds`) gives 0 for a read of a game uniform slot (c[3] to c[16]) past the size the game bound, as Maxwell does, comparing the word's index with the slot's size from a table in bank 25 that the host fills. Upstream relied on Vulkan's robust buffer access, which Metal does not have. See [reads past a uniform binding's size](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size), found on Paper Mario: The Thousand-Year Door (GitHub issue #1860).
 
+- `Ryujinx.Graphics.Shader/StructuredIr/StructuredProgram.cs`, `GetVarTypeFromUses` / `GetSourceVarType`: the array layer of a texture sample is an integer source, so the locals a layer is copied or selected into are S32. Upstream typed them by the instruction table's FP32 for every sample source, and a layer held as a float's bits (1 and 2 are denormals) read 0 on an Adreno. See [texture array layers keep integer locals](../../../docs/reference/shaders.md#texture-array-layers-keep-integer-locals), from DeathKhan's nx2android fork (5164b63).
+
 The shader translation tool in `dm/gfx/tools/dmsh_xlate` references them to translate the original Switch shaders to SPIR-V.
 License: MIT, see `LICENSE.txt`. Upstream: <https://github.com/Ryubing>.
