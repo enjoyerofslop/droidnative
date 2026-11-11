@@ -16,7 +16,7 @@
 static const uint32_t MESHLAUNCH[] = {
 #include "shaders/meshlaunch_comp.inc"
 };
-enum { ME_HDR = 16, ME_PC = 8, ME_ALIGN = 256, ME_KBIND = 100, ME_TGS_MAX = 16 << 20 };   // ME_KBIND: the kernels' set 1 bindings, 100 to 103 (spv_meshemu.B_TASKOUT ...)   // launch list words before its entries (spv_meshemu.HDR); push constant bytes {first, base}
+enum { ME_HDR = 16, ME_PC = 8, ME_ALIGN = 256, ME_KBIND = 100 };   // ME_KBIND: the kernels' set 1 bindings, 100 to 103 (spv_meshemu.B_TASKOUT ...)   // launch list words before its entries (spv_meshemu.HDR); push constant bytes {first, base}
 typedef struct memu_t { int task, pay, threads, nrec, nout, ipw, verts; VkPipeline p; VkPipelineLayout pl; int bad; vshader *pvs;
                         int queued; int bgdone; VkPipeline bgp; uint64_t bgns; } memu_t;   // queued: its pipeline is being built in the background (the replay's); bgdone, bgp, bgns: that build's result, under g_me_mu (memu_cpipe)
 static struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; int bad; } g_me;
@@ -169,14 +169,17 @@ static VkDescriptorSet memu_set(vshader *l, uint32_t n, uint32_t base, const VkD
 }
 // one dispatch of a task or mesh kernel over the arena ranges r[4] (taskout, launch, vtx, idx): groups workgroups, or (0) the launch list header's counts at ind, at most
 // `most`. A kernel whose shared memory is past the GPU's limit has it in a storage buffer (spv_tgspill, s->tgs), a region a workgroup, which stage_set sizes by g_cdim
-static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize r[8], uint32_t first, uint32_t groups, VkDeviceSize ind, uint32_t most) {
+// and takes from the compute form's arena at spill (g_tgs_b): scratch for this dispatch alone, where the chunk's arena would keep it for every dispatch of the chunk
+static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize r[8], uint32_t first, uint32_t groups, VkDeviceSize ind, uint32_t most, VkDeviceSize spill) {
     VkDescriptorSet set, es; uint32_t dyn[18]; int ok;
     g_cdim[0] = groups ? groups : most; g_cdim[1] = g_cdim[2] = 1;
+    g_tgs_b = s->tgs ? g_me.b : VK_NULL_HANDLE; g_tgs_off = spill;
     for (int t = 0;; t++) {   // as vk_dispatch: the set taken again when a sync inside stage_set closed the chunk it came from
         g_bind_bad = 0; if (!cur()) return 0; uint64_t dseq = C->seq; int got = stage_set(s, 0, &set, dyn, pr, pst, 0, dseq); ok = got && !g_bind_bad;
         if (got || !ds_moved(dseq)) break;
         if (ds_again(t, 2)) return 0;
     }
+    g_tgs_b = VK_NULL_HANDLE;
     if (!ok || !(es = memu_set(&g_me_kset, 4, ME_KBIND, r, r + 4))) return 0;
     VkCommandBuffer c = cb(); if (!c) return 0;
     cb_barrier();
@@ -267,28 +270,28 @@ static int vk_memu_draw_(const p_draw *dw) {
         if (km < 0 || kt < 0) { g_me_left++; return 1; }
     }
     static uint32_t cap_max; if (!cap_max) { const char *e = getenv("DM_VK_MESH_MAX"); cap_max = e && atoi(e) > 0 ? (uint32_t)atoi(e) : 4096; }
-    VkDeviceSize per = me_up((VkDeviceSize)m->nrec * m->nout * 16) + me_up((VkDeviceSize)m->ipw * 4);   // a mesh workgroup's records and indices
-    VkDeviceSize usable = g_me.size - 8 * ME_ALIGN, half = usable / 2;   // (the ranges' alignment)
+    VkDeviceSize per = me_up((VkDeviceSize)m->nrec * m->nout * 16) + me_up((VkDeviceSize)m->ipw * 4) + ms->tgs;   // a mesh workgroup's records and indices, and its shared memory when that is in a storage buffer (memu_kernel)
+    VkDeviceSize usable = g_me.size - 10 * ME_ALIGN, half = usable / 2;   // (the ranges' alignment)
     uint64_t room = (ts ? half : usable) / per; uint32_t cap = room < cap_max ? (uint32_t)room : cap_max; if (cap > 65535) cap = 65535;
     if (!cap) { RED_ONCE(183, "mesh shader %s: one workgroup's outputs exceed the arena (DM_VK_MESH_ARENA_MB): draw skipped", ms->key); g_me_skipped++; return 0; }
-    // shared memory in a storage buffer (memu_kernel): a part's workgroups take at most ME_TGS_MAX bytes of the chunk's arena for it
-    if (ms->tgs && ME_TGS_MAX / ms->tgs < cap) { cap = ME_TGS_MAX / ms->tgs; if (!cap) cap = 1; }
     // the arena's ranges, offsets then lengths: taskout, launch, vtx, idx
     VkDeviceSize r[8]; r[4] = ts ? 0 : ME_ALIGN; r[5] = ts ? me_up(((VkDeviceSize)ME_HDR + 2ull * cap) * 4) : ME_ALIGN;
     r[6] = (VkDeviceSize)cap * m->nrec * m->nout * 16; r[7] = (VkDeviceSize)cap * m->ipw * 4;
     uint32_t tmax = 0;
     if (ts) { VkDeviceSize left = half > r[5] ? half - r[5] : 0; uint64_t t = left / ((VkDeviceSize)ts->memu->pay * 4); tmax = t > 65535 ? 65535 : (uint32_t)t;
         if (!tmax) { RED_ONCE(183, "task shader %s: its payloads exceed the arena (DM_VK_MESH_ARENA_MB): draw skipped", ts->key); g_me_skipped++; return 0; }
-        if (ts->tgs && ME_TGS_MAX / ts->tgs < tmax) { tmax = ME_TGS_MAX / ts->tgs; if (!tmax) tmax = 1; } }
+        if (ts->tgs && half / ts->tgs < tmax) tmax = (uint32_t)(half / ts->tgs);   // its shared memory in a storage buffer: where the mesh kernel's outputs go afterwards
+        if (!tmax) { RED_ONCE(183, "task shader %s: one workgroup's shared memory exceeds the arena (DM_VK_MESH_ARENA_MB): draw skipped", ts->key); g_me_skipped++; return 0; } }
     uint32_t first = (uint32_t)dw->first, left = (uint32_t)dw->count;
     while (left) {
         uint32_t n = ts ? (left < tmax ? left : tmax) : (left < cap ? left : cap);
         if (ts) r[4] = me_up((VkDeviceSize)n * ts->memu->pay * 4);
         r[0] = 0; r[1] = me_up(r[0] + r[4]); r[2] = me_up(r[1] + r[5]); r[3] = me_up(r[2] + r[6]);
+        VkDeviceSize sp = me_up(r[3] + r[7]);   // the mesh kernel's shared memory, when it is in a storage buffer; the task kernel's lies where vtx will be
         rp_end(); tc_clear();
         if (ts) {
-            if (!memu_kernel(ts, ppr[2], pst[2], r, first, n, 0, n) || !memu_launch(r, n, ts->memu, m, cap) || !memu_kernel(ms, ppr[0], pst[0], r, 0, 0, r[1], cap)) { g_me_skipped++; return 0; }
-        } else if (!memu_kernel(ms, ppr[0], pst[0], r, first, n, 0, n)) { g_me_skipped++; return 0; }
+            if (!memu_kernel(ts, ppr[2], pst[2], r, first, n, 0, n, r[2]) || !memu_launch(r, n, ts->memu, m, cap) || !memu_kernel(ms, ppr[0], pst[0], r, 0, 0, r[1], cap, sp)) { g_me_skipped++; return 0; }
+        } else if (!memu_kernel(ms, ppr[0], pst[0], r, first, n, 0, n, sp)) { g_me_skipped++; return 0; }
         if (!memu_draw(m, fs, ppr[1], pst[1], r, ts ? 0 : n * (uint32_t)m->ipw)) { g_me_skipped++; return 0; }
         first += n; left -= n; g_me_parts++;
     }
