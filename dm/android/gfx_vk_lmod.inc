@@ -39,6 +39,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, uint64_t e5
     uint32_t *pf = NULL; size_t pn = spv_pool_fit(code, n, path, &pf); if (pn) { free(code); code = pf; n = pn; }   // the texture pool by ID moved into the pool set
     uint32_t *fit = NULL; size_t fn = spv_fit(code, n, path, &fit); if (fn) { free(code); code = fit; n = fn; }
     uint32_t *ly = NULL; size_t ln = spv_fit_layer(code, n, path, &ly); if (ln) { free(code); code = ly; n = ln; }
+    uint32_t *ts = NULL; size_t tn = spv_fit_tgs(code, n, path, &ts); if (tn) { free(code); code = ts; n = tn; }   // shared memory past the GPU's limit (spv_tgspill)
     uint32_t *pr = NULL; size_t prn = spv_fit_precise(code, n, path, &pr); if (prn) { free(code); code = pr; n = prn; }   // FMUL and FADD unfused where vertices are placed
     if (alpha) {   // NVN's alpha test, run in a wrapper entry point (spv_alpha.h); a shader it does not apply to is no module
         size_t cap = n + 256; uint32_t *o = malloc(cap * 4), fn_id = 0;

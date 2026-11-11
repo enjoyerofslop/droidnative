@@ -22,7 +22,8 @@ from pathlib import Path
 
 ANDROID_CHAIN = 6   # res.json 'android': bumped when this post-pass or spv_build.py's translation changes what they make (spv_build.py translates older outputs again).
                     # 5: the size table taken out (cbsize_strip), so a chain 4 output of the merged translator, which reads it, is translated again
-                    # 6: a vertex shader's position can read its constant buffer rows at run time (pos_rows, behind a specialization constant)
+                    # 6: a vertex shader's position can read its constant buffer rows at run time (pos_rows, behind a specialization constant); with it, the translator types sampled array layers S32
+                    #    (StructuredProgram.GetSourceVarType), so a layer no longer goes through float locals (#135 and #147 shipped together)
 EXT_FROM = 3   # 4 added res.json cbufs[].ext (cb_extents) and nothing else: spv_build.py brings an output of chain 3 up to date from its .spv (add_ext), without the translator,
                # only while ANDROID_CHAIN is EXT_FROM + 1 (upgrade stamps that chain, so a later bump for a change to the .spv translates chain 3's outputs again)
 SET_OF = {'vs': 0, 'ps': 1, 'gs': 2, 'tc': 3, 'te': 3, 'cs': 0}

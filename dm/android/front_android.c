@@ -262,9 +262,16 @@ void front_android_present(const tex_t *t, const int crop[4]) { (void)t; (void)c
 // ---------- Vulkan ----------
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkSurfaceKHR g_surf; static VkSwapchainKHR g_sc; static VkImage g_img[8]; static uint32_t g_nimg; static VkFormat g_fmt; static VkExtent2D g_ext2;
+static int g_sc_srgb, g_sc_has_srgb;   // the swapchain made in R8G8B8A8_SRGB; the surface lists it (sc_encoding)
 static VkCommandPool g_cpool; static VkCommandBuffer g_cb; static VkBuffer g_stg; static VkDeviceMemory g_stgm; static void *g_stgp; static VkDeviceSize g_stg_sz;
 static VkFence g_fence; static VkSemaphore g_acq, g_done;
-#define VKC(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { LOG("[RED] Vulkan: %s = %d", #x, r_); return 0; } } while (0)
+static char g_vk_why[160];   // the call that failed last, for the fallback's line (vk_window_first)
+static int vk_bad(const char *call, VkResult r) {
+    LOG("[RED] Vulkan: %s = %d", call, r);
+    snprintf(g_vk_why, sizeof g_vk_why, "%.*s: %s", (int)strcspn(call, "("), call, vk_result_str(r));
+    return 0;
+}
+#define VKC(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) return vk_bad(#x, r_); } while (0)
 
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
 // What the NVN replay will need from this GPU (BC textures, bindless descriptor pools, geometry and transform feedback, border colors)
@@ -297,7 +304,7 @@ static void vk_probe(void) {
 static int vk_init(void) {   // the NVN replay's device (gfx_vk.c vkb): the window's swapchain and the game's textures are on one queue
     if (g_inst) return 1;
     vkb_ctx *c = vkb();
-    if (!c || !c->has_surface || !c->has_swapchain) { LOG("[RED] Vulkan: no device with a window surface"); return 0; }
+    if (!c || !c->has_surface || !c->has_swapchain) { LOG("[RED] Vulkan: no device with a window surface"); snprintf(g_vk_why, sizeof g_vk_why, "no device with a window surface"); return 0; }
     g_inst = c->inst; g_pd = c->pd; g_dev = c->dev; g_q = c->q; g_qf = c->qf;
     vk_probe();
     VkCommandPoolCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = g_qf};
@@ -319,12 +326,15 @@ static int vk_window_up(ANativeWindow *w) {
     if (!vk_init()) return 0;
     VkAndroidSurfaceCreateInfoKHR si = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = w};
     VKC(vkCreateAndroidSurfaceKHR(g_inst, &si, NULL, &g_surf));
-    VkBool32 ok = 0; vkGetPhysicalDeviceSurfaceSupportKHR(g_pd, g_qf, g_surf, &ok); if (!ok) { LOG("[RED] Vulkan: the queue cannot present"); return 0; }
+    VkBool32 ok = 0; vkGetPhysicalDeviceSurfaceSupportKHR(g_pd, g_qf, g_surf, &ok);
+    if (!ok) { LOG("[RED] Vulkan: the queue cannot present"); snprintf(g_vk_why, sizeof g_vk_why, "the queue cannot present"); return 0; }
     VkSurfaceCapabilitiesKHR cap; VKC(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, g_surf, &cap));
     uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surf, &nf, NULL);
     VkSurfaceFormatKHR fm[32]; if (nf > 32) nf = 32; vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surf, &nf, fm);
-    g_fmt = fm[0].format; VkColorSpaceKHR cs = fm[0].colorSpace;
-    for (uint32_t i = 0; i < nf; i++) if (fm[i].format == VK_FORMAT_R8G8B8A8_UNORM) { g_fmt = fm[i].format; cs = fm[i].colorSpace; }
+    g_fmt = fm[0].format; VkColorSpaceKHR cs = fm[0].colorSpace; g_sc_has_srgb = 0;
+    for (uint32_t i = 0; i < nf; i++) if (fm[i].format == VK_FORMAT_R8G8B8A8_SRGB) g_sc_has_srgb = 1;
+    VkFormat want = g_sc_srgb && g_sc_has_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;   // the frame's encoding (sc_encoding)
+    for (uint32_t i = 0; i < nf; i++) if (fm[i].format == want) { g_fmt = fm[i].format; cs = fm[i].colorSpace; }
     g_ext2 = cap.currentExtent.width != 0xFFFFFFFFu ? cap.currentExtent : (VkExtent2D){(uint32_t)ANativeWindow_getWidth(w), (uint32_t)ANativeWindow_getHeight(w)};
     // The picture is drawn upright in the window's orientation (the extent above) with the identity transform, and the compositor rotates it for the
     // display; the current transform (90° in landscape) would ask for a picture drawn pre-rotated
@@ -333,6 +343,7 @@ static int vk_window_up(ANativeWindow *w) {
         .imageFormat = g_fmt, .imageColorSpace = cs, .imageExtent = g_ext2, .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = xf, .compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR, .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = 1};
     if (!(cap.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)) sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (vk_driver_fail("swapchain")) { snprintf(g_vk_why, sizeof g_vk_why, "DM_VK_DRIVER_FAIL=swapchain"); return 0; }   // a test, with the surface made: its teardown is tried too
     VKC(vkCreateSwapchainKHR(g_dev, &sc, NULL, &g_sc));
     g_nimg = 8; VKC(vkGetSwapchainImagesKHR(g_dev, g_sc, &g_nimg, g_img));
     // Staging buffer the status picture is drawn into (host visible), copied to the swapchain image each refresh
@@ -346,6 +357,27 @@ static int vk_window_up(ANativeWindow *w) {
     VKC(vkAllocateMemory(g_dev, &ma, NULL, &g_stgm)); VKC(vkBindBufferMemory(g_dev, g_stg, g_stgm, 0)); VKC(vkMapMemory(g_dev, g_stgm, 0, g_stg_sz, 0, &g_stgp));
     LOG("window %ux%u, swapchain %u images, format %d", g_ext2.width, g_ext2.height, g_nimg, g_fmt);
     return 1;
+}
+static void vk_front_down(void) {   // everything vk_init and vk_window_up made, so the device can be made again (vk_window_first)
+    vk_window_down();
+    if (g_dev) {
+        if (g_acq) vkDestroySemaphore(g_dev, g_acq, NULL);
+        if (g_done) vkDestroySemaphore(g_dev, g_done, NULL);
+        if (g_fence) vkDestroyFence(g_dev, g_fence, NULL);
+        if (g_cpool) vkDestroyCommandPool(g_dev, g_cpool, NULL);   // and g_cb with it
+    }
+    g_acq = g_done = VK_NULL_HANDLE; g_fence = VK_NULL_HANDLE; g_cpool = VK_NULL_HANDLE; g_cb = VK_NULL_HANDLE;
+    g_inst = VK_NULL_HANDLE; g_pd = VK_NULL_HANDLE; g_dev = VK_NULL_HANDLE; g_q = VK_NULL_HANDLE;
+}
+// The first window comes before the host starts (on_cmd), so the front end's are the only Vulkan objects yet. When a DM_VK_DRIVER driver makes the device but can't put a
+// picture on the window (a surface or swapchain it fails), they, the device and the instance are destroyed and made again on the system's driver (gfx_vk.c vkb_fallback):
+// before this, the game ran with no picture. A later window can't do this, as the game's textures, buffers and pipelines live on the device by then
+static void vk_window_first(ANativeWindow *w) {
+    g_vk_why[0] = 0;
+    if (vk_window_up(w) || !vk_driver_name()) return;
+    char why[200]; snprintf(why, sizeof why, "the first window failed (%s)", g_vk_why[0] ? g_vk_why : "the line above says where");
+    vk_front_down();
+    if (vkb_fallback(why)) vk_window_up(w);
 }
 
 // ---------- Status picture: text drawn with android.graphics (JNI) into a bitmap, copied into the staging buffer ----------
@@ -391,6 +423,7 @@ static void status_draw(void) {
         text("Loading the game...", u, y, 0.55f * u, 0xFFFFD080); y += 0.8f * u;
     }
     if (st == ST_SELFTEST || st == ST_PASS) { text(getenv("DM_FORCE_SELFTEST") ? "Self test (from the launcher)" : "No game in Android/data/org.nxnative.android/files/games/" DM_GAME_ID "/", u, y, 0.55f * u, 0xFFA0A0A0); y += 0.8f * u; }
+    { int warn; const char *vn = vk_driver_note(&warn); if (vn) { text(vn, u, y, 0.55f * u, warn ? 0xFFFFD080 : 0xFFA0A0A0); y += 0.8f * u; } }   // the DM_VK_DRIVER driver, or why not
     pthread_mutex_lock(&g_txt_mu); snprintf(line, sizeof line, "%.120s", g_last); pthread_mutex_unlock(&g_txt_mu);
     text(line, u, (float)g_ext2.height - u, 0.45f * u, 0xFF909090);
     // bitmap → staging buffer (RGBA bytes; swapped to BGRA for a BGRA swapchain)
@@ -433,6 +466,17 @@ static uint64_t g_shown;
 // The swapchain follows the window: made again when the window's size differs from it, or when presenting reports it out of date. Launched while the screen was
 // locked, the app got a 1x1 window first and kept a 1x1 swapchain, which the compositor stretched over the screen (one texel of the picture: whole-screen colour flicker)
 static int g_sc_stale;
+// The swapchain in the presented frame's encoding. A blit from an sRGB image decodes it to linear, and one into a UNORM image stores linear values unencoded, so
+// Link's Awakening's RGBA8_SRGB window shown in a UNORM swapchain was a gamma too dark (its bytes are right: the dump's present.png showed them). With the
+// swapchain in sRGB as well, the blit decodes and encodes again and carries the frame's bytes. Made again when the frame's encoding changes, where the surface
+// lists R8G8B8A8_SRGB (Android's surfaces do); DM_VK_SC_SRGB=0 keeps UNORM, as before
+static int sc_encoding(VkFormat f) {   // 1: the swapchain is to be made again (the frame not shown)
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_SC_SRGB"); on = !(e && *e == '0'); }
+    int srgb = on && (f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_A8B8G8R8_SRGB_PACK32);
+    if (srgb == g_sc_srgb || (srgb && !g_sc_has_srgb)) return 0;
+    LOG("[front] the frame is %s (format %d): swapchain made again in %s", srgb ? "sRGB" : "not sRGB", (int)f, srgb ? "R8G8B8A8_SRGB" : "R8G8B8A8_UNORM");
+    g_sc_srgb = srgb; g_sc_stale = 1; return 1;
+}
 static void sc_follow_window(void) {
     if (!g_app || !g_app->window || !g_sc) return;
     int ww = ANativeWindow_getWidth(g_app->window), wh = ANativeWindow_getHeight(g_app->window);
@@ -479,6 +523,7 @@ static int frame_draw(void) {
     if (!g_sc || (st != ST_GAME && st != ST_DEMO)) return 0;
     vkb_frame fr; if (!vkb_frame_lock(&fr)) return 0;
     if (fr.n == g_shown) { vkb_frame_unlock(); return 1; }
+    if (sc_encoding(fr.fmt)) { vkb_frame_unlock(); return 1; }   // shown once the swapchain is made again (sc_follow_window)
     vkWaitForFences(g_dev, 1, &g_fence, 1, UINT64_MAX);
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(g_dev, g_sc, 100000000ull, g_acq, VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) g_sc_stale = 1;   // made again before the next frame (sc_follow_window); not on SUBOPTIMAL, which the identity transform in landscape gives every frame
@@ -573,9 +618,23 @@ static void gamepad_reset(void) {   // the app went away: nothing stays held
     if (g_gp) { JNIEnv *e = g_env; (*e)->CallStaticVoidMethod(e, g_gp, (*e)->GetStaticMethodID(e, g_gp, "reset_", "()V")); if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e); }
     g_pad_btn = 0; memset(g_axis, 0, sizeof g_axis); pad_now(0);
 }
+// DM_PAD_ABXY: how a controller's A, B, X and Y keys become the Switch's. position (the default): by where the button sits, as Android names them after an Xbox pad
+// (A bottom, B right, X left, Y top), so the Switch's A is the right-hand button. label: A to A and so on, for a controller whose firmware already gives those keys
+// Nintendo's labels: a Retroid Pocket G2 in its "Retro" layout sends BUTTON_A from its right button, which position turned into the Switch's B (droidplay-core#247)
+static int abxy_label(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PAD_ABXY"); v = e && !strcmp(e, "label"); } return v; }
+static uint64_t face_button(int32_t code) {
+    int i = code == AKEYCODE_BUTTON_A ? 0 : code == AKEYCODE_BUTTON_B ? 1 : code == AKEYCODE_BUTTON_X ? 2 : code == AKEYCODE_BUTTON_Y ? 3 : -1;
+    if (i < 0) return 0;
+    static const uint64_t pos[] = {DM_BTN_B, DM_BTN_A, DM_BTN_Y, DM_BTN_X}, lab[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y};
+    static const char *const name[] = {"BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y"}, *const spos[] = {"B", "A", "Y", "X"}, *const slab[] = {"A", "B", "X", "Y"};
+    int label = abxy_label(); static int said;   // each key's mapping said once, so a player's log shows which button became which
+    if (!(said >> i & 1)) { said |= 1 << i; LOG("controller: Android's %s is the Switch's %s (by %s; DM_PAD_ABXY=%s maps by %s)", name[i], label ? slab[i] : spos[i],
+                                                  label ? "label" : "position", label ? "position" : "label", label ? "position" : "label"); }
+    return label ? lab[i] : pos[i];
+}
 static uint64_t key_button(int32_t code) {
-    switch (code) {   // by position: the bottom face button is the Switch's B, the right one A, the left one Y, the top one X
-        case AKEYCODE_BUTTON_A: return DM_BTN_B; case AKEYCODE_BUTTON_B: return DM_BTN_A; case AKEYCODE_BUTTON_X: return DM_BTN_Y; case AKEYCODE_BUTTON_Y: return DM_BTN_X;
+    uint64_t f = face_button(code); if (f) return f;   // A, B, X and Y: by position or by label (DM_PAD_ABXY)
+    switch (code) {
         case AKEYCODE_BUTTON_L1: return DM_BTN_L; case AKEYCODE_BUTTON_R1: return DM_BTN_R; case AKEYCODE_BUTTON_L2: return DM_BTN_ZL; case AKEYCODE_BUTTON_R2: return DM_BTN_ZR;
         case AKEYCODE_BUTTON_THUMBL: return DM_BTN_LS; case AKEYCODE_BUTTON_THUMBR: return DM_BTN_RS; case AKEYCODE_BUTTON_START: return DM_BTN_PLUS; case AKEYCODE_BUTTON_SELECT: return DM_BTN_MINUS;
         case AKEYCODE_DPAD_LEFT: return DM_BTN_LEFT; case AKEYCODE_DPAD_UP: return DM_BTN_UP; case AKEYCODE_DPAD_RIGHT: return DM_BTN_RIGHT; case AKEYCODE_DPAD_DOWN: return DM_BTN_DOWN;
@@ -630,10 +689,24 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
 
 // ---------- Lifecycle ----------
 static int g_started;
+// A start on a DM_VK_DRIVER driver counts as good (vk_driver.c vk_driver_ok) after 120 presented frames or 30 s of the game, or once the self test's picture check has drawn
+// on it, so a crash or hang before then makes the next start skip the driver once. A driver's first start compiles the game's pipelines with the status screen up, for over a
+// minute in Brilliant Diamond: that is not a failure, and so a hang in the driver after 30 s counts as good too (the records can't tell the two apart)
+static void driver_proven(void) {
+    static int done; static uint64_t t0; int st = atomic_load(&g_state);
+    if (done) return;
+    if (st == ST_PASS && g_demo_frames) { done = 1; vk_driver_ok(); return; }   // (ST_PASS comes once before the picture check too, when the self test passes)
+    if (st != ST_GAME) return;
+    if (!t0) t0 = mono_ns();
+    if (atomic_load(&g_frames) >= 120 || mono_ns() - t0 >= 30000000000ull) { done = 1; vk_driver_ok(); }
+}
 static void on_cmd(struct android_app *app, int32_t cmd) {
     int game = atomic_load(&g_state) == ST_GAME;
     switch (cmd) {
-        case APP_CMD_INIT_WINDOW: if (app->window) vk_window_up(app->window); if (!g_started) { g_started = 1; start_host(); gamepad_start(); } break;
+        case APP_CMD_INIT_WINDOW:
+            if (app->window) { if (g_started) vk_window_up(app->window); else vk_window_first(app->window); }
+            if (!g_started) { g_started = 1; start_host(); gamepad_start(); }
+            break;
         case APP_CMD_TERM_WINDOW: vk_window_down(); break;
         case APP_CMD_GAINED_FOCUS: if (game) dm_focus_set(1); break;
         case APP_CMD_LOST_FOCUS: gamepad_reset(); if (game) dm_focus_set(2); break;
@@ -659,6 +732,7 @@ void android_main(struct android_app *app) {
         if (kept) LOG("the previous start's log and dumps: %d file%s kept beside the new ones, with .prev before the extension (log.prev.txt)", kept, kept == 1 ? "" : "s");
     }
     vk_driver_dirs(g_ext, g_int);   // DM_VK_DRIVER: a driver beside env.txt, run from a copy in the internal files
+    vk_driver_game(g_game, DM_GAME_ID);   // and its start records: games/<title ID>/vk_driver_result.txt
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &g_env, NULL);
     app->onAppCmd = on_cmd; app->onInputEvent = on_input;
     // The screen stays on while the game's window is up, as the launcher's does: Android counts only its own input events as activity, so a cutscene, a game
@@ -673,5 +747,6 @@ void android_main(struct android_app *app) {
             if (g_sc) break;
         }
         if (!frame_draw()) status_draw();
+        driver_proven();
     }
 }

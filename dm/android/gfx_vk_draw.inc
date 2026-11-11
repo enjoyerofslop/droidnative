@@ -127,6 +127,7 @@ typedef struct {
     int vid;   // a vertex shader reading gl_VertexIndex: its draws keep their vertex numbers (bind_vbufs lo 0)
     uint32_t io_in, io_out;   // the locations of its user-defined inputs and outputs (bit n: location n)
     struct { uint32_t miss; struct lmod *m; } var[4]; int nvar;   // fragment shaders: variants with unwritten inputs made constants (ps_variant)
+    uint32_t tgs;   // bytes of shared memory a workgroup takes from the spill buffer at SPV_TGS_BINDING (its module declares more than the GPU takes: spv_fit_tgs); 0: none
     int b0;   // a module of its set (.spv, .z.spv, .tf.spv; ps_variant only makes inputs private) reads binding 0, the support buffer (spv_b0_used): stage_set writes it only then
     int wlayer;   // a vertex, tessellation or geometry shader that writes the layer (spv_layer_out): its draws get every layer of their targets (rp_prepare)
     struct { uint32_t miss; struct lmod *m; } avar[4]; int navar;   // alpha-test variants (ps_alpha_mod, spv_alpha.h) by the inputs variant; a NULL module: the transform does not apply
@@ -445,6 +446,28 @@ static size_t spv_fit_precise(const uint32_t *code, size_t nw, const char *what,
 // The module with its layer and viewport output made ordinary outputs, on a GPU that has no such output from vertex shaders (spv_layer.h): no
 // VK_EXT_shader_viewport_index_layer, Vulkan 1.1. Its compiler crashed on them (the Adreno 730's driver V@0615.98). In *out (to free); 0 when it needs nothing.
 // DM_SPV_LAYER=0 (env.txt): modules as translated
+// ---- Compute shared memory past the GPU's limit (spv_tgspill.h) ----
+// The limit: maxComputeSharedMemorySize (32 KB on Qualcomm's Adreno 830 driver), or DM_VK_SHARED_MAX=<bytes> (env.txt: a smaller one, to try the move on a GPU with
+// room). DM_SPV_TGSPILL=0 (env.txt): every module as it is
+static long long tgs_limit(void) { static long long v = -1; if (v < 0) { const char *e = getenv("DM_VK_SHARED_MAX"); v = e && *e ? atoll(e) : (long long)g_vk.props.limits.maxComputeSharedMemorySize; } return v; }
+static int tgs_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_SPV_TGSPILL"); v = !(e && *e == '0'); } return v; }
+// bytes a workgroup of the module takes from the spill buffer: its shared memory, when that is past the limit and spv_tgspill can move it; 0 otherwise
+static uint32_t tgs_bytes(const uint32_t *code, size_t nw, const char *what) {
+    if (!tgs_on() || nw < 5 || !code[3]) return 0;
+    uint32_t *sc = malloc(16 * (size_t)code[3]); if (!sc) return 0;
+    long long b = spv_tgs_bytes(code, nw, sc); free(sc);
+    if (b == SPV_TGS_TYPE || b == SPV_TGS_USE) { static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] [vk] %s declares shared memory spv_tgspill does not move (%s): made as it is, whatever its size against the GPU's %lld bytes",
+                                                     what, b == SPV_TGS_TYPE ? "not arrays of one 32-bit type" : "a use other than through one element", tgs_limit()); return 0; }
+    return b > tgs_limit() ? (uint32_t)b : 0;
+}
+static size_t spv_fit_tgs(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    *out = NULL; uint32_t b = tgs_bytes(code, nw, what); if (!b) return 0;
+    size_t cap = 4 * nw + 1024; uint32_t *sc = malloc(16 * (size_t)code[3]), *o = malloc(cap * 4);
+    size_t k = sc && o ? spv_tgspill(code, nw, SPV_TGS_BINDING, sc, o, cap) : 0; free(sc);
+    if (!k) { free(o); static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] [vk] %s: spv_tgspill could not move its %u bytes of shared memory: made as it is, past the GPU's %lld", what, b, tgs_limit()); return 0; }
+    static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("[vk] the GPU takes %lld bytes of shared memory a compute shader: shaders that declare more take it from a storage buffer, a region a workgroup (spv_tgspill). First: %s, %u bytes", tgs_limit(), what, b);
+    *out = o; return k;
+}
 static size_t spv_fit_layer(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LAYER"); on = !(e && *e == '0'); }
     *out = NULL;
@@ -618,7 +641,7 @@ static vshader *sh_get(const char *key) {
     t_pool_info = 0;
     snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(p, &s->b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
-      if (w) { spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
+      if (w) { if (s->stage == SH_CS) s->tgs = tgs_bytes(w, nw, s->key); spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
     if (s->stage == SH_VS) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(p, &s->b0); }
     if (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(p, &s->b0); }
     if (!s->mod) return NULL;
@@ -626,13 +649,14 @@ static vshader *sh_get(const char *key) {
     if (s->pool && !(t_pool_info & (SPV_POOL_IMG | SPV_POOL_SMP)) && !(t_pool_info & SPV_POOL_FAIL)) { t_pool_info |= SPV_POOL_FAIL; static int nl; if (nl++ < 8) LOG("[RED] [vk] shader %s: res.json names texture pool arrays its module does not have as spv_pool knows them: its draws are dropped", s->key); }
     pool_note_shader(s, t_pool_info); if (t_pool_info & SPV_POOL_FAIL) return NULL;
     // the set's layout: support buffer, constant buffers, storage buffers, textures, images
-    VkDescriptorSetLayoutBinding b[1 + CB_MAX + 16 + 64 + 16 + 4]; uint32_t nb = 0;
+    VkDescriptorSetLayoutBinding b[1 + CB_MAX + 16 + 64 + 16 + 5]; uint32_t nb = 0;
     b[nb++] = (VkDescriptorSetLayoutBinding){0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};
     sh_dyn(s);
     for (int i = 0; i < s->ncb; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->cb[i].binding, s->cbdyn[i] != 0xff ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};
     for (int i = 0; i < s->nsb; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->sb[i].binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};
     for (int i = 0; i < s->ntx; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->tx[i].binding, tex_dtype(&s->tx[i], 0), (uint32_t)(s->tx[i].array > 1 ? s->tx[i].array : 1), (VkShaderStageFlags)s->vkstage, NULL};
     for (int i = 0; i < s->nim; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->im[i].binding, tex_dtype(&s->im[i], 1), (uint32_t)(s->im[i].array > 1 ? s->im[i].array : 1), (VkShaderStageFlags)s->vkstage, NULL};
+    if (s->tgs) b[nb++] = (VkDescriptorSetLayoutBinding){SPV_TGS_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};   // its shared memory (spv_tgspill)
     VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = nb, .pBindings = b};
     if (vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &s->dsl) != VK_SUCCESS) { LOG("[RED] [vk] descriptor layout of shader %s failed", s->key); return NULL; }
     for (uint32_t i = 0; i < nb; i++) s->ndesc += b[i].descriptorCount > 1024 ? 1024 : b[i].descriptorCount;
@@ -672,6 +696,7 @@ static uint32_t ar_mem_type(uint32_t bits) {
 #define AR_USAGE (VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | \
                   VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT)   // also gfx_vk_readback.inc rb_speed
 // the current chunk's (gfx_vk.c): blocks kept and reused when it completes
+static uint64_t g_ar_bytes, g_ar_blocks;   // every chunk's arena blocks together (they are kept: the raw memory line reports them)
 static int ar_new(VkDeviceSize n) {
     if (C->nar == C->car) { C->car = C->car ? 2 * C->car : 8; C->ar = realloc(C->ar, C->car * sizeof *C->ar); }
     arena_blk *a = &C->ar[C->nar]; memset(a, 0, sizeof *a);
@@ -681,7 +706,7 @@ static int ar_new(VkDeviceSize n) {
     uint32_t mt = ar_mem_type(mr.memoryTypeBits);
     VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt};
     if (mt == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ma, NULL, &a->m) != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, a->b, NULL); return 0; }
-    vkBindBufferMemory(g_vk.dev, a->b, a->m, 0); vkMapMemory(g_vk.dev, a->m, 0, n, 0, (void **)&a->p); a->n = n; C->nar++;
+    vkBindBufferMemory(g_vk.dev, a->b, a->m, 0); vkMapMemory(g_vk.dev, a->m, 0, n, 0, (void **)&a->p); a->n = n; C->nar++; g_ar_bytes += n; g_ar_blocks++;
     return 1;
 }
 // n bytes aligned to 256 (the largest minimum uniform / storage offset alignment); the arena's blocks are reused after each submission completes
@@ -2487,10 +2512,11 @@ static void sr_put(sr_ent *e, VkDescriptorSetLayout l, VkDescriptorSet set) {   
 // (C->seq after cur()): nothing is written or taken once another is recorded (ds_moved), and the caller tells that 0 from another failure by ds_moved
 static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, const prog_t *pr, int prog_stage, uint32_t base_inst, uint64_t dseq) {
     g_alias_key = s->key;
+    int bcs = s->stage == SH_CS && bc_on(); if (bcs) { g_bc_dn = 0; g_bc_desc[0] = 0; }   // the bindings text of a dispatch's breadcrumb (gfx_vk_bc.inc)
     int nst = nvn_stage_of(s->stage);
     VkDescriptorSet set = VK_NULL_HANDLE; *pset = VK_NULL_HANDLE;   // the writes name their set once it is known (below)
     // one write per binding; every element of an array is written (an unwritten descriptor is undefined)
-    VkWriteDescriptorSet wr[1 + CB_MAX + 16 + 64 + 16]; VkDescriptorBufferInfo bi[1 + CB_MAX + 16]; VkDescriptorImageInfo *ii; VkBufferView *bvs; uint32_t nw = 0, nbi = 0, nii = 0, nbv = 0;
+    VkWriteDescriptorSet wr[1 + CB_MAX + 16 + 64 + 16 + 1]; VkDescriptorBufferInfo bi[1 + CB_MAX + 16 + 1]; VkDescriptorImageInfo *ii; VkBufferView *bvs; uint32_t nw = 0, nbi = 0, nii = 0, nbv = 0;
     uint8_t c2buf[C2_SIZE]; const uint8_t *c2 = c2_bank(nst, c2buf);   // NULL: handle words read with c2_word, the whole bank made only for a c2 constant buffer (below)
     // support buffer: render scale 1, the viewport's inverse and size. Written only for a stage whose modules read it (sh_get spv_b0_used): a descriptor no instruction of the
     // pipeline uses need not be valid (Vulkan: VUID-vkCmdDraw-None-08114, valid "if they are statically used"), so binding 0 stays in the layout, unwritten. Breath of the Wild
@@ -2521,9 +2547,11 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         } else if (slot >= 3 && slot - 3 < 16) { const p_bind_buf *u = &D.ubo[nst][slot - 3];
             if (u->addr && u->size) { src = (const void *)(uintptr_t)u->addr; n = u->size > 0x10000 ? 0x10000 : (size_t)u->size;
                 size_t rd = s->cb[i].ext && n > s->cb[i].ext ? s->cb[i].ext : n;   // in a memory pool still, as storage buffers below (else it reads 0)
+                if (s->gm) gm_lazy_ptrs(u->addr, rd);   // its pointers' chunks placed too (gfx_vk_gmem_lazy.inc): a raw load may take its address from a uniform buffer
                 if (!mtl_addr(u->addr, rd, NULL, NULL)) { RED_ONCE(119, "uniform buffer slot %d of shader %s at %#llx is in no memory pool: it reads 0", slot - 3, s->key, (unsigned long long)u->addr); src = NULL; n = 16; } }
             else { static int nlog; if (nlog < 8) { nlog++; LOG("[RED] [vk] shader %s reads uniform slot %d, which has no buffer bound: it reads 0", s->key, slot - 3); } } }
         size_t nall = n;   // (ext_check)
+        if (bcs) { bc_addf(" | c%d b%d %s%zu bytes", slot, s->cb[i].binding, src ? "" : "none, ", n); if (src) bc_words("", src, n, 16); }
         if (s->cb[i].ext && n > s->cb[i].ext) n = s->cb[i].ext;   // only what the shader reads (cb_ext_pick)
         if (dump_on() && slot != 0 && slot != 2) {   // the draw's constant buffers in the dump's log: c1 (the shader's own segment) and the game's uniform buffers, the first 8 vec4
             char vb[700]; int q = 0; const float *fv = src; size_t nf = src ? n / 4 : 0; if (nf > 32) nf = 32;
@@ -2559,8 +2587,11 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         // a binding whose range is in no memory pool any more (the game finalized the pool and left the binding): the GPU would find no pages there, the replay's copy of it
         // faulted (Super Mario Bros. Wonder on Android: SIGSEGV in memcpy from stage_set); read as unbound, as copies and indirect arguments outside every pool are
         if (u && u->addr && !mtl_addr(u->addr, n, NULL, NULL)) { RED_ONCE(118, "storage buffer of shader %s at %#llx (%zu bytes) is in no memory pool: it reads 0", s->key, (unsigned long long)u->addr, n); u = NULL; n = 16; }
+        if (bcs) { bc_addf(" | storage b%d c%d+%#x %s %#llx %zu bytes", sb->binding, sb->cb_slot, off, sb->flags & 1 ? "written" : "read", u ? (unsigned long long)u->addr : 0ull, n);
+            if (u && u->addr) bc_words("", (const void *)(uintptr_t)u->addr, n, 32); }
         if (!u || !u->addr) RED_ONCE(91, "storage buffer of shader %s (c%d +%#x) is not a bound buffer: it reads 0", s->key, sb->cb_slot, off);
         if (s->gm && gm_check_on() && u && u->addr) gm_check(s, sb->cb_slot, off, u->addr, n);   // DM_VK_RAW_GMEM_CHECK (gfx_vk_gmem.inc)
+        if (s->gm && u && u->addr) gm_lazy_ptrs(u->addr, n);   // chunks its pointers reach, placed (gfx_vk_gmem_lazy.inc)
         VkDeviceSize ao, ipr;   // ao: the arena offset (off above is the c0 / uniform buffer word); ipr: the range bound in place
         int wr_ = (sb->flags & 1) != 0;   // written by the shader
         if (u && u->addr && (!wr_ || s->stage == SH_CS) && sb_fwd(u->addr, n, wr_, &b, &ao)) g_buf_fwd[wr_]++;   // on the GPU from a dispatch's pending write (buf_fwd)
@@ -2578,6 +2609,12 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
                 if (w) { *w = (wb_t){-1 - C->ar_last, (size_t)ao, n, 1, n, n, (uint8_t *)(uintptr_t)u->addr, snap}; w->fwd = s->stage == SH_CS; if (w->fwd) C->nfwd++; } } }
         else if (!ucopy(NULL, 16, 16, &b, &ao)) return 0;
         bi[nbi] = (VkDescriptorBufferInfo){b, ao, (n + 15) & ~(size_t)15}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
+    }
+    if (s->tgs) {   // the dispatch's shared memory (spv_tgspill): a region of the arena for each workgroup of it (g_cdim: indirect counts already read)
+        VkDeviceSize sz = (VkDeviceSize)s->tgs * g_cdim[0] * g_cdim[1] * g_cdim[2];
+        if (!sz || sz > g_vk.props.limits.maxStorageBufferRange) { RED_ONCE(179, "compute shader %s: %u x %u x %u workgroups of %u bytes of shared memory pass the GPU's largest storage buffer: skipped", s->key, g_cdim[0], g_cdim[1], g_cdim[2], s->tgs); g_bind_bad = 1; }
+        else { VkDeviceSize to; if (!ar_alloc(sz, &b, &to)) return 0;
+            bi[nbi] = (VkDescriptorBufferInfo){b, to, sz}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, SPV_TGS_BINDING, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL}; }
     }
     size_t nel = 0; for (int i = 0; i < s->ntx; i++) nel += s->tx[i].array > 1 ? (size_t)(s->tx[i].array > 1024 ? 1024 : s->tx[i].array) : 1;
     for (int i = 0; i < s->nim; i++) nel += s->im[i].array > 1 ? (size_t)(s->im[i].array > 1024 ? 1024 : s->im[i].array) : 1;
@@ -2636,6 +2673,9 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             if (dump_on() && e < 4) { const vtex *dv = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? nvn_hm_get(&g_tex, &g_treg[tid].t.serial) : NULL; if (dv) dump_note_tex(dv->serial);
                 LOG("[dump]   %s binding %d[%d] type %#x tid %d sid %d -> %s s%llu %ux%ux%u layers %u levels %u vk%d pkg %d image %#llx", s->key, t->binding, e, t->type, tid, sid, dv ? "tex" : "none",
                     dv ? (unsigned long long)dv->serial : 0ull, dv ? dv->w : 0, dv ? dv->h : 0, dv ? dv->d : 0, dv ? dv->layers : 0, dv ? dv->levels : 0, dv ? dv->fmt : 0, dv ? dv->pkg : 0, dv ? (unsigned long long)(uint64_t)dv->img : 0ull); }
+            if (bcs) { const vtex *bv = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? nvn_hm_get(&g_tex, &g_treg[tid].t.serial) : NULL;
+                bc_addf(" | texture b%d[%d] type %#x tid %d sid %d: %s s%llu %ux%ux%u, %u layers, %u levels, vk format %d%s", t->binding, e, t->type, tid, sid, bv ? "" : rg ? "registered, no image," : "unregistered (a stand-in),",
+                        bv ? (unsigned long long)bv->serial : 0ull, bv ? bv->w : 0, bv ? bv->h : 0, bv ? bv->d : 0, bv ? bv->layers : 0, bv ? bv->levels : 0, bv ? (int)bv->fmt : 0, sp ? "" : ", no sampler"); }
             int shd = (t->type & 0x400) != 0; VkSampler smp;
             if (tex_once() && sp && g_scache) { VkSampler *sc = &g_scache[sid][shd]; if (*sc) g_sc_hit++; else { *sc = samp_get(sp, shd); g_sc_made++; } smp = *sc; }   // per ID (g_scache)
             else if (tex_once() && !sp) { static VkSampler none[2]; if (!none[shd]) none[shd] = samp_get(NULL, shd); smp = none[shd]; }
@@ -2659,6 +2699,8 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             if (v) { iv = storage_view(v, ri->has_v ? &ri->v : NULL, vt, t->fmt); if (!iv) g_bind_bad = 1; }
             if (iv && v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && s->stage == SH_CS) { if (t->binding < 64) g_e5_need |= 1ull << t->binding; else g_bind_bad = 1; }   // its pipeline packs RGB9E5 there (cpipe_e5)
             if (!iv) iv = dummy_storage(vt, t->fmt);
+            if (bcs) bc_addf(" | image b%d[%d] type %#x tid %d: %s s%llu %ux%ux%u, %u layers, vk format %d, usage %#x", t->binding, e, t->type, tid, v ? "" : ri ? "registered, no image (a stand-in)," : "unregistered (a stand-in),",
+                             v ? (unsigned long long)v->serial : 0ull, v ? v->w : 0, v ? v->h : 0, v ? v->d : 0, v ? v->layers : 0, v ? (int)v->fmt : 0, v ? (unsigned)v->usage : 0u);
             if (!iv) g_bind_bad = 1;
             ii[nii + e] = (VkDescriptorImageInfo){VK_NULL_HANDLE, iv, VK_IMAGE_LAYOUT_GENERAL};
         }
@@ -3282,7 +3324,9 @@ static int vk_dispatch(const p_dispatch *dp) {
     int pr_i = -1;
     if (prof_on() && C->pq && C->npq + 2 <= 512 && g_nprof < 1024) { prof_rec *r = &g_prof[pr_i = g_nprof++]; memset(r, 0, sizeof *r); r->c = C; r->ncolor = -1; r->w = g[0]; r->h = g[1]; r->draws = (int)g[2]; r->seq = g_prof_seq++;
         r->s0 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->pq, (uint32_t)r->s0); }
+    uint32_t bcid = bc_on() ? bc_begin(c, s->key, g, C->seq) : 0;   // DM_VK_BC (gfx_vk_bc.inc)
     vkCmdDispatch(c, g[0], g[1], g[2]); crumb(dp->ind ? 'C' : 'c', s->key, NULL, g[0], g[1] * g[2]);
+    bc_end(c, bcid);
     if (pr_i >= 0) { g_prof[pr_i].s1 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->pq, (uint32_t)g_prof[pr_i].s1); }
     cb_barrier();
     g_dispatches++; C->ndraw++;
