@@ -212,7 +212,7 @@ The replay has shaders of its own too, for what Vulkan has no command for: `dm/a
 
 The host does not link `libvulkan.so`. Every `vk*` function the replay and the front end call is a pointer (`gfx_vk.h`, `VK_NO_PROTOTYPES` with the list in
 `VKB_FNS`), filled by `vk_driver.c` when `vkb()` makes the device: from the system's `libvulkan.so`, opened then, by default; with `DM_VK_DRIVER=<file>`, from a
-driver the player put beside `env.txt` (a Turnip build, as for Switch emulators: [README](../../README.md#another-vulkan-driver-turnip)).
+driver the player put beside `env.txt` (a Turnip build, as for Switch emulators: [Another Vulkan driver](../../docs/android.md#another-vulkan-driver-turnip)).
 
 - The file is copied into the internal files (`vk_driver/<name>`, read-only, again when its size or time changes): Android maps no code from shared storage.
 - It is opened through libadrenotools ([dm/third_party/libadrenotools](../third_party/libadrenotools/README.md)): `adrenotools_open_libvulkan` loads a second copy of
