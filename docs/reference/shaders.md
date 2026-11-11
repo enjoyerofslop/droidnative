@@ -764,6 +764,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py DeadChannel`.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 8 of its 42,845 shaders, among them the wind solver and two NDSR upscaler variants. [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): 3 compute shaders, noted open earlier.
 
+### An else-if's branch left out of the SPIR-V
+
+- **Symptom:** the GPU hangs until the driver resets it (device lost on Android) while a shader with an `if` inside an `else` runs: a loop whose exit sits in that branch never ends. Xenoblade Chronicles 3 on Adreno, a few seconds into the title.
+- **Cause:** Ryujinx's `AstOptimizer.RemoveEmptyBlocks` turns an `Else` that holds only an `If` (and that `If`'s own `Else`) into an `ElseIf`. The SPIR-V generator branches from an `If` only into an `Else` that follows it (`SpirvGenerator.cs`, `BlockEntered`); it never evaluates an `ElseIf`'s condition or branches into it, so the whole else-if branch became unreachable code. Xenoblade Chronicles 3's volumetric cloud shaders (`6a3bebeab80d95cb`, `fabb0ef84521a927`) lost a loop's exit that way. `RemoveEmptyBlocks` runs outside `AstOptimizer`'s DebugMode gate, so it applies to the chains here, which translate with `XLATE_DEBUG=1`. Every chain here translates to SPIR-V (the Mac's MSL comes from it through SPIRV-Cross), so the Mac had the same loss.
+- **Fix:** general: for SPIR-V, `RemoveEmptyBlocks` leaves an `If` inside an `Else` as it is (`AstOptimizer.Optimize` takes the target language). A chain change. From shirai91's nx2android fork (`02e336f`).
+- **Check:** each game's shaders translated with the translator before and after, and the modules compared; every changed module must pass `spirv-val --target-env vulkan1.1`.
+- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md), on Android in the nx2android fork; not run here (no Android build of it yet). The fix changed none of the 177,841 shaders of Super Mario Odyssey, Brilliant Diamond, Breath of the Wild, Final Fantasy Resonance and Ocarina of Time (their Android shader packages): all 226,541 modules are the same, byte for byte.
+
 ### Position invariance across shaders
 
 - **Symptom:** the ground kept stale 32×32 blocks where the G-buffer draw failed the depth test: blocks of a stale image where a depth pre-pass and a later pass with other vertex shaders meet (Odyssey: 32×32 blocks on every fourth frame). With mesh shaders: white shapes on plants for single frames, at other places each frame while the leaves move (Ocarina of Time).
