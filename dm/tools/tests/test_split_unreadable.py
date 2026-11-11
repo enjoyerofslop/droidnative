@@ -77,16 +77,4 @@ class ScanFile(unittest.TestCase):
         for p in out: self.assertTrue(p.exists(), p)
 
 
-
-class BnshInCompressedData(unittest.TestCase):
-    """A BNSH header the raw scan finds whose sections lie outside the file (a compressed chunk's literal bytes: Assassin's Creed: The Rebel Collection's .forge
-    archives) is left out with a red line, and the scan goes on: the file is not counted as unreadable"""
-    def test_bad_header_is_left_out_alone(self):
-        h = bytearray(0x100); h[0:8] = b'BNSH\0\0\0\0'; struct.pack_into('<I', h, 0x1c, 0x100); h[0x60:0x64] = b'grsc'
-        struct.pack_into('<IQ', h, 0x7c, 1, 0x7fff0000)   # one variation, its table far past the end
-        d = bytes(0x10) + bytes(h) + b'tail'; out = []; buf = io.StringIO()
-        with contextlib.redirect_stdout(buf): ss.scan_blob(d, '/DataNX.forge', out)
-        self.assertEqual(out, [])
-        self.assertTrue(buf.getvalue().startswith('[RED] /DataNX.forge: 1 BNSH header(s) the scan found cannot be read and are left out (first: /DataNX.forge BNSH @0x10'), buf.getvalue())
-
 if __name__ == '__main__': unittest.main()

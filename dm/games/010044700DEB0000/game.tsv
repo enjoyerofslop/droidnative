@@ -1,7 +1,7 @@
 # Game profile of Assassin's Creed: The Rebel Collection (Switch, 1.0.0, the cartridge's base game): Black Flag and Rogue, Ubisoft's AnvilNext, NVN, SDK 8.2.0,
 # Havok and Wwise. Two programs: this one (010044700DEB0000), whose launcher picks a game, and 010044700DEB0001 (not profiled). On the Mac this program boots
-# through the launcher's parameter into Black Flag's menus and its opening at sea under control, at 30 fps, but the ship and Edward are not drawn: 210 shaders the
-# opening asks for are not in the map, presumably in the compressed parts of the .forge archives, which the shader split does not read (see README.md)
+# through the launcher's parameter into Black Flag's menus and its opening at sea under control, at 30 fps. Its shaders are BNSH files of one stage each, 326 in main
+# and 32,821 in the LZO1X blocks of the .forge archives (dm/gfx/tools/anvil_forge.py; see README.md)
 # Format: see dm/games/README.md
 # The provisional profile the survey made (dm/games/profile_guess.py), with the launcher's parameter added (launch_param)
 
@@ -41,6 +41,9 @@ sys_resource	0x0
 launch_param	hex:2f6c61756e636865723a6f6666202f67616d65736f756e646c616e67756167653a656e202f67616d656d656e756c616e67756167653a656e202f67616d65726577617264735075726368617365643a3000
 
 # ---- Shader split ----
+# Every BNSH file holds one stage, in main and in the .forge archives, and the game draws with a vertex shader of one file and a pixel shader of another: every vertex shader is
+# paired with the pixel shader cover (shader_split.py separable_pairs), so it is padded for any of them
+shader_separate	on
 shader_groups	/videos/=videos /dlc_10/=dlc10 /sounddata/=sounddata /dlc_1/=dlc1 /dlc_2/=dlc2
 shader_note	Assassin's Creed: The Rebel Collection shaders
 
