@@ -645,12 +645,24 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
 // The touch controls (Gamepad.java's window over the game's) refresh with the display: told a fixed-source 30, a Galaxy S25 Edge ran its panel at 30 Hz, the controls with
 // it. While they show, a rate under 40 Hz is told as its smallest multiple of 60 Hz or more (30 → 60): each frame spans two refreshes, which the vsync-locked grid
 // (gfx_vk_vsync.inc) shows as evenly, and the controls keep 60. The rate itself is told only with a physical controller connected, the controls hidden, and told again
-// whenever they show or hide. 40 fps and up are told as they are
+// whenever they show or hide.
+// A floor under every told rate, DM_WINDOW_RATE_MIN Hz (60 by default, as nx2android has it): a rate under it is told as its smallest multiple at or above it. Asked for
+// 20 Hz (Ocarina of Time's frame step at 20 fps), an Ayn Odin 3 reconfigured its display about every 3 s and the game's vsync waits starved: an 85 s frame, then none
+// (droidplay-core#195). A frame step moves between 30 and 20 fps, and a floor of 30 would still change the request at each step (30 ↔ 40); at 60 every rate up to 60
+// asks for the same 60. DM_WINDOW_RATE_MIN=30 brings back 30 Hz with a controller connected
 static _Atomic int g_fr_want;   // the host's present rate in millihertz (0 = none to tell); the present thread's (front_frame_rate)
 void front_frame_rate(int mhz) { atomic_store_explicit(&g_fr_want, mhz > 0 ? mhz : 0, memory_order_relaxed); }
+static int fr_floor(void) {   // DM_WINDOW_RATE_MIN in mHz
+    static int f = -1;
+    if (f < 0) { const char *e = getenv("DM_WINDOW_RATE_MIN"); f = e && *e ? atoi(e) * 1000 : 60000; if (f < 0) f = 0;
+        LOG("[front] the frame rate told to Android is at least %d Hz (DM_WINDOW_RATE_MIN): a rate under it is told as its smallest multiple at or above it", f / 1000); }
+    return f;
+}
 static int fr_told(int want, int pad) {   // the rate Android is told for a present rate of want (mHz) with the touch controls shown (pad) or not
-    if (!pad || want <= 0 || want >= 40000) return want;
-    return want * ((59000 + want - 1) / want);   // the multiple reaching 59 Hz: 2% short of 60, so 29.97 fps is told 59.94, not 89.91
+    if (want <= 0) return want;
+    int lo = fr_floor(); if (pad && lo < 60000) lo = 60000;   // the touch controls keep 60
+    int reach = lo / 50 * 49;   // 2% short of the floor, so 29.97 fps is told 59.94, not 89.91
+    return want >= reach ? want : want * ((reach + want - 1) / want);
 }
 static void fr_apply(void) {   // the main thread, between frames: the window is told when the rate, the controls' showing or the window changes
     static int32_t (*set)(ANativeWindow *, float, int8_t); static int on = -1, told; static ANativeWindow *told_win; static unsigned nlog;
@@ -666,7 +678,7 @@ static void fr_apply(void) {   // the main thread, between frames: the window is
     int fresh = w != told_win; told_win = w; told = tell;
     if (!set || (fresh && !tell)) return;   // a new window has no rate until one is told
     int32_t r = set(w, tell / 1000.0f, tell ? 1 : 0);   // 1: ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE; 0 fps: no preference again
-    const char *why = tell != want ? ", a multiple of the game's rate while the touch controls show" : want && !pad ? ", the touch controls hidden" : "";
+    const char *why = tell != want ? (pad ? ", a multiple of the game's rate while the touch controls show" : ", a multiple of the game's rate at the floor") : want && !pad ? ", the touch controls hidden" : "";
     if (nlog++ < 16) LOG("[front] Android told the frame rate is %.3f fps (a fixed source%s): %s%s", tell / 1000.0, why, r ? strerror(-r) : "accepted",
                          nlog == 16 ? "; further changes not logged" : "");
 }
