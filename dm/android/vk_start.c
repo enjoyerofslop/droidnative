@@ -1,12 +1,14 @@
 // The record of every start, whatever Vulkan driver runs the game: games/<title ID>/vk_start.txt in the external files, which DroidPlay for Windows reads over adb (the
-// app isn't debuggable, so its internal files are out of reach). A pipeline the phone's own driver refuses leaves its draws out of the picture: Frostpunk's meshes on an
-// Adreno 730 (31 pipelines), Ocarina of Time's characters on a 740 (41). The desktop app reads the count back after a run and, when its pinned catalog has a driver tested
+// app isn't debuggable, so its internal files are out of reach). A pipeline the phone's own driver refuses leaves its draws out of the picture: Frostpunk's Generator on a
+// Razr's Adreno 730 (54 pipelines on the way into its city; the log names only the first 16 of each kind), Ocarina of Time's characters on an Odin 2's 740. The desktop
+// app reads the count back after a run and, when its pinned catalog has a driver tested
 // for this game on this GPU, suggests that driver; it never switches one on by itself, and the system's driver stays every game's default. Lines:
 //   driver=            system, or the DM_VK_DRIVER file that runs (after a fallback to the system's driver: system)
 //   driver_id=         the driver's VkDriverId: 8 Qualcomm's own, 18 Mesa's Turnip; 0 when the driver doesn't say
 //   gpu=               the device's name, as the driver gives it
 //   pipelines_failed=  pipelines the game needed that the driver refused, graphics and compute (each counts once: a failed pipeline isn't made again)
-//   failed_shaders=    the first 4 of them, comma-separated: a graphics pipeline's vertex and fragment shader keys joined by +, a compute pipeline's shader key
+//   failed_shaders=    the first 4 shader sets among them, comma-separated (one set often fails in several pipelines, with other state): a graphics pipeline's vertex and
+//                      fragment shader keys joined by +, a compute pipeline's shader key
 //   device_lost=       the VkResult when the GPU was lost, else empty
 //   time=              the Unix time the device was made
 // Written when the device is made (a start that ends before that leaves none: the previous start's is removed when the game's folder is known), again within 2 s of a
@@ -15,6 +17,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include "dm.h"
@@ -72,8 +75,10 @@ void vk_start_device(const char *gpu, int driver_id) {
 }
 void vk_start_pipe_failed(const char *a, const char *b) {
     atomic_fetch_add(&g_failed, 1);
+    char k[sizeof *g_keys]; snprintf(k, sizeof k, "%s%s%s", a ? a : "-", b ? "+" : "", b ? b : "");
     pthread_mutex_lock(&g_mu);
-    if (g_nk < KEYS) snprintf(g_keys[g_nk++], sizeof *g_keys, "%s%s%s", a ? a : "-", b ? "+" : "", b ? b : "");
+    int seen = 0; for (int i = 0; i < g_nk && !seen; i++) seen = !strcmp(g_keys[i], k);
+    if (!seen && g_nk < KEYS) memcpy(g_keys[g_nk++], k, sizeof k);
     pthread_mutex_unlock(&g_mu);
     atomic_store(&g_dirty, 1);
 }
