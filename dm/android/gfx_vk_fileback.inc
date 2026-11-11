@@ -69,12 +69,12 @@ static void fb_take(const void *mem, uint64_t size, int flags) {
     if (!kind || !size || ((lo | size) & 4095) || fb_overlaps_placed(lo, hi)) return;
     pthread_mutex_lock(&g_fb_mu);
     if (!fb_open() || (g_fb_n == g_fb_cap && !(g_fb = realloc(g_fb, (g_fb_cap = g_fb_cap ? 2 * g_fb_cap : 64) * sizeof *g_fb)))) { g_fb_fail++; pthread_mutex_unlock(&g_fb_mu); return; }
-    uint64_t off = g_fb_next, t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC), copied = 0; const char *why = NULL;
+    uint64_t off = g_fb_next, t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC), copied = 0, w0 = 0, w1 = 0, held0 = atomic_load(&g_fbz_waits); const char *why = NULL;
     void *f = MAP_FAILED;
     if (fallocate(g_fb_fd, 0, (off_t)off, (off_t)size)) why = "no room for it";
     else if ((f = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, g_fb_fd, (off_t)off)) == MAP_FAILED) why = "no mapping of the file";
     if (!why) {
-        atomic_store(&g_fbz_lo, lo); atomic_store(&g_fbz_hi, hi);
+        atomic_store(&g_fbz_lo, lo); atomic_store(&g_fbz_hi, hi); w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
         if (mprotect((void *)lo, size, PROT_READ)) why = "the range not read-only";
         else {
             uint64_t pm[512]; size_t pages = size >> 12;
@@ -90,7 +90,7 @@ static void fb_take(const void *mem, uint64_t size, int flags) {
             if (q != (void *)lo) { why = "the move over the range failed"; mprotect((void *)lo, size, PROT_READ | PROT_WRITE); }
             else f = MAP_FAILED;   // it is the range now
         }
-        atomic_store(&g_fbz_hi, 0);
+        atomic_store(&g_fbz_hi, 0); w1 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     }
     if (f != MAP_FAILED) munmap(f, size);
     if (why) { fallocate(g_fb_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t)off, (off_t)size); g_fb_fail++;
@@ -98,8 +98,9 @@ static void fb_take(const void *mem, uint64_t size, int flags) {
     else {
         g_fb[g_fb_n++] = (fb_piece){lo, hi, off, mem}; g_fb_next += size; g_fb_pools++; g_fb_in += size; g_fb_copied += copied;
         sync_file_range(g_fb_fd, (off_t)off, (off_t)size, SYNC_FILE_RANGE_WRITE);   // to flash now, not in a burst under pressure
-        static int nl; if (nl++ < 16) LOG("[vk] pool file backing: pool %p, %.0f MiB (%s, flags %#x): %.0f MiB of it copied to the file in %.0f ms", mem, size / 1048576.0, kind == 1 ? "shader code" : "texture",
-                                          flags, copied / 1048576.0, (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6);
+        static int nl; if (nl++ < 16) LOG("[vk] pool file backing: pool %p, %.0f MiB (%s, flags %#x): %.0f MiB of it copied to the file in %.0f ms; writers held for %.0f ms, %llu writes waited", mem, size / 1048576.0,
+                                          kind == 1 ? "shader code" : "texture", flags, copied / 1048576.0, (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6, (w1 - w0) / 1e6,
+                                          (unsigned long long)(atomic_load(&g_fbz_waits) - held0));
     }
     pthread_mutex_unlock(&g_fb_mu);
 }
