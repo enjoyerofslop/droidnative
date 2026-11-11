@@ -38,6 +38,7 @@
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
 #include "spv_tgspill.h"   // compute shared memory past the GPU's limit from a storage buffer (gfx_vk_draw.inc spv_fit_tgs)
 #include "spv_precise.h"   // Maxwell's FMUL and FADD unfused in the shaders that place vertices (gfx_vk_draw.inc spv_fit_precise)
+#include "spv_bind.h"   // a set's far-apart binding numbers made dense, for drivers that size a layout by its highest (gfx_vk_draw.inc sh_get, gfx_vk_lmod.inc lm_code)
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
 #include "nvn_queue.h"   // the queue scheduler (hle_nvn.c nvn_queue.inc): event publication and GPU progress
@@ -2003,6 +2004,7 @@ static void clear_tex(const p_clear_tex *ct) {
 }
 
 static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip);   // below (the pass dump's PNGs)
+#include "gfx_vk_posrows.inc"   // the vertex shaders whose position reads its constant buffer rows at run time (vk_pos_rows)
 #include "gfx_vk_draw.inc"
 
 // The front end's first window failed on a DM_VK_DRIVER driver (front_android.c vk_window_first), which has destroyed what it made: the device and instance are destroyed
@@ -2530,10 +2532,10 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
       if (frame > f0) LOG("[vk] GPU busy %.2f ms per frame over the last %llu frames (%llu command buffers in all); the replay waited %.2f ms per frame for a free one of %d", (double)(g - g0) / 1e6 / (double)(frame - f0), frame - f0,
                           (unsigned long long)atomic_load(&g_gpu_chunks), (double)(w - w0) / 1e6 / (double)(frame - f0), g_nchunk);
       f0 = frame; g0 = g; w0 = w; }
-    LOG("[vk] occlusion queries %llu, samples-passed reports %llu, timestamp reports %llu, queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu (cumulative)",
+    LOG("[vk] occlusion queries %llu, samples-passed reports %llu, timestamp reports %llu, queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu; shaders with binding numbers made dense %llu (%llu bindings; spv_bind.h) (cumulative)",
         (unsigned long long)g_q_queries, (unsigned long long)g_q_reports, (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
         (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6,
-        (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids));
+        (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)g_bind_shaders, (unsigned long long)g_bind_entries);
     LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig);
     pool_stats();
     shadow_line();

@@ -139,6 +139,7 @@ typedef struct {
     uint8_t gm;   // binds the raw pool table (a storage buffer under DMSH_GMEM_MAP_CB_SLOT): 1, 2 with the stores' write log too (gfx_vk_gmem.inc)
     uint64_t e5[2]; void *cpe5[2];   // compute: sets of storage image bindings bound to E5B9G9R9 textures, and its pipeline for each with those packed (cpipe_e5, spv_e5.h)
     uint8_t upsq;   // a compute shader DM_VK_UPSCALER_SQUARE_CS lists: its dispatches are replaced (gfx_vk_upsq.inc)
+    const spv_bmap *bmap;   // its set's binding numbers compacted (spv_bind.h): NULL when none is at SPV_BIND_FROM or past it; its modules and its layout take it
 } vshader;
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
 // never matched the draw before, and stage_set wrote every set of every stage: Breath of the Wild about 7,500 a frame, vkUpdateDescriptorSets 3.4 ms a frame of the
@@ -547,13 +548,13 @@ static int pool_on(void); static void pool_note_shader(vshader *s, int info); st
 static lmod *ps_variant(vshader *s, uint32_t miss) {
     for (int i = 0; i < s->nvar; i++) if (s->var[i].miss == miss) return s->var[i].m;
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
-    lmod *m = lm_new(p, miss, NULL);
+    lmod *m = lm_new(p, miss, s->bmap, NULL);
     LOG("[vk] fragment shader %s: inputs at locations %#x are written by no earlier stage of a pipeline: a variant reads them as zero%s", s->key, miss, m ? "" : " [RED] (variant failed: the pipeline keeps the shader as it is)");
     if (!m) m = s->mod;
     if (s->nvar < 4) { s->var[s->nvar].miss = miss; s->var[s->nvar++].m = m; }
     return m;
 }
-static lmod *sh_module(const char *path, int *b0) { return lm_new(path, 0, b0); }   // *b0 |= the module reads the support buffer (spv_b0_used)
+static lmod *sh_module(const vshader *s, const char *path, int *b0) { return lm_new(path, 0, s->bmap, b0); }   // *b0 |= the module reads the support buffer (spv_b0_used)
 // Ryujinx's TextureFormat names (an image's declared format) → Vulkan, with the texel size
 static const struct { const char *n; VkFormat f; int bytes; } DECL_FMT[] = {
     {"R8Unorm", VK_FORMAT_R8_UNORM, 1}, {"R8Snorm", VK_FORMAT_R8_SNORM, 1}, {"R8Uint", VK_FORMAT_R8_UINT, 1}, {"R8Sint", VK_FORMAT_R8_SINT, 1},
@@ -604,6 +605,31 @@ static int ds_fits(const VkDescriptorSetLayoutBinding *b, uint32_t nb) {
 static uint64_t g_ds_toobig;   // shaders whose layout fits no pool (ds_fits): their draws are dropped
 static int upsq_match(const vshader *s); static int upsq_run(const vshader *s);   // gfx_vk_upsq.inc
 static vtex *g_upsq_src, *g_upsq_dst; static VkImageView g_upsq_src_iv;   // a listed upscaler's input and output, as stage_set binds them for the dispatch at hand (gfx_vk_upsq.inc)
+// A shader's set with far-apart binding numbers (spv_bind.h): the map from its res.json, made before its modules, which take it (lm_code); sh_bind_apply gives its
+// layout and stage_set's writes the new numbers once the matching of res.json against the file (spv_cb_ext) is done. DM_VK_BIND_COMPACT=0: the numbers as they are
+static uint64_t g_bind_shaders, g_bind_entries;
+static int bind_compact_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_BIND_COMPACT"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_BIND_COMPACT=0: binding numbers as the translator gave them"); } return v; }
+static void sh_bind_map(vshader *s) {
+    if (!bind_compact_on()) return;
+    uint32_t b[CB_MAX + 16 + 64 + 16 + 4]; int nb = 0;
+    for (int i = 0; i < s->ncb; i++) b[nb++] = (uint32_t)s->cb[i].binding;
+    for (int i = 0; i < s->nsb; i++) b[nb++] = (uint32_t)s->sb[i].binding;
+    for (int i = 0; i < s->ntx; i++) b[nb++] = (uint32_t)s->tx[i].binding;
+    for (int i = 0; i < s->nim; i++) b[nb++] = (uint32_t)s->im[i].binding;
+    spv_bmap m; int n = spv_bmap_make(b, nb, &m);
+    if (n < 0) { RED_ONCE(179, "shader %s: more than %d bindings at %u or past it: their numbers are left as they are, and a driver that sizes a layout by its highest binding keeps memory for each", s->key, SPV_BIND_MAX, SPV_BIND_FROM); return; }
+    if (!n) return;
+    spv_bmap *c = malloc(sizeof *c); if (!c) return; *c = m; s->bmap = c;
+    g_bind_shaders++; g_bind_entries += (uint64_t)n;
+    static int nl; if (nl++ < 4) LOG("[vk] shader %s: %d binding numbers made dense (%u -> %u%s; spv_bind.h, DM_VK_BIND_COMPACT=0: off)", s->key, n, m.from[0], m.to[0], n > 1 ? ", ..." : "");
+}
+static void sh_bind_apply(vshader *s) {
+    const spv_bmap *m = s->bmap; if (!m) return;
+    for (int i = 0; i < s->ncb; i++) s->cb[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->cb[i].binding);
+    for (int i = 0; i < s->nsb; i++) s->sb[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->sb[i].binding);
+    for (int i = 0; i < s->ntx; i++) s->tx[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->tx[i].binding);
+    for (int i = 0; i < s->nim; i++) s->im[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->im[i].binding);
+}
 static vshader *sh_get(const char *key) {
     char k[16]; memcpy(k, key, 16);
     vshader *s = nvn_hm_get(&g_sh, k); if (s) return s->ok ? s : NULL;
@@ -638,12 +664,14 @@ static vshader *sh_get(const char *key) {
     a = js_get(&r, "tf");   // [[outputs, stride] or [] per feedback buffer]
     for (int b = 0; a && a->t == 3 && b < a->n && b < 4; b++) if (a->kid[b].t == 3 && a->kid[b].n == 2) s->tf_stride[b] = (uint32_t)a->kid[b].kid[1].num;
     js_free(&r);
+    sh_bind_map(s);   // before its modules: they and the layout below take the same numbers
     t_pool_info = 0;
-    snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(p, &s->b0);
+    snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(s, p, &s->b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
       if (w) { if (s->stage == SH_CS) s->tgs = tgs_bytes(w, nw, s->key); spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
-    if (s->stage == SH_VS) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(p, &s->b0); }
-    if (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(p, &s->b0); }
+    sh_bind_apply(s);   // the layout and stage_set's writes from here on: the numbers the modules have (the matching above read the file's)
+    if (s->stage == SH_VS) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(s, p, &s->b0); }
+    if (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(s, p, &s->b0); }
     if (!s->mod) return NULL;
     // a pool read spv_pool left, or pool arrays res.json names that it found no variable for: their arrays would be in no layout
     if (s->pool && !(t_pool_info & (SPV_POOL_IMG | SPV_POOL_SMP)) && !(t_pool_info & SPV_POOL_FAIL)) { t_pool_info |= SPV_POOL_FAIL; static int nl; if (nl++ < 8) LOG("[RED] [vk] shader %s: res.json names texture pool arrays its module does not have as spv_pool knows them: its draws are dropped", s->key); }
@@ -1150,7 +1178,7 @@ static void occl_begin(void) {   // a draw while samples passed are counted: ins
     vkCmdBeginQuery(C->cb, C->qp, (uint32_t)g_q_act, g_vk_feat.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
 }
 // ---- GPU time per render pass: a file named prof_now beside $DM_DUMP_DIR profiles the frame two presents later (the log lists its passes, costliest first) ----
-typedef struct { chunk *c; int s0, s1, draws, ncolor, depth; uint32_t w, h; VkFormat f0; uint64_t t0, t1, seq, verts, big; const char *bigvs, *bigfs; } prof_rec;   // verts: vertices drawn (indices × instances); big: the largest draw's, and its shaders
+typedef struct { chunk *c; int s0, s1, draws, ncolor, depth; uint32_t w, h; VkFormat f0; uint64_t t0, t1, seq, verts, big; const char *bigvs, *bigfs; } prof_rec;   // verts: vertices drawn (indices × instances); big: the largest draw's, and its shaders (a dispatch: groups in w, h, draws; its compute shader in bigfs)
 static prof_rec g_prof[1024]; static int g_nprof, g_prof_cur = -1; static long g_prof_at = -1; static uint64_t g_prof_seq;
 static int prof_on(void) { return g_prof_at > 0 && (long)atomic_load(&g_presents) + 1 == g_prof_at; }
 static void prof_poll(uint64_t presents) {
@@ -1187,7 +1215,7 @@ static void prof_write(void) {
     LOG("[prof] frame %ld: %d records (%d not closed, %d not read), %d timed, %.0f us in them (%d dispatches %.0f us), first start to last end %.0f us", g_prof_at, g_nprof, unclosed, unread, n, sum, ncs, cs, hi > lo ? (hi - lo) * per / 1e3 : 0.0);
     qsort(g_prof, (size_t)g_nprof, sizeof *g_prof, prof_cmp);
     for (int i = 0; i < g_nprof && i < 40; i++) { prof_rec *r = &g_prof[i]; if (r->t1 <= r->t0) continue;
-        if (r->ncolor < 0) LOG("[prof] %7.0f us  dispatch #%llu  %ux%ux%u groups", (r->t1 - r->t0) * per / 1e3, (unsigned long long)r->seq, r->w, r->h, (unsigned)r->draws);
+        if (r->ncolor < 0) LOG("[prof] %7.0f us  dispatch #%llu  %ux%ux%u groups  cs %s", (r->t1 - r->t0) * per / 1e3, (unsigned long long)r->seq, r->w, r->h, (unsigned)r->draws, r->bigfs ? r->bigfs : "-");
         else LOG("[prof] %7.0f us  pass #%llu  %ux%u  colour %d (vk%d) depth %d  draws %d  vertices %llu (largest draw %llu: vs %s fs %s)", (r->t1 - r->t0) * per / 1e3, (unsigned long long)r->seq, r->w, r->h,
                  r->ncolor, r->f0, r->depth, r->draws, (unsigned long long)r->verts, (unsigned long long)r->big, r->bigvs ? r->bigvs : "-", r->bigfs ? r->bigfs : "-"); }
     g_nprof = 0; g_prof_at = -1;
@@ -1609,7 +1637,7 @@ static pthread_mutex_t g_alpha_mu = PTHREAD_MUTEX_INITIALIZER;   // one variant 
 static lmod *ps_alpha_mod_locked(vshader *s, uint32_t miss) {
     for (int i = 0; i < s->navar; i++) if (s->avar[i].miss == miss) return s->avar[i].m;
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
-    lmod *m = lm_new_a(p, miss, 1, NULL);   // the code goes through spv_alpha.h (lm_code), and its identifier is of the test in it
+    lmod *m = lm_new_a(p, miss, 1, s->bmap, NULL);   // the code goes through spv_alpha.h (lm_code), and its identifier is of the test in it
     if (s->navar < 4) { s->avar[s->navar].miss = miss; s->avar[s->navar++].m = m; }
     if (m) { static int nl; if (nl++ < 8) LOG("[vk] fragment shader %s: alpha-test variant (its function a specialization constant, the reference a push constant)", s->key); }
     return m;
@@ -1825,8 +1853,9 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
             if (alpha) {   // the variant's function, by SpecId (spv_alpha.h decorates it 0); the reference arrives in a push constant
                 pme[0] = (VkSpecializationMapEntry){0, 0, 4}; psv = k->color.alpha_func; psi = (VkSpecializationInfo){1, pme, 4, &psv}; pspec = s; } }
         if (!mod) return VK_ERROR_INITIALIZATION_FAILED;
-        lms[ns] = mod; st[ns] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = s->vkstage, .pName = "main"};
+        lms[ns] = mod; st[ns] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = s->vkstage, .pName = "main"};   // its module: lm_pipeline
         if (s->stage == SH_PS && pspec == s) st[ns].pSpecializationInfo = &psi;
+        if (s->stage == SH_VS && pos_rows_for(s->key)) st[ns].pSpecializationInfo = &g_pr_spec;   // run-time rows in the position (gfx_vk_posrows.inc)
         ns++;
         if (s->pool) { sets[POOL_SET] = g_pool_dsl; nset = POOL_SET + 1; } }
     VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};   // the alpha test's reference (spv_alpha.h); unused by shaders that do not declare it
@@ -3255,7 +3284,7 @@ static cpipe_t *cpipe_e5(vshader *s, uint64_t mask) {
     int slot = !s->cpe5[0] ? 0 : !s->cpe5[1] ? 1 : -1;
     if (slot < 0) { RED_ONCE(127, "compute shader %s binds E5B9G9R9 textures at a third set of image bindings (%#llx): its pipelines are kept for two, so this dispatch is skipped", s->key, (unsigned long long)mask); return NULL; }
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
-    lmod *m = lm_new_e(p, 0, 0, mask, NULL);
+    lmod *m = lm_new_e(p, 0, 0, mask, s->bmap, NULL);
     cpipe_t *cp = calloc(1, sizeof *cp); if (!cp) return NULL;
     s->cpe5[slot] = cp; s->e5[slot] = mask; if (!m) return NULL;   // kept with no pipeline: not tried again
     return cpipe_make(s, cp, &m);
@@ -3275,14 +3304,18 @@ static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
     if (vk_debug()) LOG("[vk] compute pipeline for shader %s", s->key);
     return cp;
 }
-// nn::ndve's movie network (Movie/Ndve/Ndve-Nvn2-vid_seq5.dat, a model any game linking the library may ship; nvn_ndve.inc runs it with host kernels on the Mac): of a movie
-// frame's 14 dispatches, the eleven of its U-Net are left out on Vulkan. Translated, its convolutions are SPIR-V modules of up to 2.2 MB (e6be82d835fbe4d3: 139,000 lines
-// of emulated HMMA), and Qualcomm's compiler (Adreno 840, driver 0x8034a013) was still building that one minutes later: the replay thread waited in it and Ocarina of
-// Time's title never came. The colour conversion before them and the last convolution and resampler after them still run, so the movie's picture is shown without the
-// network's enhancement (the last convolution adds its correction to the picture). Banana Native skips them on Qualcomm's driver for its compiler too. DM_VK_NDVE=1
-// (env.txt) runs them
-static int ndve_unet(const char *key) {
-    static const char k[][17] = {"ba079f68ae288dba", "a8b4fb48fee0ccf8", "e2eebd7ba18fe35f", "e6be82d835fbe4d3", "9442573ee4ace011", "0a56002cdc7e1fce", "d15370a382630d4e", "7f7ff0f36b54d90f"};
+// nn::ndve's movie network (Movie/Ndve/Ndve-Nvn2-vid_seq5.dat, a model any game linking the library may ship; nvn_ndve.inc runs it with host kernels on the Mac) is left
+// out on Vulkan: every one of the file's 22 compute shaders (its NDVE network and its NDSR upscaler, shader_map.tsv), of which a movie frame dispatches 14. Its U-Net
+// convolutions translate to SPIR-V modules of up to 2.2 MB (e6be82d835fbe4d3: 139,000 lines of emulated HMMA), and Qualcomm's compiler (Adreno 840, driver 0x8034a013)
+// was still building that one minutes later: the replay thread waited in it and Ocarina of Time's title never came. With only the U-Net left out, the colour conversion
+// before it and the last convolution and NDSR upscaler after it still ran, for a movie picture that stayed black: 37 ms of the Adreno 840's 38 ms GPU frame (30 fps), and
+// 1.2 s of every frame on an Adreno 740 (driver 0x802a4000, 0.8 fps from the title on: the upscaler 4f41ccf24f163e0d 790 ms, the last convolution 5a7d69b067a7f011
+// 432 ms, both straight-line emulated HMMA with thousands of local variables and no loops). Banana Native leaves out the same 22. DM_VK_NDVE=1 (env.txt) runs them all
+static int ndve_left_out(const char *key) {
+    static const char k[][17] = {"c2fc2ddd604c25e7", "4f41ccf24f163e0d",   // NDSR
+        "ba079f68ae288dba", "a8b4fb48fee0ccf8", "e2eebd7ba18fe35f", "e6be82d835fbe4d3", "9442573ee4ace011", "0a56002cdc7e1fce", "d15370a382630d4e", "7f7ff0f36b54d90f",
+        "5a7d69b067a7f011", "329e4b0f0b3f2bc6", "7653fe5f6ef0b2f2", "b6e34b46dea44278", "3f18f89630c05813", "539ad3b353758de0", "d72077c4b6cc264f", "ab9a92b55950ec02",
+        "c41f451b88a050f6", "55ee6dc89a2b64e2", "49dff010b9832251", "8e98d86c0e4a7b53"};   // NDVE
     static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_NDVE"); on = e && *e == '1'; }
     if (on) return 0;
     for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!memcmp(key, k[i], 16)) return 1;
@@ -3296,7 +3329,7 @@ static int vk_dispatch(const p_dispatch *dp) {
     vshader *s = NULL; int pst = -1;
     for (unsigned i = 0; i < pr->nstage && i < 6 && !s; i++) { uint8_t key[8]; char hx[17]; if (!prog_key(pr, i, key)) continue; key_hex(key, hx); vshader *x = sh_get(hx); if (x && x->stage == SH_CS) { s = x; pst = (int)i; } }
     if (!s) { RED_ONCE(107, "compute program without a translated compute shader"); return 0; }
-    if (ndve_unet(s->key)) { if (!g_ndve_skipped++) LOG("[vk] nn::ndve movie network: its eleven U-Net dispatches are left out (Qualcomm's compiler does not finish them; DM_VK_NDVE=1 runs them): first %s", s->key); return 1; }
+    if (ndve_left_out(s->key)) { if (!g_ndve_skipped++) LOG("[vk] nn::ndve movie network: its dispatches are left out (its picture stayed black without the U-Net, which Qualcomm's compiler does not finish, and the rest cost up to 1.2 s a frame; DM_VK_NDVE=1 runs them): first %s", s->key); return 1; }
     uint32_t g[3] = {(uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z};
     { vshader *sh[4] = {s, NULL, NULL, NULL}; rd_rng r[1] = {{(uintptr_t)dp->ind, (uintptr_t)dp->ind + 12}};   // what the dispatch reads of guest memory lands first (draw_view), not everything pending
       if (dp->ind) ranges_view(r, 1); draw_view(sh, NULL, 0); }
@@ -3322,7 +3355,7 @@ static int vk_dispatch(const p_dispatch *dp) {
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pl, 0, 1, &set, s->ndyn, dyn);
     if (s->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pl)) return 0;
     int pr_i = -1;
-    if (prof_on() && C->pq && C->npq + 2 <= 512 && g_nprof < 1024) { prof_rec *r = &g_prof[pr_i = g_nprof++]; memset(r, 0, sizeof *r); r->c = C; r->ncolor = -1; r->w = g[0]; r->h = g[1]; r->draws = (int)g[2]; r->seq = g_prof_seq++;
+    if (prof_on() && C->pq && C->npq + 2 <= 512 && g_nprof < 1024) { prof_rec *r = &g_prof[pr_i = g_nprof++]; memset(r, 0, sizeof *r); r->c = C; r->ncolor = -1; r->w = g[0]; r->h = g[1]; r->draws = (int)g[2]; r->seq = g_prof_seq++; r->bigfs = s->key;
         r->s0 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->pq, (uint32_t)r->s0); }
     uint32_t bcid = bc_on() ? bc_begin(c, s->key, g, C->seq) : 0;   // DM_VK_BC (gfx_vk_bc.inc)
     vkCmdDispatch(c, g[0], g[1], g[2]); crumb(dp->ind ? 'C' : 'c', s->key, NULL, g[0], g[1] * g[2]);
