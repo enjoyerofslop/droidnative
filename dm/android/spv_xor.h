@@ -4,7 +4,8 @@
 // particle simulation summed its live particles with it, an emitter's count came back as 0x21d1f071, and the indirect draw of its sprites asked for billions of
 // instances and hung the GPU. ShuffleXor by the same mask reads the same lane (the invocation whose ID is the lane's ^ the mask) and is right there.
 // The rewrite: a shuffle whose index is the lane ID ^ b becomes ShuffleXor by b (a uint: bitcast from a 32-bit int). The index is followed through OpBitcast,
-// OpCopyObject and OpLoad of a Function variable stored once, earlier in the same block; the lane ID is an OpLoad of the SubgroupLocalInvocationId built-in;
+// OpCopyObject and OpLoad of a Function variable stored once, earlier in the same block, and used only by loads and stores (one whose pointer goes into an access
+// chain, a call, a copy, an atomic or another pointer value may be written through it: not followed); the lane ID is an OpLoad of the SubgroupLocalInvocationId built-in;
 // b must be a global, a function parameter or defined before the shuffle in its block. Every other shuffle is left as it is. Exact on any GPU. Run before
 // spv_wide, which keeps a ShuffleXor by a mask under 32 within its 32-lane warp, as Maxwell's 5-bit lane operand always is. Self-contained (no libc), so that
 // dm/tools/tests/test_spv_xor.py builds it alone.
@@ -34,6 +35,19 @@ static int spv_xor_nores(uint32_t op) {
 }
 enum { SPX_DEF, SPX_BLK, SPX_ST, SPX_STP, SPX_STB, SPX_N };   // the scratch's arrays, bound words each
 #define SPV_XOR_MULTI 0xffffffffu   // a variable stored more than once (or with an initializer); the lane ID, as spv_xor_follow's result
+// A Function variable whose pointer an instruction uses otherwise than as an OpLoad's or OpStore's pointer: its stores are not all OpStores, so it is not followed.
+// Access chains, calls, memory copies, atomics, and pointer values made of it (a copy, a select, a phi, a pointer stored as a value)
+static void spv_xor_escape(const uint32_t *w, const uint32_t *x, uint32_t op, uint32_t len, uint32_t bound, const uint32_t *def, uint32_t *st) {
+#define SPX_MARK(id) do { uint32_t id_ = (id); if (id_ < bound && def[id_] && (w[def[id_]] & 0xffff) == 59) st[id_] = SPV_XOR_MULTI; } while (0)
+    if (((op >= 65 && op <= 67) || op == 70) && len >= 4) SPX_MARK(x[3]);   // OpAccessChain, OpInBoundsAccessChain, OpPtrAccessChain, OpInBoundsPtrAccessChain
+    else if (op == 57) { for (uint32_t q = 4; q < len; q++) SPX_MARK(x[q]); }   // OpFunctionCall's arguments
+    else if ((op == 63 || op == 64) && len >= 3) { SPX_MARK(x[1]); SPX_MARK(x[2]); }   // OpCopyMemory, OpCopyMemorySized
+    else if (op == 228 && len >= 2) SPX_MARK(x[1]);   // OpAtomicStore
+    else if (op >= 227 && op <= 242 && len >= 4) SPX_MARK(x[3]);   // the other atomics: type result pointer
+    else if (op == 83 || op == 169 || op == 245) { for (uint32_t q = 3; q < len; q++) SPX_MARK(x[q]); }   // OpCopyObject, OpSelect, OpPhi of a pointer
+    else if (op == 62 && len >= 3) SPX_MARK(x[2]);   // OpStore of the pointer as a value
+#undef SPX_MARK
+}
 // The id x stands for, followed through bitcasts, copies and Function variables stored once earlier in the same block; the lane ID: SPV_XOR_MULTI
 static uint32_t spv_xor_follow(const uint32_t *w, uint32_t bound, const uint32_t *s, uint32_t lane, uint32_t x) {
     const uint32_t *def = s + SPX_DEF * bound, *blk = s + SPX_BLK * bound, *st = s + SPX_ST * bound, *stp = s + SPX_STP * bound, *stb = s + SPX_STB * bound;
@@ -78,6 +92,7 @@ static size_t spv_xor(const uint32_t *w, size_t n, uint32_t *scratch, uint32_t *
         if (!len || i + len > n) return 0;
         const uint32_t *x = w + i; uint32_t r = 0;
         if (op == 54) fn = 1;   // OpFunction
+        if (fn) spv_xor_escape(w, x, op, len, bound, def, st);
         if (op == 248 && len == 2) cur = x[1];   // OpLabel
         else if (op == 56) cur = 0;   // OpFunctionEnd
         else if (op == 71 && len >= 4 && x[2] == 11 && x[3] == 41 && x[1] < bound) lane = x[1];   // OpDecorate BuiltIn SubgroupLocalInvocationId

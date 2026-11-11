@@ -104,6 +104,10 @@ OpFunctionEnd
 TWO_STORES = COMPUTE.replace('OpStore %vl %l1\n', 'OpStore %vl %l1\n%l1b = OpBitcast %f32 %l0\nOpStore %vl %l1b\n')
 # The mask loaded in the block before the shuffle's (the helper split in two): left as it is, as spv_xor only uses a mask from the shuffle's own block
 OTHER_BLOCK = COMPUTE.replace('%b0 = OpLoad %i32 %pb\n%x0 = OpBitwiseXor %i32 %l3 %b0\n', '%b0 = OpLoad %i32 %pb\nOpBranch %b2\n%b2 = OpLabel\n%x0 = OpBitwiseXor %i32 %l3 %b0\n')
+# The lane variable's pointer passed to a function that may write it: left as it is
+PASSED = (COMPUTE.replace('%bft = OpTypeFunction %i32 %pfi %pfi\n', '%bft = OpTypeFunction %i32 %pfi %pfi\n%wft = OpTypeFunction %void %pff\n')
+          .replace('%l2 = OpLoad %f32 %vl\n', '%wr = OpFunctionCall %void %wf %vl\n%l2 = OpLoad %f32 %vl\n')
+          + '%wf = OpFunction %void None %wft\n%wp = OpFunctionParameter %pff\n%wl = OpLabel\nOpReturn\nOpFunctionEnd\n')
 # The index the lane ID + the mask (Maxwell's SHFL.DOWN as written directly): no XOR, left as it is
 DOWN = COMPUTE.replace('%x0 = OpBitwiseXor %i32 %l3 %b0', '%x0 = OpIAdd %i32 %l3 %b0')
 # test_spv_wide's fragment shader with SHFL.IDX alone (no butterfly): nothing for spv_xor
@@ -199,7 +203,7 @@ class SpvXor(unittest.TestCase):
         self.assertIn('OpGroupNonUniformShuffleXor', self.dis(res, 'fsw2'))
 
     def test_left_as_translated(self):
-        for name, text in (('two_stores', TWO_STORES), ('other_block', OTHER_BLOCK), ('down', DOWN), ('idx', IDX_ONLY)):
+        for name, text in (('two_stores', TWO_STORES), ('other_block', OTHER_BLOCK), ('passed', PASSED), ('down', DOWN), ('idx', IDX_ONLY)):
             with self.subTest(name):
                 out, ns = self.xor(self.asm(text, name))
                 self.assertIsNone(out); self.assertEqual(ns, 0)
