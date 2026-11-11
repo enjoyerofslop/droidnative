@@ -4,6 +4,8 @@ Updates 4.0.0 (v1441792) and 4.0.1 (v1507328) over the base game, SDK 4.4.0, the
 
 The 4.0.1 build has the same `subsdk0` and `sdk` build IDs as 4.0.0 and a different `main` build ID. This profile has no build-specific function patches. [A 4.0.1 iPhone report](https://github.com/seedds/nxnative/issues/281) covers the title, menus and a complete three-lap Grand Prix race after the shared notification-wait fix. A second 4.0.1 build from current upstream, with Booster Course DLC and a derived profile, completed a full race on an iPhone 15 Pro Max (iOS 27.0.1) and on a Mac. The registered profile's combined shader tables and Mac build passed shader and pipeline prebuild checks; gameplay on a build made from this registered profile has not yet been tested. A build from the registered profile needs both update NSPs in the input folder.
 
+On Android it plays two 50cc races at 60 fps on a Pixel 9 Pro XL, steered by the game's Smart Steering ([Android](#android)).
+
 Brought up on the Mac from 4.0.0: boot, the title with its demo race, the Mii pick, the menus (their movie previews play), a 50cc Grand Prix race at Mario Kart Stadium to its results, and a second boot that loads the save. 60 fps (p50 16.7 ms), sound; about 2.4 GB resident and 1.26 GB of Metal allocations in the race, flat over minutes.
 
 ## What it needs
@@ -58,6 +60,23 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 - `run/race.sh` boots from a copy of a save past the Mii pick into a 50cc Grand Prix (Mario, Mushroom Cup) with frame-timed keys and holds accelerate: `DM_KEYS=f960:L+R~0.3,f1260:A,f1500:A,f1740:A,f2000:A,f2240:A,f2400:A,f2560:A,f2800:A,f3040:A,f4300:A~70`.
 - From a fresh save, L+R at the title opens "Select a Mii" (Right, A takes the first default Mii).
 - 2P: from a save past the Mii pick, L+R at the title, Down, A (2P), A (Grand Prix), A (50cc) opens the controller applet; 1.5–4 s between presses, or the menu fades drop them. Headless runs report one player; two players need a second controller.
+
+## Android
+
+Played on a Google Pixel 9 Pro XL (Mali-G715, Android 16) on 2026-11-10, from `main` at `0d83f7df`, as a game app (`build_android_from_nsp.py --game-apk`), with adb button input:
+
+- **The build:** the folder held the base game and 4.0.1 (v1507328), not 4.0.0, so the packing script used a profile derived from 4.0.1, with 4.0.1's own shaders: 29,651, all translated for Vulkan, none failed. The RomFS (12.1 GB) went beside the APK, as the app's OBB file.
+- **Played:** from a new save: boot, the title and its demo race, L+R, Select a Mii (the six default Miis, their heads blank as on the Mac; see [Miis](#miis)), the menus with their movie previews, then Grand Prix, 50cc, Mario in the Standard Kart and the Mushroom Cup. Mario Kart Stadium's three laps, won (1st).
+- **The steering:** the game's Smart Steering, on by default (the kart's antenna), with accelerate held over adb; no Auto-Accelerate switch was found on the kart screen. No race has been steered by hand, so how steering feels on a phone is not checked, and the game stays In-game until someone steers a race by hand with a controller.
+- **Save:** six save commits by the end of the race. After the app was stopped and started again, L+R at the title went straight to the main menu with no Mii pick, so the save loaded. A second race from there was won too (15 points).
+- **Frame rate:** 60 fps. Over each race the median frame time was 16.6 ms, with a p95 of about 20 ms. The worst 30 s was 56.6 fps on the first start (pipelines building, and the results menu after the race) and 59.1 on the second. GPU 9–11 ms a frame, 600–740 draws (1,262 at most), about 10 ms of replay CPU; on the title, GPU about 11 ms.
+- **Memory:** 4.3–4.4 GB resident, against 2.4 GB on the Mac: the Mali-G715 has no BC textures, so they are decoded on the CPU.
+- **Sound:** 390 s of the audio renderer's stereo output from the cold start through the second race (`DM_AUDIO_DUMP`), as long as the run took: −26 to −37 dBFS, spectra like music, no clipping. 3 underruns on the first start, in the menus; none on the second.
+- **Red lines:** two, from the title on. Nothing wrong showed on screen; the picture was not compared with the Mac.
+  - `[vk] a GPU block encoder draws into a BC texture decoded on the CPU (format 137): only BC4 and BC5 are decoded on the GPU, the pass draws into the decoded image`: a GPU without BC textures only (Mali, Xclipse).
+  - `[vk] texture view in format 107 over an image of format 37, which lists only its own and its sRGB twin …: read in the image's format`.
+- **Pipelines:** 2,290 draws on the first start and 481 on the second were left out while their pipelines built in the background.
+- **Not tried:** steering or items by hand, other cups and courses, 100cc and up, other devices.
 
 ## Found on this game
 
