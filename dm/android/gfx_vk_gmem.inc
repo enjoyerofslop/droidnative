@@ -22,10 +22,10 @@
 //   ran raw stores counts as a write-back of unknown range until it completes (chunk_hits): the next CPU read of guest memory waits for it, as nvn_mtl.m counts the stores as a
 //   write anywhere until it has learned their pools. Each store also sets its table entry's bit in a write log (DMSH_GMEM_LOG_CB_OFFSET): every draw with stores gets a zeroed
 //   log from the arena, read when its chunk completes, and the pools it names are logged (the Mac's learned pools are the next step). DM_VK_RAW_GMEM_STORE_WAIT=0: not waited for
-// On for a Switch 2 game (its sdk module's spec is Ounce: loader.c dm_sdk_ounce) whose device has a route; DM_VK_RAW_GMEM=1 turns it on for any game (Frostpunk's sdk is a
-// Switch 1 one with NVN2's mesh shaders), =0 off. The device is made before the game's modules are loaded (at the window's surface), so it takes the extensions whenever the
-// GPU has them and DM_VK_RAW_GMEM is not 0; which game it is is settled at its first memory pool (gm_game). Off, nothing else changes: no pool is placed and the table binding
-// reads 16 zero bytes.
+// Opt-in per game: DM_VK_RAW_GMEM=1, from env.txt or the game's android_defaults.txt (Frostpunk's), which front_android.c reads before the window's surface, so the device is
+// made with the extensions only for such a game. Off, nothing changes: the device is made as before, no pool is placed and the table binding reads 16 zero bytes. Only
+// Qualcomm's Adreno has run it (its own driver and Turnip); another GPU stays off unless DM_VK_RAW_GMEM_ANYGPU=1 (Mali and Xclipse would take the AHardwareBuffer route, whose
+// dma-buf mapping and CPU coherence are not shown there).
 #ifndef VK_EXT_map_memory_placed   // Vulkan 1.3.290; the NDK r28 headers are 1.3.275
 #define VK_EXT_map_memory_placed 1
 #define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT ((VkStructureType)1000272000)
@@ -68,23 +68,19 @@ static int gm_game(void);   // below: whether this game takes raw global memory
 static int gm_on(void) { return g_gm_on && gm_game(); }
 static int gm_store_wait(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_STORE_WAIT"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAW_GMEM_STORE_WAIT=0: CPU reads of guest memory do not wait for raw stores"); } return v; }
 
-// ---- The device (vk_create): the extensions and features, unless DM_VK_RAW_GMEM=0 ----
-static int gm_env(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_VK_RAW_GMEM"); v = e && *e == '1' ? 1 : e && *e == '0' ? 0 : -1; } return v; }   // 1 on, 0 off, -1 a Switch 2 game's
-// Settled at the first call, from a memory pool's Initialize or later (the sdk module is loaded by then); the log line comes once the device is known to have a route
-static int gm_game(void) {
-    static int v = -1; if (v >= 0) return v;
-    int env = gm_env(); v = env == 1 ? 1 : env == 0 ? 0 : dm_sdk_ounce();
-    return v;
-}
+// ---- The device (vk_create): the extensions and features, only with DM_VK_RAW_GMEM=1 ----
+static int gm_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM"); v = e && *e == '1'; } return v; }
+static int gm_game(void) { return gm_env(); }   // (the game's own choice, through its android_defaults.txt)
 static int gm_want(const VkExtensionProperties *e, uint32_t n) {
     if (!gm_env()) return 0;
+    { const char *a = getenv("DM_VK_RAW_GMEM_ANYGPU"); if (g_vk.props.vendorID != 0x5143 && !(a && *a == '1')) {
+        LOG("[RED] [vk] raw global memory: DM_VK_RAW_GMEM=1, but it has run only on Qualcomm's Adreno, and this GPU is vendor %#x: off, raw loads read 0 (DM_VK_RAW_GMEM_ANYGPU=1 tries it)", g_vk.props.vendorID); return 0; } }
     g_gm_has_placed = has_ext(e, n, "VK_KHR_map_memory2") && has_ext(e, n, "VK_EXT_map_memory_placed");
     g_gm_has_ahb = has_ext(e, n, "VK_ANDROID_external_memory_android_hardware_buffer") && has_ext(e, n, "VK_EXT_queue_family_foreign");
     int ok = has_ext(e, n, "VK_KHR_buffer_device_address") && (g_gm_has_placed || g_gm_has_ahb);
     // Virtual pools alias physical pages only when the guest's memory is in files (DM_GUEST_FILE=1, hle_nvn.c vpool_map): a placed map would replace such an alias
     const char *gf = getenv("DM_GUEST_FILE"); if (ok && gf && *gf == '1') { LOG("[RED] [vk] raw global memory: off with DM_GUEST_FILE=1 (a placed pool would replace a virtual pool's alias of its pages)"); return 0; }
-    if (!ok) LOG("%s[vk] raw global memory: this GPU lacks VK_KHR_buffer_device_address, or both VK_EXT_map_memory_placed and VK_ANDROID_external_memory_android_hardware_buffer: a Switch 2 game's raw loads read 0",
-                 gm_env() == 1 ? "[RED] " : "");
+    if (!ok) LOG("[RED] [vk] raw global memory: DM_VK_RAW_GMEM=1, but this GPU lacks VK_KHR_buffer_device_address, or both VK_EXT_map_memory_placed and VK_ANDROID_external_memory_android_hardware_buffer: raw loads read 0");
     return ok;
 }
 static void *gm_feat_query(void *next) {   // into vkGetPhysicalDeviceFeatures2's chain
@@ -138,11 +134,11 @@ static void gm_device_made(void) {   // the device has the extensions: their ent
     g_gm_cap = gm_size_env("DM_VK_RAW_GMEM_MAX");
     if (!g_gm_cap) { long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE); if (pages > 0 && psz > 0) g_gm_cap = (uint64_t)pages * (uint64_t)psz / 4; }
     g_gm_on = 1;
-    if (g_gm_mode == 2) LOG("[vk] raw global memory ready (%s): memory pools of a game that takes it become AHardwareBuffers mapped at their own addresses and imported with device addresses "
-                            "(%s), pieces of up to %llu MiB%s", gm_env() == 1 ? "DM_VK_RAW_GMEM=1" : "a Switch 2 game's; DM_VK_RAW_GMEM=0 turns it off",
+    if (g_gm_mode == 2) LOG("[vk] raw global memory on (DM_VK_RAW_GMEM=1): memory pools become AHardwareBuffers mapped at their own addresses and imported with device addresses "
+                            "(%s), pieces of up to %llu MiB%s",
                             g_gm_has_placed ? "DM_VK_RAW_GMEM_AHB=1" : "no VK_EXT_map_memory_placed", (unsigned long long)(g_gm_piece >> 20), g_gm_cap ? gm_cap_str() : "");
-    else LOG("[vk] raw global memory ready (%s): memory pools of a game that takes it become placed Vulkan memory at their own addresses, memory type %u (flags %#x), pieces of up to %llu MiB, "
-        "alignment %llu, unmap reserve %u%s", gm_env() == 1 ? "DM_VK_RAW_GMEM=1" : "a Switch 2 game's; DM_VK_RAW_GMEM=0 turns it off", g_gm_mt, g_vk.mp.memoryTypes[g_gm_mt].propertyFlags,
+    else LOG("[vk] raw global memory on (DM_VK_RAW_GMEM=1): memory pools become placed Vulkan memory at their own addresses, memory type %u (flags %#x), pieces of up to %llu MiB, "
+        "alignment %llu, unmap reserve %u%s", g_gm_mt, g_vk.mp.memoryTypes[g_gm_mt].propertyFlags,
         (unsigned long long)(g_gm_piece >> 20), (unsigned long long)g_gm_align, g_gm_mpq.memoryUnmapReserve, g_gm_cap ? gm_cap_str() : "");
 }
 
@@ -194,6 +190,7 @@ static int gm_place1(uintptr_t lo, size_t n, gm_seg *s) {   // [lo, lo + n) as o
     if (vkMapMemory(g_vk.dev, s->m, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS || !p) { t_gn.what = 4; vkFreeMemory(g_vk.dev, s->m, NULL); vkDestroyBuffer(g_vk.dev, s->b, NULL); return 0; }
     memcpy(p, (const void *)lo, n);   // the pool's bytes (a page never touched reads the zero page)
     vkUnmapMemory(g_vk.dev, s->m);
+    if ((t_gn.r = vkBindBufferMemory(g_vk.dev, s->b, s->m, 0)) != VK_SUCCESS) { t_gn.what = 11; vkFreeMemory(g_vk.dev, s->m, NULL); vkDestroyBuffer(g_vk.dev, s->b, NULL); return 0; }   // before the pages are replaced
     VkMemoryMapPlacedInfoEXT pi = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = (void *)lo};
     VkMemoryMapInfoKHR mi = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pi, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT, .memory = s->m, .offset = 0, .size = VK_WHOLE_SIZE};
     void *q = NULL; VkResult r = g_gm_map2(g_vk.dev, &mi, &q);
@@ -208,7 +205,6 @@ static int gm_place1(uintptr_t lo, size_t n, gm_seg *s) {   // [lo, lo + n) as o
         vkFreeMemory(g_vk.dev, s->m, NULL); vkDestroyBuffer(g_vk.dev, s->b, NULL); g_gm_on = 0; return 0;
     }
     if (madvise((void *)lo, n, MADV_POPULATE_READ)) for (uintptr_t a = lo; a < lo + n; a += 4096) (void)*(volatile const uint8_t *)a;   // every page now (see the top)
-    vkBindBufferMemory(g_vk.dev, s->b, s->m, 0);
     VkBufferDeviceAddressInfoKHR ai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR, .buffer = s->b}; s->gpu = g_gm_bda(g_vk.dev, &ai);
     uint64_t dt = gm_now() - t0; g_gm_place_ns += dt;
     static int probed; if (!probed && n >= (16u << 20)) {   // how fast the CPU reads the placed pages: a slow read would mean the "cached" type is mapped uncached (the Retroid Pocket 5's driver does)
@@ -235,6 +231,7 @@ static int gm_place1_ahb(uintptr_t lo, size_t n, gm_seg *s) {   // as gm_place1,
                               .usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN | AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER};
     if (AHardwareBuffer_allocate(&d, &s->ahb) || !s->ahb) { t_gn.what = 6; s->ahb = NULL; return 0; }
     int fd = gm_ahb_fd(s->ahb); uint64_t t0 = gm_now();
+    if (fd >= 0 && lseek(fd, 0, SEEK_END) < (off_t)n) { close(fd); fd = -1; }   // the handle's first descriptor is the dma-buf on the Adreno's gralloc; one shorter than the buffer would fault the copy below
     if (fd < 0) { t_gn.what = 7; AHardwareBuffer_release(s->ahb); s->ahb = NULL; return 0; }
     void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (p == MAP_FAILED) { t_gn.what = 8; close(fd); AHardwareBuffer_release(s->ahb); s->ahb = NULL; return 0; }
@@ -245,16 +242,17 @@ static int gm_place1_ahb(uintptr_t lo, size_t n, gm_seg *s) {   // as gm_place1,
     VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = n, .usage = GM_USAGE};
     int ok = (t_gn.r = g_gm_ahbp(g_vk.dev, s->ahb, &hp)) == VK_SUCCESS && hp.memoryTypeBits && vkCreateBuffer(g_vk.dev, &bc, NULL, &s->b) == VK_SUCCESS;
     if (ok) {
-        uint32_t mt = vkb_mem_type(hp.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); if (mt == UINT32_MAX) mt = (uint32_t)__builtin_ctz(hp.memoryTypeBits);
+        VkMemoryRequirements br; vkGetBufferMemoryRequirements(g_vk.dev, s->b, &br); uint32_t bits = hp.memoryTypeBits & br.memoryTypeBits;   // a type the buffer takes too
+        uint32_t mt = bits ? vkb_mem_type(bits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) : UINT32_MAX; if (mt == UINT32_MAX && bits) mt = (uint32_t)__builtin_ctz(bits);
         VkImportAndroidHardwareBufferInfoANDROID ii = {.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID, .buffer = s->ahb};
         VkMemoryDedicatedAllocateInfo di = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .pNext = &ii, .buffer = s->b};
         VkMemoryAllocateFlagsInfo fi = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .pNext = &di, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR};
         VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &fi, .allocationSize = hp.allocationSize, .memoryTypeIndex = mt};
-        ok = (t_gn.r = vkAllocateMemory(g_vk.dev, &ma, NULL, &s->m)) == VK_SUCCESS;
+        ok = mt != UINT32_MAX && (t_gn.r = vkAllocateMemory(g_vk.dev, &ma, NULL, &s->m)) == VK_SUCCESS;
+        if (ok && (t_gn.r = vkBindBufferMemory(g_vk.dev, s->b, s->m, 0)) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, s->m, NULL); ok = 0; }
         if (!ok) vkDestroyBuffer(g_vk.dev, s->b, NULL);
     }
     if (!ok) { t_gn.what = 10; munmap(p, n); close(fd); AHardwareBuffer_release(s->ahb); s->ahb = NULL; return 0; }
-    vkBindBufferMemory(g_vk.dev, s->b, s->m, 0);
     void *q = mmap((void *)lo, n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
     close(fd);
     if (q != (void *)lo) {   // a failed MAP_FIXED may have taken the old pages down: anonymous pages with the bytes, from the first mapping. Raw global memory is off from now on
@@ -283,6 +281,7 @@ static void gm_note_log(const gm_note *g) {   // t_gn, outside the swap
     case 7: LOG("[RED] [vk] raw global memory: no dma-buf from the AHardwareBuffer of %zu bytes: the pool at %#lx stays anonymous", g->n, (unsigned long)g->lo); break;
     case 8: LOG("[RED] [vk] raw global memory: the AHardwareBuffer of %zu bytes could not be mapped: the pool at %#lx stays anonymous", g->n, (unsigned long)g->lo); break;
     case 10: LOG("[RED] [vk] raw global memory: the AHardwareBuffer of %zu bytes was not imported into Vulkan (%d): the pool at %#lx stays anonymous", g->n, g->r, (unsigned long)g->lo); break;
+    case 11: LOG("[RED] [vk] raw global memory: a pool piece's memory of %zu bytes could not be bound to its buffer (%d): the pool at %#lx stays anonymous", g->n, g->r, (unsigned long)g->lo); break;
     case 9: LOG("%s[vk] raw global memory: placed pages read at %.0f MB/s (a 16 MiB sweep); placing %zu MiB took %.1f ms", g->mbs < 2000 ? "[RED] " : "", g->mbs, g->n >> 20, g->ms); break;
     default: break; }
 }
@@ -290,7 +289,7 @@ static uintptr_t (*g_gm_addr)[2]; static int g_ngma, g_cgma;   // ranges of pool
 static int gm_was_addressed(uintptr_t lo, uintptr_t hi) { for (int i = 0; i < g_ngma; i++) if (g_gm_addr[i][0] < hi && lo < g_gm_addr[i][1]) return 1; return 0; }
 static void gm_place(const void *mem, uint64_t size, int live) {   // live: the pool is in use (mtl_pool_addressed); 0: at its Initialize, before anything uses it
     if (!size || !gm_game() || !vkb() || !gm_on()) return;   // (the game first: for another game the device is not made here, earlier than it would be)
-    { static int said; if (!said++) LOG("[vk] raw global memory on: %s; memory pools are placed at their first buffer address", gm_env() == 1 ? "DM_VK_RAW_GMEM=1" : "a Switch 2 game (DM_VK_RAW_GMEM=0 turns it off)"); }
+    { static int said; if (!said++) LOG("[vk] raw global memory: memory pools are placed at their first buffer address"); }
     uintptr_t lo = (uintptr_t)mem, hi = lo + size;
     pthread_mutex_lock(&g_gm_pl);
     if (!live && !gm_was_addressed(lo, hi)) { pthread_mutex_unlock(&g_gm_pl); return; }
@@ -329,19 +328,23 @@ static void gm_place(const void *mem, uint64_t size, int live) {   // live: the 
 static void gm_unplace(const void *mem) {
     if (!gm_on() && !g_ngm) return;
     pthread_mutex_lock(&g_gm_pl);
-    gm_seg got[64]; int n = 0;
+    static gm_seg *got; static int cap; int n = 0;   // (g_gm_pl) every piece of the pool
     pthread_mutex_lock(&g_gm_mu);
-    for (int i = 0; i < g_ngm;) if (g_gm[i].pool == mem && n < 64) { got[n++] = g_gm[i]; g_gm_bytes -= g_gm[i].hi - g_gm[i].lo; memmove(g_gm + i, g_gm + i + 1, (size_t)(--g_ngm - i) * sizeof *g_gm); } else i++;
+    for (int i = 0; i < g_ngm;) if (g_gm[i].pool == mem) {
+        if (n == cap) { cap = cap ? 2 * cap : 64; got = realloc(got, (size_t)cap * sizeof *got); if (!got) die("raw global memory: the pieces given back"); }
+        got[n++] = g_gm[i]; g_gm_bytes -= g_gm[i].hi - g_gm[i].lo; memmove(g_gm + i, g_gm + i + 1, (size_t)(--g_ngm - i) * sizeof *g_gm); } else i++;
     if (n) atomic_fetch_add(&g_gm_gen, 1);   // a draw recorded from here takes a table without it
     pthread_mutex_unlock(&g_gm_mu);
     if (!n) { pthread_mutex_unlock(&g_gm_pl); return; }
-    // The GPU first: a chunk recorded or in flight may still read through the old table (the game finalizes a pool once its own GPU work is done, so this is short)
-    uint64_t t0 = gm_now();
-    { BK_LOCK(); all_wait(); BK_UNLOCK(); }
+    // The GPU first: a chunk recorded or in flight may still read through the old table (the game finalizes a pool once its own GPU work is done, so this is short). The replay stays
+    // held through the give-back: on the placed route a piece's range is unmapped between its free and the pages moving in, and nothing of the replay may read it then
+    uint64_t t0 = gm_now(); int kept = 0;
+    BK_LOCK(); all_wait();
     for (int k = 0; k < n; k++) {
         const gm_seg *s = &got[k]; size_t len = s->hi - s->lo;
         uint8_t *t = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (t == MAP_FAILED) { g_gm_kept++; LOG("[RED] [vk] raw global memory: no room to give pool memory %#lx+%#zx back: it stays placed (its allocation is kept)", (unsigned long)s->lo, len); continue; }
+        if (t == MAP_FAILED) {   // no room: the piece stays placed, and listed again, so its memory is still accounted and in the table
+            kept++; g_gm_kept++; pthread_mutex_lock(&g_gm_mu); gm_seg_insert(s); g_gm_bytes += len; atomic_fetch_add(&g_gm_gen, 1); pthread_mutex_unlock(&g_gm_mu); continue; }
         for (uintptr_t a = s->lo; a < s->hi; a += 4096) {   // zero pages stay untouched, so uncommitted
             const uint64_t *w = (const uint64_t *)a; uint64_t o = 0; for (int j = 0; j < 512 && !o; j++) o |= w[j];
             if (o) memcpy(t + (a - s->lo), (const void *)a, 4096); }
@@ -357,9 +360,11 @@ static void gm_unplace(const void *mem) {
         free(s->rd);
         g_gm_given++;
     }
+    BK_UNLOCK();
     g_gm_give_ns += gm_now() - t0;
     pthread_mutex_unlock(&g_gm_pl);
-    static int nl; if (nl++ < 4) LOG("[vk] raw global memory: memory pool %p given back as anonymous memory (%d pieces, %.1f MiB still placed)", mem, n, g_gm_bytes / 1048576.0);
+    if (kept) LOG("[RED] [vk] raw global memory: no room to give %d pieces of pool %p back: they stay placed", kept, mem);
+    static int nl; if (nl++ < 4) LOG("[vk] raw global memory: memory pool %p given back as anonymous memory (%d pieces, %.1f MiB still placed)", mem, n - kept, g_gm_bytes / 1048576.0);
 }
 
 // ---- The table and the write log (stage_set, the replay's thread under g_bk) ----

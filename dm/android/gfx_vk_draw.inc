@@ -2089,9 +2089,9 @@ static int own_alias(const char *key, uint64_t addr, uint64_t n, VkDeviceSize al
     if (!C || !addr || !n || g_fwd_nwb < 0 || g_fwd_nwb > C->nwb || !alias_on()) return 0;
     for (int i = C->nwb - 1; i >= g_fwd_nwb; i--) {   // this draw's or dispatch's own write-backs (g_fwd_nwb: the chunk's count when it began)
         const wb_t *w = &C->wb[i]; uint64_t at;
-        if (!wb_alias_at(w->st < 0, w->rows, (uintptr_t)w->dst, w->row_bytes, w->off, addr, n, al, &at)) continue;
+        if (!wb_alias_at(w->st < 0 || w->inpl, w->rows, (uintptr_t)w->dst, w->row_bytes, w->off, addr, n, al, &at)) continue;   // (in place: off is its offset in the pool piece, gfx_vk_gmem_inplace.inc)
         if (!g_alias++) LOG("[vk] shader %s binds %#llx+%llu again: bound on the copy of its other binding (own_alias)", key, (unsigned long long)addr, (unsigned long long)n);
-        *b = C->ar[-1 - w->st].b; *o = (VkDeviceSize)at; return 1;
+        *b = w->inpl ? w->ipb : C->ar[-1 - w->st].b; *o = (VkDeviceSize)at; return 1;
     }
     return 0;
 }
