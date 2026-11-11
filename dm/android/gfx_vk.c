@@ -74,6 +74,7 @@ static int qr_used(void) { static int v = -1; if (v < 0) { const char *e = geten
 static int qr_host_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_HOST_QRESET"); v = !(e && *e == '0') && qr_used(); } return v; }
 static PFN_vkResetQueryPoolEXT g_qreset;   // vkResetQueryPoolEXT, through vkGetDeviceProcAddr (the instance is Vulkan 1.1, and the android-29 libvulkan.so stub has no vkResetQueryPool); NULL: no host resets
 static PFN_vkGetShaderModuleCreateInfoIdentifierEXT g_smid;   // VK_EXT_shader_module_identifier enabled: modules made only for pipelines the driver's cache lacks (gfx_vk_lmod.inc); NULL: made at once
+static int g_lm_lazy;   // no identifiers: a pipeline's modules made for its build and destroyed after it, so the driver keeps no copy of every shader loaded; the idle ones kept (gfx_vk_lmod.inc)
 static PFN_vkGetDeviceFaultInfoEXT g_fault_info;   // VK_EXT_device_fault enabled: what the driver says of a lost device (gpu_fault_log); NULL: not offered
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
 #include "gfx_vk_memreport.inc"   // DM_VK_MEMREPORT: the driver's memory reports, by object type
@@ -217,7 +218,9 @@ static int vk_try(char *why, size_t nwhy) {
     if (hqr && !(g_qreset = (PFN_vkResetQueryPoolEXT)vkGetDeviceProcAddr(g_vk.dev, "vkResetQueryPoolEXT"))) LOG("[RED] [vk] VK_EXT_host_query_reset is enabled but vkResetQueryPoolEXT was not found");
     if (dfault) g_fault_info = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetDeviceFaultInfoEXT");
     if (smid && !(g_smid = (PFN_vkGetShaderModuleCreateInfoIdentifierEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetShaderModuleCreateInfoIdentifierEXT"))) LOG("[RED] [vk] VK_EXT_shader_module_identifier is enabled but vkGetShaderModuleCreateInfoIdentifierEXT was not found: modules made at once");
-    LOG("[vk] shader modules: %s", g_smid ? "made only for a pipeline the driver's cache does not have, which takes their identifiers (VK_EXT_shader_module_identifier; DM_VK_MODULE_ID=0: made at once)" : "made as each shader loads");
+    { const char *e = getenv("DM_VK_MODULE_LAZY"); g_lm_lazy = g_smid ? 0 : e && *e ? atoi(e) : 64; if (g_lm_lazy < 0) g_lm_lazy = 0; }
+    LOG("[vk] shader modules: %s", g_smid ? "made only for a pipeline the driver's cache does not have, which takes their identifiers (VK_EXT_shader_module_identifier; DM_VK_MODULE_ID=0: made at once)"
+        : g_lm_lazy ? "made for each pipeline's build and destroyed after it, the last idle ones kept (no VK_EXT_shader_module_identifier; DM_VK_MODULE_LAZY=0: made as each shader loads and kept)" : "made as each shader loads");
     if (gm) gm_device_made();
     LOG("[vk] query resets: %s", g_qreset ? "on the host, the queries each chunk used, once read (VK_EXT_host_query_reset)" : qr_used() ? "in the command buffer, the queries the chunk used last time"
                                                                                                                                      : "in the command buffer, every pool at every chunk begin (DM_VK_QRESET_USED=0)");
@@ -1994,9 +1997,9 @@ static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, u
 int vkb_fallback(const char *why) {
     if (!vk_driver_name()) return 0;
     pthread_mutex_lock(&g_vk_mu);
-    if (g_vk_ok) { vkDeviceWaitIdle(g_vk.dev); vkDestroyDevice(g_vk.dev, NULL); }
+    if (g_vk_ok) { vkDeviceWaitIdle(g_vk.dev); lk_clear(); vkDestroyDevice(g_vk.dev, NULL); }
     if (g_vk.inst) vkDestroyInstance(g_vk.inst, NULL);
-    g_vk_ok = 0; g_qreset = NULL; g_fault_info = NULL; g_smid = NULL; g_gm_on = 0;
+    g_vk_ok = 0; g_qreset = NULL; g_fault_info = NULL; g_smid = NULL; g_lm_lazy = 0; g_gm_on = 0;
     pthread_mutex_destroy(&g_vk.qmu); memset(&g_vk, 0, sizeof g_vk); pthread_mutex_init(&g_vk.qmu, NULL);
     if (vk_driver_fallback(why)) vk_make();
     pthread_mutex_unlock(&g_vk_mu);
@@ -2510,10 +2513,10 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
       if (frame > f0) LOG("[vk] GPU busy %.2f ms per frame over the last %llu frames (%llu command buffers in all); the replay waited %.2f ms per frame for a free one of %d", (double)(g - g0) / 1e6 / (double)(frame - f0), frame - f0,
                           (unsigned long long)atomic_load(&g_gpu_chunks), (double)(w - w0) / 1e6 / (double)(frame - f0), g_nchunk);
       f0 = frame; g0 = g; w0 = w; }
-    LOG("[vk] occlusion queries %llu, samples-passed reports %llu, timestamp reports %llu, queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu (cumulative)",
+    LOG("[vk] occlusion queries %llu, samples-passed reports %llu, timestamp reports %llu, queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu, made for pipelines' builds %llu, kept ones used again %llu (cumulative)",
         (unsigned long long)g_q_queries, (unsigned long long)g_q_reports, (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
         (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6,
-        (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids));
+        (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)atomic_load(&g_lm_tmp), (unsigned long long)atomic_load(&g_lm_reuse));
     LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig);
     pool_stats();
     shadow_line();

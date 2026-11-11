@@ -1984,6 +1984,17 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** Brilliant Diamond on a Galaxy Z Flip 7 (Xclipse 950), warm cache: the first frame at 3.29 s against 9.7 to 17.9 s on `main`, its frame 1 1.2 s against 7.7 to 15 s. All 3,082 pipelines came from identifiers, with no module made; the language menu and Eterna City at 60 fps, as on `main`.
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) on a Galaxy Z Flip 7 ([Android baselines](../../dm/android/baselines.md), the Xclipse 950).
 
+### Shader modules kept for good without module identifiers (Android)
+
+- **Symptom:** Android, a GPU without `VK_EXT_shader_module_identifier` (the Pixel 9 Pro XL's Mali-G715): the log's `[vk] shader modules: made as each shader loads`, and `dumpsys meminfo`'s Native Heap grows with the shaders a game loads. Pokémon Brilliant Diamond held 706 MB in Eterna City after its warm-up made 8,974 modules.
+- **Cause:** without identifiers every module was made as its shader loaded and kept for good, and the driver keeps its own copy of the code on its malloc heap, about 48 KB a module there.
+- **Fix:** such a GPU gets the lazy path without the identifiers (`gfx_vk_lmod.inc`): a module is its path until a pipeline is built, the pipeline's modules are made for that build from the files (the same rewrites) and destroyed once the pipeline exists. The last 64 idle ones are kept for the next builds (`lk_take`), since a start-up list or a warm-up builds many pipelines over a few shared vertex shaders. `DM_VK_MODULE_LAZY=N` keeps N, `0` restores the old behaviour.
+- **Check:** the Pixel, warm caches, `DM_VK_MODULE_LAZY=0` against the default:
+  - Brilliant Diamond's Eterna City: native heap 706 → 278 MB, RssAnon 2,062 → 1,642 MB; first frame 4.4 → 4.2 s, 60 fps both; its pipelines took 585 → 1,151 ms over the run (6,281 modules made for builds, 428 kept ones used again).
+  - Super Mario Odyssey's Cap Kingdom: native heap 130 → 95 MB; pipelines 174 → 723 ms (602 from the start-up list, on its own thread), first frame 1.6 → 1.4 s.
+  - Ocarina of Time: no change (about 800 modules; its 6.7 GB was set and pipeline layouts sized past the texture pool arrays, droidplay-core#277).
+- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) on a Pixel 9 Pro XL.
+
 ### A crash in the driver's shader compiler names the pipelines being built
 
 - **Symptom:** Android only: a crash in the Vulkan driver's shader compiler (`libllvm-qgl.so` in the stack) while a game builds pipelines, and nothing in the log says which shaders, or on which thread.
