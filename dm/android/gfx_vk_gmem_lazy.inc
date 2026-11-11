@@ -3,8 +3,9 @@
 // 571 of the 1,967 MiB placed had been resident before, the game's own anonymous memory sat 4.1 GB deep in swap (dumpsys meminfo), and the low-memory killer ended 2 of 11
 // runs on a Galaxy Z Fold 8 (PSS about 11.2 GB on 10.8 GB). A pool is now placed in chunks of GM_CHUNK (one under it a single chunk; gm_lazy_min), each when it is first used:
 // - when a storage buffer in a chunk is bound (gm_inplace → gm_lazy_bind), the chunks it covers, as one allocation so that it binds in place;
-// - when a word in a storage buffer that a shader binding the raw pool table reads points into a chunk, or a word in the first 4 KiB at such a pointer does (gm_lazy_ptrs, from
-//   stage_set): that chunk and the next, placed at once (a buffer is scanned again at most every 100 ms);
+// - when a word in a storage or uniform buffer that a shader binding the raw pool table reads points into a chunk, or a word in the first 4 KiB at such a pointer does
+//   (gm_lazy_ptrs, from stage_set): that chunk and the next, placed at once (a buffer is scanned again at most every 100 ms). Uniform buffers too: with storage buffers alone,
+//   Link and the Mad Scrubs went dark in a fight in Ocarina of Time's Sacred Grove, lit with every written chunk placed (DM_VK_RAW_GMEM_WRITTEN=1);
 // - every 200 ms or so at a submission's start (gm_lazy_tick), those a binding or a pointer wanted placed but which a pending write kept back (the swap waits for it there;
 //   inside stage_set it may not).
 // Chunks the CPU wrote but nothing binds or points to stay unplaced: a raw load from one reads 0. Placing every chunk the game had written (a page present or swapped out,
