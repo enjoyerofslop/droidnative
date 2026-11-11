@@ -3271,14 +3271,18 @@ static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
     if (vk_debug()) LOG("[vk] compute pipeline for shader %s", s->key);
     return cp;
 }
-// nn::ndve's movie network (Movie/Ndve/Ndve-Nvn2-vid_seq5.dat, a model any game linking the library may ship; nvn_ndve.inc runs it with host kernels on the Mac): of a movie
-// frame's 14 dispatches, the eleven of its U-Net are left out on Vulkan. Translated, its convolutions are SPIR-V modules of up to 2.2 MB (e6be82d835fbe4d3: 139,000 lines
-// of emulated HMMA), and Qualcomm's compiler (Adreno 840, driver 0x8034a013) was still building that one minutes later: the replay thread waited in it and Ocarina of
-// Time's title never came. The colour conversion before them and the last convolution and resampler after them still run, so the movie's picture is shown without the
-// network's enhancement (the last convolution adds its correction to the picture). Banana Native skips them on Qualcomm's driver for its compiler too. DM_VK_NDVE=1
-// (env.txt) runs them
-static int ndve_unet(const char *key) {
-    static const char k[][17] = {"ba079f68ae288dba", "a8b4fb48fee0ccf8", "e2eebd7ba18fe35f", "e6be82d835fbe4d3", "9442573ee4ace011", "0a56002cdc7e1fce", "d15370a382630d4e", "7f7ff0f36b54d90f"};
+// nn::ndve's movie network (Movie/Ndve/Ndve-Nvn2-vid_seq5.dat, a model any game linking the library may ship; nvn_ndve.inc runs it with host kernels on the Mac) is left
+// out on Vulkan: every one of the file's 22 compute shaders (its NDVE network and its NDSR upscaler, shader_map.tsv), of which a movie frame dispatches 14. Its U-Net
+// convolutions translate to SPIR-V modules of up to 2.2 MB (e6be82d835fbe4d3: 139,000 lines of emulated HMMA), and Qualcomm's compiler (Adreno 840, driver 0x8034a013)
+// was still building that one minutes later: the replay thread waited in it and Ocarina of Time's title never came. With only the U-Net left out, the colour conversion
+// before it and the last convolution and NDSR upscaler after it still ran, for a movie picture that stayed black: 37 ms of the Adreno 840's 38 ms GPU frame (30 fps), and
+// 1.2 s of every frame on an Adreno 740 (driver 0x802a4000, 0.8 fps from the title on: the upscaler 4f41ccf24f163e0d 790 ms, the last convolution 5a7d69b067a7f011
+// 432 ms, both straight-line emulated HMMA with thousands of local variables and no loops). Banana Native leaves out the same 22. DM_VK_NDVE=1 (env.txt) runs them all
+static int ndve_left_out(const char *key) {
+    static const char k[][17] = {"c2fc2ddd604c25e7", "4f41ccf24f163e0d",   // NDSR
+        "ba079f68ae288dba", "a8b4fb48fee0ccf8", "e2eebd7ba18fe35f", "e6be82d835fbe4d3", "9442573ee4ace011", "0a56002cdc7e1fce", "d15370a382630d4e", "7f7ff0f36b54d90f",
+        "5a7d69b067a7f011", "329e4b0f0b3f2bc6", "7653fe5f6ef0b2f2", "b6e34b46dea44278", "3f18f89630c05813", "539ad3b353758de0", "d72077c4b6cc264f", "ab9a92b55950ec02",
+        "c41f451b88a050f6", "55ee6dc89a2b64e2", "49dff010b9832251", "8e98d86c0e4a7b53"};   // NDVE
     static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_NDVE"); on = e && *e == '1'; }
     if (on) return 0;
     for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!memcmp(key, k[i], 16)) return 1;
@@ -3292,7 +3296,7 @@ static int vk_dispatch(const p_dispatch *dp) {
     vshader *s = NULL; int pst = -1;
     for (unsigned i = 0; i < pr->nstage && i < 6 && !s; i++) { uint8_t key[8]; char hx[17]; if (!prog_key(pr, i, key)) continue; key_hex(key, hx); vshader *x = sh_get(hx); if (x && x->stage == SH_CS) { s = x; pst = (int)i; } }
     if (!s) { RED_ONCE(107, "compute program without a translated compute shader"); return 0; }
-    if (ndve_unet(s->key)) { if (!g_ndve_skipped++) LOG("[vk] nn::ndve movie network: its eleven U-Net dispatches are left out (Qualcomm's compiler does not finish them; DM_VK_NDVE=1 runs them): first %s", s->key); return 1; }
+    if (ndve_left_out(s->key)) { if (!g_ndve_skipped++) LOG("[vk] nn::ndve movie network: its dispatches are left out (its picture stayed black without the U-Net, which Qualcomm's compiler does not finish, and the rest cost up to 1.2 s a frame; DM_VK_NDVE=1 runs them): first %s", s->key); return 1; }
     uint32_t g[3] = {(uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z};
     { vshader *sh[4] = {s, NULL, NULL, NULL}; rd_rng r[1] = {{(uintptr_t)dp->ind, (uintptr_t)dp->ind + 12}};   // what the dispatch reads of guest memory lands first (draw_view), not everything pending
       if (dp->ind) ranges_view(r, 1); draw_view(sh, NULL, 0); }
