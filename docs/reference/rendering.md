@@ -1815,6 +1815,17 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - The rest came from one (`f632c6a1bc76cd19`) reading a 64 KB storage buffer the dispatch before wrote, then writing a 3D image.
   - The opening ran at 15.9 fps on an Ayn Odin 2 and 10.3 on a OnePlus Pad 3; it now runs at 40.6 and 41.0 (frame p50 24 ms). The Pad 3's GPU time per frame went from 28.7 to 15.5 ms.
 
+### Two bindings of the same memory in one shader
+
+- **Symptom:** Android only, nothing visible found yet: a shader that binds one guest buffer twice (two image slots, or two storage buffers) and writes it through one of them.
+  - What one binding writes isn't what the other reads in that dispatch.
+  - When both write, the bytes that land are a mix of the two copies.
+- **Cause:** the replay gives each written binding an arena copy and a write-back of its own. `buf_fwd` binds a write in place only on a write-back from before the draw or dispatch (`g_fwd_nwb`), so when the draw or dispatch is the first in its submission to write the buffer, its second binding of it gets a second copy. On the Switch the two views are one buffer. The two write-backs carry one snapshot and land the bytes each changed, so the later one wins where both changed a byte.
+- **Fix:** `own_alias` (in `tbuf_view` and in `stage_set`'s storage buffers) binds a binding that lies inside a write-back this same draw or dispatch made on that write-back's copy. It adds no copy and no write-back of its own; `wb_alias.h` decides, and `test_wb_alias.py` tests it.
+  - The `[vk] read on the GPU from a dispatch's pending write` line counts these bindings.
+  - `DM_VK_ALIAS=0`: each binding gets its own copy, as before.
+- **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md)'s Niagara argument shader `544e80ec57b3a10b`. It binds its 8 KB counts buffer as an R32ui image it reads and as a format-less image it clears, and on its title screen it's the first in its submission to write that buffer. In the field an earlier dispatch has written it, so both bindings were already in place there.
+
 ### Render passes kept over CPU-side commands
 
 - **Symptom:** hundreds of render passes a frame on the same targets; on a tiler GPU each loads and stores its attachments.

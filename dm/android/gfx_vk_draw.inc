@@ -2037,6 +2037,24 @@ static int buf_fwd(uint64_t addr, uint64_t n, int write, VkDeviceSize al, VkBuff
 }
 static int sb_fwd(uint64_t addr, uint64_t n, int write, VkBuffer *b, VkDeviceSize *o) { return buf_fwd(addr, n, write, g_vk.props.limits.minStorageBufferOffsetAlignment, b, o); }
 static int tb_fwd(uint64_t addr, uint64_t n, int write, VkBuffer *b, VkDeviceSize *o) { return buf_fwd(addr, n, write, g_vk.props.limits.minTexelBufferOffsetAlignment, b, o); }
+// A shader that binds the same guest memory twice (Final Fantasy Resonance's Niagara argument shader 544e80ec57b3a10b: one 8 KB buffer as an R32ui image it
+// reads and as a format-less one it clears): on the Switch the two views are one buffer. When the draw or dispatch is the first in its chunk to write it, buf_fwd
+// finds no write-back to bind in place (it looks only at those from before the draw, g_fwd_nwb), so each binding got an arena copy and a write-back of its own:
+// a write through one view was not what the other read, and the two write-backs, with one snapshot, landed byte by byte over each other. A binding inside a
+// write-back this same draw or dispatch made is bound on that copy (wb_alias.h), with no copy or write-back of its own, and what both views wrote lands once.
+// DM_VK_ALIAS=0 (env.txt): each binding gets its own copy, as before (the A/B of this alone)
+static int alias_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ALIAS"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_ALIAS=0: a shader's bindings of the same memory get copies of their own"); } return v; }
+static uint64_t g_alias;   // bindings bound on the copy of another binding of the same draw or dispatch (own_alias)
+static int own_alias(const char *key, uint64_t addr, uint64_t n, VkDeviceSize al, VkBuffer *b, VkDeviceSize *o) {
+    if (!C || !addr || !n || g_fwd_nwb < 0 || g_fwd_nwb > C->nwb || !alias_on()) return 0;
+    for (int i = C->nwb - 1; i >= g_fwd_nwb; i--) {   // this draw's or dispatch's own write-backs (g_fwd_nwb: the chunk's count when it began)
+        const wb_t *w = &C->wb[i]; uint64_t at;
+        if (!wb_alias_at(w->st < 0, w->rows, (uintptr_t)w->dst, w->row_bytes, w->off, addr, n, al, &at)) continue;
+        if (!g_alias++) LOG("[vk] shader %s binds %#llx+%llu again: bound on the copy of its other binding (own_alias)", key, (unsigned long long)addr, (unsigned long long)n);
+        *b = C->ar[-1 - w->st].b; *o = (VkDeviceSize)at; return 1;
+    }
+    return 0;
+}
 // the guest bytes tbuf_view copies of a buffer texture: its width in texels, cut to the GPU's limit, times the texel size; 0 when it copies none (the dummy is bound).
 // draw_view asks it for the range a draw reads, so it must cover at least what tbuf_view reads
 static size_t tbuf_bytes(const tex_t *t) {
@@ -2046,6 +2064,7 @@ static size_t tbuf_bytes(const tex_t *t) {
     if (n > g_vk.props.limits.maxTexelBufferElements) n = g_vk.props.limits.maxTexelBufferElements;
     return (size_t)n * (size_t)bpb;
 }
+static const char *g_alias_key = "";   // the shader stage_set binds, for own_alias's log
 static VkBufferView tbuf_view(const tex_t *t, int write, int cs) {   // cs: a dispatch binds it (a buffer image it writes may be bound in place, and its write-back is forwardable: buf_fwd)
     uint32_t m = 0; uint8_t swz[4];
     if (!t || t->d.target != NVN_TEXTURE_TARGET_BUFFER || !t->mem || !nvn_fmt_to_mtl(t->d.format, &m, swz) || !m) return VK_NULL_HANDLE;
@@ -2056,6 +2075,7 @@ static VkBufferView tbuf_view(const tex_t *t, int write, int cs) {   // cs: a di
     if (t->d.width > g_vk.props.limits.maxTexelBufferElements) RED_ONCE(102, "buffer texture of %u elements over the GPU's %u: cut", (unsigned)t->d.width, g_vk.props.limits.maxTexelBufferElements);
     VkBuffer b; VkDeviceSize off;
     if ((!write || cs) && tb_fwd((uint64_t)(uintptr_t)t->mem, bytes, write, &b, &off)) g_buf_fwd[write]++;   // on the GPU from a dispatch's pending write (buf_fwd)
+    else if (own_alias(g_alias_key, (uint64_t)(uintptr_t)t->mem, bytes, g_vk.props.limits.minTexelBufferOffsetAlignment, &b, &off)) {}   // a range another binding of this shader wrote
     else { uint8_t *d = ar_alloc(bytes, &b, &off); if (!d) return VK_NULL_HANDLE;
         int inpool = mtl_addr((uint64_t)(uintptr_t)t->mem, bytes, NULL, NULL);
         if (inpool) memcpy(d, t->mem, bytes); else { memset(d, 0, bytes); RED_ONCE(103, "buffer texture outside every memory pool: reads 0"); }
@@ -2312,6 +2332,7 @@ static void sr_put(sr_ent *e, VkDescriptorSetLayout l, VkDescriptorSet set) {   
 // the same descriptors in this recording (sr_find), else one from the chunk (ds_get; tf: of dsl_tf) written here. dseq: the chunk recorded when the draw's first stage began
 // (C->seq after cur()): nothing is written or taken once another is recorded (ds_moved), and the caller tells that 0 from another failure by ds_moved
 static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, const prog_t *pr, int prog_stage, uint32_t base_inst, uint64_t dseq) {
+    g_alias_key = s->key;
     int nst = nvn_stage_of(s->stage);
     VkDescriptorSet set = VK_NULL_HANDLE; *pset = VK_NULL_HANDLE;   // the writes name their set once it is known (below)
     // one write per binding; every element of an array is written (an unwritten descriptor is undefined)
@@ -2384,6 +2405,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         VkDeviceSize ao;   // ao: the arena offset (off above is the c0 / uniform buffer word)
         int wr_ = (sb->flags & 1) != 0;   // written by the shader
         if (u && u->addr && (!wr_ || s->stage == SH_CS) && sb_fwd(u->addr, n, wr_, &b, &ao)) g_buf_fwd[wr_]++;   // on the GPU from a dispatch's pending write (buf_fwd)
+        else if (u && u->addr && own_alias(s->key, u->addr, n, g_vk.props.limits.minStorageBufferOffsetAlignment, &b, &ao)) {}   // a range another binding of this shader wrote
         else if (u && u->addr && !wr_) { if (!sb_keep(u->addr, n, &b, &ao) && !ucopy((const void *)(uintptr_t)u->addr, n, (n + 15) & ~(size_t)15, &b, &ao)) return 0; }   // read only: kept between frames (sb_keep), or shared as uniforms are
         else if (u && u->addr) { uint8_t *d = ar_alloc((n + 15) & ~(size_t)15, &b, &ao); if (!d) return 0; memcpy(d, (const void *)(uintptr_t)u->addr, n);
             if (sb->flags & 1) {   // written by the shader: what it changed is copied back when the chunk completes
