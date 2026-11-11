@@ -1699,7 +1699,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 
 // ---------------- Clears ----------------
 static void clear_color_pass(const p_clear_color *cc); static void clear_ds_pass(const p_clear_ds *cd, VkImageAspectFlags a);   // gfx_vk_draw.inc: partial and masked ones
-static int clear_in_pass(const vtex *v, unsigned level, int depth);   // gfx_vk_draw.inc: whether a full clear of v can be made in the bound targets' pass
+static int clear_in_pass(const vtex *v, int slot, unsigned level, int depth);   // gfx_vk_draw.inc: whether a full clear of v (colour slot, -1 depth) can be made in the bound targets' pass
 static struct { p_set_rt rt; int has_rt; p_scissor sc; int has_sc; } R;
 static int full_scissor(const vtex *v, unsigned level) {
     if (!R.has_sc) return 1;
@@ -1735,7 +1735,7 @@ static void clear_color(const p_clear_color *cc) {
     if ((cc->mask & 0xf) != 0xf || !full_scissor(v, rg.baseMipLevel)) { if (cc->mask & 0xf) clear_color_pass(cc); return; }
     // a full clear of a target the size of the bound targets' pass: in the pass (vkCmdClearAttachments), on a tiler a clear of the tile memory, instead of writing the
     // whole image to memory outside it, a full barrier, and the pass loading it back. Only one layer of one level is a pass attachment
-    if (rg.layerCount == 1 && clear_in_pass(v, rg.baseMipLevel, 0)) { clear_color_pass(cc); return; }
+    if (rg.layerCount == 1 && clear_in_pass(v, cc->index, rg.baseMipLevel, 0)) { clear_color_pass(cc); return; }
     VkCommandBuffer c = cb(); if (!c) return;
     VkClearColorValue cv = clear_value(v->fmt, cc->rgba);
     vkCmdClearColorImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &rg); cb_barrier();
@@ -1747,7 +1747,7 @@ static void clear_ds(const p_clear_ds *cd) {
     a &= v->aspect; if (!a) return;
     if (((cd->stencil_mask & 0xff) && (cd->stencil_mask & 0xff) != 0xff) || !full_scissor(v, 0)) { clear_ds_pass(cd, a); return; }
     VkImageSubresourceRange rg = view_range(v, &R.rt.dview, R.rt.has_dview, a); rg.levelCount = 1;
-    if (rg.layerCount == 1 && clear_in_pass(v, rg.baseMipLevel, 1)) { clear_ds_pass(cd, a); return; }   // in the pass, as colour clears
+    if (rg.layerCount == 1 && clear_in_pass(v, -1, rg.baseMipLevel, 1)) { clear_ds_pass(cd, a); return; }   // in the pass, as colour clears
     VkCommandBuffer c = cb(); if (!c) return;
     VkClearDepthStencilValue dv = {cd->depth, (uint32_t)cd->stencil};
     vkCmdClearDepthStencilImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, &dv, 1, &rg); cb_barrier();

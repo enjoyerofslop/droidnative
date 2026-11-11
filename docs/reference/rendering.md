@@ -2106,6 +2106,18 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - `DM_VK_DUP_SLOTS=0` attaches the image at every slot, as before.
 - **Check:** Breath of the Wild's `outdoors` save on a Galaxy S25 Edge (Adreno 830, Samsung's driver 0x80320001): the Shrine is drawn as on the Odin 2, with no write lost, and the GPU time drops from 21.4 to 20.5 ms. With `DM_VK_DUP_SLOTS=0` it is dark as before. On the Pad 3 a local test leaving the later slot of each pair unused drew it right too. A Galaxy Z Fold 8 (Adreno 840) draws it right either way, and with the fix its GPU time drops from 30.3 to 29.6 ms.
 
+### Clears in a layered pass clear every layer (Android)
+
+- **Symptom:** Android, a 3D or array render target drawn a slice at a time by draws that write the layer (a layered pass) and cleared each frame keeps, in every slice but the first, what earlier frames drew there. With additive blending it grows or flickers from frame to frame.
+- **Cause:** `clear_color_pass` and `clear_ds_pass` cleared through `vkCmdClearAttachments` with a rect of layer 0 alone. NVN clears the whole bound target. A full clear of a 3D target takes that path whenever its size matches the pass's, since a 3D image has one array layer (`clear_color`, `clear_ds`).
+- **Cause, the other order:** a clear before the first layered draw opened a pass of one layer (`clear_in_pass`, `rp_prepare_(0)`), so a 3D target was cleared at slice 0 alone, and that draw then reopened the pass layered and loaded the other slices as they were.
+- **Fix:**
+  - The rect covers every layer of the pass's framebuffer (`P.layers`, `clear_rect_layers`).
+  - A clear whose target's view covers more than one layer or slice asks for a layered pass (`clear_rp_prepare`: `rp_prepare_(1)`, the layers as `rt_layers` gives a layered draw), so it reaches all of them whether it comes before the layered draws or after, as the Mac does in a pass of its own ([Clears of layered render targets in a pass that is not layered](#clears-of-layered-render-targets-in-a-pass-that-is-not-layered)).
+  - A full clear whose pass still has fewer layers than the view (`DM_VK_LAYERED=0`, or another target of the pass with fewer) is made outside the pass instead (`vkCmdClearColorImage` / `vkCmdClearDepthStencilImage` on the view's range; a 3D level is cleared whole). A clear limited by the scissor has no such way out: red line 172 names it.
+  - A clear with a channel mask or a partial stencil mask is a draw of layer 0, which this does not widen: red line 171 says when one meets a layered pass.
+- **Found on:** code reading, from shirai91/nx2android 37c76f613 (carried by DeathKhan/nx2android), where the same rect in that fork's Vulkan backend left Final Fantasy Resonance's 32x32x32 light volumes uncleared in slices 1-31: the fog boxes that read them changed every frame on its first road (pass dumps over 4 frames at the road's centre: 29.6, 40.7, 31.7, 39.7; with every layer cleared, 30.4 in each). Not reproduced on this replay yet.
+
 ### Pipeline keys built from the state objects' fields
 
 - **Symptom:** new graphics pipelines made all through play, also in a level seen before (a few per frame, about 1 to 2 ms each on the Adreno); the start-up list of pipelines grew past 186,000 keys over a few sessions, and making it again took the fast cores for most of an hour.
