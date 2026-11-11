@@ -475,6 +475,9 @@ class Phone(Base):
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('sha256sum '): return self.remote.get('sha', '') + '  x\n'
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('cat ') and ba.MANIFEST in c[1]: return self.remote.get('manifest', '')
             if c == ['shell', 'getprop ro.build.version.sdk']: return self.remote.get('sdk', '')
+            if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('cat ') and 'defaults.txt' in c[1]: return self.remote.get('defaults', '')
+            if c == ['shell', 'pidof org.nxnative.android:game']: return self.remote.get('pid', '')
+            if c[0] == 'push' and str(c[1]).endswith('.txt') and c[2].endswith('/defaults.txt'): self.remote['pushed_defaults'] = Path(c[1]).read_text()
             return ''
         cm = mock.patch.object(ba, 'adb', adb); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
         self.game = self.tmp / 'v1'; (self.game / 'RomFS').mkdir(parents=True); (self.game / 'RomFS/a.bin').write_bytes(b'a')
@@ -731,6 +734,29 @@ class VkDriverGameApp(Base):   # --game-apk --vk-driver: the driver and its NOTI
     def test_gamestart_clears_an_old_driver_at_an_update(self):   # a rebuild without --vk-driver leaves no 19 MB driver behind
         src = (REPO / 'dm/android/java/org/nxnative/android/GameStart.java').read_text()
         self.assertRegex(src, r'new String\[\] \{[^}]*"vk_driver"[^}]*\}\) rm\(')
+
+
+class VkDriverSet(Phone):   # --set-vk-driver: an installed game's driver changed on the phone, with no build
+    def test_the_driver_lines_are_replaced_and_its_records_cleared(self):
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, '/dev/kgsl-3d0': True, 'pid': '4242\n',
+                                                         'defaults': 'DM_LANG=en-US\r\nDM_VK_DRIVER=vk_drivers/old-00000000.so\nDM_VK_DRIVER_SHA256=00\nTU_DEBUG=sysmem\nDM_VK_RAW_GMEM=1\n'})
+        vk = vkpkg().read(make_pkg(self.tmp))
+        ba.set_vk_driver('S', GID, vk, ['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1'], self.tmp / 'logs')
+        self.assertEqual(self.remote['pushed_defaults'], f'DM_LANG=en-US\nDM_VK_RAW_GMEM=1\nDM_VK_DRIVER=vk_drivers/{vk.name}\nDM_VK_DRIVER_SHA256={vk.sha256}\n'
+                                                         'FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1\n')
+        flat = [' '.join(c) for c in self.cmds]
+        self.assertTrue(any(c.startswith('push') and c.endswith(f'vk_drivers/{vk.name}') for c in flat), flat)
+        self.assertIn(f"shell rm -f '{g}/vk_driver_result.txt' '{ba.REMOTE}/vk_driver_state/{vk.name}.json'", flat)
+        self.assertTrue(any('takes effect at its next start' in m for m in self.said), self.said)
+
+    def test_system_takes_the_driver_out(self):
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, 'defaults': 'DM_LANG=en-US\nDM_VK_DRIVER=vk_drivers/x.so\nDM_VK_DRIVER_SHA256=00\n'})
+        ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')
+        self.assertEqual(self.remote['pushed_defaults'], 'DM_LANG=en-US\n')
+        self.assertFalse(any('vk_drivers' in ' '.join(c) for c in self.cmds if c[0] == 'push'))
+
+    def test_a_game_not_on_the_phone_is_refused(self):
+        with self.assertRaises(ba.BuildError): ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')
 
 
 class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop app's updates: the newest release read, its Setup downloaded and checked; a local server is GitHub
