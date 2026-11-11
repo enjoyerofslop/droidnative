@@ -133,7 +133,7 @@ typedef struct {
     uint8_t dsbig;   // bit tf: one set of its layout (dsl, dsl_tf) does not fit an empty pool (sh_get ds_fits, else ds_alloc_n, RED 93): ds_get gives none for it, without making another pool
     uint8_t cbdyn[18], ndyn;   // set_reuse: cb[i] a dynamic uniform buffer, its offset at cbdyn[i] of the bind's (0xff: a plain one, its offset in the set); ndyn of them
     uint8_t pool;   // reads the texture pool by ID: its modules read the pool set (gfx_vk_pool.inc), which its pipelines' layouts take at POOL_SET
-    uint64_t e5; void *cpe5;   // compute: the storage image bindings bound to E5B9G9R9 textures, and its pipeline with those packed (cpipe_e5, spv_e5.h)
+    uint64_t e5[2]; void *cpe5[2];   // compute: sets of storage image bindings bound to E5B9G9R9 textures, and its pipeline for each with those packed (cpipe_e5, spv_e5.h)
 } vshader;
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
 // never matched the draw before, and stage_set wrote every set of every stage: Breath of the Wild about 7,500 a frame, vkUpdateDescriptorSets 3.4 ms a frame of the
@@ -2141,8 +2141,8 @@ static VkFormat view_format(const vtex *v, const view_t *vv) {
     if (!v->mutable_ || !fmt_bytes(f) || fmt_bytes(f) != fmt_bytes(v->fmt)) { RED_ONCE(118, "texture view in format %d over an image of format %d: read in the image's", f, v->fmt); return VK_FORMAT_UNDEFINED; }
     return f;
 }
-static int g_bind_bad;
-static uint64_t g_e5_need;   // compute: the storage image bindings stage_set bound to E5B9G9R9 textures (vk_dispatch takes cpipe_e5 for them)   // set by stage_set when a binding has no valid descriptor: the draw / dispatch is skipped
+static int g_bind_bad;   // set by stage_set when a binding has no valid descriptor: the draw / dispatch is skipped
+static uint64_t g_e5_need;   // compute: the storage image bindings stage_set bound to E5B9G9R9 textures (vk_dispatch takes cpipe_e5 for them)
 // An image slot's texture made without storage use takes it (vt_storage_up), unless it is a target of the pass a draw prepared (rp_prepare ran before stage_set): rp_start would
 // begin that pass's framebuffer, made on the image the upgrade replaces. A dispatch's copy ends the pass, and the next rp_prepare makes the targets' views again
 // DM_VK_STORAGE_UP (env.txt): 0 leaves such a texture as before (bound as it is, an sRGB one skipped). 1 (default) upgrades one whose own format the GPU stores to, and still
@@ -3085,14 +3085,16 @@ static cpipe_t *cpipe_get(vshader *s) {
     return cpipe_make(s, cp, &s->mod);
 }
 // The compute pipeline whose storage images at the bindings of mask are E5B9G9R9 textures bound through R32_UINT views (stage_set's g_e5_need): its module packs RGB9E5 there
-// (spv_e5.h). Same layout as cpipe_get's, so the set stage_set wrote binds to it. One kept per shader, made again when the bindings change; NULL: it cannot be (red in lm_code)
+// (spv_e5.h). Same layout as cpipe_get's, so the set stage_set wrote binds to it. Kept per shader for two sets of bindings (Ocarina of Time's a335c1db6270c355 always binds
+// one), so a shader alternating between them makes no pipeline again; a third set is refused, its dispatches skipped with a red line. NULL: it cannot be (red in lm_code)
 static cpipe_t *cpipe_e5(vshader *s, uint64_t mask) {
-    cpipe_t *cp = s->cpe5;
-    if (cp && s->e5 == mask) return cp->p ? cp : NULL;
-    if (cp && s->e5 != mask) { cp = NULL; }   // another set of bindings: a new one (the old pipeline stays, as cpipe_get's never go)
+    for (int i = 0; i < 2; i++) if (s->cpe5[i] && s->e5[i] == mask) { cpipe_t *cp = s->cpe5[i]; return cp->p ? cp : NULL; }
+    int slot = !s->cpe5[0] ? 0 : !s->cpe5[1] ? 1 : -1;
+    if (slot < 0) { RED_ONCE(127, "compute shader %s binds E5B9G9R9 textures at a third set of image bindings (%#llx): its pipelines are kept for two, so this dispatch is skipped", s->key, (unsigned long long)mask); return NULL; }
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
     lmod *m = lm_new_e(p, 0, 0, mask, NULL);
-    cp = calloc(1, sizeof *cp); s->cpe5 = cp; s->e5 = mask; if (!cp || !m) return NULL;
+    cpipe_t *cp = calloc(1, sizeof *cp); if (!cp) return NULL;
+    s->cpe5[slot] = cp; s->e5[slot] = mask; if (!m) return NULL;   // kept with no pipeline: not tried again
     return cpipe_make(s, cp, &m);
 }
 static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
