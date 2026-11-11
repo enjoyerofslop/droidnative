@@ -62,7 +62,8 @@ VK_DRIVER_LIBS = ('libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so')
 ANDROID_TESTED = {
     '01008DB008C2C000',   # Pokémon Shield (Playable through Postwick)
     '010027400CDC6000',   # Divinity: Original Sin 2 - Definitive Edition (Playable through the cabin deck)
-    '0100000011D90000',   # Pokémon Brilliant Diamond
+    '010003F003A34000',   # Pokémon: Let's Go, Pikachu! (Playable through Route 1)
+    '0100000011D90000',   # Pokémon Brilliant Diamond (Playable through Lake Verity's first battle)
     '01006F8002326000',   # Animal Crossing: New Horizons
     '0100000000010000',   # Super Mario Odyssey
     '01006A800016E000',   # Super Smash Bros. Ultimate
