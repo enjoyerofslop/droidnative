@@ -3,5 +3,5 @@
 # shaders load from addresses they read from memory, through the translator's raw pool table; without it each such load reads 0. On a OnePlus Pad 3 (Adreno 830) Link and the
 # Kokiri drew as near-black silhouettes without it and lit with it (2026-11-10). In Kokiri Forest on a Galaxy Z Fold 8 (Adreno 840) storage buffers bound in their placed pools
 # took the replay from 2.3-2.8 to about 10 fps. Its large pools are placed in 2 MiB chunks as they are used and its shader-code pools are left out (gfx_vk_gmem_lazy.inc), so
-# the low-memory killer no longer ends Kokiri Forest on the Fold (README.md, Android)
+# the low-memory killer no longer ends Kokiri Forest on the Fold, under app pressure too. Not yet on a OnePlus Pad 3: 7 of 11 launches killed there (README.md, Android)
 DM_VK_RAW_GMEM=1
