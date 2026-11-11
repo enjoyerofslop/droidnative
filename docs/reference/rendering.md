@@ -2121,6 +2121,18 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - `DM_VK_DUP_SLOTS=0` attaches the image at every slot, as before.
 - **Check:** Breath of the Wild's `outdoors` save on a Galaxy S25 Edge (Adreno 830, Samsung's driver 0x80320001): the Shrine is drawn as on the Odin 2, with no write lost, and the GPU time drops from 21.4 to 20.5 ms. With `DM_VK_DUP_SLOTS=0` it is dark as before. On the Pad 3 a local test leaving the later slot of each pair unused drew it right too. A Galaxy Z Fold 8 (Adreno 840) draws it right either way, and with the fix its GPU time drops from 30.3 to 29.6 ms.
 
+### Clears in a layered pass clear every layer (Android)
+
+- **Symptom:** Android, a 3D or array render target drawn a slice at a time by draws that write the layer (a layered pass) and cleared each frame keeps, in every slice but the first, what earlier frames drew there. With additive blending it grows or flickers from frame to frame.
+- **Cause:** `clear_color_pass` and `clear_ds_pass` cleared through `vkCmdClearAttachments` with a rect of layer 0 alone. NVN clears the whole bound target. A full clear of a 3D target takes that path whenever its size matches the pass's, since a 3D image has one array layer (`clear_color`, `clear_ds`).
+- **Cause, the other order:** a clear before the first layered draw opened a pass of one layer (`clear_in_pass`, `rp_prepare_(0)`), so a 3D target was cleared at slice 0 alone, and that draw then reopened the pass layered and loaded the other slices as they were.
+- **Fix:**
+  - The rect covers every layer of the pass's framebuffer (`P.layers`, `clear_rect_layers`).
+  - A clear whose target's view covers more than one layer or slice asks for a layered pass (`clear_rp_prepare`: `rp_prepare_(1)`, the layers as `rt_layers` gives a layered draw), so it reaches all of them whether it comes before the layered draws or after, as the Mac does in a pass of its own ([Clears of layered render targets in a pass that is not layered](#clears-of-layered-render-targets-in-a-pass-that-is-not-layered)).
+  - A full clear whose pass still has fewer layers than the view (`DM_VK_LAYERED=0`, or another target of the pass with fewer) is made outside the pass instead (`vkCmdClearColorImage` / `vkCmdClearDepthStencilImage` on the view's range; a 3D level is cleared whole). A clear limited by the scissor has no such way out: red line 172 names it.
+  - A clear with a channel mask or a partial stencil mask is a draw of layer 0, which this does not widen: red line 171 says when one meets a layered pass.
+- **Found on:** code reading, from shirai91/nx2android 37c76f613 (carried by DeathKhan/nx2android), where the same rect in that fork's Vulkan backend left Final Fantasy Resonance's 32x32x32 light volumes uncleared in slices 1-31: the fog boxes that read them changed every frame on its first road (pass dumps over 4 frames at the road's centre: 29.6, 40.7, 31.7, 39.7; with every layer cleared, 30.4 in each). Not reproduced on this replay yet.
+
 ### Pipeline keys built from the state objects' fields
 
 - **Symptom:** new graphics pipelines made all through play, also in a level seen before (a few per frame, about 1 to 2 ms each on the Adreno); the start-up list of pipelines grew past 186,000 keys over a few sessions, and making it again took the fast cores for most of an hour.
@@ -2161,11 +2173,11 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 
 - **Symptom:** Android only: the game stops drawing, its sound and vsync going on, and the log has `submission N took 2034–10634 ms on the GPU, its end timestamp never written (the driver's hang recovery cut it short)` with a draw of `… x 1366987687 instances` in the submission's list. It happens in every run, at the same scene.
 - **Cause:** the game's own instance count. Final Fantasy Resonance's first field on the Adreno 730 (a Moto Razr Plus 2023) asks for 1 to 3.8 billion instances (0x7993a7d2, 0x7a93a3c2, 0xe0ad0a27, …) of one indexed quad (vertex shader `fb570ef861debd17`, 6 indices) every frame. The GPU works through them until the driver's hang recovery.
-  - It's a direct draw, not an indirect one read on the CPU.
+  - It's an indirect draw: its arguments are written by a compute shader (`544e80ec57b3a10b`, Unreal's Niagara argument generation), and the replay reads them on the CPU once they land.
   - The same field plays on the Adreno 740 and 830.
   - Not the cause: 32-lane warps in compute shaders (`spv_wide` over compute kept it), the write-back read path (`DM_VK_WB_READBACK=0` kept it), compute shared memory over the GPU's 32 KB (none asks for more), failed pipelines or dropped draws (none).
-  - Where the count comes from isn't found yet: most likely a value the GPU writes and the game reads back.
-- **Fix, a mitigation:** `vk_draw__` skips a draw of more than 2^24 instances, more than any Switch game draws, with a once-only red line naming its shaders and count. The GPU doesn't hang, and what the draw would have shown is missing; the cause stays open.
+  - Where the count comes from: the particle simulation's warp reduction, through a shuffle this driver gets wrong: [Maxwell's butterfly shuffle on the Adreno 730](#maxwells-butterfly-shuffle-on-the-adreno-730), fixed by `spv_xor`.
+- **Fix, a mitigation:** `vk_draw__` skips a draw of more than 2^24 instances, more than any Switch game draws, with a once-only red line naming its shaders and count. The GPU doesn't hang, and what the draw would have shown is missing. It stays for any other runaway count; this one's cause is fixed by `spv_xor`.
 - **Check:** Final Fantasy Resonance's `field` route on the Razr.
   - Without the skip, the GPU hangs as the field appears in every run (5 of 5), with no frame after.
   - With it (the same condition in a diagnostic build), the field plays at 15–17 fps through the route's walk north, with no hang.
@@ -2187,6 +2199,25 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Note:** this is right where a warp's leader is chosen within the subgroup (a lane ID of 0, or a ballot's lowest or highest lane), so that each subgroup's leader adds its own result. Final Fantasy Resonance's leaders are `SubgroupLocalInvocationId == 0`. A game that chose its leader by local invocation index would lose the second subgroup's result.
 - **Check:** `t_warp_reduce` on the Pixel 9 Pro XL (`test_spv_narrow.py` with `DM_TEST_SERIAL`): as translated, the sum wrong and the rest right; rewritten, all four right. Run over the packed modules (`DM_SPV_DIR`): Final Fantasy Resonance 1,725 rewritten, all 309 with reduction steps made the value; Mario Kart World 284 (3); Brilliant Diamond 23; Animal Crossing 1; Link's Awakening 5. Every result passes spirv-val wherever the module itself does. Final Fantasy Resonance's opening on the Pixel: 29.8 and 30.2 fps, GPU 23.3 and 23.0 ms with it, 30.2 fps and 23.1 ms without; no difference was found in its screenshots.
 - **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md) on the Pixel 9 Pro XL ([Android baselines](../../dm/android/baselines.md#mali-super-mario-odyssey-on-a-pixel-9-pro-xl)).
+
+### Maxwell's butterfly shuffle on the Adreno 730
+
+- **Symptom:** Android only, on the Adreno 730 (Qualcomm's driver V@0615.98, Vulkan 1.1): a compute shader's warp reduction through SHFL.BFLY gives a garbage value, with no red line of its own. In Final Fantasy Resonance's first field, a particle emitter with about 20 live particles added 0x21d1f071 or 0xf6b4131c to its count, so the indirect draw of its sprites asked for billions of instances ([Draws of billions of instances skipped](#draws-of-billions-of-instances-skipped)).
+- **Cause:** the translator writes SHFL.BFLY as `OpGroupNonUniformShuffle` to the lane ID ^ the mask (its helper keeps both in Function variables). This driver returns garbage from that shuffle.
+  - The emitters with one live particle, whose reduction takes nothing from other lanes, came out right.
+  - `OpGroupNonUniformShuffleXor` by the same mask names the same lane and is right on this driver.
+  - Not the cause: the 32-lane warps on 64-lane subgroups (`spv_wide` over compute kept it), the views' numeric types, uninitialized variables, and the host's write-backs (`DM_VK_SAFE=1` kept it).
+- **Fix:** `spv_fit_xor` (`dm/android/spv_xor.h`, the first step of `spv_fit`) rewrites each shuffle whose index is the lane ID ^ b into `ShuffleXor` by b.
+  - The index is followed through bitcasts, copies and Function variables stored once earlier in the same block.
+  - It runs on Qualcomm's own driver below Vulkan 1.3, in a stage that runs subgroup operations, with 32 lanes or more. The Adreno 740's and 830's drivers (Vulkan 1.3) run the shuffle as translated.
+  - The rewrite is exact on any GPU. `spv_wide` keeps a `ShuffleXor` by a mask under 32 as it is, within its 32-lane warp.
+  - Other shuffles (SHFL.IDX, as Brilliant Diamond's quad derivatives use; UP; DOWN) are left as translated.
+  - `DM_SPV_XOR=0`: as translated; `=1`: on any GPU of 32 lanes or more.
+- **Check:** the `field` route on the Razr, two runs.
+  - With the rewrite: 19.9–20.0 fps, GPU 30.5 ms, and the skip never fires.
+  - With `DM_SPV_XOR=0`, the same build: 15.9 fps, GPU 38.5 ms, and the skip drops a draw of 427,590,567 instances (0x197c83a7).
+  - Over the packed modules (`test_spv_xor.py` with `DM_SPV_DIR`), the rewritten counts: Final Fantasy Resonance 733 of 82,749, Mario Kart World 114, Link's Awakening 5, Animal Crossing 1. Brilliant Diamond, Super Mario Odyssey, Smash, Breath of the Wild and Skyward Sword HD have none. All are valid, and `spv_wide` leaves none of them that it rewrites as translated.
+- **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md) on a Moto Razr Plus 2023 ([Android baselines](../../dm/android/baselines.md#adreno-730-a-moto-razr-plus-2023)).
 
 ### Layer output from vertex shaders on a GPU that has none
 

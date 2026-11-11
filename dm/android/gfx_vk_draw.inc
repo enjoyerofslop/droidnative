@@ -435,13 +435,46 @@ static size_t spv_fit_layer(const uint32_t *code, size_t nw, const char *what, u
     if (vk_debug()) LOG("[vk] %s: layer or viewport output rewritten as an ordinary output", what);
     *out = o; return k;
 }
+// The module with its butterfly shuffles as ShuffleXor (spv_xor.h), in *out (to free); 0 when it needs nothing: a GPU spv_xor is not for, subgroups under 32 lanes
+// (spv_narrow rewrites those), a stage that runs no subgroup operations (spv_limits'), or no shuffle by the lane ID ^ a mask. For Qualcomm's own driver below
+// Vulkan 1.3 (its GPU name "Adreno (TM) ..."; Turnip's differs): the Adreno 730's (V@0615.98) returns garbage from the translator's Shuffle by the lane ^ the
+// mask in compute shaders, and ShuffleXor is right. The Adreno 740's and 830's drivers (Vulkan 1.3) run the shuffle as translated, which is left to them.
+// DM_SPV_XOR=1 (env.txt): on any GPU of 32 lanes or more (ShuffleXor is exact everywhere); =0: never
+static int xor_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_SPV_XOR");
+        int q = g_vk.props.vendorID == 0x5143 && !strncmp(g_vk.props.deviceName, "Adreno (TM)", 11) && g_vk.props.apiVersion < VK_API_VERSION_1_3;
+        v = e && *e == '0' ? 0 : e && *e == '1' ? 1 : q;
+    }
+    return v;
+}
+static size_t spv_fit_xor(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    *out = NULL;
+    if (g_sg_size < 32 || !xor_on() || !spv_xor_wanted(code, nw) || !spv_wide_wanted(code, nw, g_sg_stages)) return 0;
+    uint32_t *s = malloc(SPX_N * (size_t)code[3] * 4), *o = NULL; size_t need = 0, k = 0; int ns = 0;
+    if (!s) return 0;
+    spv_xor(code, nw, s, NULL, 0, &need, &ns);
+    if (need && (o = malloc(need * 4))) k = spv_xor(code, nw, s, o, need, &need, &ns);
+    free(s);
+    if (!k) { free(o); return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1))
+        LOG("[vk] %s (Vulkan %u.%u): the translator's butterfly shuffles (Shuffle by the lane ^ a mask) are made ShuffleXor, which this driver runs right "
+            "(DM_SPV_XOR=0: as translated). First: %s, %d", g_vk.props.deviceName, VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion), what, ns);
+    if (vk_debug()) LOG("[vk] %s: %d butterfly shuffles made ShuffleXor", what, ns);
+    *out = o; return k;
+}
 // The module without subgroup operations in a stage where the GPU runs none (spv_limits.h), in *out (to free); 0 when it needs nothing. A GPU that runs them in
 // every graphics stage gets every module as translated, untouched; so does one that runs them in the module's stage. DM_SPV_LIMITS=0 (env.txt): modules as translated
 static size_t spv_fit(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LIMITS"); on = !(e && *e == '0'); }
     *out = NULL;
-    size_t wk = spv_fit_wide(code, nw, what, out); if (wk) return wk;   // a stage that runs them: as wide as the GPU's subgroups
-    size_t nk = spv_fit_narrow(code, nw, what, out); if (nk) return nk;   // or as narrow
+    uint32_t *xo = NULL; size_t xk = spv_fit_xor(code, nw, what, &xo);   // first: spv_wide keeps its ShuffleXor
+    if (xk) { code = xo; nw = xk; }
+    size_t wk = spv_fit_wide(code, nw, what, out); if (wk) { free(xo); return wk; }   // a stage that runs them: as wide as the GPU's subgroups
+    size_t nk = spv_fit_narrow(code, nw, what, out); if (nk) { free(xo); return nk; }   // or as narrow
+    if (xk) { *out = xo; return xk; }   // a stage that runs them (spv_fit_xor's check), so nothing for spv_limits
     if (!on || (g_sg_stages & VK_SHADER_STAGE_ALL_GRAPHICS) == VK_SHADER_STAGE_ALL_GRAPHICS || !spv_lim_wanted(code, nw, g_sg_stages)) return 0;
     uint32_t *s = malloc(2 * (size_t)code[3] * 4), *o = NULL; size_t need = 0, k = 0; int got = 0;
     if (!s) return 0;
@@ -990,7 +1023,7 @@ static VkRenderPass rp_get(const rp_key *k) {
     nvn_hm_put(&g_rps, k, rp);
     return rp;
 }
-static struct { int active, layered; VkRenderPass rp; rp_key key; uint32_t w, h; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8];
+static struct { int active, layered; VkRenderPass rp; rp_key key; uint32_t w, h, layers; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8];
                 uint8_t *snap[8]; size_t snap_cap[8], snap_n[8]; uint8_t *snap_dst[8]; VkImage snap_img[8]; } P;   // snap: a linear target's guest bytes at rp_prepare (lsnap_take), until its write-back takes them
 static uint64_t g_passes;
 // DM_VK_DUMP=<frame>: every render pass of that frame (counted in presents from 1) has its colour targets copied out when it ends, written to
@@ -1353,7 +1386,7 @@ static int rp_prepare_(int layered) {
         if (vkCreateFramebuffer(g_vk.dev, &fc, NULL, &fb) != VK_SUCCESS) { RED_ONCE(85, "framebuffer %ux%u failed", w, h); lsnap_drop_all(); return 0; }
         nvn_hm_put(&g_fbs, &fk, fb);
     }
-    P.rp = rp; P.key = k; P.w = w; P.h = h; P.fb = fb; P.layered = layered; if (layers > 1) g_layered_passes++;
+    P.rp = rp; P.key = k; P.w = w; P.h = h; P.layers = layers; P.fb = fb; P.layered = layered; if (layers > 1) g_layered_passes++;
     return 1;
 }
 static int rp_prepare(void) { return rp_prepare_(0); }
@@ -3151,21 +3184,44 @@ static VkPipeline clear_pipe(const cpk_t *k) {
 static int is_int_fmt(VkFormat f) {
     VkClearColorValue t = clear_value(f, (const float[4]){1.5f, 0, 0, 0}); return t.uint32[0] == 1;   // clear_value converts only for integer formats
 }
-static int clear_in_pass(const vtex *v, unsigned level, int depth) {
-    if (!rp_prepare() || (depth && !P.key.depth)) return 0;
+// The pass a clear of colour slot `slot` (-1: the depth target) is made in: a layered one when the target's view covers more than one layer or slice, as a layered draw
+// gets, so the clear reaches all of them in either order, clear then draw or draw then clear (as nvn_mtl.m clears a view of more layers than its pass in a pass of its
+// own: rendering.md, "Clears of layered render targets in a pass that is not layered"). In a pass of one layer, a clear before the first layered draw cleared slice 0
+// alone, and that draw reopened the pass layered and loaded the other slices as they were. full: the clear writes every channel / stencil bit, so it can be a rect of every
+// layer (clear_rect_layers); a masked clear is a draw of layer 0 whatever the pass, so it asks for no layered pass, which would only end the open one. → *nl: the layers
+// the view covers (1: one), 1 for a masked clear
+static int clear_rp_prepare(int slot, int full, uint32_t *nl) {
+    vtex *v = NULL; const view_t *vw = NULL; *nl = 1;
+    if (slot >= 0 && slot < R.rt.n && R.rt.color[slot]) { v = vt_get(R.rt.color[slot]); vw = R.rt.has_cview[slot] ? &R.rt.cview[slot] : NULL; }
+    else if (slot < 0 && R.rt.depth) { v = vt_get(R.rt.depth); vw = R.rt.has_dview ? &R.rt.dview : NULL; }
+    if (v && full) { uint32_t lv = vw && vw->set_levels ? vw->base_level : 0, ly = vw && vw->set_layers ? vw->min_layer : 0; if (lv < v->levels) *nl = rt_layers(v, vw, lv, ly); }
+    return rp_prepare_(*nl > 1);
+}
+// A full clear in the bound targets' pass when its target is the pass's size and the pass has every layer its view covers; else (DM_VK_LAYERED=0, or a pass whose other
+// targets have fewer layers) the clear is made outside the pass, on the whole view (gfx_vk.c clear_color, clear_ds)
+static int clear_in_pass(const vtex *v, int slot, unsigned level, int depth) {
+    uint32_t nl; if (!clear_rp_prepare(slot, 1, &nl) || (depth && !P.key.depth) || (nl > 1 && P.layers < nl)) return 0;
     return (v->w >> level ? v->w >> level : 1) == P.w && (v->h >> level ? v->h >> level : 1) == P.h;
 }
+// A clear in the pass covers every layer of its framebuffer (clear_rp_prepare above makes it layered for a view of several): NVN clears the whole bound target, and in a layered pass (a 3D or array target attached whole for a draw
+// that writes the layer, rp_prepare) a rect of layer 0 alone left the other slices with what earlier frames drew. A full clear of a 3D target is in the pass whenever its
+// size matches (its one array layer: gfx_vk.c clear_color), so a volume drawn slice by slice and cleared each frame was cleared at slice 0 only: Final Fantasy Resonance
+// adds its lights into 32x32x32 volumes with additive blending, and in shirai91/nx2android's replay the fog boxes that read them changed every frame on its first road
+// (37c76f613 there). The masked clears below are a draw of layer 0, which a layered pass cannot widen without a layer-writing shader: a red line says when one meets it
+static VkClearRect clear_rect_layers(VkRect2D r) { return (VkClearRect){r, 0, P.layers ? P.layers : 1}; }
 // A colour clear of target idx limited by the scissor and / or a channel mask (gfx_vk.c clear_color takes the full ones)
 static void clear_color_pass(const p_clear_color *cc) {
     bf_reset();   // its pipeline and dynamic state are set behind the bind filter (bf_*)
-    if (!rp_prepare() || !rp_start()) return;
+    uint32_t nl; if (!clear_rp_prepare(cc->index, (cc->mask & 0xf) == 0xf, &nl) || !rp_start()) return;
     VkRect2D r = clear_rect(); if (!r.extent.width || !r.extent.height) return;
     int ci = dup_slot(cc->index); VkFormat f = P.key.color[ci];
+    if (nl > 1 && P.layers < nl) RED_ONCE(172, "clear of colour slot %d in a pass of %u layers, its view %u: the layers past the pass are not cleared", cc->index, P.layers, nl);
     if ((cc->mask & 0xf) == 0xf) {
         VkClearAttachment at = {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)ci, {.color = clear_value(f, cc->rgba)}};
-        VkClearRect cr = {r, 0, 1}; vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;
+        VkClearRect cr = clear_rect_layers(r); vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;
     }
     if (is_int_fmt(f)) { RED_ONCE(109, "masked clear of an integer target (format %d): not done", f); return; }
+    if (P.layers > 1) RED_ONCE(171, "masked clear in a layered pass of %u layers: layer 0 alone is cleared", P.layers);
     cpk_t k; memset(&k, 0, sizeof k); k.rp = P.rp; k.ncolor = P.key.ncolor; k.idx = (uint32_t)ci; k.mask = (uint32_t)cc->mask & 0xf; k.samples = P.key.samples;
     VkPipeline p = clear_pipe(&k); if (!p) return;
     float pc[5] = {cc->rgba[0], cc->rgba[1], cc->rgba[2], cc->rgba[3], 0};
@@ -3176,13 +3232,15 @@ static void clear_color_pass(const p_clear_color *cc) {
 // A depth-stencil clear limited by the scissor and / or a partial stencil mask
 static void clear_ds_pass(const p_clear_ds *cd, VkImageAspectFlags a) {
     bf_reset();   // as clear_color_pass
-    if (!rp_prepare() || !rp_start() || !P.key.depth) return;
+    uint32_t nl; if (!clear_rp_prepare(-1, !(a & VK_IMAGE_ASPECT_STENCIL_BIT) || (cd->stencil_mask & 0xff) == 0xff, &nl) || !rp_start() || !P.key.depth) return;
+    if (nl > 1 && P.layers < nl) RED_ONCE(172, "depth-stencil clear in a pass of %u layers, its view %u: the layers past the pass are not cleared", P.layers, nl);
     VkRect2D r = clear_rect(); if (!r.extent.width || !r.extent.height) return;
     uint32_t sm = (uint32_t)cd->stencil_mask & 0xff;
     if (!(a & VK_IMAGE_ASPECT_STENCIL_BIT) || sm == 0xff) {
         VkClearAttachment at = {a, 0, {.depthStencil = {cd->depth, (uint32_t)cd->stencil}}};
-        VkClearRect cr = {r, 0, 1}; vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;
+        VkClearRect cr = clear_rect_layers(r); vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;
     }
+    if (P.layers > 1) RED_ONCE(171, "masked clear in a layered pass of %u layers: layer 0 alone is cleared", P.layers);
     cpk_t k; memset(&k, 0, sizeof k); k.rp = P.rp; k.ncolor = P.key.ncolor; k.idx = 99; k.samples = P.key.samples; k.stencil_mask = sm; k.depth = (a & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
     VkPipeline p = clear_pipe(&k); if (!p) return;
     float pc[5] = {0, 0, 0, 0, cd->depth};

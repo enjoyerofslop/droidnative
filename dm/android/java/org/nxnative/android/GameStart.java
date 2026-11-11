@@ -5,7 +5,7 @@
 //   The RomFS is read where it is, never copied: the APK's own stored entry; else the app's OBB file, Android/obb/<package>/main.<version code>.<package>.obb, which an
 //   XAPK installer puts there (build_android_from_nsp.py --xapk); else the <name>.romfs file the player picked once with Android's file picker (kept as a persistable
 //   grant). Each is checked for the RomFS image's mark and the size game.json gives before the game starts. It reaches the host as DM_ROMFS=fd:<descriptor>:<offset>:<length> (dm/host/romfs_image.h romfs_image_spec), set in this process's
-//   environment before the NativeActivity starts in the same process, so the host reads it at its start; the descriptor stays open for the process's life.
+//   environment before `GameActivity` starts in the same process, so the host reads it at its start; the descriptor stays open for the process's life.
 //   defaults.txt (the game language picked when packing) is set the same way, without overriding the environment; env.txt still overrides both (front_android.c).
 //   DLC the APK couldn't hold (droidplay-core issue #169) follows the RomFS in that same file, the .romfs or the OBB, as a pack (build_android_from_nsp.py make_game_app
 //   says how it is laid out); game.json gives its offset (dlc_at) and the file's whole size (data_bytes). Its images are copied out once into games/<title ID>/aoc/, where
@@ -14,7 +14,6 @@
 package org.nxnative.android;
 
 import android.app.Activity;
-import android.app.NativeActivity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetFileDescriptor;
@@ -229,7 +228,7 @@ public class GameStart extends Activity {
             int eq = line.indexOf('='); if (line.startsWith("#") || eq <= 0) continue;
             Os.setenv(line.substring(0, eq).trim(), line.substring(eq + 1).trim(), false);
         }
-        startActivity(new Intent(this, NativeActivity.class)); overridePendingTransition(0, 0);
+        startActivity(new Intent(this, org.nxnative.android.GameActivity.class)); overridePendingTransition(0, 0);
         finish();
     }
 
