@@ -1251,6 +1251,21 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#shaders): 168 compute shaders of `DrivePassShaderDefault` declare 48 KB (`spvUnsafeArray<uint, 12288>`), 84 of them with barriers and none with shared atomics; all 168 compile rewritten. From the title to the first race all their dispatches are direct, of 1 to 3 workgroups, 6 a frame in the race.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_tg_spill.py` (the rewritten kernel compiles where the Metal compiler is installed, and with Xcode runs over 1,024 workgroups on this Mac's GPU, each summing data its workgroup wrote to its shared memory); `make -C dm/gfx/tests check_t_tg_spill` runs `dispatch` over 1,024 such workgroups, direct and indirect, the indirect counts written by the GPU after the CPU's copy named one workgroup.
 
+### Compute shared memory past the GPU's limit on Vulkan
+
+- **Symptom:** Android only, on Qualcomm's Adreno 830 driver (0x80320001): a compute dispatch that never ends. Three submissions in a row run about 250 ms until the driver's hang recovery cuts them short, then `vkQueueSubmit failed: -4` (the device lost), with fault addresses that look like floats (`0x3f800580`) or null plus an offset. GPU breadcrumbs (`DM_VK_BC`) name the dispatch, begun and never ended.
+- **Cause:** the translator declares Maxwell's shared memory as a Workgroup array of 32-bit words at its full size, up to 48 KB. A Vulkan module may declare at most `maxComputeSharedMemorySize`, which is 32,768 bytes on that driver. Qualcomm's compiler takes the module anyway, and the dispatch runs in 0.2 ms when it is the only work. In the game it hangs. Turnip on the same GPU and Samsung's Xclipse 950 driver run the same module. The Mac moves such memory out ([Compute shared memory past 32 KB](#compute-shared-memory-past-32-kb)); the Android path left it in place.
+- **Fix:** `spv_tgspill.h`, run in `lm_code` (`gfx_vk_draw.inc` `spv_fit_tgs`) only on a module whose Workgroup storage is past the GPU's limit (`DM_VK_SHARED_MAX` sets a smaller one; `DM_SPV_TGSPILL=0` turns it off):
+  - Each Workgroup array gets a place in one storage buffer at binding `SPV_TGS_BINDING` (110): a region per workgroup at the workgroup's index in the dispatch's grid, from `WorkgroupId` and `NumWorkgroups`, computed at the entry point's start into a Private variable. Each array has its own offset in the region.
+  - Every access chain on an array becomes one on the buffer.
+  - Barriers and atomics with Workgroup memory semantics also take UniformMemory, so they order the buffer's writes as they did the shared memory's.
+  - `sh_get` adds the binding to the shader's layout. `stage_set` binds a slice of the chunk's arena of the groups times the region's size (`g_cdim`, an indirect dispatch's counts read already).
+  - A module whose arrays aren't all of one 32-bit type, or that uses them otherwise than through one element, stays as it is, with a red line.
+- **Check:**
+  - `dm/tools/tests/test_spv_tgspill.py`: the rewritten module passes `spirv-val`, has no Workgroup storage left, binds the buffer at 110, adds `NumWorkgroups` to the interface, gives the barrier's and the atomic's semantics UniformMemory, and places the second array at its offset. Arrays of vectors, and a whole-array use, are left alone.
+  - With `DM_SPV_DIR` set to Mario Kart World's packed shaders: all 168 of its compute modules past 32 KB are rewritten and valid.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) on a Galaxy S25 Edge: `2a89b6d4df731b8d`, a 24-bone skeleton's animation, then `a8310cf7c7acd0fe`, both among the 168 kernels of `DrivePassShaderDefault` that declare 48 KB.
+
 ### Uniform references past the first kilobyte
 
 - **Symptom:** `[RED] shader <key>_b reflection conversion failed: fetch call 0: frag_pos uniform reference out of range`; the shader does not load and its draws are skipped.
