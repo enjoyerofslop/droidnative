@@ -135,7 +135,7 @@ typedef struct {
     uint8_t pool;   // reads the texture pool by ID: its modules read the pool set (gfx_vk_pool.inc), which its pipelines' layouts take at POOL_SET
     struct memu_t *memu;   // a task or mesh shader's compute form, on a GPU without VK_EXT_mesh_shader (gfx_vk_meshemu.inc: its facts, pipeline and pass-through vertex shader)
 } vshader;
-static int memu_on(void); static int memu_facts(vshader *s, const jv *e); static int memu_ready(vshader *s);   // gfx_vk_meshemu.inc
+static int memu_on(void); static int memu_facts(vshader *s, const jv *e); static int memu_ready(vshader *s); static vshader *memu_pvs_get(const char *key);   // gfx_vk_meshemu.inc
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
 // never matched the draw before, and stage_set wrote every set of every stage: Breath of the Wild about 7,500 a frame, vkUpdateDescriptorSets 3.4 ms a frame of the
 // replay on an Ayn Odin 2. With the constant buffers dynamic uniform buffers, their offsets go to vkCmdBindDescriptorSets, and what a set holds (buffer, range, views,
@@ -471,6 +471,7 @@ static int ds_fits(const VkDescriptorSetLayoutBinding *b, uint32_t nb) {
 }
 static uint64_t g_ds_toobig;   // shaders whose layout fits no pool (ds_fits): their draws are dropped
 static vshader *sh_get(const char *key) {
+    if (key[0] >= 'g' && key[0] <= 'v') return memu_pvs_get(key);   // a mesh shader's pass-through vertex shader (gfx_vk_meshemu.inc memu_pvs_key)
     char k[16]; memcpy(k, key, 16);
     vshader *s = nvn_hm_get(&g_sh, k); if (s) return s->ok ? s : NULL;
     s = calloc(1, sizeof *s); memcpy(s->key, key, 16); nvn_hm_put(&g_sh, k, s);
@@ -1464,7 +1465,7 @@ static void *prewarm_thread(void *arg) {
         memcpy(&h, r, sizeof h); memcpy(&z, r + sizeof h, 4); memcpy(&rk, r + sizeof h + 4, sizeof rk);
         pthread_mutex_lock(&g_bk);   // the shaders, the pass and what the pipeline shares (pipe_prep), under the lock; the compile without it
         pipe_key k; memset(&k, 0, sizeof k); int ok = 1, mk = 0;
-        for (int j = 0; j < 4 && ok; j++) if (h.sh[j][0]) { h.sh[j][16] = 0; k.sh[j] = sh_get(h.sh[j]); if (!k.sh[j]) ok = 0; }
+        for (int j = 0; j < 4 && ok; j++) if (h.sh[j][0]) { h.sh[j][16] = 0; k.sh[j] = sh_get(h.sh[j]); if (!k.sh[j] || k.sh[j]->memu) ok = 0; }   // (a compute form is no pipeline stage: a record from before memu_pvs_key)
         if (ok) { k.z = z; k.rk = rk; k.rp = rp_get(&rk); memcpy((uint8_t *)&k + pk_tail_off(), r + sizeof h + 4 + sizeof rk, PK_TAIL); if (!k.rp) ok = 0; }
         if (ok) { if (nvn_hm_get(&g_pipes, &k)) had++; else { pipe_prep(&k); mk = 1; } } else bad++;
         pthread_mutex_unlock(&g_bk);

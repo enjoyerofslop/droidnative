@@ -37,9 +37,17 @@ static VkDescriptorSetLayout memu_dsl(uint32_t n, VkShaderStageFlags st) {   // 
     VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = n, .pBindings = b}; VkDescriptorSetLayout l;
     return vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &l) == VK_SUCCESS ? l : VK_NULL_HANDLE;
 }
+// A pass-through vertex shader's key: its mesh shader's with each hex digit moved to 'g'..'v'. The pipeline list (prewarm_thread) records a pipeline's shaders by key and
+// makes them again with sh_get, which takes this key back to the mesh shader's pass-through vertex shader; under the mesh shader's own key it made the compute form, which
+// as a vertex stage crashed Qualcomm's vkCreateGraphicsPipelines at the next start (OnePlus Pad 3, Adreno 830)
+static void memu_pvs_key(const char *mk, char *out) { for (int i = 0; i < 16; i++) { char c = mk[i]; out[i] = (char)('g' + (c <= '9' ? c - '0' : c - 'a' + 10)); } out[16] = 0; }
+static vshader *memu_pvs_get(const char *key) {
+    char mk[17]; for (int i = 0; i < 16; i++) { int d = key[i] - 'g'; if (d < 0 || d > 15) return NULL; mk[i] = (char)(d < 10 ? '0' + d : 'a' + d - 10); } mk[16] = 0;
+    vshader *ms = sh_get(mk); return ms && ms->memu ? ms->memu->pvs : NULL;
+}
 static vshader *memu_pvs(const vshader *ms) {   // a mesh shader's pass-through vertex shader, as a vertex shader the pipelines take (pipe_get)
     vshader *v = calloc(1, sizeof *v); if (!v) return NULL;
-    memcpy(v->key, ms->key, sizeof v->key); v->stage = SH_VS; v->vkstage = VK_SHADER_STAGE_VERTEX_BIT; v->set = 0; v->vid = 1;
+    memu_pvs_key(ms->key, v->key); v->stage = SH_VS; v->vkstage = VK_SHADER_STAGE_VERTEX_BIT; v->set = 0; v->vid = 1;
     char p[700]; int b0 = 0; snprintf(p, sizeof p, "%s/%s.pvs.spv", g_spv_dir, ms->key); v->mod = sh_module(p, &b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw); if (w) { spv_io(w, nw, &v->io_in, &v->io_out); free(w); } }
     snprintf(p, sizeof p, "%s/%s.pvs.z.spv", g_spv_dir, ms->key); v->modz = sh_module(p, &b0);
