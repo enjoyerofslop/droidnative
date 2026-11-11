@@ -79,13 +79,25 @@ def shot_display(ids: list[tuple[str, str]], states: dict[str, str]) -> str | No
     return first[0] if first else None
 
 
+PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+
+
+def png_only(out: bytes) -> bytes:
+    # screencap writes its warnings to stdout too, ahead of the PNG: a Galaxy Z Fold 8 (Android 17) asked without -d gives ~350 bytes of "[Warning] Multiple displays
+    # were found, ..." first, and the file is neither a PNG to `file` nor one PIL opens. Whatever comes before the signature goes; output with no PNG in it is kept
+    # as it is, so what screencap said instead is still there to read
+    at = out.find(PNG_SIGNATURE)
+    return out[at:] if at > 0 else out
+
+
 def screenshot(serial) -> bytes:
-    # A phone with a second screen needs screencap's -d: without it screencap writes a warning ahead of the PNG, which leaves an unreadable file, and takes whichever
-    # display it finds first. Which screen is on is asked at each shot, so folding or unfolding the phone during a bench is followed; one screen, no -d, as before
-    if serial not in _displays:
+    # A phone with a second screen needs screencap's -d: without it screencap writes a warning ahead of the PNG and takes whichever display it finds first. Which
+    # screen is on is asked at each shot, so folding or unfolding the phone during a bench is followed; one screen, no -d, as before. A display list that came back
+    # empty (adb or dumpsys failing at that moment) is asked for again at the next shot rather than kept for the whole run, which would leave every shot without -d
+    if not _displays.get(serial):
         _displays[serial] = re.findall(r'^Display (\d+) \(HWC display (\d+)\)', sh(serial, 'dumpsys SurfaceFlinger --display-id'), re.M)
     d = shot_display(_displays[serial], display_states(sh(serial, 'dumpsys display')) if len(_displays[serial]) > 1 else {})
-    return adb_bytes(serial, 'exec-out', 'screencap', '-p', *(['-d', d] if d else []))
+    return png_only(adb_bytes(serial, 'exec-out', 'screencap', '-p', *(['-d', d] if d else [])))
 
 
 def ready_devices():
