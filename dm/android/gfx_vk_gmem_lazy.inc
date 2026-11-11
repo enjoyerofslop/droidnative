@@ -2,21 +2,26 @@
 // Placed memory is committed when it is allocated and can't go to swap. Placing whole pools pinned the pages the game never touched: in Ocarina of Time's Kokiri Forest only
 // 571 of the 1,967 MiB placed had been resident before, the game's own anonymous memory sat 4.1 GB deep in swap (dumpsys meminfo), and the low-memory killer ended 2 of 11
 // runs on a Galaxy Z Fold 8 (PSS about 11.2 GB on 10.8 GB). A pool of GM_LAZY_MIN or more is now placed in chunks of GM_CHUNK, each when it is first used:
-// - at the pool's first buffer address, the chunks the game has already written (a page present or swapped out: /proc/self/pagemap);
 // - when a storage buffer in a chunk is bound (gm_inplace → gm_lazy_bind), the chunks it covers, as one allocation so that it binds in place;
-// - every 200 ms or so at a submission's start (gm_lazy_tick), the chunks the game has written since, and those a binding wanted placed but which a pending
-//   write kept back (the swap waits for it there; inside stage_set it may not).
-// A chunk nothing has touched holds zeros, and a raw load of an address missing from the table reads 0, so leaving it out changes nothing until someone writes it. What the
-// game writes into one later is seen by raw loads from the next scan on. Two gaps remain: raw stores into a chunk nothing has bound or written go nowhere (a GPU-only buffer
-// reached only through pointers), and a buffer across a chunk placed earlier and one placed later is copied as before (two allocations).
+// - when a word in a storage buffer that a shader binding the raw pool table reads points into a chunk, or a word in the first 4 KiB at such a pointer does (gm_lazy_ptrs, from
+//   stage_set): that chunk and the next, placed at once (a buffer is scanned again at most every 100 ms);
+// - every 200 ms or so at a submission's start (gm_lazy_tick), those a binding or a pointer wanted placed but which a pending write kept back (the swap waits for it there;
+//   inside stage_set it may not).
+// Chunks the CPU wrote but nothing binds or points to stay unplaced: a raw load from one reads 0. Placing every chunk the game had written (a page present or swapped out,
+// /proc/self/pagemap) placed 1,172 MiB in Kokiri Forest, two thirds of it memory no draw, dispatch or copy reads (a test-only count on a Galaxy S25 Edge); placing on bindings
+// alone drew Link and the Kokiri black again, since his data is reached through pointers, and the scan found it in 4 chunks: 693 MiB placed, the picture as before.
+// DM_VK_RAW_GMEM_WRITTEN=1 (env.txt) places the chunks the CPU wrote too, as before. Two gaps remain: a pointer the scan doesn't see (deeper than two levels, or computed in
+// the shader) reads 0 until its chunk is bound or written with DM_VK_RAW_GMEM_WRITTEN=1; raw stores into a chunk not placed go nowhere (DM_VK_RAW_GMEM_SINK counts them); and a
+// buffer across a chunk placed earlier and one placed later is copied as before (two allocations) until its pool is merged.
 // A chunk is placed while the game may be writing it, so the swap freezes it: read-only from the copy to the placed map, and a guest write meanwhile waits in gm_frz_hook, a
 // host write in gm_frz_prep (a system call writing a read-only page fails rather than faults). This is the design of nx2android's lazy pool backing and its freeze window
 // (vk_pool_of, nvn_dirty_freeze), written anew; it backs a chunk at its first GPU use as well, and backs every addressed pool once a shader uses raw memory, where this
-// places on first use only, by binding or by the CPU's writes. DM_VK_RAW_GMEM_LAZY=0 (env.txt): whole pools at their first buffer address, as before
+// places what a binding or a pointer reaches. DM_VK_RAW_GMEM_LAZY=0 (env.txt): whole pools at their first buffer address, as before
 typedef struct { uintptr_t lo, hi; const void *pool; uint8_t *st; uint32_t nch; int merge; } gm_lz;   // st: each chunk's state (LZ_*); merge: a binding crossed two of its pieces
 enum { LZ_NO, LZ_WANT, LZ_PLACED, LZ_REFUSED };
 static gm_lz *g_lz; static int g_nlz, g_clz;   // under g_gm_pl
 static _Atomic int g_lz_any;
+static uint64_t g_lz_ptr_scans, g_lz_ptr_hits, g_lz_ptr;   // gm_lazy_ptrs: buffers scanned, words pointing into a chunked pool, chunks wanted for them
 static uint64_t g_lz_pools, g_lz_bind, g_lz_res, g_lz_waited, g_lz_busy, g_lz_scans, g_lz_scan_ns, g_lz_refused, g_lz_cross, g_lz_merges, g_lz_merge_ns, g_lz_merge_bytes;
 static _Atomic uint64_t g_frz_waits, g_frz_preps;
 static int gm_lazy_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_LAZY"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAW_GMEM_LAZY=0: memory pools are placed whole at their first buffer address"); } return v; }
@@ -63,7 +68,9 @@ static int gm_lz_touched(uintptr_t a, uintptr_t z) {
         if (!mincore((void *)p, len, v)) for (size_t i = 0; i < (len >> 12); i++) if (v[i] & 1) return 1; }
     return 0;
 }
-static void gm_lz_scan(gm_lz *L) {   // the chunks not placed with a page written: wanted
+static int gm_lz_written(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_WRITTEN"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_RAW_GMEM_WRITTEN=1: chunks the CPU wrote are placed too"); } return v; }
+static void gm_lz_scan(gm_lz *L) {   // DM_VK_RAW_GMEM_WRITTEN=1: the chunks not placed with a page written: wanted
+    if (!gm_lz_written()) return;
     uint64_t t0 = gm_now();
     for (uint32_t c = 0; c < L->nch; c++) if (L->st[c] == LZ_NO && gm_lz_touched(L->lo + (uintptr_t)c * GM_CHUNK, gm_lz_end(L, c))) { L->st[c] = LZ_WANT; g_lz_res++; }
     g_lz_scans++; g_lz_scan_ns += gm_now() - t0;
@@ -126,6 +133,29 @@ static int gm_lazy_bind(uint64_t addr, size_t n) {
     pthread_mutex_unlock(&g_gm_pl);
     return got > 0;
 }
+// stage_set, the replay's thread under g_bk: a storage buffer [addr, addr + n) that a shader binding the raw pool table reads. Its first 4 KiB, and the first 4 KiB at each word
+// in them pointing into a chunked pool, are read for such words; the chunk each lands in and the next (a record or an array may run on) are wanted and placed now, before the
+// draw records its table. Each buffer is scanned again at most every 100 ms: in Kokiri Forest every binding scanned in every chunk cost the replay about 3-5 ms of CPU a frame
+static void gm_lz_ptr_scan(uintptr_t addr, size_t n, int depth, gm_lz **hit, int *nhit) {   // g_gm_pl held
+    const uint64_t *w = (const uint64_t *)(addr & ~(uintptr_t)7); size_t nw = (n < 4096 ? n : 4096) / 8; g_lz_ptr_scans++;
+    for (size_t k = 0; k < nw; k++) {
+        uint64_t v = w[k]; gm_lz *L = v >> 40 ? NULL : gm_lz_of((uintptr_t)v); if (!L) continue;
+        g_lz_ptr_hits++; uint32_t c = (uint32_t)(((uintptr_t)v - L->lo) / GM_CHUNK); int got = 0;
+        for (uint32_t x = c; x < L->nch && x <= c + 1; x++) if (L->st[x] == LZ_NO) { L->st[x] = LZ_WANT; g_lz_ptr++; got = 1; }
+        if (got) { int dup = 0; for (int i = 0; i < *nhit && !dup; i++) dup = hit[i] == L; if (!dup && *nhit < 8) hit[(*nhit)++] = L; }
+        if (!depth) gm_lz_ptr_scan((uintptr_t)v, L->hi - (uintptr_t)v, 1, hit, nhit);
+    }
+}
+static void gm_lazy_ptrs(uint64_t addr, size_t n) {
+    if (!atomic_load(&g_lz_any) || !addr || !n || addr >> 40) return;
+    static struct { uint64_t a, t; } memo[1024]; unsigned h = (unsigned)((addr >> 4) ^ (addr >> 14)) & 1023; uint64_t now = gm_now();
+    if (memo[h].a == addr && now - memo[h].t < 100000000ull) return;
+    if (pthread_mutex_trylock(&g_gm_pl)) { g_lz_busy++; return; }   // (lock order g_gm_pl before g_bk, as gm_lazy_bind)
+    memo[h].a = addr; memo[h].t = now;
+    gm_lz *hit[8]; int nhit = 0; gm_lz_ptr_scan((uintptr_t)addr, n, 0, hit, &nhit);
+    for (int i = 0; i < nhit; i++) gm_lz_place(hit[i], 1, 0);   // a pending write over one keeps it wanted for the tick
+    pthread_mutex_unlock(&g_gm_pl);
+}
 // A storage buffer across two placed pieces of a chunked pool can't be bound in place (two allocations), and it is copied as before: the game fills its dynamic pools a little
 // further each frame, so the scan places neighbouring chunks at different times and buffers across them fell back to the per-draw copy and compare (Kokiri Forest: 26,420 such
 // bindings in a run, 2.1 fps against 10.2 with whole pools). Such a pool is made one allocation at the next submission's start (gm_lz_merge), the whole pool: it is a pool the game
@@ -176,10 +206,10 @@ static void gm_lazy_stat(void) {
     uint64_t placed = 0, all = 0; pthread_mutex_lock(&g_gm_pl);
     for (int i = 0; i < g_nlz; i++) for (uint32_t k = 0; k < g_lz[i].nch; k++) { uint64_t len = gm_lz_end(&g_lz[i], k) - (g_lz[i].lo + (uintptr_t)k * GM_CHUNK); all += len; if (g_lz[i].st[k] == LZ_PLACED) placed += len; }
     int n = g_nlz; pthread_mutex_unlock(&g_gm_pl);
-    LOG("[vk] raw global memory in chunks: %d pools of %.1f MiB, %.1f MiB of them placed; chunks placed for a binding %llu, wanted for written pages %llu, kept back by a pending write %llu, "
+    LOG("[vk] raw global memory in chunks: %d pools of %.1f MiB, %.1f MiB of them placed; chunks placed for a binding %llu, wanted for pointers %llu (%llu buffers scanned, %llu words pointing into chunked pools), wanted for written pages %llu, kept back by a pending write %llu, "
         "refused %llu, pools merged for a binding across two pieces %llu (%.1f MiB, %.0f ms), bindings across a placed chunk %llu, placements put off (lock busy) %llu; %llu scans (%.2f ms in all); writes that waited for a swap %llu, host writes %llu; raw stores into chunks not placed "
         "(DM_VK_RAW_GMEM_SINK) %llu (cumulative; gfx_vk_gmem_lazy.inc)",
-        n, all / 1048576.0, placed / 1048576.0, (unsigned long long)g_lz_bind, (unsigned long long)g_lz_res, (unsigned long long)g_lz_waited, (unsigned long long)g_lz_refused,
+        n, all / 1048576.0, placed / 1048576.0, (unsigned long long)g_lz_bind, (unsigned long long)g_lz_ptr, (unsigned long long)g_lz_ptr_scans, (unsigned long long)g_lz_ptr_hits, (unsigned long long)g_lz_res, (unsigned long long)g_lz_waited, (unsigned long long)g_lz_refused,
         (unsigned long long)g_lz_merges, g_lz_merge_bytes / 1048576.0, g_lz_merge_ns / 1e6, (unsigned long long)g_lz_cross, (unsigned long long)g_lz_busy, (unsigned long long)g_lz_scans, g_lz_scan_ns / 1e6,
         (unsigned long long)atomic_load(&g_frz_waits), (unsigned long long)atomic_load(&g_frz_preps), (unsigned long long)atomic_load(&g_sink_hits));
 }
