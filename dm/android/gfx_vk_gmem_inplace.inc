@@ -23,7 +23,7 @@ static int gm_seg_at(uintptr_t a) {   // the piece holding a, or -1 (caller hold
 }
 // a read-only storage buffer [addr, addr + n): 1 with *b, *off, *range the piece's buffer to bind; 0: copy it as before. The replay's thread, under g_bk, with a chunk open
 static int gm_inplace(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *off, VkDeviceSize *range) {
-    if (!n || n > g_vk.props.limits.maxStorageBufferRange || !C || !g_ngm || !ip_on() || !gm_on()) return 0;
+    if (!n || n > g_vk.props.limits.maxStorageBufferRange || !C || (!g_ngm && !atomic_load(&g_lz_any)) || !ip_on() || !gm_on()) return 0;   // (nothing placed yet but chunked pools: a binding may place its chunks)
     static struct { uint64_t a, n, seq; } memo[512];   // the stamps already made by this chunk: a buffer is often bound by many draws of one chunk
     unsigned h = (unsigned)((addr >> 6) ^ (addr >> 17) ^ n) & 511;
     VkDeviceSize al = g_vk.props.limits.minStorageBufferOffsetAlignment ? g_vk.props.limits.minStorageBufferOffsetAlignment : 1;
