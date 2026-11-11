@@ -86,7 +86,11 @@ On Windows, Git Bash rewrites `/data/...` arguments: set `MSYS_NO_PATHCONV=1` fo
 `scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys>` does it all for a game you own: extraction, the Android rewrite, the host for the
 profile (kept in the computer's host library, `%LOCALAPPDATA%\nxnative\android\hosts\<id>\` on Windows, `~/.local/share/nxnative/android` elsewhere), the APK with every host in
 the library, then installs it and copies the modules, the RomFS, the DLC, the button-icon font and a `game.json` to `Android/data/org.nxnative.android/files/games/<id>/`.
-`--push-only` installs and copies a game built before without building; `--apk-only` packs and installs the app alone; `--migrate --title <id>` moves a one-game install;
+`--push-only` installs and copies a game built before without building; `--vk-driver <package>` (with an install or `--push-only`) gives the game a Vulkan driver:
+`dm/android/tools/vk_driver_pkg.py` checks the AdrenoTools zip or `.so` without running it (at most 32 entries and none outside it, `meta.json`'s schema and `libraryName`,
+an Android arm64 `ET_DYN` that needs bionic's `libc.so`, not glibc's, and exports `HMI`), `push_vk_driver` copies it to `files/vk_drivers/<stem>-<sha8>.so` (not again when
+the phone has it; left out on a phone without `/dev/kgsl-3d0` or older than `meta.json`'s `minApi`) and the game's `defaults.txt` gets `DM_VK_DRIVER` and
+`DM_VK_DRIVER_SHA256`, plus `--vk-driver-env` lines (only `TU_DEBUG`, `FD_DEV_FEATURES`); `--apk-only` packs and installs the app alone; `--migrate --title <id>` moves a one-game install;
 `--check` and `--info <NSP folder>` print the requirements and a game's details as JSON; `--progress json` prints the build's progress as JSON events.
 adbd may not create folders there, so the folder tree is made first by a mkdir script run in the shell. The shell makes them `drwxrws---` for itself, which an Android 15 phone (a Galaxy S21 Ultra) kept the app out of (it found no game and ran the self test, logging `[RED] the game in … cannot be read`), so the script opens the copied tree to everyone at the end (`chmod 0777` folders, `0666` files; `Android/data/<package>` is reachable only by the app and the shell). Every build is signed with
 `~/.android/nxnative-debug.jks`: an app signed with another key cannot be updated, and uninstalling it deletes its saves and game files.

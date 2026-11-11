@@ -8,6 +8,9 @@
 #   python scripts/build_android_from_nsp.py --check | --info <NSP folder>                              requirements / the game's details, as JSON (the desktop app)
 #   python scripts/build_android_from_nsp.py --setup [--accept-android-licenses]                         install what --check finds missing (Windows: dm/android/tools/host_setup.py)
 #   python scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys> --game-apk [--xapk] [--out <folder>]   the game in an app of its own, to install anywhere (make_game_app)
+#   --vk-driver <package or .so | system> [--vk-driver-env K=V ...]: with an install or --push-only, the game runs on that Vulkan driver (a Turnip build, DM_VK_DRIVER on an
+#   Adreno phone): checked first (dm/android/tools/vk_driver_pkg.py), copied to files/vk_drivers/ and named in the game's defaults.txt with its SHA-256. Without it (or
+#   with system), defaults.txt names none, so each install writes the choice again
 #   --progress json: newline-delimited JSON events on stdout (build_ipa_from_nsp.py Progress), for the desktop app (scripts/nxnative_android.py)
 #   Every build also writes those events to a journal, <data>/builds/<time>-<pid>.jsonl (start and exit events around them), whatever its --progress: the desktop app
 #   shows a build started from a console too
@@ -813,13 +816,13 @@ def migrate_legacy(serial, gid, nacp_local=None):
 
 
 @says_when_phone_full
-def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, meta):
-    """The game's files → files/games/<gid>/ (the RomFS with --sync: a repeat copies only what changed)"""
+def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, meta, vk=None, vk_env=()):
+    """The game's files → files/games/<gid>/ (the RomFS with --sync: a repeat copies only what changed); with vk (--vk-driver), the driver too, named in defaults.txt"""
     dst = f'{REMOTE}/games/{gid}'
     # each device's copy logs, and the tar archives and RomFS pieces named after them, in a folder of its own: two installs at once (one per device) shared
     # adb_push_spv.tar, and one's cleanup removed the archive the other was sending
     logs = logs / f'push_{serial}'; logs.mkdir(parents=True, exist_ok=True)
-    parts = ['the one-game install', 'font', 'code'] + ['shaders'] * bool(spv) + ['RomFS'] + ['DLC'] * aoc.is_dir() + ['launcher files', 'permissions']
+    parts = ['the one-game install', 'font', 'code'] + ['shaders'] * bool(spv) + ['RomFS'] + ['DLC'] * aoc.is_dir() + ['Vulkan driver'] * bool(vk) + ['launcher files', 'permissions']
     def part(name, step=None):   # the part in the step's name; the count is the part's files or bytes (counting), or the parts when it has none
         bi.PROG.set(step=f'{step or name} · part {parts.index(name) + 1} of {len(parts)}'); bi.PROG.set(done=parts.index(name), total=len(parts), unit='parts')
     part('the one-game install', 'looking for the one-game install'); migrate_legacy(serial, gid, game / 'control.nacp')
@@ -844,6 +847,7 @@ def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, 
         adb(serial, 'shell', 'rm', '-f', f'{dst}/RomFS.img')
         push_dir(serial, rom, dst, 'RomFS', logs / 'adb_push_romfs.log', sync=True)
     if aoc.is_dir(): part('DLC'); push_dir(serial, aoc, dst, 'aoc', logs / 'adb_push_aoc.log', sync=True)
+    if vk: part('Vulkan driver'); defaults += ''.join(ln + '\n' for ln in push_vk_driver(serial, vk, vk_env, logs))
     part('launcher files')
     # the launcher (dm/android/java Launcher.java): the game's icon and control data (name, version, languages), its defaults (defaults_text) and
     # game.json; env.txt is the player's and stays as it is (a key it sets wins over the settings screen)
@@ -854,6 +858,35 @@ def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, 
     gj = work / 'android_game.json'; gj.write_text(json.dumps(meta, indent=1), encoding='utf-8', newline='\n')
     adb(serial, 'push', gj, f'{dst}/game.json')
     part('permissions'); open_tree(serial, dst)
+
+
+def vk_driver_arg(a):   # --vk-driver / --vk-driver-env → (vk_driver_pkg.Driver or None, the env lines), checked before anything is built
+    sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
+    try:
+        env = vkpkg.parse_env(a.vk_driver_env)
+        if not a.vk_driver or a.vk_driver == 'system':
+            if env: raise vkpkg.PackageError('--vk-driver-env goes with a --vk-driver package')
+            return None, []
+        return vkpkg.read(Path(a.vk_driver).expanduser()), env
+    except vkpkg.PackageError as e: raise BuildError(f'--vk-driver: {e}') from None
+
+
+def push_vk_driver(serial, vk, env, logs):
+    """The driver → files/vk_drivers/<its name> (not again when the phone has it); → the lines for the game's defaults.txt, or none on a phone it can't run on"""
+    sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
+    if not remote_exists(serial, '/dev/kgsl-3d0'):   # Turnip drives Qualcomm's KGSL; the host ignores DM_VK_DRIVER without it anyway (vk_driver.c)
+        say(f'--vk-driver: this phone has no Adreno GPU (no /dev/kgsl-3d0), so {vk.library} is left out and the game runs on its own driver'); return []
+    sdk = adb(serial, 'shell', 'getprop ro.build.version.sdk', check=False).strip()
+    if vk.min_api and sdk.isdigit() and int(sdk) < vk.min_api:
+        say(f'--vk-driver: {vk.library} needs Android API {vk.min_api} and this phone has {sdk}, so it is left out and the game runs on its own driver'); return []
+    d = f'{REMOTE}/{vkpkg.REMOTE_DIR}'; dst = f'{d}/{vk.name}'
+    if adb(serial, 'shell', f'sha256sum {sh_quote(dst)} 2>/dev/null', check=False).split()[:1] == [vk.sha256]: say(f'{vk.name}: on the phone already')
+    else:
+        local = logs / vk.name; local.write_bytes(vk.data)
+        adb(serial, 'shell', 'mkdir', '-p', d); adb(serial, 'push', local, dst, log=logs / 'adb_push_vk_driver.log'); local.unlink(missing_ok=True)
+    open_tree(serial, d)
+    say(f'Vulkan driver: {vk.describe()} as {vkpkg.REMOTE_DIR}/{vk.name} (sha256 {vk.sha256[:12]}…)')
+    return vkpkg.defaults_lines(f'{vkpkg.REMOTE_DIR}/{vk.name}', vk.sha256, env)
 
 
 # ---------------- --check and --info (JSON for the desktop app) ----------------
@@ -1013,6 +1046,8 @@ def main(argv):
     ap.add_argument('--game-apk', action='store_true', help='the game in an app of its own, to install on any device (no phone needed; the DroidPlay app is left as it is)')
     ap.add_argument('--xapk', action='store_true', help='with --game-apk: one .xapk (the APK with the RomFS as its OBB file) for an XAPK installer')
     ap.add_argument('--out', help='with --game-apk: the folder for the app (default: the NSP folder)')
+    ap.add_argument('--vk-driver', metavar='PACKAGE', help="with an install or --push-only: run the game on this Vulkan driver (an AdrenoTools .zip or .so, Adreno phones only), or 'system'")
+    ap.add_argument('--vk-driver-env', action='append', metavar='K=V', help="with --vk-driver: one of Mesa's switches the driver needs (TU_DEBUG, FD_DEV_FEATURES); repeatable")
     ap.add_argument('--setup', action='store_true', help='install what --check finds missing (Windows: the JDK, the .NET SDK and the Android SDK)')
     ap.add_argument('--accept-android-licenses', action='store_true', help="with --setup: you accept the Android SDK License (https://developer.android.com/studio/terms)")
     a = ap.parse_args(argv)
@@ -1031,6 +1066,8 @@ def main(argv):
         with contextlib.redirect_stdout(sys.stderr): out = check(a.sdk) if a.check else info(Path(a.nsp_dir).expanduser().resolve(), Path(a.keys).expanduser().resolve() if a.keys else None)
         print(json.dumps(out, indent=1)); return
     if a.setup: setup(a.sdk, a.accept_android_licenses); return
+    vk, vk_env = vk_driver_arg(a)
+    if vk and (a.game_apk or a.no_push or a.apk_only or a.migrate or a.update_shaders): raise BuildError('--vk-driver goes with an install to a phone or --push-only')
     if a.apk_only or a.migrate:
         logs = data_dir() / 'logs'; logs.mkdir(parents=True, exist_ok=True)
         serial = a.serial or os.environ.get('ANDROID_SERIAL') or pick_device()
@@ -1195,7 +1232,7 @@ def main(argv):
         rom = bi.rfs.source(game)
         push_game(serial, g.id, game, patched, spv, font, work / 'aoc', defaults, work, logs,
                   {'title_id': g.id, 'name': label, 'version': pkg_ver, 'display': nacp.version(game / 'control.nacp'),
-                   'romfs_bytes': Path(rom).stat().st_size if bi.rfs.is_image(rom) else None})
+                   'romfs_bytes': Path(rom).stat().st_size if bi.rfs.is_image(rom) else None}, vk, vk_env)
     bi.PROG.end(f'{REMOTE}/games/{g.id}')
     say(f'done: open DroidPlay on the phone and pick "{label}". Log: {REMOTE}/log.txt (adb logcat -s DroidPlay)')
 
