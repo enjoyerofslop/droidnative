@@ -108,7 +108,8 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   shakes the controller. The **≡** button at the top (left of −) goes back to the launcher while the game keeps running behind it: **Play** on the same game resumes
   it, and picking another game asks before closing the running one.
 - **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; the desktop app backs them up to the computer. The log is
-  `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`).
+  `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`). The start before's is kept as `log.prev.txt`, so a game the system closed
+  for memory and that opened again still leaves its last log.
 
 ## Game apps
 
