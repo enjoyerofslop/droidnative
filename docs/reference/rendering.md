@@ -2514,7 +2514,13 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** `dm/tools/tests/test_sb_reuse.py` drives the reuse table with a fake tracker that stamps a page only on a write while it is protected, as `nvn_dirty.c`
   does. It checks that a second bind in the chunk takes the copy, that the copy protects every page it read, that a write since the copy makes a new one (and the one
   after it reuses that), that a write elsewhere, a new chunk, another size and untracked memory each do what they should.
+  - Mario Kart World on a OnePlus Pad 3 (Adreno 830), one build, `DM_VK_SB_DIRTY=0` against the default:
+    - the race went from frames of 216–312 ms (the replay's CPU 200–294 ms at 1,625–2,443 draws) to 47–65 ms (36–52 ms at 1,017–1,889 draws);
+    - the attract drive and title from 181–220 ms to 41–47 ms;
+    - `DM_VK_SB_CHECK=1` over the attract drive, the menus and a race compared 1,840,757 binds with the shadow and found none different.
+  - Super Mario Odyssey's opening (from the library, on a host with the change) ran 16.6–16.7 ms a frame either way, the picture the same.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md).
+
 ### Texture and sampler banks packed in one `cbuf_slot`
 
 - **Symptom:** Android only: a black picture while the game runs at full rate with no draw dropped; every render target of a pass dump is all zero, and the dump's binding lines show `tid 0 sid 0 -> none` for every texture.
