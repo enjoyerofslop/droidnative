@@ -26,7 +26,7 @@
      "games": {"0100B1C0249B4000": "Frostpunk: the Generator and the buildings draw, which the phone's own driver can't build; the city at 29.4 fps"}},
     {"gpu": 740, "device": "Ayn Odin 2", "android": 13, "date": "2026-11-11",
      "games": {"0100000011D90000": "Brilliant Diamond: 60 fps", "0100000000010000": "Super Mario Odyssey: the opening at 60 fps on 2026-11-08",
-               "0400486024DEC000": "Ocarina of Time: Kokiri Forest lit, its characters drawn, no pipeline refused (the phone's own driver refuses 41, leaving them dark); 9.2 fps against about 14 on its own driver, and 1.6 GB more memory"}},
+               "0400486024DEC000": "Ocarina of Time: Kokiri Forest lit, its characters drawn, no pipeline refused (the phone's own driver refuses the pipelines that draw them, leaving them dark); 9.2 fps against about 14 on its own driver, and 1.6 GB more memory"}},
     {"gpu": 830, "device": "Galaxy S25 Edge", "android": 16, "date": "2026-11-11",
      "games": {"0400C3F00006E000": "Mario Kart World: the title, the menus and a Grand Prix race; the skinning shader that hangs the phone's own driver completes"}},
     {"gpu": 840, "device": "Galaxy Z Fold 8", "android": 17, "date": "2026-11-11",
