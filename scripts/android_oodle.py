@@ -82,6 +82,15 @@ class Phone:
         self.adb, self.serial, self.gid, self.remote, self.pkg, self.work, self.logs, self.say = adb, serial, gid, remote, pkg, Path(work), Path(logs), say
         self.jobs = 0
     def sh(self, cmd, check=True): return self.adb(self.serial, 'shell', cmd, check=check)
+    def evidence(self):
+        """What the phone shows of a job that stopped early, for its log (issue #228: an empty log.txt said nothing more): the files folder (whether log.txt and the job's output
+        were written) and logcat's lines of the app, of the system starting and ending its process (Zygote's exit status), and of any crash. The app tells a missing game or host
+        only in a toast (Launcher.java)"""
+        ls = self.sh(f'ls -l {self.remote}', check=False)
+        lc = self.adb(self.serial, 'logcat', '-d', '-v', 'time', '-t', '3000', '-s', 'DroidPlay:V', 'ActivityManager:I', 'ActivityTaskManager:I', 'Zygote:I',
+                      'AndroidRuntime:E', 'DEBUG:V', 'libc:F', check=False)
+        return (f'\n---- ls -l {self.remote} ----\n{ls}\n---- logcat ----\n{lc}\n---- if the phone showed "The game … is not on this phone, or this app has no host for it", '
+                'the app was installed without this game\'s host, or the game\'s code did not reach the phone ----\n')
     def __call__(self, records):   # → [bytes or None], in jobs of at most CHUNK decoded bytes
         out, part = [], []
         for c, n in records:
@@ -105,14 +114,23 @@ class Phone:
             self.adb(self.serial, 'push', envf, renv)
             self.sh(f'chmod 666 {rjob} {renv}', check=False)   # Android 16 (a OnePlus Pad 3): the game cannot read what adb's shell user wrote otherwise
             self.sh(f'am start -n {self.pkg}/.Launcher --es game {self.gid} --ez play true')
-            done, fail, log = None, None, ''
+            done, fail, log, gone = None, None, '', False
             while time.time() - t0 < JOB_SECS:
                 time.sleep(1)
                 log = self.sh(f'grep -E "DM_OODLE_JOB|FATAL|CRASH" {rlog} 2>/dev/null', check=False)
                 if 'records decoded' in log: done = True; break
                 if 'FATAL' in log or 'CRASH' in log or 'cannot' in log: fail = log; break
-                if time.time() - t0 > 20 and not self.sh(f'pidof {self.pkg}:game', check=False).strip() and 'records decoded' not in log: fail = log or 'the game stopped before it decoded anything'; break
-            (self.logs / f'oodle_phone_{self.jobs}.log').write_text(self.sh(f'cat {rlog} 2>/dev/null', check=False), encoding='utf-8', errors='replace')
+                if time.time() - t0 > 20 and not self.sh(f'pidof {self.pkg}:game', check=False).strip() and 'records decoded' not in log:
+                    gone, fail = True, log or 'the game stopped before it decoded anything'; break
+            text = self.sh(f'cat {rlog} 2>/dev/null', check=False)
+            # The host writes its output whole, logs "records decoded" and _exit()s. On Android its stderr reaches log.txt through a thread reading a pipe (front_android.c
+            # log_reader), and the process can end before that thread has written the last lines: on an Ayn Odin 2 the log stopped at the decoder's address, and on an AYN Thor
+            # log.txt stayed empty (issue #228), while Zygote logged the process as exited cleanly (0). A game that has exited and left its output has finished: the copy below
+            # and read_out check that the output is whole
+            if gone and self.sh(f'stat -c %s {rjob}.out 2>/dev/null', check=False).strip().isdigit():
+                done = True; text += '\n[build] the game exited and left its output, but its last log lines did not reach log.txt: the output is checked instead\n'
+            if not done: text += self.evidence()
+            (self.logs / f'oodle_phone_{self.jobs}.log').write_text(text, encoding='utf-8', errors='replace')
             if not done: raise ValueError(f'the Oodle job on the phone did not finish ({(fail or f"no answer in {JOB_SECS} s").strip()[-400:]}); its log: {self.logs / f"oodle_phone_{self.jobs}.log"}')
             res = self.work / 'tmp' / 'oodle_phone.job.out'; size = self.sh(f'stat -c %s {rjob}.out', check=False).strip()
             for _ in range(2):   # a copy that came over shorter than the phone's file is made again, once
