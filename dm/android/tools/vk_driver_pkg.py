@@ -6,7 +6,7 @@
 # Each driver goes onto the phone under a name of its own, <stem>-<first 8 hex digits of its SHA-256>.so (installed_name): builders name theirs alike
 # (libvulkan_freedreno.so), and the host keeps a pipeline cache per driver file name and copies a file again only when its size or time changes.
 #   python3 dm/android/tools/vk_driver_pkg.py <package or .so>     what the package holds, as JSON, or why it can't be used (exit 1)
-import hashlib, io, json, posixpath, re, struct, sys, zipfile
+import hashlib, io, json, posixpath, re, struct, sys, zipfile, zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,12 +66,21 @@ def read(path):
     elif raw_head[:2] == b'PK':
         data, meta, library = _read_zip(p)
     else: raise PackageError(f'{p.name} is neither a driver package (.zip) nor a driver library (.so)')
-    problems = check_elf(data)
+    try: problems = check_elf(data)
+    except (struct.error, IndexError, ValueError, OverflowError) as e:   # a header pointing past the file's end, say: what is malformed is said, not a traceback
+        raise PackageError(f'{library}{"" if library == p.name else " in " + p.name} is a malformed ELF file ({e})') from e
     if problems: raise PackageError(f'{library}{"" if library == p.name else " in " + p.name} is not an Android arm64 Vulkan driver: ' + '; '.join(problems))
     return Driver(data, library, meta, hashlib.sha256(data).hexdigest(), str(p))
 
 
 def _read_zip(p):
+    try: return _read_zip_entries(p)
+    except PackageError: raise
+    # an encrypted entry (RuntimeError), a compression method zipfile lacks (NotImplementedError), a damaged stream: refused with why, never a traceback
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, zlib.error, EOFError, OSError, ValueError) as e: raise PackageError(f'{p.name} could not be read as a zip: {e}') from e
+
+
+def _read_zip_entries(p):
     try: z = zipfile.ZipFile(p)
     except zipfile.BadZipFile as e: raise PackageError(f'{p.name} is not a readable zip: {e}') from e
     with z:
@@ -154,7 +163,8 @@ def check_elf(data):
             lo = e_shoff + sh_link * 64
             if lo + 64 <= len(data): symstr = struct.unpack_from('<IIQQQQIIQQ', data, lo)[4]
             break
-    if count is None and 4 in tags and at(tags[4]) is not None: count = struct.unpack_from('<II', data, at(tags[4]))[1]
+    h = at(tags[4]) if 4 in tags else None
+    if count is None and h is not None and h + 8 <= len(data): count = struct.unpack_from('<II', data, h)[1]
     if count is None and symtab is not None and strtab > symtab: count = (strtab - symtab) // 24
     hmi = False
     if symtab is not None and count:
