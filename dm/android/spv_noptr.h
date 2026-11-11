@@ -7,14 +7,15 @@
 // comes out as the slot in the high word and the offset into the piece in the low word, and its code stays as translated. spv_noptr replaces only the end: each
 // OpConvertUToPtr of a bitcast v2uint, and every load, store or atomic through its result, by an access into a runtime array of storage buffers, pools[high word].d[low word >> 2]
 // (a vector as its components, each its own access, bitcast where they are not uint), decorated NonUniform as each invocation may reach another piece. The replay binds
-// each placed piece's buffer at its slot (SPV_NOPTR_SET, SPV_NOPTR_BINDING). The pointer types, the capability, the extension and the memory model's addressing go, and
+// each placed piece's buffer at its slot (the set the caller names, SPV_NOPTR_BINDING). The pointer types, the capability, the extension and the memory model's addressing go, and
 // Int64 too when nothing else needs it. It needs runtimeDescriptorArray and shaderStorageBufferArrayNonUniformIndexing (the Odin 2's 740 has both). A module whose pointers
 // are made or used any other way is left as it is. Self-contained (no libc) for dm/tools/tests/test_spv_noptr.py.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
 
-enum { SPV_NOPTR_SET = 5, SPV_NOPTR_BINDING = 0 };   // after the texture pool's set (gfx_vk_pool.inc POOL_SET 4); the Odin 2's 740 binds up to 7 sets
+enum { SPV_NOPTR_SET = 5, SPV_NOPTR_SET_LOW = 3, SPV_NOPTR_BINDING = 0 };   // the array's set: after the texture pool's (gfx_vk_pool.inc POOL_SET 4) where the GPU binds 6 sets at once (the Odin 2's
+                                                                           // 740 binds 7); the last of 4 on a GPU that binds no more (gfx_vk_gmem_noptr.inc picks, and refuses a stage of that set)
 enum { SPV_NOPTR_FORM = 1, SPV_NOPTR_USE = 2, SPV_NOPTR_TYPE = 3, SPV_NOPTR_ROOM = 4 };   // why a module was left: a malformed module or a pointer not made from a bitcast
                                                                                         // v2uint; a pointer used otherwise; a pointee that is not 32-bit words; out too small
 
@@ -67,8 +68,9 @@ static int spv_noptr_lit(uint32_t op, uint32_t q) {
     }
 }
 
-// The rewrite. sc: 3 * bound words of scratch. → words written to out (0: left as it is; *why says why, 0 when it has no pointers to rewrite)
-static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t *sc, uint32_t *out, size_t cap, int *why) {
+// The rewrite. set: the descriptor set of the pools' array; sc: 3 * bound words of scratch. → words written to out (0: left as it is; *why says why, 0 when it has no
+// pointers to rewrite)
+static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, uint32_t *sc, uint32_t *out, size_t cap, int *why) {
     *why = 0;
     if (n < 5 || w[0] != 0x07230203) { *why = SPV_NOPTR_FORM; return 0; }
     uint32_t bound = w[3], ver = w[1];
@@ -143,7 +145,7 @@ static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t *sc, uint32_t *out
             NP_E(4u << 16 | 71); NP_E(rta); NP_E(6); NP_E(4);   // ArrayStride 4
             NP_E(5u << 16 | 72); NP_E(blk); NP_E(0); NP_E(35); NP_E(0);   // member 0 Offset 0
             NP_E(3u << 16 | 71); NP_E(blk); NP_E(2);   // Block
-            NP_E(4u << 16 | 71); NP_E(var); NP_E(34); NP_E(SPV_NOPTR_SET);   // DescriptorSet
+            NP_E(4u << 16 | 71); NP_E(var); NP_E(34); NP_E(set);   // DescriptorSet
             NP_E(4u << 16 | 71); NP_E(var); NP_E(33); NP_E(SPV_NOPTR_BINDING);   // Binding
             ann = k; }
         if (i == i_fn) {   // its types, the constants the accesses take and the variable

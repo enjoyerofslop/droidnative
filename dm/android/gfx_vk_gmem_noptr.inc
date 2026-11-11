@@ -1,18 +1,22 @@
 // ---------------- Raw global memory without physical pointers (included at the end of gfx_vk_gmem.inc) ----------------
 // Drivers that reject OpConvertUToPtr reach the placed pieces through a descriptor array instead (spv_noptr.h). The Ayn Odin 2's Adreno 740 driver (V@0676.32) logs
 // "Instruction OpConvertUToPtr not supported" and fails the pipeline of every raw-memory shader with VK_ERROR_UNKNOWN (77 in a Kokiri Forest load: Ocarina of Time's characters
-// dark); the Razr's 730 (V@0615) does the same to Frostpunk's buildings. Here each placed piece's buffer is a slot of one storage-buffer array, set SPV_NOPTR_SET, and each
+// dark); the Razr's 730 (V@0615) does the same to Frostpunk's buildings. Here each placed piece's buffer is a slot of one storage-buffer array, in a set of its own, and each
 // table entry's delta is (slot << 32) - start, so the translator's helper computes the slot and the offset where it computed the device address.
 // - One set serves every table: a slot is its piece's for as long as the piece is placed, and pieces are given back only with the GPU idle (gm_unplace, gm_lz_merge). A new
 //   piece's slot is written into the set as it is placed: the set is update-after-bind and its slots partially bound and updated unused while pending, so the write
 //   never waits for the draws already recorded. Slots are handed out round the array, so a freed one is the last to come back.
 // - Pieces are capped at maxStorageBufferRange (128 MiB on the 740), each one descriptor; an offset into one fits the low word.
+// - The set: SPV_NOPTR_SET (5), past the stages' sets (0-3) and the texture pool's (4), where the GPU binds 6 sets at once; SPV_NOPTR_SET_LOW (3) on a GPU that binds only
+//   4 or 5, where a pipeline with a stage of set 3 that reads raw memory is refused (gm_np_layout). The array is as long as the table (8,192 slots) or as the GPU's
+//   update-after-bind storage buffers a stage allow.
 // - Chosen when the device is made: a probe pipeline (shaders/gmem_probe.comp, a pointer made by OpConvertUToPtr as the translator makes it) the driver refuses, on a device
 //   that has what the array needs (runtime descriptor arrays, non-uniform storage-buffer indexing, update-after-bind storage buffers, partially bound slots).
 //   DM_VK_RAW_GMEM_NOPTR=1 (env.txt): on without the probe; =0: never, raw-memory shaders then fail on such a driver as before
 static int g_gm_np_ok;   // the device was made with what the array needs (gm_np_take)
 static VkDescriptorSetLayout g_np_dsl; static VkDescriptorPool g_np_dp; static VkDescriptorSet g_np_ds;
 static uint8_t *g_np_used; static uint32_t g_np_n, g_np_next = 1;   // slots in use; the array's length; where the next search starts (slot 0 is the sink's, DM_VK_RAW_GMEM_SINK)
+static uint32_t g_np_set = SPV_NOPTR_SET;   // the array's set in every pipeline layout that has it
 static uint64_t g_np_writes, g_np_full, g_np_binds;
 static _Atomic uint64_t g_np_mods, g_np_left;   // modules rewritten by spv_noptr; modules with physical pointers it left (lm_code)
 static const uint32_t k_gm_probe_cs[] =
@@ -68,10 +72,18 @@ static void gm_np_made(void) {
     if (gm_np_env() != 1 && (pr = gm_np_probe()) == VK_SUCCESS) { LOG("[vk] raw global memory: the driver builds physical pointers made by OpConvertUToPtr (the probe pipeline): pointers, as translated"); return; }
     VkPhysicalDeviceDescriptorIndexingPropertiesEXT dp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES_EXT};
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &dp}; vkGetPhysicalDeviceProperties2(g_vk.pd, &p2);
-    const uint32_t n = DMSH_GMEM_MAP_ENTRIES, own = 64;   // a slot for each table entry; room for a stage's own storage buffers beside it, four stages' in a set's count
-    const char *why = g_vk.props.limits.maxBoundDescriptorSets <= SPV_NOPTR_SET ? "fewer than 6 descriptor sets bound at once"
-                    : dp.maxPerStageDescriptorUpdateAfterBindStorageBuffers < n + own || dp.maxDescriptorSetUpdateAfterBindStorageBuffers < n + 4 * own ? "too few update-after-bind storage buffers"
-                    : dp.maxPerStageUpdateAfterBindResources < n + 256 ? "too few update-after-bind resources per stage" : NULL;
+    // a slot for each table entry where the GPU has room, beside a stage's own storage buffers (four stages' in a set's count) and resources
+    const uint32_t own = 64, sets = g_vk.props.limits.maxBoundDescriptorSets; uint32_t n = DMSH_GMEM_MAP_ENTRIES;
+    uint32_t lim = dp.maxPerStageDescriptorUpdateAfterBindStorageBuffers; if (dp.maxDescriptorSetUpdateAfterBindStorageBuffers / 4 < lim) lim = dp.maxDescriptorSetUpdateAfterBindStorageBuffers / 4;
+    if (dp.maxPerStageUpdateAfterBindResources < lim) lim = dp.maxPerStageUpdateAfterBindResources;
+    if (dp.maxUpdateAfterBindDescriptorsInAllPools < lim) lim = dp.maxUpdateAfterBindDescriptorsInAllPools;
+    lim = lim > 4 * own ? lim - 4 * own : 0; if (n > lim) n = lim;
+    g_np_set = sets > SPV_NOPTR_SET ? SPV_NOPTR_SET : SPV_NOPTR_SET_LOW;
+    char probe[96]; if (gm_np_env() == 1) snprintf(probe, sizeof probe, "DM_VK_RAW_GMEM_NOPTR=1"); else snprintf(probe, sizeof probe, "the driver refuses the probe's OpConvertUToPtr (VkResult %d)", (int)pr);
+    LOG("[vk] raw global memory: %s; %u descriptor sets bound at once, update-after-bind storage buffers %u a stage and %u a set, resources %u a stage, descriptors %u in all pools, "
+        "maxStorageBufferRange %u MiB", probe, sets, dp.maxPerStageDescriptorUpdateAfterBindStorageBuffers, dp.maxDescriptorSetUpdateAfterBindStorageBuffers, dp.maxPerStageUpdateAfterBindResources,
+        dp.maxUpdateAfterBindDescriptorsInAllPools, g_vk.props.limits.maxStorageBufferRange >> 20);
+    const char *why = sets <= SPV_NOPTR_SET_LOW ? "fewer than 4 descriptor sets bound at once" : n < 256 ? "too few update-after-bind storage buffers" : NULL;
     VkDescriptorSetLayoutBinding b = {SPV_NOPTR_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, n, VK_SHADER_STAGE_ALL, NULL};
     VkDescriptorBindingFlagsEXT bf = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT_EXT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT_EXT;
     VkDescriptorSetLayoutBindingFlagsCreateInfoEXT fc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, .bindingCount = 1, .pBindingFlags = &bf};
@@ -82,18 +94,12 @@ static void gm_np_made(void) {
     VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 1, .pSetLayouts = &g_np_dsl};
     if (!why && (vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &g_np_dsl) != VK_SUCCESS || vkCreateDescriptorPool(g_vk.dev, &pc, NULL, &g_np_dp) != VK_SUCCESS ||
                  (ai.descriptorPool = g_np_dp, vkAllocateDescriptorSets(g_vk.dev, &ai, &g_np_ds)) != VK_SUCCESS)) why = "its descriptor set could not be made";
-    if (why || !(g_np_used = calloc(n, 1))) {
-        LOG("[RED] [vk] raw global memory: the driver refuses physical pointers made by OpConvertUToPtr (the probe: VkResult %d), and the pools' descriptor array is not on (%s): "
-            "raw-memory shaders fail to build", (int)pr, why ? why : "memory");
-        return; }
+    if (why || !(g_np_used = calloc(n, 1))) { LOG("[RED] [vk] raw global memory: the pools' descriptor array is not on (%s): raw-memory shaders fail to build on this driver", why ? why : "memory"); return; }
     g_np_n = n;
     VkDeviceSize r = g_vk.props.limits.maxStorageBufferRange & ~(VkDeviceSize)(GM_CHUNK - 1); if (r && g_gm_piece > r) g_gm_piece = r;
     g_gm_np = 1;
-    if (gm_np_env() == 1) LOG("[vk] raw global memory without physical pointers (DM_VK_RAW_GMEM_NOPTR=1): placed pieces are slots of a storage-buffer array (set %d, %u slots), pieces of up to %llu MiB",
-                              SPV_NOPTR_SET, n, (unsigned long long)(g_gm_piece >> 20));
-    else LOG("[vk] raw global memory without physical pointers: the driver refuses OpConvertUToPtr (the probe pipeline: VkResult %d), so placed pieces are slots of a storage-buffer array "
-             "(set %d, %u slots), pieces of up to %llu MiB (maxStorageBufferRange), and spv_noptr rewrites the shaders' pointers (DM_VK_RAW_GMEM_NOPTR=0: off)", (int)pr, SPV_NOPTR_SET, n,
-             (unsigned long long)(g_gm_piece >> 20));
+    LOG("[vk] raw global memory without physical pointers: placed pieces are slots of a storage-buffer array (set %u, %u slots), pieces of up to %llu MiB, and spv_noptr rewrites the "
+        "shaders' pointers (DM_VK_RAW_GMEM_NOPTR=0: off)", g_np_set, n, (unsigned long long)(g_gm_piece >> 20));
 }
 // A piece being listed (gm_seg_insert, g_gm_mu held, under g_gm_pl): its slot, its buffer written there. 0: every slot taken (the piece stays out of the table, raw accesses read 0)
 static uint32_t gm_np_slot(VkBuffer b, VkDeviceSize n) {
@@ -104,9 +110,17 @@ static uint32_t gm_np_slot(VkBuffer b, VkDeviceSize n) {
     return 0;
 }
 static void gm_np_free(uint32_t s) { if (g_gm_np && s && s < g_np_n) g_np_used[s] = 0; }   // a piece given back (the GPU idle; g_gm_pl held)
-// A draw or dispatch whose shaders read raw memory (any[k]: a stage's gm), after its own sets: the array at SPV_NOPTR_SET, which its pipeline's layout has (pipe_make, cpipe_make)
+// The array's set into the sets of a pipeline layout whose shaders read raw memory (pipe_make, cpipe_make; the sets no stage has are g_empty_dsl). 0: a stage has that
+// set itself (only where the array is at SPV_NOPTR_SET_LOW): no layout, so no pipeline
+static int gm_np_layout(VkDescriptorSetLayout *sets, uint32_t *nset, VkDescriptorSetLayout empty) {
+    if (sets[g_np_set] != empty) { RED_ONCE(180, "raw global memory: a shader that reads it has descriptor set %u itself, where this GPU's pools' array is (it binds %u sets at once): its pipelines are not made",
+                                            g_np_set, g_vk.props.limits.maxBoundDescriptorSets); return 0; }
+    sets[g_np_set] = g_np_dsl; if (*nset < g_np_set + 1) *nset = g_np_set + 1;
+    return 1;
+}
+// A draw or dispatch whose shaders read raw memory, after its own sets: the array at its set
 static void gm_np_bind(VkCommandBuffer c, VkPipelineBindPoint bp, VkPipelineLayout pl) {
-    vkCmdBindDescriptorSets(c, bp, pl, SPV_NOPTR_SET, 1, &g_np_ds, 0, NULL); g_np_binds++;
+    vkCmdBindDescriptorSets(c, bp, pl, g_np_set, 1, &g_np_ds, 0, NULL); g_np_binds++;
 }
 // lm_code: a module with physical pointers, rewritten (spv_noptr.h) into *out (to free). 0: nothing to rewrite, or left as it is (a red line, once a reason)
 static size_t gm_np_code(const uint32_t *code, size_t nw, const char *what, int first, uint32_t **out) {
@@ -115,7 +129,7 @@ static size_t gm_np_code(const uint32_t *code, size_t nw, const char *what, int 
     uint32_t *sc = malloc(3 * (size_t)code[3] * 4); size_t k = 0; int why = 0;
     for (size_t cap = 2 * nw + 4096; sc && !k && cap <= 16 * nw + 4096; cap *= 4) {   // a vector access becomes several: rarely past twice the words
         free(*out); *out = malloc(cap * 4); if (!*out) break;
-        k = spv_noptr(code, nw, sc, *out, cap, &why); if (why != SPV_NOPTR_ROOM) break; }
+        k = spv_noptr(code, nw, g_np_set, sc, *out, cap, &why); if (why != SPV_NOPTR_ROOM) break; }
     free(sc);
     if (!k) { free(*out); *out = NULL; }
     if (!first) return k;

@@ -1859,7 +1859,7 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
         ns++;
         if (s->pool) { sets[POOL_SET] = g_pool_dsl; nset = POOL_SET + 1; }
         gmnp |= s->gm && g_gm_np; }
-    if (gmnp) { sets[SPV_NOPTR_SET] = g_np_dsl; nset = SPV_NOPTR_SET + 1; }   // raw memory through the pools' descriptor array (gfx_vk_gmem_noptr.inc)
+    if (gmnp && !gm_np_layout(sets, &nset, g_empty_dsl)) return VK_ERROR_INITIALIZATION_FAILED;   // raw memory through the pools' descriptor array (gfx_vk_gmem_noptr.inc)
     VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};   // the alpha test's reference (spv_alpha.h); unused by shaders that do not declare it
     VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nset, .pSetLayouts = sets, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &pp->pl) != VK_SUCCESS) return VK_ERROR_INITIALIZATION_FAILED;
@@ -3298,9 +3298,10 @@ static cpipe_t *cpipe_e5(vshader *s, uint64_t mask) {
 }
 static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo ec = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &ec, NULL, &g_empty_dsl); }
-    VkDescriptorSetLayout sl[SPV_NOPTR_SET + 1] = {s->dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, s->pool ? g_pool_dsl : g_empty_dsl, g_np_dsl};   // the pool set after empty ones (gfx_vk_pool.inc),
-    VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,                                                       // then the pools' array (gfx_vk_gmem_noptr.inc)
-                                     .setLayoutCount = s->gm && g_gm_np ? SPV_NOPTR_SET + 1 : s->pool ? POOL_SET + 1 : 1, .pSetLayouts = sl};
+    VkDescriptorSetLayout sl[SPV_NOPTR_SET + 1] = {s->dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, s->pool ? g_pool_dsl : g_empty_dsl, g_empty_dsl};   // the pool set after empty ones (gfx_vk_pool.inc)
+    uint32_t nsl = s->pool ? POOL_SET + 1 : 1;
+    if (s->gm && g_gm_np && !gm_np_layout(sl, &nsl, g_empty_dsl)) return NULL;   // raw memory through the pools' descriptor array (gfx_vk_gmem_noptr.inc)
+    VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nsl, .pSetLayouts = sl};
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &cp->pl) != VK_SUCCESS) return NULL;
     VkComputePipelineCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = cp->pl,
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .pName = "main"}};   // its module: lm_pipeline

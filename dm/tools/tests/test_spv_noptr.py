@@ -134,7 +134,7 @@ class SpvNoPtr(unittest.TestCase):
         cls.bin = NDK / 'toolchains/llvm/prebuilt' / HOST / 'bin'
         src = cls.tmp / 't.c'
         export = '__declspec(dllexport)' if os.name == 'nt' else '__attribute__((visibility("default")))'
-        src.write_text(f'#include "spv_noptr.h"\n{export} size_t run(const uint32_t *w, size_t n, uint32_t *sc, uint32_t *o, size_t cap, int *why) {{ return spv_noptr(w, n, sc, o, cap, why); }}\n'
+        src.write_text(f'#include "spv_noptr.h"\n{export} size_t run(const uint32_t *w, size_t n, uint32_t set, uint32_t *sc, uint32_t *o, size_t cap, int *why) {{ return spv_noptr(w, n, set, sc, o, cap, why); }}\n'
                        f'{export} int wanted(const uint32_t *w, size_t n) {{ return spv_noptr_wanted(w, n); }}\n')
         env = dict(os.environ, MSYS_NO_PATHCONV='1')
         if os.name == 'nt':   # no C library: a DLL linked by lld alone
@@ -146,7 +146,8 @@ class SpvNoPtr(unittest.TestCase):
             cc = ['xcrun', 'clang'] if sys.platform == 'darwin' else [shutil.which('clang') or cls.bin / 'clang']
             subprocess.run([*cc, '-shared', '-fPIC', '-O1', '-Wall', '-Wextra', '-Werror', '-I', REPO / 'dm/android', src, '-o', cls.tmp / 't.so'], check=True)
             cls.lib = ctypes.CDLL(str(cls.tmp / 't.so'))
-        cls.lib.run.restype = ctypes.c_size_t
+        cls.lib.run.restype = ctypes.c_size_t; cls.lib.run.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+        cls.lib.wanted.argtypes = [ctypes.c_void_p, ctypes.c_size_t]   # (typed: untyped size_t arguments crashed test_spv_pool on the Linux runner)
 
     @classmethod
     def tearDownClass(cls): shutil.rmtree(cls.tmp, ignore_errors=True)
@@ -163,13 +164,13 @@ class SpvNoPtr(unittest.TestCase):
 
     def wanted(self, data): n = len(data) // 4; return self.lib.wanted((ctypes.c_uint32 * n).from_buffer_copy(data), n)
 
-    def run_on(self, data, cap=None):   # → (the rewritten module or None, why)
+    def run_on(self, data, cap=None, set_=5):   # → (the rewritten module or None, why)
         n = len(data) // 4; w = (ctypes.c_uint32 * n).from_buffer_copy(data); cap = cap or 4 * n + 1024; o = (ctypes.c_uint32 * cap)()
         sc = (ctypes.c_uint32 * (3 * words(data)[3]))(); why = ctypes.c_int(-1)
-        k = self.lib.run(w, n, sc, o, cap, ctypes.byref(why))
+        k = self.lib.run(w, n, set_, sc, o, cap, ctypes.byref(why))
         return (bytes(o)[:4 * k] if k else None), why.value
 
-    def check_rewritten(self, out, nacc):   # what every rewritten module has
+    def check_rewritten(self, out, nacc, set_=5):   # what every rewritten module has
         o = ops(out)
         self.assertFalse([x for op, x in o if op == 120])   # no OpConvertUToPtr
         self.assertFalse([x for op, x in o if op == 32 and x[1] == 5349])   # nor PhysicalStorageBuffer pointers
@@ -177,7 +178,7 @@ class SpvNoPtr(unittest.TestCase):
         self.assertNotIn(5347, caps); self.assertTrue({5301, 5302, 5308} <= caps)
         self.assertEqual([x[0] for op, x in o if op == 14], [0])   # Logical addressing
         sets = {x[0]: x[2] for op, x in o if op == 71 and x[1] == 34}; binds = {x[0]: x[2] for op, x in o if op == 71 and x[1] == 33}
-        pools = [v for v, s in sets.items() if s == 5]; self.assertEqual(len(pools), 1); self.assertEqual(binds[pools[0]], 0)   # set 5, binding 0
+        pools = [v for v, s in sets.items() if s == set_]; self.assertEqual(len(pools), 1); self.assertEqual(binds[pools[0]], 0)   # the set asked for, binding 0
         nonuni = {x[0] for op, x in o if op == 71 and x[1] == 5300}
         acc = [x for op, x in o if op == 65 and x[2] == pools[0]]   # the accesses: pools[slot].d[word]
         self.assertEqual(len(acc), nacc)
@@ -205,6 +206,10 @@ class SpvNoPtr(unittest.TestCase):
         pools = [x[0] for op, x in o if op == 71 and x[1] == 34 and x[2] == 5]
         ep = [x for op, x in o if op == 15][0]; self.assertIn(pools[0], ep[3:])
         self.assertNotIn(b'SPV_EXT_descriptor_indexing', out)   # core from SPIR-V 1.5
+
+    def test_the_array_goes_to_the_set_asked_for(self):   # a GPU that binds 4 sets at once: set 3
+        out, why = self.run_on(self.asm(CS, 'set3'), set_=3); self.assertIsNotNone(out, why); assert out is not None
+        self.valid(out, 'set3'); self.check_rewritten(out, 15, set_=3)
 
     def test_ulong_used_elsewhere_keeps_int64(self):
         data = self.asm(CS.replace('%i0 = OpConstant %int 0\n', '%i0 = OpConstant %int 0\n%k = OpConstant %ulong 5\n').replace(
