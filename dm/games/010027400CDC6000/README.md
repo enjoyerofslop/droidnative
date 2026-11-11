@@ -2,7 +2,7 @@
 
 Update 1.0.3.1 (v196608) over the base game, SDK 8.2.0. Larian Studios' Divinity Engine (`FW3.5/Gold/Stable` in its asserts' paths), NVN, Wwise sound, RakNet 15.03.26. Modules `main`, `subsdk0` and `sdk`: `subsdk0` and `sdk` are one build (`3ae34e68…`), the SDK twice. The RomFS is 48 files, 10.74 GB: Larian's LSPK packages (`Data/*.pak`, version 13), the voice and localization packages beside them.
 
-Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The title, the main menu, a new game (Classic mode), character creation, the opening cinematic and the first area (the Merryweather's hold, Magister Siwan's first dialogue) in play, at the game's 30 fps, and on a OnePlus Pad 3 the cabin deck after it ([First area](#first-area)); from there, on the Odin 2 by hand, the burning hold, the top deck and its first fight, won ([To the first combat](#to-the-first-combat)). Not yet played further than that; see [Open](#open).
+Status: brought up on Android, on an Ayn Odin 2 (Adreno 740, Android 13). The title, the main menu, a new game (Classic mode), character creation, the opening cinematic and the first area (the Merryweather's hold, Magister Siwan's first dialogue) in play, at the game's 30 fps, and on a OnePlus Pad 3 the cabin deck after it ([First area](#first-area)); from there, on the Odin 2 by hand, the burning hold, the top deck and its first fight, won ([To the first combat](#to-the-first-combat)), then the lifeboat and a second fight below deck, won ([Below deck](#below-deck)). Not yet played past the locked Greasy Door that follows; see [Open](#open).
 
 ## What it needs
 
@@ -52,6 +52,19 @@ Played by hand on the Ayn Odin 2 from `saves/cabin` (2026-11-10, adb joystick an
 - Quick Save on the top deck after the fight (`QuickSave_1`, in-game Day 1 14:55), then Main Menu and Load: the pause menu's Load, or Story → Load campaign. It loads again where it was. Continue loaded an older save instead, since every save then read 18:00:02 31/12/1969; the network clock's answer fixed that ([First area](#first-area)).
 - Sound: a 4-minute `DM_AUDIO_DUMP` from the title through loading that save. L and R about −35 dBFS, centre and LFE silent, the rear pair about −70 dBFS, no clipping, spectra like music (flatness 0.00–0.02, peaks on notes), and 0 underruns.
 
+## Below deck
+
+Played by hand on the Ayn Odin 2 from `saves/combat`'s `QuickSave_1` (2026-11-10, `main` at `0a33aa37` with [#185](https://github.com/enjoyerofslop/droidplay-core/pull/185)'s network clock, `DM_CTL` button and stick lines, a private `DM_SAVE` copy):
+
+- From the top deck, burning and in rain, forward along the deck to the lifeboat ("A lifeboat! That means there's still a chance…"). A fire there made the Red Prince Warm; he was Wet from the rain, so not Burning. Leave at the lifeboat starts Gil's and Trice's dialogue; the first answer sends him back down for survivors (journal: *Troubled Waters*).
+- The ladder through the hatch near the lifeboat (the one under the tentacles only joins the lifeboat deck to a walkway) comes down below deck. Through the door beside the stairs, "Voidwoken!" starts the second fight: Void Hatchlings, with Lohse and Beast fighting on the player's side.
+- The fight, turn-based: Restoration (8 to 15 vitality, Regenerating), Dragon's Blaze aimed past a tied-up survivor (5 fire damage, Burning), Blood Sucker on the deck's blood, then "Hold B to end turn". Lohse's Electric Discharge and a water skill froze and shattered a Hatchling; the fight ended in its second round (75 XP).
+- The quest marker then lies at the far end of that deck, behind a locked Greasy Door (434 vitality; an Attack took 3). No other way round was found, so the stretch ends there.
+- Quick Saves at the lifeboat, after the fight and at the door read 22:03:26, 22:16:59 and 22:23:54 10/11/2026 in the Load list, newest first; the folder's older saves, made before the fix, keep 18:00:02 31/12/1969 below them. After a cold start, Continue loaded the newest, at the door.
+- 30 fps throughout: 213 windows of 300 frames over two launches (about 26 minutes), median frame time 33.2–33.4 ms in each, p95 about 34–35 ms, GPU 9–16 ms; the longest frames (325 and 506 ms) at loads and saves. 228 and 71 draws were left out while the new areas' pipelines built in the background.
+- Sound: AudioOut #0's six channels, L and R about −35 dBFS, the rear pair about −62, centre and LFE silent (`DM_AUDIO_DUMP`); 2 and 1 underruns, around loads.
+- Red lines: besides `SetRenderEnableConditional`, four fragment shaders (`08733b8aaa14e146`, `278dbcf7be929822`, `b7c32f113d8b0ee8`, `f6361d15a3d1ae5c`): "an alpha test is set, but the shader has no float vec4 colour 0 to test … the draw keeps the shader as it is". Nothing wrong showed on screen.
+
 ## Routes
 
 [`bench_android.tsv`](bench_android.tsv), for `scripts/bench_android.py`:
@@ -88,4 +101,5 @@ Measured on a OnePlus Pad 3 (Adreno 830, Android 16; its 144 Hz panel runs Divin
 
 - On a cold pipeline cache, 25 draws of a new game's first minutes are left out while their pipelines build in the background (`[vk] draws not made: … pipeline 25`, `pipeline built in the background … draws left out meanwhile`); with the cache warm, `hold` leaves out none.
 - `[nvn] [RED] SetRenderEnableConditional: the host draws anyway for now`, from the title on.
-- Further into the game (past the first fight, Fort Joy) is not played yet.
+- Four fragment shaders have an alpha test set but no float colour 0 to test, so the draw keeps the shader as it is (red lines, [Below deck](#below-deck)); nothing wrong showed on screen.
+- Further into the game (past the locked Greasy Door below deck, Fort Joy) is not played yet. The lifeboat's Leave may be the other way on.
