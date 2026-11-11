@@ -1625,12 +1625,21 @@ static void pk_guard_init(void) {
     const char *c = getenv("DM_PIPELINE_CACHE"); if (!c) return;
     char mk[700], sk[700]; snprintf(mk, sizeof mk, "%s.making4", c); snprintf(sk, sizeof sk, "%s.skip4", c);
     uint8_t r[PK_REC]; int crashed; pk_head h;
-    if (pkg_take(mk, r, PK_REC, &crashed) && (memcpy(&h, r, sizeof h), h.magic == PK_MAGIC && h.size == PK_TAIL)) {   // an earlier start ended during this entry's compile
+    int took = pkg_take(mk, r, PK_REC, &crashed) && (memcpy(&h, r, sizeof h), h.magic == PK_MAGIC && h.size == PK_TAIL);
+    if (took) {   // an earlier start ended during this entry's compile
         int32_t z; memcpy(&z, r + sizeof h, 4); for (int j = 0; j < 4; j++) h.sh[j][16] = 0;
         pkg_skip_add(sk, r, PK_REC);
         LOG("[RED] [vk] start-up list: the entry with shaders %s %s %s %s%s %s, so it is left out from now on (%s)", h.sh[0][0] ? h.sh[0] : "-", h.sh[1][0] ? h.sh[1] : "-",
             h.sh[2][0] ? h.sh[2] : "-", h.sh[3][0] ? h.sh[3] : "-", z ? " (vertex .z variant)" : "",
             crashed ? "crashed the driver's shader compiler at an earlier start" : "was being compiled when an earlier start ended (a crash, a kill or a stop)", sk);
+    }
+    // the second start in a row that crashed inside the list: the whole list set aside (pk_guard.h), before anything of this session reads or appends to it
+    char st[700]; snprintf(st, sizeof st, "%s.strikes4", c);
+    if (pkg_strikes(st, took && crashed) >= 2) {
+        char ls[700], as[708]; snprintf(ls, sizeof ls, "%s.keys4", c); snprintf(as, sizeof as, "%s.aside", ls);
+        struct stat lst; long ent = stat(ls, &lst) ? -1 : (long)(lst.st_size / PK_REC);
+        if (pkg_set_aside(ls, as)) LOG("[RED] [vk] start-up list: two starts in a row crashed in it, so the whole list (%ld entries) is set aside as %s and this session starts a new one", ent, as);
+        pkg_strikes(st, 0);
     }
     uint8_t *all; size_t n = pkg_skip_load(sk, PK_REC, &all);
     g_pk_skip.klen = PK_REC; for (size_t i = 0; i < n; i++) nvn_hm_put(&g_pk_skip, all + i * PK_REC, (void *)1);

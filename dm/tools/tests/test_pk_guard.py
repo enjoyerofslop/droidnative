@@ -1,4 +1,5 @@
-"""dm/android/pk_guard.h (the start-up list's marker and skip list: an entry whose compile never finishes is left out from the next start on), built for the PC with the
+"""dm/android/pk_guard.h (the start-up list's marker and skip list: an entry whose compile never finishes is left out from the next start on, and the whole list is set
+aside after two starts in a row crashed in it), built for the PC with the
 system's clang and driven through ctypes on records like the list's. POSIX only: skipped on Windows, and without a C compiler."""
 import ctypes
 import os
@@ -23,6 +24,8 @@ X int g_take(const char *p, uint8_t *r, size_t n, int *crashed) { return pkg_tak
 X size_t g_load(const char *p, size_t n, uint8_t **out) { return pkg_skip_load(p, n, out); }
 X int g_add(const char *p, const uint8_t *r, size_t n) { return pkg_skip_add(p, r, n); }
 X void g_free(void *q) { free(q); }
+X int g_strikes(const char *p, int crashed) { return pkg_strikes(p, crashed); }
+X int g_aside(const char *l, const char *a) { return pkg_set_aside(l, a); }
 '''
 
 
@@ -46,12 +49,15 @@ class PkGuard(unittest.TestCase):
         L.g_add.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
         L.g_open.argtypes = [ctypes.c_char_p]
         L.g_free.argtypes = [ctypes.c_void_p]
+        L.g_strikes.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        L.g_aside.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
 
     @classmethod
     def tearDownClass(cls): shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
         self.d = Path(tempfile.mkdtemp(dir=self.tmp)); self.mk = str(self.d / 'c.making4').encode(); self.sk = str(self.d / 'c.skip4').encode()
+        self.st = str(self.d / 'c.strikes4').encode(); self.ls = self.d / 'c.keys4'; self.aside = self.d / 'c.keys4.aside'
 
     def take(self):   # → (record or None, crashed)
         buf = ctypes.create_string_buffer(REC); cr = ctypes.c_int(-1)
@@ -104,6 +110,36 @@ class PkGuard(unittest.TestCase):
         skip = set(self.load()); listed = [rec(i) for i in range(5) if rec(i) not in skip]
         self.assertEqual(listed, [rec(0), rec(1), rec(2), rec(4)])
         self.start(entries=0); self.assertEqual(self.take(), (None, 0))   # the session after makes the rest and leaves nothing
+
+
+    def init(self):   # gfx_vk_draw.inc pk_guard_init's steps: the marker's entry to the skip list, the count, and the list set aside at the second crash in a row
+        left, crashed = self.take()
+        if left: self.lib.g_add(self.sk, left, REC)
+        n = self.lib.g_strikes(self.st, int(bool(left) and bool(crashed)))
+        if n >= 2:
+            self.assertEqual(self.lib.g_aside(str(self.ls).encode(), str(self.aside).encode()), 1); self.lib.g_strikes(self.st, 0)
+        return n
+
+    def test_two_starts_in_a_row_that_crash_in_the_list_set_it_aside(self):
+        self.ls.write_bytes(b''.join(rec(i) for i in range(32)))
+        self.start(crash_at=0, crashed=True); self.assertEqual(self.init(), 1); self.assertTrue(self.ls.exists())   # one crash: that entry skipped, the list kept
+        self.start(crash_at=1, crashed=True); self.assertEqual(self.init(), 2)                                     # the second in a row: the whole list set aside
+        self.assertFalse(self.ls.exists()); self.assertEqual(len(self.aside.read_bytes()), 32 * REC)
+        self.assertEqual(self.lib.g_strikes(self.st, 0), 0)   # and the count starts again
+        self.assertEqual(self.load(), [rec(0), rec(1)])
+
+    def test_a_clean_start_or_a_kill_starts_the_count_again(self):
+        self.ls.write_bytes(rec(0) + rec(1))
+        self.start(crash_at=0, crashed=True); self.assertEqual(self.init(), 1)
+        self.start(); self.assertEqual(self.init(), 0)                             # a start that ran its list through
+        self.start(crash_at=1, crashed=True); self.assertEqual(self.init(), 1)
+        self.start(crash_at=1, crashed=False); self.assertEqual(self.init(), 0)    # ended in a compile without the crash hook (killed for memory, stopped)
+        self.assertTrue(self.ls.exists())
+
+    def test_a_list_set_aside_replaces_an_earlier_one(self):
+        self.aside.write_bytes(b'old'); self.ls.write_bytes(rec(5))
+        self.assertEqual(self.lib.g_aside(str(self.ls).encode(), str(self.aside).encode()), 1)
+        self.assertEqual(self.aside.read_bytes(), rec(5)); self.assertFalse(self.ls.exists())
 
 
 if __name__ == '__main__':

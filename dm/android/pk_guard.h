@@ -2,10 +2,13 @@
 // earlier sessions again at every start, so an entry the driver's shader compiler crashes on kills every start a few seconds in, and nothing a player can do clears it.
 // Before each compile the prewarm writes the entry to a marker file (<cache>.making4) and empties the file after; a crash in that compile also flags it (pb_dump, the crash
 // dump's graphics hook). An entry still in the marker at the next start goes to the skip list (<cache>.skip4), which the prewarm leaves out from then on.
+// Clearing one entry per crash is slow when a list holds many bad ones: on a OnePlus Pad 3, Ocarina of Time's held 32, each a start's crash. So the starts in a row that crashed inside
+// the list are counted (<cache>.strikes4), and at the second the whole list is set aside (<cache>.keys4.aside) and the session starts from an empty one.
 // Plain POSIX file calls on whole records of the caller's size, for dm/tools/tests/test_pk_guard.py.
 #pragma once
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -53,3 +56,13 @@ static int pkg_skip_add(const char *path, const uint8_t *rec, size_t n) {
     int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600); if (fd < 0) return 0;
     off_t at = (off_t)(cnt * n); int ok = ftruncate(fd, at) == 0 && pwrite(fd, rec, n, at) == (ssize_t)n; close(fd); return ok;
 }
+
+// The starts in a row that crashed inside the list, this one's outcome counted: a crash (the marker flagged) adds one, anything else starts the count again. One byte in path
+static int pkg_strikes(const char *path, int crashed) {
+    unsigned char n = 0; int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600); if (fd < 0) return crashed;
+    if (crashed) { if (pread(fd, &n, 1, 0) != 1) n = 0; if (n < 255) n++; }
+    (void)!pwrite(fd, &n, 1, 0); close(fd); return n;
+}
+
+// The list set aside under another name (an earlier one there is replaced), so the session starts from an empty list: 1 when it was moved
+static int pkg_set_aside(const char *list, const char *aside) { return rename(list, aside) == 0; }
