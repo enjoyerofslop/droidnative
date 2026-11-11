@@ -131,7 +131,7 @@ A Playable game was played by hand through the stretch its row names, with saves
 Playable now:
 
 - **Playable – minor issues:** Pokémon Brilliant Diamond, Pokémon Shield, Pokémon: Let's Go, Pikachu!, Persona 3 Portable, Divinity: Original Sin 2 - Definitive Edition and Mario Kart 8 Deluxe.
-- **Playable – major issues:** The Legend of Zelda: Breath of the Wild and The Legend of Zelda: Skyward Sword HD.
+- **Playable – major issues:** Frostpunk, The Legend of Zelda: Breath of the Wild and The Legend of Zelda: Skyward Sword HD.
 
 More games reach gameplay (In-game) or their menus; the table below has every game run on Android, and the issues seen.
 
