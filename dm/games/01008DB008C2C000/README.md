@@ -91,3 +91,21 @@ First run on Android, 2026-11-10: a Samsung Galaxy S25 Edge (SM-S937U1: Snapdrag
 - **First start:** the longest frame was 6.4 s at the first step outside. 245 pipelines and 298 libraries were made in that frame (5.7 s), on Samsung's slow first-time shader creation. 1.2–1.3 s frames came at two later loads. With the pipeline cache (6.5 MB), the Continue start's longest frame was 118 ms.
 - **Sound:** `DM_AUDIO_DUMP` over the Continue start (95 s): the title music, then the Weald's, in the front pair. No underrun in 647 reports during play and 22 after the restart.
 - **`[RED]`:** the same single line; no crash, no hang, nothing wrong seen in the picture (the battle scenes, the Weald's fog).
+
+**Through the Slumbering Weald on the Retroid Pocket 5**, the same day (job q105). The phone's own APK (main `5736949c`, 0.7.3-16-g5736949c), started from the Z Flip 7's Weald save (`saves/slumbering_weald`, a save made on an Android phone). Played by hand with adb input, 29 minutes.
+
+- **The stretch:**
+  - The Weald in the fog: a wild Rookidee and a wild Skwovet beaten on the way. The fog thickens until Hop can't see his own hand.
+  - **The Weald's event:** Zamazenta's silhouette in the fog, then the battle against "???". Its turns end in the fog, as the story has it. Leon and Charizard find the two, with the Wooloo.
+  - Back in Postwick: Hop sends the player home, and Mum's scene plays in the kitchen. The next objective is Wedgehurst.
+- **Through the fog with adb:** a short run (B held) in each direction, kept when the next screenshot changed. The depths are west: runs west, then north up a sunken path, reached the event. Hop following can make a blocked run look like a move.
+- **Saves and Continue:** six commits:
+  - the X menu's save after the Weald (its "Current time" is the real date and time);
+  - the game's autosave after Mum;
+  - a save in Hop's garden (play time 1:06).
+
+  A cold start's Continue loaded the last one there. Kept as `saves/after_weald_rp5`.
+- **30 fps throughout:** 172 windows of 300 frames, frame p50 33.0–34.5 ms (median 33.3), p95 median 36.3 ms. GPU p50 median 19.1 ms, at most 27.2, on the Adreno 650.
+- **Sound:** `DM_AUDIO_DUMP` over the Continue start (105 s, one 6-channel output): the title and Postwick's music in the front pair, at −22 to −31 dBFS RMS. Peaks on notes (440 / 880 Hz, 659 Hz), no clipping. No underrun during play; one 12 ms gap during the Continue start.
+- **`[RED]`:** the same single line; no crash, no hang.
+- **Not played:** Route 2, Professor Magnolia's house, the Wild Area.
