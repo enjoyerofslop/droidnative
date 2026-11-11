@@ -62,3 +62,22 @@ First run on Android, 2026-11-10: a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Eli
   - `a second NVN queue submits: the Vulkan replay shares one state between queues`, as in Pokémon Shield. Nothing in the picture showed it.
 - **Driving it over adb:** the on-screen buttons need a held touch (`input swipe x y x y 150`), since a plain `input tap` is shorter than one 30 fps frame and is sometimes missed. In the X menu, the ▶ cursor is moved onto SAVE with the stick; SAVE's highlight alone doesn't select it. A wild Pokémon that walks into the player starts an encounter, which B and then Yes leave.
 - **Not tried:** a trainer battle (the first one comes later in the story), aiming with motion, docked mode, the other devices and the Mac.
+
+**On a Google Pixel 9 Pro XL**, 2026-11-10: Tensor G4, Mali-G715 with Arm's driver 0xd803000 and Vulkan 1.4.343, Android 17. The hosts from `main` at `898ac92f`, the game files from the same build folder; handheld, the on-screen controls, played by hand with adb input:
+
+- **From a new game:** the controller screen, the opening, the language, Oak, the player and the rival (`DM_KBD`), the bedroom, the rival's visit, Mom downstairs, then Pallet Town. Nothing wrong was seen in the picture, and there was no crash and no hang.
+- **A catch, from the Z Fold 8's Route 1 save:** a wild Pidgey (Lv 3) caught with the buttons on its first throw, then the Pokédex entry.
+- **30 fps, as on the Switch:** 29.7–30.0 fps per 30 s over the new game; the bedroom GPU p50 11–12 ms; walking in Pallet Town 30.0 fps, frame p50 33.2 / p95 43.5 ms, GPU p50 16.6 / p95 23.5 ms; the catch 29.9–30.0 fps, GPU p50 15–18 ms.
+- **Saves:** the X menu's Save committed (`save commit #1`), and after a restart "Continue your adventure" loaded it in Pallet Town.
+- **Sound:** an audio dump from the Continue start (47 s): silent on the controller screen, as on the Z Fold 8, then the confirm sound and the music from about 20 s at −21 to −24 dBFS RMS on the front pair.
+- **`[RED]`:** the same two kinds.
+- **Not tried:** Route 1 from a save made on this phone, trainer battles, aiming with motion.
+
+**On a Samsung Galaxy Z Flip 7**, 2026-11-10: Exynos 2500, Xclipse 950 with Samsung's driver 0x6000215 and Vulkan 1.3.279, Android 16, open, on its inner screen. The hosts from `main` at `898ac92f`, the game files from the same build folder; the on-screen controls, played by hand with adb input from a new game:
+
+- **The stretch:** the controller screen, the opening movie, Oak's introduction, the default look, both names (`DM_KBD`), then walking in the bedroom.
+- **30 fps, as on the Switch:** 29.8 fps over the 6.6-minute first launch, 29.9 walking; frame p50 33.4 ms, p95 37–40 ms; GPU p50 5.0–7.2 ms.
+- **Saves:** the X menu's SAVE committed (`save commit #1`), and the title's "Continue your adventure" loaded it in the bedroom.
+- **Sound:** an audio dump: the title music at −20 to −27 dBFS and the bedroom's at −23 to −26 dBFS on the front pair; no underrun in 256,000 callbacks.
+- **`[RED]`:** the same two kinds.
+- **Not tried:** downstairs and Pallet Town, catches, aiming with motion.

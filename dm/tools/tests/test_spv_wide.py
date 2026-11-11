@@ -403,10 +403,10 @@ class SpvWide(unittest.TestCase):
         text = HEAD[:HEAD.index('%L = OpLoad')] + 'OpReturn\nOpFunctionEnd\n'
         self.assertEqual(self.run_on(self.asm(text, 'fs_none')), (None, 0))
 
-    def test_operation_not_covered_left(self):   # the translator writes SHFL as Shuffle only; a relative shuffle or an arithmetic one is not Maxwell's
+    def test_operation_not_covered_left(self):   # the translator writes SHFL as Shuffle only (spv_xor makes its butterfly ShuffleXor); a relative shuffle or an arithmetic one is not Maxwell's
         text = FS.replace('OpCapability GroupNonUniformVote\n', 'OpCapability GroupNonUniformVote\nOpCapability GroupNonUniformShuffleRelative\n') \
-                 .replace('%sh1 = OpGroupNonUniformShuffle %f32 %scope %f %src1\n', '%sh1 = OpGroupNonUniformShuffleXor %f32 %scope %f %u1\n')
-        self.assertEqual(self.run_on(self.asm(text, 'fs_xor')), (None, KEPT))
+                 .replace('%sh1 = OpGroupNonUniformShuffle %f32 %scope %f %src1\n', '%sh1 = OpGroupNonUniformShuffleUp %f32 %scope %f %u1\n')
+        self.assertEqual(self.run_on(self.asm(text, 'fs_up')), (None, KEPT))
         text = FS.replace('OpCapability GroupNonUniformVote\n', 'OpCapability GroupNonUniformVote\nOpCapability GroupNonUniformArithmetic\n') \
                  .replace('%sz = OpLoad %u32 %size\n', '%sz = OpGroupNonUniformIAdd %u32 %scope Reduce %L\n')
         self.assertEqual(self.run_on(self.asm(text, 'fs_add')), (None, KEPT))

@@ -35,4 +35,45 @@ First run on Android, 2026-11-10: a Samsung Galaxy S25 Edge (SM-S937U1: Snapdrag
 - **Sound:** AudioOut #0 (6 channels, `main+0x3a60d0`) on AAudio at 48 kHz stereo. `DM_AUDIO_DUMP` has the title and town music in the first two channels, the other four silent; no underrun in 34 reports.
 - **Saves:** the manual save and the autosave committed (`save commit #1`, `#2`) and loaded again.
 - **One `[RED]` line**, once at boot: `a second NVN queue submits: the Vulkan replay shares one state between queues` (the replay keeps one state for every NVN queue, `gfx_vk.c` `mtl_queue_activate`). Nothing in the picture showed it.
-- **Not tried:** a battle (the run stops before the first Pokémon), the Wild Area, docked mode, and the other devices (it was installed on the Ayn Odin 2 and the OnePlus Pad 3 on 2026-11-09, with no result written down).
+
+**Through the first battle on a Retroid Pocket 5**, 2026-11-10: SM8250, Adreno 650 with Qualcomm's driver 0x802ea000 and Vulkan 1.1.128, Android 13. DroidPlay Core `main` at `898ac92f`, handheld (720p), the built-in controls. The same build folder (no shader translated again). Played by hand with adb input, about 36 minutes from a new game:
+
+- **The stretch:**
+  - the opening and the Bag;
+  - Hop and the race to his house, where his mum sends them to meet Leon;
+  - Route 1, and Wedgehurst station, where Leon and Charizard arrive among the fans;
+  - back in Hop's garden, Leon's three starters (Scorbunny taken; its nickname box answered by `DM_KBD` as well), and dinner;
+  - the next day, **Hop's battle**: his Wooloo (Lv 3) and Grookey (Lv 5) against Scorbunny (Lv 5) with Tackle. Won; Scorbunny went up to Lv 6 and learned Ember.
+
+  Then a save, and a cold start: the title and Continue loaded it in Hop's garden. Nothing wrong was seen in the picture (battle scenes, HP bars, menus, the level-up panel), and there was no crash and no hang.
+- **30 fps throughout:** 218 windows of 300 frames, frame p50 33.0–34.5 ms (median 33.3), p95 median 36.5 / max 40.4 ms. GPU p50 median 19.5 ms, the most 27.2 ms (outdoors, Wedgehurst). Battles: GPU 14–17 ms.
+- **First start:** the longest frames are pipelines and shader libraries made in the frame, as on the S25 Edge but longer on this GPU:
+  - 5.0 s at the first step outside (245 pipelines and 481 libraries, 4.3 s of it);
+  - 1.7 s in the opening;
+  - 1.2 s as the battle starts.
+
+  25 of the 218 windows had a frame over 100 ms. With the pipeline cache (10.8 MB after the run), the Continue start's longest frame was 178 ms.
+- **Sound:** `DM_AUDIO_DUMP` over the Continue start (82 s): the title and town music in the first two channels; no underrun in 291 reports.
+- **Saves:** three commits (two manual saves and the game's autosave), and the last was loaded again.
+- **`[RED]`:** the same single line as on the S25 Edge.
+- **Installing:** the Retroid Pocket 5 unpacks the 101,375 shader files at about 13–32 a second (per-file kernel time), so the first install took 1 h 32 min. Shield takes about 15 GB there.
+- **Not tried:** the Wild Area, docked mode, the Ayn Odin 2 and the OnePlus Pad 3 (it was installed on both on 2026-11-09, with no result written down).
+
+**On a Google Pixel 9 Pro XL**, 2026-11-10: Tensor G4, Mali-G715 with Arm's driver 0xd803000 and Vulkan 1.4.343, Android 17. The hosts from `main` at `898ac92f`, the game files from the same build folder; handheld (720p), the on-screen controls, played by hand with adb input from a new game:
+
+- **The stretch:** the language, the photo and the name (`DM_KBD`), Rose's broadcast and Leon's match, the living room and Hop with Wooloo, the Bag in the bedroom and its scene, a save from the X menu, then out of the front door to Hop on the path in Postwick. Nothing wrong was seen in the picture (the spots compared with the S25 Edge's shots of them), and there was no crash and no hang.
+- **30 fps, as on the Switch:** 29.5–30.1 fps per 30 s in the house, GPU p50 16–18 ms; walking in Postwick 29.8 fps, frame p50 33.2 / p95 39.9 ms, GPU p50 22.2 / p95 27.5 ms.
+- **First start:** 934 pipelines were built in 18.7 s, with 4,089 draws left out meanwhile; the first step outside took one 4.6 s frame. The Mali-G715 has no BC textures, so they are decoded on the CPU.
+- **Saves:** the X menu's save committed (`save commit #1`), and after a restart the title's Continue loaded it in the bedroom.
+- **Sound:** `DM_AUDIO_DUMP` over the title and the bedroom (59 s): the front pair at −22.5 / −23.2 dBFS RMS, peaks −3 / −2 dBFS; the other four channels silent, as on the S25 Edge.
+- **`[RED]`:** the same single line.
+- **Not tried:** a battle, the Wild Area.
+
+**On a Samsung Galaxy Z Flip 7**, 2026-11-10: Exynos 2500, Xclipse 950 with Samsung's driver 0x6000215 and Vulkan 1.3.279, Android 16, open, on its inner screen. The hosts from `main` at `898ac92f`, the game files from the same build folder; the on-screen controls, played by hand with adb input from a new game:
+
+- **The stretch:** the language, the look and the name (`DM_KBD`), the stadium opening with Chairman Rose, Postwick's Wooloo scene and Hop's talk, then walking in the house.
+- **30 fps, as on the Switch:** 29.7 fps over the 7.7-minute first launch, 30.0 walking; frame p50 33.4 ms, p95 37.9–39.9 ms; GPU p50 10.5–11.8 ms.
+- **Saves:** the X menu's save committed (`save commit #1`), and after a restart Continue loaded it where it was made.
+- **Sound:** an audio dump of the title and the house: the front pair at −22 / −23 dBFS RMS, peaks to −2 dBFS; no underrun in 266,000 callbacks.
+- **`[RED]`:** the same single line.
+- **Not tried:** outside the house, the Bag, a battle.

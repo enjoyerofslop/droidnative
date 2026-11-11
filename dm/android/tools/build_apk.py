@@ -22,6 +22,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def game_package(title_id):   # a game app's package: a name segment may not start with a digit, as a title ID does
     return 'org.nxnative.game.t' + title_id.lower()
 
+# Why a game app's ZIP stopped: zipfile raises the same LargeZipFile for each limit of a ZIP without ZIP64 ("Files count", or the bytes: "Filesize", "Zipfile size",
+# "Central directory offset" / "size" … would require ZIP64 extensions), and the message once said 2 GiB for all of them, so a game with too many files was told its RomFS was too big (droidplay-core
+# issue #169). writing: the entry being added, its size, how many entries the ZIP had and its bytes written
+def zip64_message(out, why, writing):
+    arc, size, entries, written = writing
+    if str(why).startswith('Files count'):
+        limit = f'reached {entries:,} entries, and an APK without ZIP64, which apksigner needs, holds at most 65,535'
+    else:
+        limit = f'passed 2 GiB ({written:,} bytes written), more than an APK without ZIP64, which apksigner needs, holds'
+    return (f'{out}: the game app {limit}, while {arc} ({size:,} bytes) was being added ({why}). build_android_from_nsp.py --game-apk weighs the parts and counts '
+            'their files before packing, packs the shaders into one file and puts the RomFS and the DLC beside the APK when they don\'t fit (make_game_app)')
+
 def run(*a):
     r = subprocess.run(a, capture_output=True, text=True, errors='replace')
     if r.returncode: sys.exit(f'{a[0]} failed ({r.returncode}):\n{r.stdout}{r.stderr}')
@@ -85,8 +97,8 @@ def main():
         run(os.path.join(bt, 'd8' + bat), '--lib', jar, '--min-api', '29', '--output', d, *[os.path.join(r, f) for r, _, fs in os.walk(cls) for f in fs if f.endswith('.class')])
         # a game app's ZIP without ZIP64 (allowZip64=False: past 2 GiB zipfile raises instead of writing records apksigner can't read). What was being written when it
         # did is named: the message used to advise packing the RomFS beside the APK, which a game whose other files passed 2 GiB already did (droidplay-core issue #169)
-        writing = ['', 0]
-        def put(z, path, arc, **kw): writing[:] = [arc, os.path.getsize(path)]; z.write(path, arc, **kw)
+        writing = ['', 0, 0, 0]
+        def put(z, path, arc, **kw): writing[:] = [arc, os.path.getsize(path), len(z.filelist), z.fp.tell() if z.fp else 0]; z.write(path, arc, **kw)
         try:
             with zipfile.ZipFile(base, 'a', zipfile.ZIP_DEFLATED, allowZip64=not a.game_app) as z:
                 put(z, os.path.join(d, 'classes.dex'), 'classes.dex')
@@ -107,10 +119,8 @@ def main():
                             path = os.path.join(root, f); rel = os.path.relpath(path, a.game_dir).replace(os.sep, '/')
                             if rel != 'RomFS.img': put(z, path, f'assets/game/{rel}')
                     if a.romfs: put(z, a.romfs, 'assets/game/RomFS.img', compress_type=zipfile.ZIP_STORED)
-        except zipfile.LargeZipFile:   # (only a game app's ZIP is written without ZIP64)
-            sys.exit(f'{a.out}: the game app passed 2 GiB while {writing[0]} ({writing[1]:,} bytes) was being added, with {os.path.getsize(base):,} bytes written: an APK '
-                     'without ZIP64, which apksigner needs, holds no more. build_android_from_nsp.py --game-apk weighs the parts before packing and puts the RomFS '
-                     'and the DLC beside the APK when they don\'t fit (make_game_app)')
+        except zipfile.LargeZipFile as why:   # (only a game app's ZIP is written without ZIP64)
+            sys.exit(zip64_message(a.out, why, writing))
         aligned = os.path.join(d, 'aligned.apk')
         run(os.path.join(bt, 'zipalign' + exe), '-f', '-P', '16', '4', base, aligned)   # stored entries (a game app's RomFS) on 4 bytes, the libraries on 16 KiB pages
         run(os.path.join(bt, 'apksigner' + bat), 'sign', '--ks', a.keystore, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', a.out, aligned)
