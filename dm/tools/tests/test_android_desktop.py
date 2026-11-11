@@ -330,7 +330,7 @@ class VkCatalog(unittest.TestCase):   # the Vulkan driver catalog (dm/android/vk
         t30 = self.cat['turnip-mrpurple-t30']
         self.assertEqual(t30['zip_sha256'][:8], 'f65b2d33'); self.assertEqual(t30['library_sha256'][:8], '1d80dfa0')   # the package DroidPlay tested
         for e in self.cat.values():
-            for r in e['tested']: self.assertTrue(vkd.in_ranges(r['gpu'], e['gpus']), f'{e["id"]} tested on the {r["gpu"]}, which its gpus leave out')
+            for r in e['tested']: self.assertTrue(600 <= r['gpu'] <= 999 and r['games'], f'{e["id"]}: a tested row needs an Adreno number and its games')   # a row may go past the builder's list: DroidPlay's own run
 
     def test_marks_against_a_phone(self):
         t30, faux = self.cat['turnip-mrpurple-t30'], self.cat['turnip-faux123-1.2.10']
@@ -342,6 +342,26 @@ class VkCatalog(unittest.TestCase):   # the Vulkan driver catalog (dm/android/vk
         self.assertEqual(vkd.mark(t30, gpu.classify('', 'adreno'))['kind'], vkd.UNKNOWN)
         self.assertIn('API 30', vkd.mark(t30, gpu.classify('Adreno (TM) 650'), '29')['warn'])
         self.assertIn("doesn't have", vkd.mesh_note(t30)); self.assertIn("isn't known", vkd.mesh_note(self.cat['turnip-stevenmxz-gen8-v39']))
+
+    def test_the_start_record_reads(self):   # the host's vk_start.txt, as refresh_phone reads it ('|' for its line breaks)
+        r = vkd.parse_start('driver=system|driver_id=8|gpu=Adreno (TM) 730|pipelines_failed=31|failed_shaders=1e7e00b64456ac66+81d552c0a9598f40,a335c1db6270c355|device_lost=|time=1794418017|')
+        self.assertEqual((r['driver'], r['gpu'], r['pipelines_failed'], r['device_lost']), ('system', 'Adreno (TM) 730', 31, ''))
+        self.assertEqual(vkd.parse_start(''), {}); self.assertEqual(vkd.parse_start('driver=system\npipelines_failed=x\n')['pipelines_failed'], 0)
+
+    def test_a_tested_driver_is_suggested_only_where_the_phones_own_failed(self):
+        cat = list(self.cat.values()); fp, bd, oot, smo = '0100B1C0249B4000', '0100000011D90000', '0400486024DEC000', '0100000000010000'
+        a730, a740 = gpu.classify('Adreno (TM) 730'), gpu.classify('Adreno (TM) 740')
+        bad = vkd.parse_start('driver=system|gpu=Adreno (TM) 730|pipelines_failed=31')
+        e, n, line = vkd.suggestion(cat, bad, a730, fp)
+        self.assertEqual((e['id'], n), ('turnip-mrpurple-t30', 730)); self.assertIn('Frostpunk', line)   # the catalog's order among drivers listed for the 730
+        self.assertEqual(vkd.suggestion(cat, bad, a730, bd)[0]['id'], 'turnip-faux123-1.2.10')   # the builder lists the 730: before Gen8, tested there but not listed
+        self.assertEqual(vkd.suggestion(cat, dict(bad, gpu='Adreno (TM) 740'), a740, oot)[0]['id'], 'turnip-mrpurple-t30')
+        self.assertEqual(vkd.suggestion(cat, bad, gpu.classify('', 'adreno'), fp)[1], 730)   # the phone's number not known yet: the record's GPU name gives it
+        self.assertIn('31 pipelines', vkd.suggestion_text(bad, e, n, 'Frostpunk')); self.assertIn('try it?', vkd.suggestion_text(bad, e, n, 'Frostpunk'))
+        for why, args in (('nothing failed', (dict(bad, pipelines_failed=0), a730, fp)), ('a driver is chosen', (bad, a730, fp, 'turnip-faux123-1.2.10')),
+                          ('the start ran on another driver', (dict(bad, driver='libvulkan_freedreno-c9a5c405.so'), a730, fp)), ('no record', ({}, a730, fp)),
+                          ('not an Adreno', (bad, gpu.classify('Mali-G715'), fp)), ('no driver tested for this game there', (bad, a730, smo))):
+            self.assertIsNone(vkd.suggestion(cat, *args), why)
 
     def test_a_bad_catalog_is_refused(self):
         bad = json.loads(vkd.CATALOG.read_text()); bad['drivers'][0]['env'] = ['DM_VK_RAW_GMEM=1']

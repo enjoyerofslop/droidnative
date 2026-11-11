@@ -139,6 +139,11 @@ arm64 driver; it can't check what the code does, so add only drivers from builde
 with **Apply to phone now** (no rebuild); the dialog also says which driver the phone's copy uses and how its last start went. A game app (**Build a game app…**)
 carries the driver chosen in its dialog. On a phone without an Adreno GPU none of this applies, and the game runs on the phone's own driver.
 
+The phone's own driver stays every game's default, and DroidPlay never switches drivers by itself. When it refuses some of a game's shaders at its last start (the
+phone writes the count to `files/games/<title ID>/vk_start.txt`), parts of the picture are missing: Frostpunk's buildings on an Adreno 730, say. If the catalog has a
+driver tested for that game on that Adreno, the Library says so under the game, with **Try** (which chooses that driver for the game, as the options do; it reaches
+the phone with the next install or **Apply to phone now**) and **Not now** (not suggested again for that game). The game's options show the same line.
+
 **By hand:**
 
 1. Unzip the driver package (`turnip_mrpurple_T30-toasted.adpkg.zip`, say). It holds a `.so` (`vulkan.purple.so`) and a `meta.json` that names it.

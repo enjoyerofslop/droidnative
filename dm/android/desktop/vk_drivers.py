@@ -1,7 +1,8 @@
 # The Vulkan drivers DroidPlay for Windows offers per game (droidplay's plans/turnip-driver-windows-app.md, phase 3): the catalog pinned in the repository
 # (dm/android/vk_drivers.json), each entry checked against a phone's GPU (phone_gpu.py), downloaded on demand from its builder's release and checked by the zip's
 # and the driver's SHA-256, and drivers a player adds ("Add your own…"), checked by vk_driver_pkg as the packing script checks them. Nothing from a driver is run
-# on the computer. Without Qt, so dm/tools/tests/test_android_desktop.py runs it where PySide6 isn't installed.
+# on the computer. suggestion(): a driver tested for a game on the phone's Adreno, offered when the game's last start (the host's vk_start.txt) had pipelines refused by
+# the phone's own driver; the app shows it and the player decides (plans/turnip-vs-native-drivers-2026-11-11.md: native fixes first, no switching by itself). Without Qt, so dm/tools/tests/test_android_desktop.py runs it where PySide6 isn't installed.
 #   The files: <data>/vk_drivers/<id>/<the release's zip name> for catalog entries, <data>/vk_drivers/custom-<sha8>/<the file's name> for a player's own (<data>:
 #   build_android_from_nsp.py's data folder). The app passes that file to the packing script (--vk-driver, --set-vk-driver), which checks it again.
 import hashlib, io, json, re, shutil, sys, urllib.request, zipfile
@@ -63,6 +64,39 @@ def mesh_note(e):   # for a Switch 2 game (NVN2): its mesh draws need VK_EXT_mes
     if e.get('mesh_shaders') is True: return ''
     return ("This Switch 2 game may draw with mesh shaders, which this driver doesn't have: those draws are skipped" if e.get('mesh_shaders') is False
             else "This Switch 2 game may draw with mesh shaders, and whether this driver has them isn't known")
+
+
+def parse_start(text):
+    """A game's last start record (games/<title ID>/vk_start.txt, the host's vk_start.c; refresh_phone reads it with '|' for its line breaks) → its fields, with
+    pipelines_failed an int; {} when there is none"""
+    out = dict(x.split('=', 1) for x in re.split(r'[|\n]', text or '') if '=' in x)
+    if out: out['pipelines_failed'] = int(out['pipelines_failed']) if str(out.get('pipelines_failed', '')).strip().isdigit() else 0
+    return out
+
+
+def suggestion(entries, start, gpu, game, choice=''):
+    """The catalog driver to suggest for a game whose last start (parse_start) ran on the phone's own driver and had pipelines refused → (entry, Adreno number, the
+    tested row's line for the game), or None. Only for a game on the system driver (choice '': nothing picked for it), on an Adreno phone whose number is known
+    (gpu: phone_gpu.classify's; else the record's GPU name), with an entry tested for this game on that Adreno: one its builder lists for that GPU first, then the
+    catalog's order. The app shows it and the player decides: nothing here or in the app switches a driver by itself (plans/turnip-vs-native-drivers-2026-11-11.md)"""
+    if choice or not start or start.get('driver') != 'system' or not start.get('pipelines_failed'): return None
+    kind, n = (gpu or {}).get('kind'), (gpu or {}).get('adreno')
+    if kind not in (None, 'adreno', 'unknown'): return None
+    if not n:
+        m = re.search(r'Adreno\D{0,8}?(\d{3})', start.get('gpu', ''))
+        n = int(m[1]) if m else None
+    if not n: return None
+    best = None
+    for e in entries:
+        r = next((r for r in e['tested'] if r['gpu'] == n and game in r['games']), None)
+        if r and (best is None or (not in_ranges(n, e['gpus'])) < best[0]): best = (not in_ranges(n, e['gpus']), e, r['games'][game])
+    return (best[1], n, best[2]) if best else None
+
+
+def suggestion_text(start, e, n, game_name):
+    k = start['pipelines_failed']
+    return (f"Some shaders failed on this phone's own driver ({k} pipeline{'' if k == 1 else 's'} at the last start), so parts of the picture may be missing. "
+            f"{e['name']} is tested for {game_name} on the Adreno {n}: try it?")
 
 
 def file_of(e, folder):   # where a catalog entry's zip goes (and is found)
