@@ -314,6 +314,15 @@ static int gm_swap(const void *pool, uintptr_t lo, size_t n, int live, int freez
 }
 static uintptr_t (*g_gm_addr)[2]; static int g_ngma, g_cgma;   // ranges of pools the game took a buffer address in, kept after they are given back (under g_gm_pl)
 static int gm_was_addressed(uintptr_t lo, uintptr_t hi) { for (int i = 0; i < g_ngma; i++) if (g_gm_addr[i][0] < hi && lo < g_gm_addr[i][1]) return 1; return 0; }
+// Shader-code pools (NVN_MEMORY_POOL_FLAGS_SHADER_CODE) are left unplaced: the replay runs translated shaders and reads a program's own constants on the CPU, and no raw
+// pointer reaches shader code. Ocarina of Time has 205 of them, 345 MiB that would be committed and unswappable (BananaNative found it and leaves them out by default,
+// DM_VK_PLACE_SHADER_POOLS, after Anka Native). DM_VK_RAW_GMEM_CODE=1 (env.txt): placed as other pools
+static uint64_t g_gm_code_skipped;
+static int gm_code_skip(int flags) {
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_CODE"); v = !(e && *e == '1'); if (!v) LOG("[vk] DM_VK_RAW_GMEM_CODE=1: shader-code pools are placed as other pools"); }
+    if (v && (flags & NVN_MEMORY_POOL_FLAGS_SHADER_CODE)) { g_gm_code_skipped++; return 1; }
+    return 0;
+}
 enum { GM_CHUNK = 2u << 20, GM_LAZY_MIN = 4u << 20 };   // a pool at least GM_LAZY_MIN is placed in chunks of GM_CHUNK as they are used (gfx_vk_gmem_lazy.inc)
 static int gm_lazy_on(void); static void gm_lazy_add(const void *pool, uintptr_t lo, size_t size, int live); static void gm_lazy_drop(const void *pool);
 static void gm_place(const void *mem, uint64_t size, int live) {   // live: the pool is in use (mtl_pool_addressed); 0: at its Initialize, before anything uses it
@@ -490,9 +499,9 @@ static void gm_stat(void) {
         LOG("[vk] raw global memory: memory pools by the addresses taken in them: a buffer's %llu (%.1f MiB), only a texture's %llu (%.1f MiB), none %llu (%.1f MiB); the largest (MiB, b/t/-):%s",
             (unsigned long long)nb[1], by[1] / 1048576.0, (unsigned long long)nb[2], by[2] / 1048576.0, (unsigned long long)nb[0], by[0] / 1048576.0, t); }
     LOG("[vk] raw global memory: %d placed pieces, %.1f MiB (peak %.1f; %.1f MiB of the pools were resident when placed), placing took %.0f ms, giving back %.0f ms (%llu given back, %llu kept placed); pools not placed: %llu over DM_VK_RAW_GMEM_MAX, %llu overlapping, "
-        "%llu failed; %llu swaps waited for the GPU; %llu tables built (%llu buffers made); %llu bindings of the table, %llu of a write log (%llu logs with stores, %llu entry bits, %llu CPU reads that met their chunk); draws that met pending write-backs: %llu as they were, %llu landed first (cumulative)",
+        "%llu failed, %llu shader-code pools left out; %llu swaps waited for the GPU; %llu tables built (%llu buffers made); %llu bindings of the table, %llu of a write log (%llu logs with stores, %llu entry bits, %llu CPU reads that met their chunk); draws that met pending write-backs: %llu as they were, %llu landed first (cumulative)",
         g_ngm, g_gm_bytes / 1048576.0, g_gm_peak / 1048576.0, g_gm_resident / 1048576.0, g_gm_place_ns / 1e6, g_gm_give_ns / 1e6, (unsigned long long)g_gm_given, (unsigned long long)g_gm_kept, (unsigned long long)g_gm_capped,
-        (unsigned long long)g_gm_overlap, (unsigned long long)g_gm_failed, (unsigned long long)g_gm_waits, (unsigned long long)g_gm_tabs, (unsigned long long)g_gm_tab_new, (unsigned long long)g_gm_draws, (unsigned long long)g_gm_stdraws, (unsigned long long)g_gm_logs,
+        (unsigned long long)g_gm_overlap, (unsigned long long)g_gm_failed, (unsigned long long)g_gm_code_skipped, (unsigned long long)g_gm_waits, (unsigned long long)g_gm_tabs, (unsigned long long)g_gm_tab_new, (unsigned long long)g_gm_draws, (unsigned long long)g_gm_stdraws, (unsigned long long)g_gm_logs,
         (unsigned long long)g_gm_logbits, (unsigned long long)g_gm_store_hits, (unsigned long long)g_gm_unsynced, (unsigned long long)g_gm_synced);
 }
 #include "gfx_vk_gmem_check.inc"   // DM_VK_RAW_GMEM_TEST and DM_VK_RAW_GMEM_CHECK: the self-test on the GPU and the pointers the shaders read
