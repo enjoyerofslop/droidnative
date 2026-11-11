@@ -80,6 +80,12 @@ def check_zip(e, data):   # the zip's bytes against the entry: its hash, then th
     return None
 
 
+def present(e, folder):   # the entry's zip downloaded, by its size alone: cheap enough for the UI thread (cached checks the hashes before it is used)
+    f = file_of(e, folder)
+    try: return f.is_file() and f.stat().st_size == e['size']
+    except OSError: return False
+
+
 def cached(e, folder):   # the entry's zip, downloaded before and still matching, or None
     f = file_of(e, folder)
     try: return f if f.is_file() and f.stat().st_size == e['size'] and check_zip(e, f.read_bytes()) is None else None

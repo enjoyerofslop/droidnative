@@ -365,8 +365,11 @@ class VkCatalog(unittest.TestCase):   # the Vulkan driver catalog (dm/android/vk
 
     def test_download_checked_by_both_hashes(self):
         data = make_pkg(self.tmp).read_bytes(); base = self.serve({'/turnip.adpkg.zip': data}); e = self.entry(base, data)
+        self.assertFalse(vkd.present(e, self.tmp / 'dl'))
         f = vkd.download(e, self.tmp / 'dl')
-        self.assertEqual(f.read_bytes(), data); self.assertEqual(vkd.cached(e, self.tmp / 'dl'), f)
+        self.assertEqual(f.read_bytes(), data); self.assertEqual(vkd.cached(e, self.tmp / 'dl'), f); self.assertTrue(vkd.present(e, self.tmp / 'dl'))
+        f.write_bytes(bytes(len(data)))   # the same size, other bytes: present by its size, refused by its hash
+        self.assertTrue(vkd.present(e, self.tmp / 'dl')); self.assertIsNone(vkd.cached(e, self.tmp / 'dl'))
         other = make_pkg(self.tmp, 'other.zip', data=elf(pad=64)).read_bytes()   # same name, another driver: the zip's hash refuses it
         base2 = self.serve({'/turnip.adpkg.zip': other})
         with self.assertRaises(ValueError): vkd.download(self.entry(base2, data), self.tmp / 'dl2')

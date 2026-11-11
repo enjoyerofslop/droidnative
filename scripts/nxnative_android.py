@@ -312,7 +312,9 @@ class VkDrivers:   # the window's: the catalog (vk_drivers.json), the player's o
         if not c: return 'System driver'
         e = self.entry(c); r = self.customs().get(c)
         return e['name'] if e else (r or {}).get('name') or c
-    def file(self, c):   # the file the packing script takes for choice c, or None (a catalog entry not downloaded yet, a player's file gone)
+    def env_args(self, c):   # the Mesa switches a catalog entry sets beside its driver (its env), as the packing script takes them
+        return [x for line in (self.entry(c) or {}).get('env') or [] for x in ('--vk-driver-env', line)]
+    def file(self, c):   # the file the packing script takes for choice c, or None (a catalog entry not downloaded yet, a player's file gone). Hashes: off the UI thread
         e = self.entry(c)
         if e: return vkd.cached(e, vk_folder())
         r = self.customs().get(c)
@@ -350,7 +352,7 @@ class VkDriverBox(QWidget):   # the options dialog's Vulkan driver choice for on
         add('', "System driver: the phone's own (the default)", '')
         other = QWidget(); ol = QVBoxLayout(other); ol.setContentsMargins(0, 0, 0, 0); ol.setSpacing(6); n_other = 0
         for e in self.vk.catalog:
-            m = vkd.mark(e, self.gpu, sdk, g.id); have = vkd.cached(e, vk_folder()) is not None
+            m = vkd.mark(e, self.gpu, sdk, g.id); have = vkd.present(e, vk_folder())   # (by its size: the hashes are checked off this thread before it is used)
             lines = [{'tested': '✓ ', 'supported': '○ ', 'unknown': '○ '}.get(m['kind'], '✕ ') + m['text'] + '.']
             lines += [f'   {r["device"]} (Adreno {r["gpu"]}, Android {r["android"]}): {line or "; ".join(r["games"].values())}' for r, line in m['rows'][:3]]
             if m['warn']: lines.append(f'⚠ {m["warn"]}.')
@@ -391,20 +393,25 @@ class VkDriverBox(QWidget):   # the options dialog's Vulkan driver choice for on
     def picked_page(self): self.page_b.setEnabled(self.vk.entry(self.choice()) is not None)
     def picked(self, _btn):   # a catalog entry not downloaded yet: its size and source asked about once, then downloaded
         c = self.choice(); e = self.vk.entry(c); self.picked_page()
-        if e and vkd.cached(e, vk_folder()) is None:
+        if e and not vkd.present(e, vk_folder()):
             host = '/'.join(e['url'].split('/')[2:4])
             if not self.win.st.value(f'vkdrv/asked/{c}', False, type=bool):
                 if QMessageBox.question(self, 'Download the driver', f'Download {e["name"]} ({gb_text(e["size"])}) from {host}? DroidPlay checks it against the '
                                         'checksums in its catalog and runs nothing from it on this computer.') != QMessageBox.Yes:
                     self.radios[self.prev].setChecked(True); self.picked_page(); return
                 self.win.st.setValue(f'vkdrv/asked/{c}', True)
-            self.win.vk_download(e, lambda f: f or (self.radios[self.prev].setChecked(True), self.picked_page()))
+            prev = self.prev
+            def got(f):   # a failed or cancelled download leaves the choice it replaced, so OK can't save a driver that isn't there
+                if f: self.prev = c
+                else: self.radios[prev].setChecked(True); self.picked_page()
+            self.win.vk_download(e, got); return
         self.prev = c
     def add_own(self):
         f, _ = QFileDialog.getOpenFileName(self, 'Add a Vulkan driver', str(Path.home()), 'Driver packages (*.zip *.adpkg *.so)')
         if not f: return
-        try: rec = vkd.import_custom(f, vk_folder())
-        except vkd.vkpkg.PackageError as e: QMessageBox.warning(self, 'Not a driver DroidPlay can use', str(e)); return
+        bg(lambda: vkd.import_custom(f, vk_folder()), self.added)   # read and hashed off the UI thread (a driver is about 19 MB)
+    def added(self, rec):
+        if isinstance(rec, Exception): QMessageBox.warning(self, 'Not a driver DroidPlay can use', str(rec)); return
         text = vkd.ADD_WARNING + ('\n\n' + vkd.PROPRIETARY_WARNING.format(vendor=(rec.get('meta') or {}).get('vendor') or 'non-Mesa') if rec['proprietary'] else '')
         box = QMessageBox(QMessageBox.Warning, 'Add your own driver', f'<b>{esc(rec["name"])}</b><br>sha256 {rec["sha256"]}', parent=self); box.setInformativeText(text)
         box.setStyleSheet('QLabel#qt_msgbox_informativelabel { min-width: 460px; }')
@@ -419,12 +426,15 @@ class VkDriverBox(QWidget):   # the options dialog's Vulkan driver choice for on
         e = self.vk.entry(self.choice())
         if e: QDesktopServices.openUrl(QUrl(e['page']))
     def apply(self):   # --set-vk-driver: the phone's copy of the game switched now, with no build
-        c = self.choice(); s = self.win.serial(); self.win.st.setValue(f'vkdrv/{self.g.id}', c)
+        c = self.choice(); s = self.win.serial(); self.win.st.setValue(f'vkdrv/{self.g.id}', c); win, g, after = self.win, self.g, self.page.after_task
         def go(f):
             if c and not f: return
-            self.win.builds.start(f'Set the Vulkan driver of {self.g.name}', ['--set-vk-driver', str(f) if c else 'system', '--title', self.g.id, '--serial', s], after=self.page.after_task)
-        if c and self.vk.file(c) is None and self.vk.entry(c): self.win.vk_download(self.vk.entry(c), go)
-        else: go(self.vk.file(c) if c else None)
+            win.builds.start(f'Set the Vulkan driver of {g.name}', ['--set-vk-driver', str(f) if c else 'system', '--title', g.id, '--serial', s, *win.vk.env_args(c)], after=after)
+        def have(f):
+            if c and f is None and win.vk.entry(c): win.vk_download(win.vk.entry(c), go)
+            else: go(f)
+        if c: bg(lambda: win.vk.file(c), lambda f: have(None if isinstance(f, Exception) else f))   # (hashed off the UI thread)
+        else: go(None)
         self.window().close()
 
 
@@ -658,16 +668,16 @@ class LibraryPage(QWidget):
         # the game's Vulkan driver (its options; vk: the game app dialog's pick), for what installs to a phone or packs a game app: downloaded first when the catalog's
         # entry isn't yet, and checked again by the script (--vk-driver)
         c = self.win.vk.choice(g.id) if vk is None else vk
-        if c and ('--game-apk' in extra or ('--no-push' not in extra and '--update-shaders' not in extra)):
-            f = self.win.vk.file(c)
-            if f is None and self.win.vk.entry(c):
-                self.win.vk_download(self.win.vk.entry(c), lambda got: got and self.run(g, extra, what, after, c)); return
-            if f is None: self.win.toast(f'{self.win.vk.name(c)}, the Vulkan driver chosen for {g.name}, is gone: pick one in its options'); return
-            extra = [*extra, '--vk-driver', str(f)]
         done = after or self.after_task
         def installed():   # it went onto that phone: the next Play there is a first start, with its shaders to prepare
             self.win.st.setValue(f'firststart/{s}/{g.id}', True); done()
-        self.win.builds.start(f'{what} {g.name}', args + extra, after=installed if '--serial' in args else done)
+        def start(more): self.win.builds.start(f'{what} {g.name}', args + extra + more, after=installed if '--serial' in args else done)
+        if not c or not ('--game-apk' in extra or ('--no-push' not in extra and '--update-shaders' not in extra)): start([]); return
+        def have(f):
+            if f is None and self.win.vk.entry(c): self.win.vk_download(self.win.vk.entry(c), lambda got: got and self.run(g, extra, what, after, c)); return
+            if f is None: self.win.toast(f'{self.win.vk.name(c)}, the Vulkan driver chosen for {g.name}, is gone: pick one in its options'); return
+            start(['--vk-driver', str(f), *self.win.vk.env_args(c)])
+        bg(lambda: self.win.vk.file(c), lambda f: have(None if isinstance(f, Exception) else f))   # (its hashes checked off the UI thread)
     def first_start_ok(self, g, s):   # the first Play since the game went onto this phone: say the screen stays black a while, so it isn't taken for a crash
         key = f'firststart/{s}/{g.id}'
         if not self.win.st.value(key, False, type=bool) or self.win.st.value('firststart/never', False, type=bool): return True
@@ -702,8 +712,7 @@ class LibraryPage(QWidget):
         (xapk if self.win.st.value('game_app_kind', 'apk') == 'xapk' else apk).setChecked(True)
         lay.addSpacing(6); lay.addWidget(label('Vulkan driver', 'meta')); drv = QComboBox(); drv.addItem('System driver (works on every phone)', '')
         for e in self.win.vk.catalog: drv.addItem(f'{e["name"]}  ·  Adreno ' + ', '.join(f'{lo}–{hi}' for lo, hi in e['gpus']), e['id'])
-        for rid, rec in self.win.vk.customs().items(): drv.addItem(f'My driver: {rec["name"]}', rid)
-        drv.setCurrentIndex(max(drv.findData(self.win.vk.choice(g.id)), 0)); lay.addWidget(drv)
+        drv.setCurrentIndex(max(drv.findData(self.win.vk.choice(g.id)), 0)); lay.addWidget(drv)   # the catalog's only: a game app is made to share, and a driver you added may not be passed on
         lay.addWidget(label("The app carries it and uses it on Adreno phones it suits; on a phone without an Adreno GPU, or one the driver doesn't support, the app "
                             "uses the phone's own driver. To change it, build the app again.", 'muted', wrap=True))
         lay.addSpacing(6); lay.addWidget(label(f'It goes in the game\'s folder, {g.folder}, beside the other kind if that was built too.', 'muted', wrap=True))
@@ -1694,7 +1703,7 @@ class Window(QMainWindow):
         bg(lambda: vkd.download(e, vk_folder(), lambda a, b: st.update(done=a, total=b or st['total']), lambda: st['cancel']), got)
     def refresh_phone(self):   # the app and the games on the picked phone: the Library's statuses and the Phones page
         s = self.serial()
-        if not s: self.phone_games = {}; self.library.refresh_status(); self.phones.show_phone('', {}, False); return
+        if not s: self.phone_games = {}; self.phone_env_driver = ''; self.library.refresh_status(); self.phones.show_phone('', {}, False); return
         def look():
             _, pkg = adb_run(s, 'shell', f'dumpsys package {PKG} | grep -E "lastUpdateTime|versionName" | head -2')
             # game.json on one line, its \r too: a build on Windows wrote it with \r\n, and splitlines() below cut the JSON at each \r
