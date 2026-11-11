@@ -3,7 +3,7 @@
 The cartridge's base game, 1.0.0, SDK **8.2.0** (`NintendoSDK_NVN-8_2_0`, `NintendoSDK_gfx-8_2_0`). It holds **Assassin's Creed IV: Black Flag** and **Assassin's Creed Rogue** on Ubisoft's **AnvilNext**, with Havok and Wwise. It renders with **NVN**. The RomFS is 120 files, 10.95 GB in all: 28 `.forge` archives, 15 Wwise `.pck` banks, 75 Bink movies (`.bik`, `.bk2`), a `.txt` and a `.lang` file.
 
 - **On the Mac:** In-game. Black Flag boots straight to its title, menus and opening storm at sea, with the player in control at 30 fps. The ship, Edward and the crew are drawn, and no shader the run asks for is missing from the map. The shaders come from the `.forge` archives; see [Shaders](#shaders).
-- **On Android:** not run yet.
+- **On Android:** In-game on a Moto Razr Plus 2023, at about 30 fps, with the same picture as the Mac. Edward walks the deck to the ship's wheel, the save loads, and sound plays. Sailing wasn't reached. See [Android](#android).
 
 ## What it needs
 
@@ -47,9 +47,28 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made (the sur
 - **The pipeline prebuild** (22,334 pairs) crashed once, inside Metal (`MultiLevelAirntBinaryCache::getElementAtDestination`, called by `MTL4Compiler` from `arch_capture` on one of 18 workers), after 13,000 pairs. The next build went on from the archive and finished with none failed.
 - **Not checked:** sound, saving and loading, Rogue, and play by hand.
 
+## Android
+
+- **Tested 2026-11-10 on a Moto Razr Plus 2023** (Adreno 730, Qualcomm's driver V@0615.98, Vulkan 1.1, Android 16), from this branch as a game app (`--game-apk`). The RomFS went over as the app's OBB file, and the phone's DroidPlay was left alone.
+  - **The run:** scripted over adb, with `DM_CTL` presses and `DM_KBD=Abstergo` in the app's `env.txt`. No hand play.
+  - **The control file:** create it with mode 666. A file `adb shell` makes in the app's folder is 660 and owned by `shell`, the app can't open it, and the presses are lost without a red line.
+- **First start:** unpacking the 72,000 translated shader files took about 30 s, then the title came up.
+- **Route:** the title's attract trailer (Bink) and the title, then the menus and the name prompt as on the Mac, then a new game into the opening storm at sea.
+  - **What draws:** the ship, Edward, the crew, the rain, the explosions, the cannon fire and the HUD, as on the Mac.
+  - **Some frames are much brighter:** lighting that looks like the storm's lightning, with the sky and the ship beside lit and the HUD unchanged. It wasn't compared with the Switch.
+- **Control:** the left stick took Edward from the opening's spot along the deck, up to the raised deck and to the ship's wheel. The right stick turned the camera.
+  - **The wheel:** its "take wheel" prompt showed, but no A press landed while it was up: the deck sways and moved him off the spot between screenshots. So taking the wheel and sailing weren't reached; a person with a controller should check them.
+- **Frame rate:** 29.7 fps over 3 minutes of the opening, and 28.9 fps over 5 minutes of the second session (menus, loading, walking). Frame time p50 33.5 ms, p95 43 to 48 ms.
+  - **The slow frames:** 2 to 7% of frames take 50 to 73 ms. Each is a single frame with about twice the usual draws and passes (2,276 draws and 118 passes, against 1,135 and 59), not a new pipeline.
+  - **The GPU:** busy 20 to 23 ms a frame.
+- **Saves:** the opening saves on its own. After a restart, Story Mode lists the save ("Abstergo", 0%) and loads it back into the storm.
+- **Sound:** the game opens AudioOut (6 channels, from `main`) and the audio renderer. Neither underran.
+  - **The dump:** 140 s of `DM_AUDIO_DUMP` holds signal throughout: RMS 170 to 2,500 in 5 s windows, with peaks to 27,500, louder once the game loaded. Nobody listened to it.
+- **Red lines:** none from the game in either session.
+
 ## Open
 
-- **Android:** not run yet. It takes the same tables; the shaders are translated for Vulkan from the same 33,147.
+- **Android:** taking the wheel and sailing, by hand; the frames with twice the draws; the bright frames, against the Switch.
 - **Rogue** (program 1): not profiled. Its own RomFS may use the same `.forge` format.
 - **`pso_manifest.tsv`** is empty. It can be recorded on the Mac now that the shaders are complete (`DM_PSO_MANIFEST=off DM_PSO_RECORD`).
 - **The prebuild crash** inside Metal, seen once: not reproduced.
