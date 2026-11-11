@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'scripts'))
 import bug_report   # noqa: E402  # pyright: ignore[reportMissingImports]  (scripts/, put on the path above: its redaction)
 
-DISCORD = 'https://discord.gg/4wNHX3uqSU'
+DISCORD = 'https://discord.gg/3r92f8wmh7'
 DISCORD_LIMIT = 2000   # characters in one message
 
 

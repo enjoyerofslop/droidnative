@@ -3,7 +3,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/enjoyerofslop/droidplay-core?label=latest%20release)](https://github.com/enjoyerofslop/droidplay-core/releases/latest)
 [![License: MIT](https://img.shields.io/github/license/enjoyerofslop/droidplay-core)](LICENSE)
-[![Discord](https://img.shields.io/badge/Discord-DroidPlay-5865F2?logo=discord&logoColor=white)](https://discord.gg/4wNHX3uqSU)
+[![Discord](https://img.shields.io/badge/Discord-DroidPlay-5865F2?logo=discord&logoColor=white)](https://discord.gg/3r92f8wmh7)
 
 **Play the Switch games you own on your Android phone or handheld, natively.** DroidPlay builds your own copy of a Switch game into an Android app: the
 game's code runs directly on the phone's processor, not in an emulator, and its graphics are drawn by the phone's GPU through Vulkan.
@@ -23,7 +23,7 @@ release. Run it, and it walks you through the rest ([Get started](#get-started))
 - **Runs on** arm64 phones and handhelds with Android 10 or later and a Vulkan GPU. Tested on Qualcomm Adreno (the Ayn Odin 2, the Retroid Pocket 5, the
   Galaxy S25 Edge and others), Arm Mali (the Pixel 9 Pro XL) and Samsung Xclipse (the Galaxy Z Flip 7): [Phones and handhelds](#phones-and-handhelds).
 - **What plays:** [Game Status](#game-status) lists every game run on Android, on which devices, and how far it got.
-- **Help:** the [DroidPlay Discord](https://discord.gg/4wNHX3uqSU), #help for a problem and #compatibility for how a game runs on your device.
+- **Help:** the [DroidPlay Discord](https://discord.gg/3r92f8wmh7), #help for a problem and #compatibility for how a game runs on your device.
 
 <table>
 <tr>
@@ -232,7 +232,7 @@ before the script refused it ([its note](dm/games/0100024008310000/README.md#and
 
 ## Help and reports
 
-- **Ask in the [DroidPlay Discord](https://discord.gg/4wNHX3uqSU):** #help for a problem, #compatibility for how a game runs on your device. Its rules are
+- **Ask in the [DroidPlay Discord](https://discord.gg/3r92f8wmh7):** #help for a problem, #compatibility for how a game runs on your device. Its rules are
   this README's: no games, keys, firmware or packed APKs.
 - **When a build fails,** DroidPlay for Windows says why in plain words, with the button that fixes it where there is one. Otherwise **Copy report** on the
   Builds page copies a short report to paste in #help; it leaves out your user folder, the phone's serial and anything that looks like a key.
