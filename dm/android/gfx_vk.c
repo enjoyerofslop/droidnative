@@ -28,9 +28,13 @@
 #include "spv_readonly.h"
 #include "spv_alpha.h"
 #include "spv_limits.h"
+#include "spv_layer.h"   // layer and viewport output made ordinary outputs on a GPU that has none (gfx_vk_draw.inc spv_fit_layer)
 #include "spv_pool.h"
 #include "spv_wide.h"
+#include "spv_e5.h"   // E5B9G9R9 storage images through R32_UINT views, RGB9E5 packed by the shader (vt_storage_up, gfx_vk_draw.inc cpipe_e5)
 #include "spv_narrow.h"   // each subgroup of a GPU narrower than 32 lanes a warp of its own (gfx_vk_draw.inc spv_fit_narrow)
+#include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
+#include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
 #include "nvn_queue.h"   // the queue scheduler (hle_nvn.c nvn_queue.inc): event publication and GPU progress
 #include <stdatomic.h>
@@ -47,6 +51,7 @@ static __thread int t_bk_sub;   // this thread holds g_bk for a submission (mtl_
 
 // ---------------- The device ----------------
 static uint32_t g_sg_stages = VK_SHADER_STAGE_ALL;   // the stages that run subgroup operations (subgroupSupportedStages; spv_limits.h); all when not known
+static int g_layer_out = 1;   // vertex shaders may write the layer and viewport index: VK_EXT_shader_viewport_index_layer or Vulkan 1.2 (spv_layer.h)
 static uint32_t g_sg_size = 32;   // the subgroup size (subgroupSize): over 32, Maxwell's warps are 32-lane parts of a subgroup (spv_wide.h)
 static VkPhysicalDeviceFeatures g_vk_feat; static int g_divisor;   // what the device was created with; VK_EXT_vertex_attribute_divisor or the KHR one   // what the device was created with
 // The KHR divisor without supportsNonZeroFirstInstance (the Pixel 9 Pro XL's Mali-G715): a draw with a stream stepping per N > 1 instances must start at instance 0, so its
@@ -116,6 +121,8 @@ static void vk_create(void) {
     if (g_stencil_export) dext[nde++] = "VK_EXT_shader_stencil_export";
     // colour images name the formats they are viewed in (vt_create: Adreno's framebuffer compression); core only from Vulkan 1.2, and the instance asks for 1.1
     if ((g_fmt_list = has_ext(de, nd, "VK_KHR_image_format_list"))) dext[nde++] = "VK_KHR_image_format_list";
+    // A 1.2 device's shaderOutputLayer isn't asked (the instance asks for 1.1); every 1.2 or later GPU here takes the translator's layer output as it is
+    g_layer_out = has_ext(de, nd, "VK_EXT_shader_viewport_index_layer") || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1 || VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 2;
     int hqr = qr_host_env() && has_ext(de, nd, "VK_EXT_host_query_reset");   // the completion thread resets the queries a chunk used (Query resets below); core only from Vulkan 1.2
     int memreport = mr_want(de, nd);   // DM_VK_MEMREPORT (gfx_vk_memreport.inc)
     if (memreport) dext[nde++] = "VK_EXT_device_memory_report";
@@ -1248,6 +1255,9 @@ static vtex *vt_create(const tex_t *t) {
 // - A format the GPU cannot store to (sRGB) takes STORAGE for views in its UNORM twin alone (EXTENDED_USAGE, ext_store), which storage_view then makes.
 // Under g_bk; cb() ends an open render pass. 0: it cannot be (a decoded BC texture, multisample, depth or stencil, no format of it the GPU stores to)
 static uint64_t g_st_up;
+// An E5B9G9R9 texture bound to an image slot: no GPU here stores to a shared-exponent format, so it is stored through an R32_UINT view, the shader packing each texel
+// into RGB9E5 (spv_e5.h), and the texture keeps its format and its bits. DM_VK_E5_STORE=0 (env.txt): skipped, as before
+static int e5_store_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_E5_STORE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_E5_STORE=0: an E5B9G9R9 texture bound to an image slot is skipped"); } return v; }
 static int vt_storage_up(vtex *v) {
     if (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) return 1;
     VkFormat f = v->fmt, sf = f; VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
@@ -1255,7 +1265,8 @@ static int vt_storage_up(vtex *v) {
                             (v->type == VK_IMAGE_TYPE_3D && (v->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0);   // as vt_create makes them
     int ext = 0;
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {   // EXTENDED_USAGE is Vulkan 1.1's
-        VkFormatProperties tp = {0}; sf = srgb_twin(f); if (sf) vkGetPhysicalDeviceFormatProperties(g_vk.pd, sf, &tp);
+        VkFormatProperties tp = {0}; sf = srgb_twin(f); if (!sf && f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && e5_store_on()) sf = VK_FORMAT_R32_UINT;   // its views: R32_UINT, packed by the shader
+        if (sf) vkGetPhysicalDeviceFormatProperties(g_vk.pd, sf, &tp);
         if (!sf || !(tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || (VK_API_VERSION_MAJOR(g_vk.props.apiVersion) == 1 && VK_API_VERSION_MINOR(g_vk.props.apiVersion) < 1)) sf = VK_FORMAT_UNDEFINED;
         else { ext = 1; cf |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT; }
     }
@@ -1292,7 +1303,7 @@ static int vt_storage_up(vtex *v) {
     views_drop(v->img); dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem);
     v->img = img; v->mem = mem; v->usage = u; v->ext_store = ext; v->mutable_ = 1; v->fixed_fmt = 0; g_vt_gen++;
     if (g_st_up++ < 8) LOG("[vk] texture ser=%llu %ux%u format %d bound to an image slot without storage use: made again with it%s (%llu so far)", (unsigned long long)v->serial, v->w, v->h, f,
-                           ext ? ", stored through its UNORM twin" : "", (unsigned long long)g_st_up);
+                           ext ? (f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 ? ", stored through an R32_UINT view, RGB9E5 packed by the shader" : ", stored through its UNORM twin") : "", (unsigned long long)g_st_up);
     return 1;
 }
 // Upload a texture's guest storage (deswizzled on the CPU; BC decoded when the GPU lacks it). The dirty-page stamp is taken and the pages protected before reading (nvn_mtl.m pkg_upload_)
@@ -1720,7 +1731,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 
 // ---------------- Clears ----------------
 static void clear_color_pass(const p_clear_color *cc); static void clear_ds_pass(const p_clear_ds *cd, VkImageAspectFlags a);   // gfx_vk_draw.inc: partial and masked ones
-static int clear_in_pass(const vtex *v, unsigned level, int depth);   // gfx_vk_draw.inc: whether a full clear of v can be made in the bound targets' pass
+static int clear_in_pass(const vtex *v, int slot, unsigned level, int depth);   // gfx_vk_draw.inc: whether a full clear of v (colour slot, -1 depth) can be made in the bound targets' pass
 static struct { p_set_rt rt; int has_rt; p_scissor sc; int has_sc; } R;
 static int full_scissor(const vtex *v, unsigned level) {
     if (!R.has_sc) return 1;
@@ -1756,7 +1767,7 @@ static void clear_color(const p_clear_color *cc) {
     if ((cc->mask & 0xf) != 0xf || !full_scissor(v, rg.baseMipLevel)) { if (cc->mask & 0xf) clear_color_pass(cc); return; }
     // a full clear of a target the size of the bound targets' pass: in the pass (vkCmdClearAttachments), on a tiler a clear of the tile memory, instead of writing the
     // whole image to memory outside it, a full barrier, and the pass loading it back. Only one layer of one level is a pass attachment
-    if (rg.layerCount == 1 && clear_in_pass(v, rg.baseMipLevel, 0)) { clear_color_pass(cc); return; }
+    if (rg.layerCount == 1 && clear_in_pass(v, cc->index, rg.baseMipLevel, 0)) { clear_color_pass(cc); return; }
     VkCommandBuffer c = cb(); if (!c) return;
     VkClearColorValue cv = clear_value(v->fmt, cc->rgba);
     vkCmdClearColorImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &rg); cb_barrier();
@@ -1768,7 +1779,7 @@ static void clear_ds(const p_clear_ds *cd) {
     a &= v->aspect; if (!a) return;
     if (((cd->stencil_mask & 0xff) && (cd->stencil_mask & 0xff) != 0xff) || !full_scissor(v, 0)) { clear_ds_pass(cd, a); return; }
     VkImageSubresourceRange rg = view_range(v, &R.rt.dview, R.rt.has_dview, a); rg.levelCount = 1;
-    if (rg.layerCount == 1 && clear_in_pass(v, rg.baseMipLevel, 1)) { clear_ds_pass(cd, a); return; }   // in the pass, as colour clears
+    if (rg.layerCount == 1 && clear_in_pass(v, -1, rg.baseMipLevel, 1)) { clear_ds_pass(cd, a); return; }   // in the pass, as colour clears
     VkCommandBuffer c = cb(); if (!c) return;
     VkClearDepthStencilValue dv = {cd->depth, (uint32_t)cd->stencil};
     vkCmdClearDepthStencilImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, &dv, 1, &rg); cb_barrier();
@@ -2300,7 +2311,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig);
     pool_stats();
     shadow_line();
-    LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu, other bindings %llu, written in place by a later dispatch %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd)", (unsigned long long)g_fwd, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1]);
+    LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu, other bindings %llu, written in place by a later dispatch %llu; bound on another binding's copy of the same shader %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd, own_alias)", (unsigned long long)g_fwd, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1], (unsigned long long)g_alias);
     LOG("[vk] render passes with every layer of their targets attached (a draw writes the layer): %llu (cumulative; gfx_vk_draw.inc rp_prepare_)", (unsigned long long)g_layered_passes);
     if (slot0_fill_on()) LOG("[vk] render passes given a scratch target in their empty colour slot 0: %llu (cumulative; gfx_vk_draw.inc slot0_fill_on)", (unsigned long long)g_slot0_fills);
     if (dup_slots_on()) LOG("[vk] render passes attaching an image once that two colour slots name: %llu, draws whose write to the slot left unused was lost: %llu (cumulative; gfx_vk_draw.inc dup_slots)", (unsigned long long)g_dup_passes, (unsigned long long)g_dup_lost);

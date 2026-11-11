@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- A game app (tools/build_apk.py, its game-app mode): one game in an app of its own, package org.nxnative.game.t<title ID> with the game's name and icon, so several install
      side by side and apart from the DroidPlay app. GameStart (dm/android/java) unpacks the game the APK carries, finds its RomFS (in the APK, in the app's OBB folder, or
-     a file the player picked) and starts the NativeActivity in the same process, with the game's host as its library: no launcher and no loader. build_apk.py fills in
+     a file the player picked) and starts GameActivity in the same process, with the game's host as its library: no launcher and no loader. build_apk.py fills in
      @PACKAGE@ and @LIB@ -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="@PACKAGE@" android:versionCode="1" android:versionName="0.1">
@@ -21,7 +21,7 @@
             </intent-filter>
         </activity>
         <!-- the game, in GameStart's process: it reads DM_ROMFS from the environment GameStart set, and ends the process when it closes (front_android.c) -->
-        <activity android:name="android.app.NativeActivity" android:exported="false" android:launchMode="singleTask"
+        <activity android:name="org.nxnative.android.GameActivity" android:exported="false" android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">
             <meta-data android:name="android.app.lib_name" android:value="@LIB@"/>

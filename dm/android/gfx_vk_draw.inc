@@ -134,6 +134,7 @@ typedef struct {
     uint8_t cbdyn[18], ndyn;   // set_reuse: cb[i] a dynamic uniform buffer, its offset at cbdyn[i] of the bind's (0xff: a plain one, its offset in the set); ndyn of them
     uint8_t pool;   // reads the texture pool by ID: its modules read the pool set (gfx_vk_pool.inc), which its pipelines' layouts take at POOL_SET
     uint8_t gm;   // binds the raw pool table (a storage buffer under DMSH_GMEM_MAP_CB_SLOT): 1, 2 with the stores' write log too (gfx_vk_gmem.inc)
+    uint64_t e5[2]; void *cpe5[2];   // compute: sets of storage image bindings bound to E5B9G9R9 textures, and its pipeline for each with those packed (cpipe_e5, spv_e5.h)
 } vshader;
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
 // never matched the draw before, and stage_set wrote every set of every stage: Breath of the Wild about 7,500 a frame, vkUpdateDescriptorSets 3.4 ms a frame of the
@@ -416,13 +417,66 @@ static size_t spv_fit_narrow(const uint32_t *code, size_t nw, const char *what, 
         LOG("[RED] [vk] %s: a whole-warp reduction step past the GPU's %u-lane subgroup whose result spv_narrow does not follow: left as translated (its shuffle reads the lane's own value)", what, g_sg_size);
     *out = o; return k;
 }
+// The module with its layer and viewport output made ordinary outputs, on a GPU that has no such output from vertex shaders (spv_layer.h): no
+// VK_EXT_shader_viewport_index_layer, Vulkan 1.1. Its compiler crashed on them (the Adreno 730's driver V@0615.98). In *out (to free); 0 when it needs nothing.
+// DM_SPV_LAYER=0 (env.txt): modules as translated
+static size_t spv_fit_layer(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LAYER"); on = !(e && *e == '0'); }
+    *out = NULL;
+    if (!on || g_layer_out || !spv_layer_wanted(code, nw)) return 0;
+    uint32_t *o = malloc(nw * 4); size_t k = o ? spv_layer(code, nw, o, nw) : 0;
+    static _Atomic int logged, nred;
+    if (!k) {
+        int parsed = o != NULL; free(o);
+        if (parsed && atomic_fetch_add(&nred, 1) < 8) LOG("[RED] [vk] %s declares layer or viewport output that spv_layer does not rewrite (a block member): made as it is, on a GPU without it", what);
+        return 0;
+    }
+    if (!atomic_exchange(&logged, 1))
+        LOG("[vk] the GPU has no layer or viewport output from vertex shaders (no VK_EXT_shader_viewport_index_layer, Vulkan 1.1): shaders that write them write an unused "
+            "output instead, and draw to layer 0 and viewport 0 (DM_SPV_LAYER=0: as translated). First: %s", what);
+    if (vk_debug()) LOG("[vk] %s: layer or viewport output rewritten as an ordinary output", what);
+    *out = o; return k;
+}
+// The module with its butterfly shuffles as ShuffleXor (spv_xor.h), in *out (to free); 0 when it needs nothing: a GPU spv_xor is not for, subgroups under 32 lanes
+// (spv_narrow rewrites those), a stage that runs no subgroup operations (spv_limits'), or no shuffle by the lane ID ^ a mask. For Qualcomm's own driver below
+// Vulkan 1.3 (its GPU name "Adreno (TM) ..."; Turnip's differs): the Adreno 730's (V@0615.98) returns garbage from the translator's Shuffle by the lane ^ the
+// mask in compute shaders, and ShuffleXor is right. The Adreno 740's and 830's drivers (Vulkan 1.3) run the shuffle as translated, which is left to them.
+// DM_SPV_XOR=1 (env.txt): on any GPU of 32 lanes or more (ShuffleXor is exact everywhere); =0: never
+static int xor_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_SPV_XOR");
+        int q = g_vk.props.vendorID == 0x5143 && !strncmp(g_vk.props.deviceName, "Adreno (TM)", 11) && g_vk.props.apiVersion < VK_API_VERSION_1_3;
+        v = e && *e == '0' ? 0 : e && *e == '1' ? 1 : q;
+    }
+    return v;
+}
+static size_t spv_fit_xor(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    *out = NULL;
+    if (g_sg_size < 32 || !xor_on() || !spv_xor_wanted(code, nw) || !spv_wide_wanted(code, nw, g_sg_stages)) return 0;
+    uint32_t *s = malloc(SPX_N * (size_t)code[3] * 4), *o = NULL; size_t need = 0, k = 0; int ns = 0;
+    if (!s) return 0;
+    spv_xor(code, nw, s, NULL, 0, &need, &ns);
+    if (need && (o = malloc(need * 4))) k = spv_xor(code, nw, s, o, need, &need, &ns);
+    free(s);
+    if (!k) { free(o); return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1))
+        LOG("[vk] %s (Vulkan %u.%u): the translator's butterfly shuffles (Shuffle by the lane ^ a mask) are made ShuffleXor, which this driver runs right "
+            "(DM_SPV_XOR=0: as translated). First: %s, %d", g_vk.props.deviceName, VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion), what, ns);
+    if (vk_debug()) LOG("[vk] %s: %d butterfly shuffles made ShuffleXor", what, ns);
+    *out = o; return k;
+}
 // The module without subgroup operations in a stage where the GPU runs none (spv_limits.h), in *out (to free); 0 when it needs nothing. A GPU that runs them in
 // every graphics stage gets every module as translated, untouched; so does one that runs them in the module's stage. DM_SPV_LIMITS=0 (env.txt): modules as translated
 static size_t spv_fit(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LIMITS"); on = !(e && *e == '0'); }
     *out = NULL;
-    size_t wk = spv_fit_wide(code, nw, what, out); if (wk) return wk;   // a stage that runs them: as wide as the GPU's subgroups
-    size_t nk = spv_fit_narrow(code, nw, what, out); if (nk) return nk;   // or as narrow
+    uint32_t *xo = NULL; size_t xk = spv_fit_xor(code, nw, what, &xo);   // first: spv_wide keeps its ShuffleXor
+    if (xk) { code = xo; nw = xk; }
+    size_t wk = spv_fit_wide(code, nw, what, out); if (wk) { free(xo); return wk; }   // a stage that runs them: as wide as the GPU's subgroups
+    size_t nk = spv_fit_narrow(code, nw, what, out); if (nk) { free(xo); return nk; }   // or as narrow
+    if (xk) { *out = xo; return xk; }   // a stage that runs them (spv_fit_xor's check), so nothing for spv_limits
     if (!on || (g_sg_stages & VK_SHADER_STAGE_ALL_GRAPHICS) == VK_SHADER_STAGE_ALL_GRAPHICS || !spv_lim_wanted(code, nw, g_sg_stages)) return 0;
     uint32_t *s = malloc(2 * (size_t)code[3] * 4), *o = NULL; size_t need = 0, k = 0; int got = 0;
     if (!s) return 0;
@@ -973,7 +1027,7 @@ static VkRenderPass rp_get(const rp_key *k) {
     nvn_hm_put(&g_rps, k, rp);
     return rp;
 }
-static struct { int active, layered; VkRenderPass rp; rp_key key; uint32_t w, h; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8];
+static struct { int active, layered; VkRenderPass rp; rp_key key; uint32_t w, h, layers; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8];
                 uint8_t *snap[8]; size_t snap_cap[8], snap_n[8]; uint8_t *snap_dst[8]; VkImage snap_img[8]; } P;   // snap: a linear target's guest bytes at rp_prepare (lsnap_take), until its write-back takes them
 static uint64_t g_passes;
 // DM_VK_DUMP=<frame>: every render pass of that frame (counted in presents from 1) has its colour targets copied out when it ends, written to
@@ -1336,7 +1390,7 @@ static int rp_prepare_(int layered) {
         if (vkCreateFramebuffer(g_vk.dev, &fc, NULL, &fb) != VK_SUCCESS) { RED_ONCE(85, "framebuffer %ux%u failed", w, h); lsnap_drop_all(); return 0; }
         nvn_hm_put(&g_fbs, &fk, fb);
     }
-    P.rp = rp; P.key = k; P.w = w; P.h = h; P.fb = fb; P.layered = layered; if (layers > 1) g_layered_passes++;
+    P.rp = rp; P.key = k; P.w = w; P.h = h; P.layers = layers; P.fb = fb; P.layered = layered; if (layers > 1) g_layered_passes++;
     return 1;
 }
 static int rp_prepare(void) { return rp_prepare_(0); }
@@ -1919,7 +1973,10 @@ static const uint8_t c_bases[6] = {0x11, 0x51, 0x41, 0, 0, 0x31};   // c0 storag
 static uint32_t g_cdim[3];   // the current dispatch's group counts (c0 + 0x200 for compute)
 static void bank_c0(int nst, uint8_t *b, uint32_t base_inst) {
     memset(b, 0, 0x800);
-    if (nst == 5) { memcpy(b + 0x200, g_cdim, 12);   // compute: the group counts, then the uniform buffer table (0x210 + 16 r)
+    if (nst == 5) { memcpy(b + DMSH_C0_DISPATCH, g_cdim, 12);   // compute: the group counts, then the uniform buffer table (0x210 + 16 r)
+        // NVN2 compute also reads them at the start of the segment, as nvn_mtl.m's encode_args_ writes them: Ocarina of Time's fog takes its sample count from x · y · 32 · 32
+        // (21d9f83e6027c565), and at zero divided by it, which put NaN in the fog's froxel volumes and left Kokiri Forest black
+        if (dm_sdk_ounce()) memcpy(b + DMSH_C0_DISPATCH_NVN2, g_cdim, 12);
         for (int r = 0; r < 16; r++) { uint64_t a = D.ubo[5][r].addr; uint32_t n = (uint32_t)D.ubo[5][r].size; memcpy(b + 0x210 + 16 * r, &a, 8); memcpy(b + 0x218 + 16 * r, &n, 4); } }
     uint32_t o = (uint32_t)c_bases[nst] << 4;
     for (int r = 0; r < 16 && o && o + 16 * r + 12 <= 0x800; r++) { uint64_t a = D.ssbo[nst][r].addr; uint32_t n = (uint32_t)D.ssbo[nst][r].size; memcpy(b + o + 16 * r, &a, 8); memcpy(b + o + 16 * r + 8, &n, 4); }
@@ -2020,6 +2077,24 @@ static int buf_fwd(uint64_t addr, uint64_t n, int write, VkDeviceSize al, VkBuff
 }
 static int sb_fwd(uint64_t addr, uint64_t n, int write, VkBuffer *b, VkDeviceSize *o) { return buf_fwd(addr, n, write, g_vk.props.limits.minStorageBufferOffsetAlignment, b, o); }
 static int tb_fwd(uint64_t addr, uint64_t n, int write, VkBuffer *b, VkDeviceSize *o) { return buf_fwd(addr, n, write, g_vk.props.limits.minTexelBufferOffsetAlignment, b, o); }
+// A shader that binds the same guest memory twice (Final Fantasy Resonance's Niagara argument shader 544e80ec57b3a10b: one 8 KB buffer as an R32ui image it
+// reads and as a format-less one it clears): on the Switch the two views are one buffer. When the draw or dispatch is the first in its chunk to write it, buf_fwd
+// finds no write-back to bind in place (it looks only at those from before the draw, g_fwd_nwb), so each binding got an arena copy and a write-back of its own:
+// a write through one view was not what the other read, and the two write-backs, with one snapshot, landed byte by byte over each other. A binding inside a
+// write-back this same draw or dispatch made is bound on that copy (wb_alias.h), with no copy or write-back of its own, and what both views wrote lands once.
+// DM_VK_ALIAS=0 (env.txt): each binding gets its own copy, as before (the A/B of this alone)
+static int alias_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ALIAS"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_ALIAS=0: a shader's bindings of the same memory get copies of their own"); } return v; }
+static uint64_t g_alias;   // bindings bound on the copy of another binding of the same draw or dispatch (own_alias)
+static int own_alias(const char *key, uint64_t addr, uint64_t n, VkDeviceSize al, VkBuffer *b, VkDeviceSize *o) {
+    if (!C || !addr || !n || g_fwd_nwb < 0 || g_fwd_nwb > C->nwb || !alias_on()) return 0;
+    for (int i = C->nwb - 1; i >= g_fwd_nwb; i--) {   // this draw's or dispatch's own write-backs (g_fwd_nwb: the chunk's count when it began)
+        const wb_t *w = &C->wb[i]; uint64_t at;
+        if (!wb_alias_at(w->st < 0, w->rows, (uintptr_t)w->dst, w->row_bytes, w->off, addr, n, al, &at)) continue;
+        if (!g_alias++) LOG("[vk] shader %s binds %#llx+%llu again: bound on the copy of its other binding (own_alias)", key, (unsigned long long)addr, (unsigned long long)n);
+        *b = C->ar[-1 - w->st].b; *o = (VkDeviceSize)at; return 1;
+    }
+    return 0;
+}
 // the guest bytes tbuf_view copies of a buffer texture: its width in texels, cut to the GPU's limit, times the texel size; 0 when it copies none (the dummy is bound).
 // draw_view asks it for the range a draw reads, so it must cover at least what tbuf_view reads
 static size_t tbuf_bytes(const tex_t *t) {
@@ -2029,6 +2104,7 @@ static size_t tbuf_bytes(const tex_t *t) {
     if (n > g_vk.props.limits.maxTexelBufferElements) n = g_vk.props.limits.maxTexelBufferElements;
     return (size_t)n * (size_t)bpb;
 }
+static const char *g_alias_key = "";   // the shader stage_set binds, for own_alias's log
 static VkBufferView tbuf_view(const tex_t *t, int write, int cs) {   // cs: a dispatch binds it (a buffer image it writes may be bound in place, and its write-back is forwardable: buf_fwd)
     uint32_t m = 0; uint8_t swz[4];
     if (!t || t->d.target != NVN_TEXTURE_TARGET_BUFFER || !t->mem || !nvn_fmt_to_mtl(t->d.format, &m, swz) || !m) return VK_NULL_HANDLE;
@@ -2039,6 +2115,7 @@ static VkBufferView tbuf_view(const tex_t *t, int write, int cs) {   // cs: a di
     if (t->d.width > g_vk.props.limits.maxTexelBufferElements) RED_ONCE(102, "buffer texture of %u elements over the GPU's %u: cut", (unsigned)t->d.width, g_vk.props.limits.maxTexelBufferElements);
     VkBuffer b; VkDeviceSize off;
     if ((!write || cs) && tb_fwd((uint64_t)(uintptr_t)t->mem, bytes, write, &b, &off)) g_buf_fwd[write]++;   // on the GPU from a dispatch's pending write (buf_fwd)
+    else if (own_alias(g_alias_key, (uint64_t)(uintptr_t)t->mem, bytes, g_vk.props.limits.minTexelBufferOffsetAlignment, &b, &off)) {}   // a range another binding of this shader wrote
     else { uint8_t *d = ar_alloc(bytes, &b, &off); if (!d) return VK_NULL_HANDLE;
         int inpool = mtl_addr((uint64_t)(uintptr_t)t->mem, bytes, NULL, NULL);
         if (inpool) memcpy(d, t->mem, bytes); else { memset(d, 0, bytes); RED_ONCE(103, "buffer texture outside every memory pool: reads 0"); }
@@ -2068,6 +2145,7 @@ static VkFormat view_format(const vtex *v, const view_t *vv) {
     return f;
 }
 static int g_bind_bad;   // set by stage_set when a binding has no valid descriptor: the draw / dispatch is skipped
+static uint64_t g_e5_need;   // compute: the storage image bindings stage_set bound to E5B9G9R9 textures (vk_dispatch takes cpipe_e5 for them)
 // An image slot's texture made without storage use takes it (vt_storage_up), unless it is a target of the pass a draw prepared (rp_prepare ran before stage_set): rp_start would
 // begin that pass's framebuffer, made on the image the upgrade replaces. A dispatch's copy ends the pass, and the next rp_prepare makes the targets' views again
 // DM_VK_STORAGE_UP (env.txt): 0 leaves such a texture as before (bound as it is, an sRGB one skipped). 1 (default) upgrades one whose own format the GPU stores to, and still
@@ -2077,8 +2155,12 @@ static int st_up_mode(void) { static int m = -1; if (m < 0) { const char *e = ge
 static int img_up(vtex *v, int compute) {
     int m = st_up_mode(); if (!m) return 1;
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, v->fmt, &fp);
-    if (m == 1 && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
-        RED_ONCE(125, "texture ser=%llu %ux%u format %d, made without storage use, is bound to an image slot in a format the GPU cannot store to: skipped (DM_VK_STORAGE_UP=2 stores it through its UNORM twin)", (unsigned long long)v->serial, v->w, v->h, v->fmt);
+    int e5 = v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && e5_store_on();   // stored through an R32_UINT view (vt_storage_up, spv_e5.h)
+    if (e5 && !compute) { RED_ONCE(126, "texture ser=%llu %ux%u E5B9G9R9 is bound to an image slot of a draw: only compute shaders are rewritten to pack it (spv_e5.h), skipped", (unsigned long long)v->serial, v->w, v->h); return 0; }
+    if (m == 1 && !e5 && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {   // said once for each format: a later one, once hidden behind the first, can be another cause
+        static uint8_t told[256]; static int other; int f_ = (int)v->fmt;
+        if (f_ >= 0 && f_ < 256 ? !told[f_] : !other) { if (f_ >= 0 && f_ < 256) told[f_] = 1; else other = 1;
+            LOG("[RED] [vk] texture ser=%llu %ux%u format %d, made without storage use, is bound to an image slot in a format the GPU cannot store to: skipped (DM_VK_STORAGE_UP=2 stores an sRGB one through its UNORM twin; said once for each format)", (unsigned long long)v->serial, v->w, v->h, v->fmt); }
         return 0; }
     if (!compute) { int hit = P.dv == v; for (int i = 0; i < 8; i++) hit |= P.cv[i] == v;
         if (hit) { RED_ONCE(124, "texture ser=%llu, made without storage use, is bound to an image slot of a draw that renders to it: skipped", (unsigned long long)v->serial); return 0; } }
@@ -2089,10 +2171,16 @@ static VkImageView storage_view(vtex *v, const view_t *vv, VkImageViewType vt, V
     if (f != v->fmt && (v->conv || !fmt_bytes(v->fmt) || fmt_bytes(v->fmt) != fmt_bytes(f))) { RED_ONCE(110, "image of format %d bound where the shader declares format %d: skipped", v->fmt, f); return VK_NULL_HANDLE; }
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
     // an sRGB format the GPU cannot store to is stored through its UNORM twin, texels as the shader writes them, as Maxwell's image stores do and the Mac's linear-twin
-    // views (nvn_mtl.m img_fit); the image takes STORAGE for such views (vt_storage_up)
-    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && srgb_twin(f)) {
+    // views (nvn_mtl.m img_fit); the image takes STORAGE for such views (vt_storage_up). Only into an image that has it: with DM_VK_STORAGE_UP=0 an sRGB image without it was
+    // viewed through its twin all the same, an invalid storage view, and Ocarina of Time's title then ran its movie compositor at 8 fps instead of skipping it as before
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && srgb_twin(f)) {
         VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, srgb_twin(f), &tp);
         if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = srgb_twin(f); fp = tp; }
+    }
+    // E5B9G9R9, which no GPU here stores to, through an R32_UINT view: the compute shader bound to it packs RGB9E5 (cpipe_e5, spv_e5.h)
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !v->conv && (v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && e5_store_on()) {
+        VkFormatProperties tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, VK_FORMAT_R32_UINT, &tp);
+        if (tp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) { f = VK_FORMAT_R32_UINT; fp = tp; }
     }
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || v->conv) { RED_ONCE(104, "image format %d is not storage-capable here: skipped", f); return VK_NULL_HANDLE; }
     g_view_fmt = f == v->fmt ? VK_FORMAT_UNDEFINED : f;
@@ -2294,6 +2382,7 @@ static void sr_put(sr_ent *e, VkDescriptorSetLayout l, VkDescriptorSet set) {   
 // the same descriptors in this recording (sr_find), else one from the chunk (ds_get; tf: of dsl_tf) written here. dseq: the chunk recorded when the draw's first stage began
 // (C->seq after cur()): nothing is written or taken once another is recorded (ds_moved), and the caller tells that 0 from another failure by ds_moved
 static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, const prog_t *pr, int prog_stage, uint32_t base_inst, uint64_t dseq) {
+    g_alias_key = s->key;
     int nst = nvn_stage_of(s->stage);
     VkDescriptorSet set = VK_NULL_HANDLE; *pset = VK_NULL_HANDLE;   // the writes name their set once it is known (below)
     // one write per binding; every element of an array is written (an unwritten descriptor is undefined)
@@ -2374,6 +2463,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         else if (u && u->addr && !wr_ && gm_inplace(u->addr, n, &b, &ao, &ipr)) {   // read only, in a placed pool: bound there (gfx_vk_gmem_inplace.inc)
             bi[nbi] = (VkDescriptorBufferInfo){b, ao, ipr}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
             continue; }
+        else if (u && u->addr && own_alias(s->key, u->addr, n, g_vk.props.limits.minStorageBufferOffsetAlignment, &b, &ao)) {}   // a range another binding of this shader wrote
         else if (u && u->addr && !wr_) { if (!sb_keep(u->addr, n, &b, &ao) && !ucopy((const void *)(uintptr_t)u->addr, n, (n + 15) & ~(size_t)15, &b, &ao)) return 0; }   // read only: kept between frames (sb_keep), or shared as uniforms are
         else if (u && u->addr && gm_inplace_w(u->addr, n, s->stage == SH_CS, &b, &ao, &ipr)) {   // written, in a placed pool: bound there, its write-back only a note (gfx_vk_gmem_inplace.inc)
             bi[nbi] = (VkDescriptorBufferInfo){b, ao, ipr}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
@@ -2461,6 +2551,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             VkImageView iv = VK_NULL_HANDLE; vtex *v = !ri ? NULL : ce ? ce->v : vt_get(&ri->t);
             if (v && !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !img_up(v, s->stage == SH_CS)) { g_bind_bad = 1; v = NULL; }   // made without storage use (vt_storage_up)
             if (v) { iv = storage_view(v, ri->has_v ? &ri->v : NULL, vt, t->fmt); if (!iv) g_bind_bad = 1; }
+            if (iv && v->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 && s->stage == SH_CS) { if (t->binding < 64) g_e5_need |= 1ull << t->binding; else g_bind_bad = 1; }   // its pipeline packs RGB9E5 there (cpipe_e5)
             if (!iv) iv = dummy_storage(vt, t->fmt);
             if (!iv) g_bind_bad = 1;
             ii[nii + e] = (VkDescriptorImageInfo){VK_NULL_HANDLE, iv, VK_IMAGE_LAYOUT_GENERAL};
@@ -2921,6 +3012,10 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     { float db[3] = {D.po.units, g_vk_feat.depthBiasClamp ? D.po.clamp : 0, D.po.factor}; if (!bf_same(c, BF_DB, g_bf.db, db, sizeof db)) vkCmdSetDepthBias(c, db[0], db[1], db[2]); }
     // indices: copied, quads made triangles; vertex range for the vertex data copy
     int64_t vlo = 0, vhi = 0; uint32_t count = dw ? (uint32_t)dw->count : (uint32_t)di->count, inst = (uint32_t)(dw ? dw->instances : di->instances); if (!inst) inst = 1;
+    // More instances than any Switch game draws (2^24): the GPU would work through them until the driver's hang recovery cut the submission short, and the game drew no
+    // frame after. Final Fantasy Resonance's first field on the Adreno 730 asks 1 to 3.8 billion of one quad every frame, its own count (not found yet). A mitigation
+    if (inst > (1u << 24)) { RED_ONCE(177, "a draw of %u instances (%#x) skipped, shaders %s %s, %u %s: more than any Switch game draws; the GPU would run it until its hang "
+                                    "recovery (said once; every such draw is skipped)", inst, inst, k.sh[0] ? k.sh[0]->key : "-", k.sh[1] ? k.sh[1]->key : "-", count, di ? "indices" : "vertices"); return 1; }
     int quads = prim == 7, qstrip = prim == 8; VkBuffer ib = VK_NULL_HANDLE; VkDeviceSize ioff = 0; uint32_t icount = count; int i32 = 0;
     if (di) {
         int isz = di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4; const uint8_t *src = (const uint8_t *)(uintptr_t)di->ibuf; uint32_t mx = 0, mn = UINT32_MAX;
@@ -2998,9 +3093,26 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
 typedef struct { VkPipeline p; VkPipelineLayout pl; } cpipe_t;
 static nvn_hmap g_cpipes = {.klen = 8};
 static uint64_t g_dispatches;
+static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod);
 static cpipe_t *cpipe_get(vshader *s) {
     cpipe_t *cp = nvn_hm_get(&g_cpipes, &s); if (cp) return cp->p ? cp : NULL;
     cp = calloc(1, sizeof *cp); nvn_hm_put(&g_cpipes, &s, cp);
+    return cpipe_make(s, cp, &s->mod);
+}
+// The compute pipeline whose storage images at the bindings of mask are E5B9G9R9 textures bound through R32_UINT views (stage_set's g_e5_need): its module packs RGB9E5 there
+// (spv_e5.h). Same layout as cpipe_get's, so the set stage_set wrote binds to it. Kept per shader for two sets of bindings (Ocarina of Time's a335c1db6270c355 always binds
+// one), so a shader alternating between them makes no pipeline again; a third set is refused, its dispatches skipped with a red line. NULL: it cannot be (red in lm_code)
+static cpipe_t *cpipe_e5(vshader *s, uint64_t mask) {
+    for (int i = 0; i < 2; i++) if (s->cpe5[i] && s->e5[i] == mask) { cpipe_t *cp = s->cpe5[i]; return cp->p ? cp : NULL; }
+    int slot = !s->cpe5[0] ? 0 : !s->cpe5[1] ? 1 : -1;
+    if (slot < 0) { RED_ONCE(127, "compute shader %s binds E5B9G9R9 textures at a third set of image bindings (%#llx): its pipelines are kept for two, so this dispatch is skipped", s->key, (unsigned long long)mask); return NULL; }
+    char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
+    lmod *m = lm_new_e(p, 0, 0, mask, NULL);
+    cpipe_t *cp = calloc(1, sizeof *cp); if (!cp) return NULL;
+    s->cpe5[slot] = cp; s->e5[slot] = mask; if (!m) return NULL;   // kept with no pipeline: not tried again
+    return cpipe_make(s, cp, &m);
+}
+static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo ec = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &ec, NULL, &g_empty_dsl); }
     VkDescriptorSetLayout sl[POOL_SET + 1] = {s->dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, g_pool_dsl};   // the pool set after empty ones (gfx_vk_pool.inc)
     VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = s->pool ? POOL_SET + 1 : 1, .pSetLayouts = sl};
@@ -3008,7 +3120,7 @@ static cpipe_t *cpipe_get(vshader *s) {
     VkComputePipelineCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = cp->pl,
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .pName = "main"}};   // its module: lm_pipeline
     const char *pbk[4] = {s->key, NULL, NULL, NULL}; int pb = pb_begin('c', pbk, 0, 0, 0, 0);
-    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); VkResult pr = lm_pipeline(NULL, &pc, &pc.stage, &s->mod, 1, &cp->p);
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); VkResult pr = lm_pipeline(NULL, &pc, &pc.stage, mod, 1, &cp->p);
     pb_end(pb);
     atomic_fetch_add(&g_cpso_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); atomic_fetch_add(&g_cpso_made, 1);
     if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] compute pipeline of shader %s failed", s->key); cp->p = VK_NULL_HANDLE; return NULL; }
@@ -3048,11 +3160,12 @@ static int vk_dispatch(const p_dispatch *dp) {
     memcpy(g_cdim, g, sizeof g_cdim);
     VkDescriptorSet set; int ok; uint32_t dyn[18];
     for (int t = 0;; t++) {   // t 1: the set taken again from the chunk recorded now when a sync inside stage_set closed the one it came from (ds_moved)
-        g_bind_bad = 0; if (!cur()) return 0; uint64_t dseq = C->seq; int got = stage_set(s, 0, &set, dyn, pr, pst, 0, dseq); ok = got && !g_bind_bad;
+        g_bind_bad = 0; g_e5_need = 0; if (!cur()) return 0; uint64_t dseq = C->seq; int got = stage_set(s, 0, &set, dyn, pr, pst, 0, dseq); ok = got && !g_bind_bad;
         if (got || !ds_moved(dseq)) break;
         if (ds_again(t, 2)) return 0;
     }
     if (!ok) return 0;
+    if (g_e5_need) { cpipe_t *ce = cpipe_e5(s, g_e5_need); if (!ce) return 0; cp = ce; }   // E5B9G9R9 storage images: the pipeline that packs RGB9E5 into their R32_UINT views
     VkCommandBuffer c = cb(); if (!c) return 0;
     cb_barrier();
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p);
@@ -3119,21 +3232,44 @@ static VkPipeline clear_pipe(const cpk_t *k) {
 static int is_int_fmt(VkFormat f) {
     VkClearColorValue t = clear_value(f, (const float[4]){1.5f, 0, 0, 0}); return t.uint32[0] == 1;   // clear_value converts only for integer formats
 }
-static int clear_in_pass(const vtex *v, unsigned level, int depth) {
-    if (!rp_prepare() || (depth && !P.key.depth)) return 0;
+// The pass a clear of colour slot `slot` (-1: the depth target) is made in: a layered one when the target's view covers more than one layer or slice, as a layered draw
+// gets, so the clear reaches all of them in either order, clear then draw or draw then clear (as nvn_mtl.m clears a view of more layers than its pass in a pass of its
+// own: rendering.md, "Clears of layered render targets in a pass that is not layered"). In a pass of one layer, a clear before the first layered draw cleared slice 0
+// alone, and that draw reopened the pass layered and loaded the other slices as they were. full: the clear writes every channel / stencil bit, so it can be a rect of every
+// layer (clear_rect_layers); a masked clear is a draw of layer 0 whatever the pass, so it asks for no layered pass, which would only end the open one. → *nl: the layers
+// the view covers (1: one), 1 for a masked clear
+static int clear_rp_prepare(int slot, int full, uint32_t *nl) {
+    vtex *v = NULL; const view_t *vw = NULL; *nl = 1;
+    if (slot >= 0 && slot < R.rt.n && R.rt.color[slot]) { v = vt_get(R.rt.color[slot]); vw = R.rt.has_cview[slot] ? &R.rt.cview[slot] : NULL; }
+    else if (slot < 0 && R.rt.depth) { v = vt_get(R.rt.depth); vw = R.rt.has_dview ? &R.rt.dview : NULL; }
+    if (v && full) { uint32_t lv = vw && vw->set_levels ? vw->base_level : 0, ly = vw && vw->set_layers ? vw->min_layer : 0; if (lv < v->levels) *nl = rt_layers(v, vw, lv, ly); }
+    return rp_prepare_(*nl > 1);
+}
+// A full clear in the bound targets' pass when its target is the pass's size and the pass has every layer its view covers; else (DM_VK_LAYERED=0, or a pass whose other
+// targets have fewer layers) the clear is made outside the pass, on the whole view (gfx_vk.c clear_color, clear_ds)
+static int clear_in_pass(const vtex *v, int slot, unsigned level, int depth) {
+    uint32_t nl; if (!clear_rp_prepare(slot, 1, &nl) || (depth && !P.key.depth) || (nl > 1 && P.layers < nl)) return 0;
     return (v->w >> level ? v->w >> level : 1) == P.w && (v->h >> level ? v->h >> level : 1) == P.h;
 }
+// A clear in the pass covers every layer of its framebuffer (clear_rp_prepare above makes it layered for a view of several): NVN clears the whole bound target, and in a layered pass (a 3D or array target attached whole for a draw
+// that writes the layer, rp_prepare) a rect of layer 0 alone left the other slices with what earlier frames drew. A full clear of a 3D target is in the pass whenever its
+// size matches (its one array layer: gfx_vk.c clear_color), so a volume drawn slice by slice and cleared each frame was cleared at slice 0 only: Final Fantasy Resonance
+// adds its lights into 32x32x32 volumes with additive blending, and in shirai91/nx2android's replay the fog boxes that read them changed every frame on its first road
+// (37c76f613 there). The masked clears below are a draw of layer 0, which a layered pass cannot widen without a layer-writing shader: a red line says when one meets it
+static VkClearRect clear_rect_layers(VkRect2D r) { return (VkClearRect){r, 0, P.layers ? P.layers : 1}; }
 // A colour clear of target idx limited by the scissor and / or a channel mask (gfx_vk.c clear_color takes the full ones)
 static void clear_color_pass(const p_clear_color *cc) {
     bf_reset();   // its pipeline and dynamic state are set behind the bind filter (bf_*)
-    if (!rp_prepare() || !rp_start()) return;
+    uint32_t nl; if (!clear_rp_prepare(cc->index, (cc->mask & 0xf) == 0xf, &nl) || !rp_start()) return;
     VkRect2D r = clear_rect(); if (!r.extent.width || !r.extent.height) return;
     int ci = dup_slot(cc->index); VkFormat f = P.key.color[ci];
+    if (nl > 1 && P.layers < nl) RED_ONCE(172, "clear of colour slot %d in a pass of %u layers, its view %u: the layers past the pass are not cleared", cc->index, P.layers, nl);
     if ((cc->mask & 0xf) == 0xf) {
         VkClearAttachment at = {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)ci, {.color = clear_value(f, cc->rgba)}};
-        VkClearRect cr = {r, 0, 1}; vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;
+        VkClearRect cr = clear_rect_layers(r); vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;
     }
     if (is_int_fmt(f)) { RED_ONCE(109, "masked clear of an integer target (format %d): not done", f); return; }
+    if (P.layers > 1) RED_ONCE(171, "masked clear in a layered pass of %u layers: layer 0 alone is cleared", P.layers);
     cpk_t k; memset(&k, 0, sizeof k); k.rp = P.rp; k.ncolor = P.key.ncolor; k.idx = (uint32_t)ci; k.mask = (uint32_t)cc->mask & 0xf; k.samples = P.key.samples;
     VkPipeline p = clear_pipe(&k); if (!p) return;
     float pc[5] = {cc->rgba[0], cc->rgba[1], cc->rgba[2], cc->rgba[3], 0};
@@ -3144,13 +3280,15 @@ static void clear_color_pass(const p_clear_color *cc) {
 // A depth-stencil clear limited by the scissor and / or a partial stencil mask
 static void clear_ds_pass(const p_clear_ds *cd, VkImageAspectFlags a) {
     bf_reset();   // as clear_color_pass
-    if (!rp_prepare() || !rp_start() || !P.key.depth) return;
+    uint32_t nl; if (!clear_rp_prepare(-1, !(a & VK_IMAGE_ASPECT_STENCIL_BIT) || (cd->stencil_mask & 0xff) == 0xff, &nl) || !rp_start() || !P.key.depth) return;
+    if (nl > 1 && P.layers < nl) RED_ONCE(172, "depth-stencil clear in a pass of %u layers, its view %u: the layers past the pass are not cleared", P.layers, nl);
     VkRect2D r = clear_rect(); if (!r.extent.width || !r.extent.height) return;
     uint32_t sm = (uint32_t)cd->stencil_mask & 0xff;
     if (!(a & VK_IMAGE_ASPECT_STENCIL_BIT) || sm == 0xff) {
         VkClearAttachment at = {a, 0, {.depthStencil = {cd->depth, (uint32_t)cd->stencil}}};
-        VkClearRect cr = {r, 0, 1}; vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;
+        VkClearRect cr = clear_rect_layers(r); vkCmdClearAttachments(C->cb, 1, &at, 1, &cr); return;
     }
+    if (P.layers > 1) RED_ONCE(171, "masked clear in a layered pass of %u layers: layer 0 alone is cleared", P.layers);
     cpk_t k; memset(&k, 0, sizeof k); k.rp = P.rp; k.ncolor = P.key.ncolor; k.idx = 99; k.samples = P.key.samples; k.stencil_mask = sm; k.depth = (a & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
     VkPipeline p = clear_pipe(&k); if (!p) return;
     float pc[5] = {0, 0, 0, 0, cd->depth};

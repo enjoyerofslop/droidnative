@@ -1815,6 +1815,21 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - The rest came from one (`f632c6a1bc76cd19`) reading a 64 KB storage buffer the dispatch before wrote, then writing a 3D image.
   - The opening ran at 15.9 fps on an Ayn Odin 2 and 10.3 on a OnePlus Pad 3; it now runs at 40.6 and 41.0 (frame p50 24 ms). The Pad 3's GPU time per frame went from 28.7 to 15.5 ms.
 
+### Two bindings of the same memory in one shader
+
+- **Symptom:** Android only, nothing visible found yet: a shader that binds one guest buffer twice (two image slots, or two storage buffers) and writes it through one of them.
+  - What one binding writes isn't what the other reads in that dispatch.
+  - When both write, the bytes that land are a mix of the two copies.
+- **Cause:** the replay gives each written binding an arena copy and a write-back of its own. `buf_fwd` binds a write in place only on a write-back from before the draw or dispatch (`g_fwd_nwb`), so when the draw or dispatch is the first in its submission to write the buffer, its second binding of it gets a second copy. On the Switch the two views are one buffer. The two write-backs carry one snapshot and land the bytes each changed, so the later one wins where both changed a byte.
+- **Fix:** `own_alias` (in `tbuf_view` and in `stage_set`'s storage buffers) binds a binding that lies inside a write-back this same draw or dispatch made on that write-back's copy. It adds no copy and no write-back of its own; `wb_alias.h` decides, and `test_wb_alias.py` tests it.
+  - The `[vk] read on the GPU from a dispatch's pending write` line counts these bindings.
+  - `DM_VK_ALIAS=0`: each binding gets its own copy, as before.
+- **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md)'s Niagara argument shader `544e80ec57b3a10b`. It binds its 8 KB counts buffer as an R32ui image it reads and as a format-less image it clears. As the first field loads it's the first in its submission to write that buffer, and own_alias binds 16 bindings in those frames. Later in the field an earlier dispatch has written it, so both bindings are already in place.
+- **Check:** Final Fantasy Resonance's `field` route on a Moto Razr Plus 2023 (Adreno 730), with and without (`DM_VK_ALIAS=0`).
+  - The 16 bindings come 54 s in, as the field loads.
+  - 15.9–16.0 fps against 16.0, GPU 38.5–38.6 ms against 38.3. The picture at the route's end is the same.
+  - Super Mario Odyssey on a Retroid Pocket 5 binds none (59.4 against 59.5 fps).
+
 ### Render passes kept over CPU-side commands
 
 - **Symptom:** hundreds of render passes a frame on the same targets; on a tiler GPU each loads and stores its attachments.
@@ -2106,6 +2121,21 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - Super Mario Odyssey (`opening`) and Brilliant Diamond (`eterna`), two runs each: no upgrade and no red line. 60 fps throughout, frame p50 within 0.05 ms. GPU p50 7.94–7.97 against 8.04–8.10 ms (SMO) and 10.07–10.11 against 10.14–10.36 ms (BD); the branch always ran second in each pair.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2), by the nx2android picks run on a Galaxy S25 Edge.
 
+
+### An E5B9G9R9 texture bound to a compute shader's image slot (Android)
+
+- **Symptom:** Android, Ocarina of Time's Kokiri Forest: black under the HUD with OoT's own upscaler replaced (#173), or white streak noise with it running. The forest itself is drawn: the 1440x810 scene target is finite through every pass. No red line names it: red line 125 ("a format the GPU cannot store to: skipped") was said once for the whole run, and the title's sRGB target took it first.
+- **Cause:** `a335c1db6270c355` writes the upscaler's input, a 1440x810 E5B9G9R9 texture, through an image slot, and the upscaler (`fa3033d05c0a41d6`) samples it. No GPU here stores to a shared-exponent format, so `img_up` refused the texture and the dispatch was skipped. The input was never written: the network turned the empty texture into noise (16% of its 1920x1080 output non-finite), and the replacement squared it to 0. The Mac writes RGB9E5 natively.
+- **Fix:** the texture keeps its format and its bits; the shader packs them.
+  - `vt_storage_up` makes such a texture again with `STORAGE` for R32_UINT views alone (`MUTABLE_FORMAT`, `EXTENDED_USAGE`), as it does for an sRGB texture's UNORM twin, and `storage_view` binds it through an R32_UINT view.
+  - `stage_set` notes the compute shader's image bindings that hold one, and `vk_dispatch` takes that shader's variant pipeline for them (`cpipe_e5`; two kept per shader, by bindings: a third set is skipped, red line 127). Its module goes through `spv_e5.h` (`lm_code`): the image becomes an R32ui image. A raw store (Maxwell's SUST.B, which the translator writes as vec4(the word's bits, 0, 0, 0)) stores the word as it is: `a335c1db6270c355`'s stores are these, the game packing RGB9E5 itself. A formatted store packs its texel into RGB9E5, and a load unpacks it, with alpha 1.
+  - The packing is Vulkan's conversion (Shared Exponent Formats): channels clamped to [0, 65408], NaN to 0; the shared exponent from the largest channel, one higher where that channel would round to 512; each mantissa rounded to nearest. So later reads, copies and the CPU see the bits a GPU with the format would write.
+  - A draw's image slot with such a texture is still skipped (red line 126), and so is a module whose image has another use (a format query, a texel pointer for an atomic). `DM_VK_E5_STORE=0` skips them all, as before.
+  - Red line 125 is now said once for each format, so a second format refused behind the first shows up.
+- **Check:** Galaxy Z Fold 8 (Adreno 840; `E5B9G9R9 storage no, R32_UINT storage yes`).
+  - `t_e5_store` (`test_spv_e5.py` with `DM_TEST_SERIAL`): a formatted store's 256 words match the specification's conversion bit for bit (0, denormals, NaN, infinities, 65408, the 511 / 512 edges, random values), and a raw store's 256 words come back unchanged, 56 of them with NaN or infinity float bit patterns.
+  - Ocarina of Time's `kokiri` route, on a test build with #191 (the c0 + 4 counts): `a335c1db6270c355` now runs ("its storage images at binding mask 0x8 are E5B9G9R9 textures"), and Kokiri Forest is drawn instead of black. With #189 (compute warp ops) the game's own upscaler network shows it cleanly. The picture is still too bright (open, not this entry's).
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md): `a335c1db6270c355`, the upscaler's input. Across its compute modules, 421 of the 424 storage image bindings can be rewritten, all valid under `spirv-val` (`test_spv_e5.py` with `DM_SPV_DIR`).
 ### A render pass with colour slot 0 empty hangs a later pass on the Adreno 830 (Android)
 
 - **Symptom:** Breath of the Wild loses the GPU on a OnePlus Pad 3 (Adreno 830, driver 0x8032004a) at its first frame in the field: `vkQueueSubmit` gives -4 and the loading screen stays up. Before that, one submission a frame takes 250–340 ms on the GPU with its end timestamp never written: the driver's hang recovery. The hang report names one draw, a vertical blur into a 640×360 RGBA8 target (vertex `2decd3e894b3736a`, fragment `26ae1640f3448ba4`). An Ayn Odin 2 (Adreno 740) runs the same frames.
@@ -2133,6 +2163,18 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - A later draw of the pass that writes a slot left unused and not the kept one loses that write. It is counted in the stats line, with a red line.
   - `DM_VK_DUP_SLOTS=0` attaches the image at every slot, as before.
 - **Check:** Breath of the Wild's `outdoors` save on a Galaxy S25 Edge (Adreno 830, Samsung's driver 0x80320001): the Shrine is drawn as on the Odin 2, with no write lost, and the GPU time drops from 21.4 to 20.5 ms. With `DM_VK_DUP_SLOTS=0` it is dark as before. On the Pad 3 a local test leaving the later slot of each pair unused drew it right too. A Galaxy Z Fold 8 (Adreno 840) draws it right either way, and with the fix its GPU time drops from 30.3 to 29.6 ms.
+
+### Clears in a layered pass clear every layer (Android)
+
+- **Symptom:** Android, a 3D or array render target drawn a slice at a time by draws that write the layer (a layered pass) and cleared each frame keeps, in every slice but the first, what earlier frames drew there. With additive blending it grows or flickers from frame to frame.
+- **Cause:** `clear_color_pass` and `clear_ds_pass` cleared through `vkCmdClearAttachments` with a rect of layer 0 alone. NVN clears the whole bound target. A full clear of a 3D target takes that path whenever its size matches the pass's, since a 3D image has one array layer (`clear_color`, `clear_ds`).
+- **Cause, the other order:** a clear before the first layered draw opened a pass of one layer (`clear_in_pass`, `rp_prepare_(0)`), so a 3D target was cleared at slice 0 alone, and that draw then reopened the pass layered and loaded the other slices as they were.
+- **Fix:**
+  - The rect covers every layer of the pass's framebuffer (`P.layers`, `clear_rect_layers`).
+  - A clear whose target's view covers more than one layer or slice asks for a layered pass (`clear_rp_prepare`: `rp_prepare_(1)`, the layers as `rt_layers` gives a layered draw), so it reaches all of them whether it comes before the layered draws or after, as the Mac does in a pass of its own ([Clears of layered render targets in a pass that is not layered](#clears-of-layered-render-targets-in-a-pass-that-is-not-layered)).
+  - A full clear whose pass still has fewer layers than the view (`DM_VK_LAYERED=0`, or another target of the pass with fewer) is made outside the pass instead (`vkCmdClearColorImage` / `vkCmdClearDepthStencilImage` on the view's range; a 3D level is cleared whole). A clear limited by the scissor has no such way out: red line 172 names it.
+  - A clear with a channel mask or a partial stencil mask is a draw of layer 0, which this does not widen: red line 171 says when one meets a layered pass.
+- **Found on:** code reading, from shirai91/nx2android 37c76f613 (carried by DeathKhan/nx2android), where the same rect in that fork's Vulkan backend left Final Fantasy Resonance's 32x32x32 light volumes uncleared in slices 1-31: the fog boxes that read them changed every frame on its first road (pass dumps over 4 frames at the road's centre: 29.6, 40.7, 31.7, 39.7; with every layer cleared, 30.4 in each). Not reproduced on this replay yet.
 
 ### Pipeline keys built from the state objects' fields
 
@@ -2170,6 +2212,20 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** on the Retroid Pocket 5, the crashing pipeline (`f8d70797a143b99f`, `b2f8ca02b9c1a06c`) with the fragment shader's shuffle made a copy of its own value built, and the crash moved to the next of the 23 (`74f249b01166d890`); with the lane ID taken out and the shuffle kept, it still crashed; with all 23 shuffles taken out the game booted. With the fix, `t_quad_shuffle`'s four shuffles are right in all 4,096 pixels, NaN patterns included. Every module rewritten from the packed shaders passes spirv-val: Brilliant Diamond 23 of 21,688, Animal Crossing 500 (a ballot each), Link's Awakening 5, Final Fantasy Resonance 548 fragment shaders (its 1,199 compute ones are left), Mario Kart World 120. With the Adreno 740 and 830's stages (`0x30`), not one module of Brilliant Diamond, Animal Crossing, Link's Awakening, Super Mario Odyssey, Skyward Sword HD or Smash is touched (none uses subgroup operations outside fragment and compute shaders).
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) on a Retroid Pocket 5 ([Android baselines](../../dm/android/baselines.md), problem 2): it boots on the phone's own driver and reaches Eterna City.
 
+### Draws of billions of instances skipped
+
+- **Symptom:** Android only: the game stops drawing, its sound and vsync going on, and the log has `submission N took 2034–10634 ms on the GPU, its end timestamp never written (the driver's hang recovery cut it short)` with a draw of `… x 1366987687 instances` in the submission's list. It happens in every run, at the same scene.
+- **Cause:** the game's own instance count. Final Fantasy Resonance's first field on the Adreno 730 (a Moto Razr Plus 2023) asks for 1 to 3.8 billion instances (0x7993a7d2, 0x7a93a3c2, 0xe0ad0a27, …) of one indexed quad (vertex shader `fb570ef861debd17`, 6 indices) every frame. The GPU works through them until the driver's hang recovery.
+  - It's an indirect draw: its arguments are written by a compute shader (`544e80ec57b3a10b`, Unreal's Niagara argument generation), and the replay reads them on the CPU once they land.
+  - The same field plays on the Adreno 740 and 830.
+  - Not the cause: 32-lane warps in compute shaders (`spv_wide` over compute kept it), the write-back read path (`DM_VK_WB_READBACK=0` kept it), compute shared memory over the GPU's 32 KB (none asks for more), failed pipelines or dropped draws (none).
+  - Where the count comes from: the particle simulation's warp reduction, through a shuffle this driver gets wrong: [Maxwell's butterfly shuffle on the Adreno 730](#maxwells-butterfly-shuffle-on-the-adreno-730), fixed by `spv_xor`.
+- **Fix, a mitigation:** `vk_draw__` skips a draw of more than 2^24 instances, more than any Switch game draws, with a once-only red line naming its shaders and count. The GPU doesn't hang, and what the draw would have shown is missing. It stays for any other runaway count; this one's cause is fixed by `spv_xor`.
+- **Check:** Final Fantasy Resonance's `field` route on the Razr.
+  - Without the skip, the GPU hangs as the field appears in every run (5 of 5), with no frame after.
+  - With it (the same condition in a diagnostic build), the field plays at 15–17 fps through the route's walk north, with no hang.
+- **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md) on a Moto Razr Plus 2023 (Adreno 730, Qualcomm's driver V@0615.98).
+
 ### Maxwell's 32-lane warps in a wider subgroup
 
 - **Symptom:** Android only, on a GPU whose subgroups have more than 32 lanes (the Adreno 830: 64 in fragment and compute shaders, its only size): in a fragment shader that exchanges values within its 2×2 quad (Maxwell's `fwidth` and fine derivatives through SHFL), the pixels of lanes 32 and up read another quad's value, or keep their own: half of each wave's pixels get a wrong derivative. No `[RED]` line; the log's `subgroup operations in stages 0x30, 64 lanes` names such a GPU.
@@ -2186,6 +2242,38 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Note:** this is right where a warp's leader is chosen within the subgroup (a lane ID of 0, or a ballot's lowest or highest lane), so that each subgroup's leader adds its own result. Final Fantasy Resonance's leaders are `SubgroupLocalInvocationId == 0`. A game that chose its leader by local invocation index would lose the second subgroup's result.
 - **Check:** `t_warp_reduce` on the Pixel 9 Pro XL (`test_spv_narrow.py` with `DM_TEST_SERIAL`): as translated, the sum wrong and the rest right; rewritten, all four right. Run over the packed modules (`DM_SPV_DIR`): Final Fantasy Resonance 1,725 rewritten, all 309 with reduction steps made the value; Mario Kart World 284 (3); Brilliant Diamond 23; Animal Crossing 1; Link's Awakening 5. Every result passes spirv-val wherever the module itself does. Final Fantasy Resonance's opening on the Pixel: 29.8 and 30.2 fps, GPU 23.3 and 23.0 ms with it, 30.2 fps and 23.1 ms without; no difference was found in its screenshots.
 - **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md) on the Pixel 9 Pro XL ([Android baselines](../../dm/android/baselines.md#mali-super-mario-odyssey-on-a-pixel-9-pro-xl)).
+
+### Maxwell's butterfly shuffle on the Adreno 730
+
+- **Symptom:** Android only, on the Adreno 730 (Qualcomm's driver V@0615.98, Vulkan 1.1): a compute shader's warp reduction through SHFL.BFLY gives a garbage value, with no red line of its own. In Final Fantasy Resonance's first field, a particle emitter with about 20 live particles added 0x21d1f071 or 0xf6b4131c to its count, so the indirect draw of its sprites asked for billions of instances ([Draws of billions of instances skipped](#draws-of-billions-of-instances-skipped)).
+- **Cause:** the translator writes SHFL.BFLY as `OpGroupNonUniformShuffle` to the lane ID ^ the mask (its helper keeps both in Function variables). This driver returns garbage from that shuffle.
+  - The emitters with one live particle, whose reduction takes nothing from other lanes, came out right.
+  - `OpGroupNonUniformShuffleXor` by the same mask names the same lane and is right on this driver.
+  - Not the cause: the 32-lane warps on 64-lane subgroups (`spv_wide` over compute kept it), the views' numeric types, uninitialized variables, and the host's write-backs (`DM_VK_SAFE=1` kept it).
+- **Fix:** `spv_fit_xor` (`dm/android/spv_xor.h`, the first step of `spv_fit`) rewrites each shuffle whose index is the lane ID ^ b into `ShuffleXor` by b.
+  - The index is followed through bitcasts, copies and Function variables stored once earlier in the same block.
+  - It runs on Qualcomm's own driver below Vulkan 1.3, in a stage that runs subgroup operations, with 32 lanes or more. The Adreno 740's and 830's drivers (Vulkan 1.3) run the shuffle as translated.
+  - The rewrite is exact on any GPU. `spv_wide` keeps a `ShuffleXor` by a mask under 32 as it is, within its 32-lane warp.
+  - Other shuffles (SHFL.IDX, as Brilliant Diamond's quad derivatives use; UP; DOWN) are left as translated.
+  - `DM_SPV_XOR=0`: as translated; `=1`: on any GPU of 32 lanes or more.
+- **Check:** the `field` route on the Razr, two runs.
+  - With the rewrite: 19.9–20.0 fps, GPU 30.5 ms, and the skip never fires.
+  - With `DM_SPV_XOR=0`, the same build: 15.9 fps, GPU 38.5 ms, and the skip drops a draw of 427,590,567 instances (0x197c83a7).
+  - Over the packed modules (`test_spv_xor.py` with `DM_SPV_DIR`), the rewritten counts: Final Fantasy Resonance 733 of 82,749, Mario Kart World 114, Link's Awakening 5, Animal Crossing 1. Brilliant Diamond, Super Mario Odyssey, Smash, Breath of the Wild and Skyward Sword HD have none. All are valid, and `spv_wide` leaves none of them that it rewrites as translated.
+- **Found on:** [Final Fantasy Resonance](../../dm/games/0100606026F12000/README.md) on a Moto Razr Plus 2023 ([Android baselines](../../dm/android/baselines.md#adreno-730-a-moto-razr-plus-2023)).
+
+### Layer output from vertex shaders on a GPU that has none
+
+- **Symptom:** Android only: a crash in the driver's shader compiler at every boot, before the first frame, as the first pipelines are built (`CRASH sig=11 addr=0x48 pc=…(libllvm-qgl.so+0xd8a064)`, thread `NVN queue repla`). The pipeline being built names a vertex shader whose module declares `ShaderViewportIndexLayerEXT` and decorates a variable `BuiltIn Layer`; its fragment shader has no subgroup operation and no derivative, unlike [Subgroup operations rewritten for stages the GPU runs none in](#subgroup-operations-rewritten-for-stages-the-gpu-runs-none-in).
+- **Cause:** Maxwell's vertex shaders may write the render target layer and the viewport index, and the translator declares them as `BuiltIn Layer` and `ViewportIndex` with the `ShaderViewportIndexLayerEXT` capability and `SPV_EXT_shader_viewport_index_layer`. Vulkan 1.1 allows that only with `VK_EXT_shader_viewport_index_layer` (1.2: `shaderOutputLayer` and `shaderOutputViewportIndex`). The Adreno 730's driver V@0615.98 (Vulkan 1.1.128) has neither, and its compiler dereferences null on such a module. The host never asked for the extension; the newer drivers here (the 650's V@0746, the 740's, the 830's) took the modules anyway.
+- **Fix:** on a GPU without the extension that is not Vulkan 1.2 or later, `lm_code` passes each module through `spv_layer` (`dm/android/spv_layer.h`, after `spv_fit`). It makes each of those built-ins an ordinary output at a location after the module's highest, which no fragment shader reads, and drops the capability and extension. Those draws then go to layer 0 and viewport 0 (such a GPU has no `multiViewport` either). `DM_SPV_LAYER=0` (env.txt) makes the modules as translated. A built-in that is a block member is left as it is, with a red line (the translator writes none).
+- **Check:**
+  - On the Moto Razr Plus 2023, the crashing pipeline (vertex shader `472d0b6794a8a777`, fragment shader `5ec702f7caaf2ff6`) built with its vertex shader's layer output stripped by hand, and the crash moved to the next layer-writing vertex shader (`5f7f16a6d1c85b71`).
+  - With all 12 of Brilliant Diamond's layer-writing vertex shaders (and their `.z` variants) stripped, and then with this change and the modules as packed, the game boots: the language menu at 60 fps, Eterna City at 59.9 fps.
+  - With `DM_SPV_LAYER=0`, the same crash at the same address.
+  - The log counted no layered render pass in those scenes, so nothing drawn changed.
+  - `dm/tools/tests/test_spv_layer.py` checks the rewrite against the module the translator would write without the built-ins, and runs it over a game's packed shaders (`DM_SPV_DIR`; each result must pass `spirv-val`).
+- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) on a Moto Razr Plus 2023 (Adreno 730): it boots on the phone's own driver. Mesa's Turnip (`DM_VK_DRIVER`) compiled the same modules as they were, past the crashing pipeline.
 
 ### Geometry kept on the GPU between frames
 

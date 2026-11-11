@@ -21,8 +21,9 @@ Bros. Ultimate's Retroid Pocket 5 rows were measured again the same day on `main
 | Samsung Galaxy S25 Edge | SM8750 (Snapdragon 8 Elite for Galaxy) | Adreno 830, V@0800.40.1, 1.3.284 | 16 | 12 GB |
 | Google Pixel 9 Pro XL ([Mali](#mali-super-mario-odyssey-on-a-pixel-9-pro-xl)) | Tensor G4 | Mali-G715, Arm's driver 0xd803000, 1.4.343 | 17 | 16 GB |
 | Samsung Galaxy Z Flip 7 ([Xclipse](#xclipse-brilliant-diamond-on-a-galaxy-z-flip-7)) | Exynos 2500 | Xclipse 950, Samsung's driver 24.0.533 (0x6000215), 1.3.279 | 16 | 12 GB |
+| Moto Razr Plus 2023 ([Adreno 730](#adreno-730-a-moto-razr-plus-2023)) | SM8475 (Snapdragon 8+ Gen 1) | Adreno 730, V@0615.98 (0x80267062), 1.1.128 | 16 | 8 GB |
 
-All six use 4 KB pages. The Odin 2 and the Retroid Pocket 5 have built-in controls; the Pad 3, the S25 Edge, the Pixel 9 Pro XL and the Z Flip 7 show the on-screen controls over the game.
+All seven use 4 KB pages. The Odin 2 and the Retroid Pocket 5 have built-in controls; the Pad 3, the S25 Edge, the Pixel 9 Pro XL, the Z Flip 7 and the Razr Plus 2023 show the on-screen controls over the game.
 The Pixel 9 Pro XL, the first GPU outside Adreno, is not in the Results table: it has [a section of its own](#mali-super-mario-odyssey-on-a-pixel-9-pro-xl).
 
 The RAM column is the device's installed capacity, not a measurement of how much memory a game uses. These baselines report frame rates and frame
@@ -154,6 +155,39 @@ Where this GPU differs from the Adreno above:
 
   The fold was simulated with `cmd device_state`, which locks a phone that has a secure screen lock.
 - **The benchmark's screenshots:** `screencap` needs a display on a phone with two screens; without one, every shot was unreadable before #132.
+
+## Adreno 730: a Moto Razr Plus 2023
+
+The first Adreno 730, 2026-11-10: a Moto Razr Plus 2023.
+- **Hardware:** SM8475, Snapdragon 8+ Gen 1; Adreno 730 with Qualcomm's driver V@0615.98 (0x80267062, built 2025-05-02); Vulkan 1.1.128; Android 16; 8 GB of RAM.
+- **Setup:** open, on its inner screen (1080 × 2640, modes from 24 to 165 Hz, 90 Hz when the runs began), with the on-screen controls.
+- **Build:** an APK of Brilliant Diamond's, Odyssey's and Final Fantasy Resonance's hosts built from `main` at 30215723, the first DroidPlay install on this phone, with each game's chain-5 shaders from `main`.
+- **Runs:** `scripts/bench_android.py`, a warm-up plus two runs.
+
+| Game, scene | Moto Razr Plus 2023 |
+|---|---|
+| **Super Mario Odyssey 1.4.1**, the opening cutscene (Start pressed on a fresh save) | 57.4–58.1 · 16.8–17.0 / 20.2 · GPU 12.5–12.6 (the warm-up 52.5) |
+| **Pokémon Brilliant Diamond 1.3.0**, language menu and Eterna City | **Crashes** at boot, before its first frame, in every launch (6 of 6): the driver's shader compiler |
+| **Final Fantasy Resonance 1.0.1**, the first field (the `battlefield` save) | **The GPU hung** as the field appeared, about 56 s in, in every run (3 of 3), with no frame after it. With `spv_xor` (`main` 5c21a252, two runs, no warm-up): 19.9–20.0 · 50.4–50.7 / 59.8–60.3 · GPU 30.5, no hang |
+
+Where this GPU differs from the Adreno above:
+
+- **Brilliant Diamond's crash** is in the driver's shader compiler: `CRASH sig=11 addr=0x48 pc=libllvm-qgl.so+0xd8a064`, on the replay thread, about 4 s into the boot.
+  - It happens building the pipeline of vertex shader `472d0b6794a8a777` and fragment shader `5ec702f7caaf2ff6`, at the same address in all six launches.
+  - It isn't problem 2's: that fragment shader has no subgroup operation and no derivative, and this GPU runs subgroup operations in fragment shaders.
+  - The game boots on the Adreno 650 (driver V@0746), the 740 (V@0676) and the 830 (V@0800), all newer drivers than this one. Not narrowed down yet.
+- **Final Fantasy Resonance's hang:** 55–60 fps through the load and the field's first frames. Then one submission ran 10.2–10.6 s on the GPU until the driver's hang recovery cut it short, its end timestamp never written; its last commands were compute dispatches.
+  - The game kept running (sound, vsync) and drew no further frame.
+  - Its red line `a compute shader with Maxwell's 32-lane warp instructions on the GPU's 64-lane subgroups` (`e918336692525691`) shows on the other 64-lane GPUs too, where the field plays. It isn't the hang's cause.
+  - **Found and fixed:** the particle simulation's warp reduction through the translator's butterfly shuffle comes back as garbage on this driver, so a sprite draw asked for billions of instances. `spv_xor` makes that shuffle ShuffleXor: [Maxwell's butterfly shuffle on the Adreno 730](../../docs/reference/rendering.md#maxwells-butterfly-shuffle-on-the-adreno-730).
+- **The flames:** the field's last frame before the hang has black pixel-art shapes along the road where its flames burn. That's the Ayn Odin 2's Adreno 740 picture before droidplay-core#135, whose run-time rows it turns on for Qualcomm's Adreno 7xx. So it points the same way for the 730, from one frozen frame: the hang came before the route's walk, and #135 wasn't run here.
+- **Odyssey** plays the opening at 57–58 fps, with GPU 12.5 ms against the Odin 2's 5.5 ms; the picture is right.
+- **Vulkan:**
+  - 64-lane subgroups in fragment and compute shaders only (stages 0x30), so `spv_wide` applies.
+  - No `VK_EXT_shader_module_identifier`, so #144's lazy modules stay off.
+  - `VK_EXT_vertex_attribute_divisor` but not the KHR one; `VK_GOOGLE_display_timing`.
+  - BC, ETC2 and ASTC textures; `maxStorageBufferRange` 128 MB.
+- **The cover screen** (1056 × 1066, 48 to 144 Hz) was off: the phone stayed open. The screenshots came from the inner screen with droidplay-core#154's `bench_android.py`.
 
 ## Known problems
 

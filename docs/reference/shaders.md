@@ -1442,10 +1442,10 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### NVN2 compute reads its workgroup counts at c0 + 4
 
-- **Symptom:** a scene lit by many small lights comes out too dark, with its clustered light lists empty for most clusters.
-- **Cause:** a light culling shader computes its cluster as `(z * c0[8] + y) * c0[4] + x`. NVN2 compute keeps the dispatch's workgroup counts at the start of its driver segment, below the per-shader layout at 0x10, and the host wrote them only at c0 + 0x200, Maxwell's place. At zero, every cluster of a column wrote the same entry.
-- **Fix:** with a Switch 2 `sdk` (`dm_sdk_ounce`), `encode_args_` also writes them at `DMSH_C0_DISPATCH_NVN2`, and an indirect dispatch copies its GPU-written counts there too. x and y are read by the shader; z at c0 + 12 follows their order and has not been seen read.
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `35d12d6f98fa05e2`, read from its translated MSL. The picture's change has not been measured on its own.
+- **Symptom:** a scene lit by many small lights comes out too dark, with its clustered light lists empty for most clusters. On Android: Ocarina of Time's volumetric fog fills with NaN (its froxel volumes, 8-13% of texels), which the forward pass, blur and bloom spread to the whole frame, and Kokiri Forest is black.
+- **Cause:** a light culling shader computes its cluster as `(z * c0[8] + y) * c0[4] + x`. NVN2 compute keeps the dispatch's workgroup counts at the start of its driver segment, below the per-shader layout at 0x10, and the host wrote them only at c0 + 0x200, Maxwell's place. At zero, every cluster of a column wrote the same entry. The Android replay's `bank_c0` kept writing only 0x200 after the Mac's fix: Ocarina of Time's `21d9f83e6027c565` takes a golden-spiral sample count from x · y · 32 · 32, divided 1 by it, and the infinity became NaN in the buffer the fog shaders read (`9e6b00b050e30801`'s `cp_s3`, words 16-18).
+- **Fix:** with a Switch 2 `sdk` (`dm_sdk_ounce`), `encode_args_` also writes them at `DMSH_C0_DISPATCH_NVN2`, and an indirect dispatch copies its GPU-written counts there too. The Android replay's `bank_c0` writes them there as well (an indirect dispatch's counts are read on the CPU first, so they are the ones written). x and y are read by the shader; z at c0 + 12 follows their order and has not been seen read.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `35d12d6f98fa05e2`, read from its translated MSL. The picture's change has not been measured on its own. [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on the Galaxy Z Fold 8: the fog's eight froxel volumes from 8.4-13.3% NaN to none, and `21d9f83e6027c565`'s three words 0.192, 0.285 and 0.503 instead of NaN.
 
 ### Texture handles of SDK 22's Ampere code
 
