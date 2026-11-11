@@ -13,7 +13,7 @@ Update 1.0.1 (v65536) over the base game, SDK **20.5.19** (`nnSdk-20_5_19`, `Nin
 | `sys_resource 0x0`, `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | no system resource, so no virtual address memory. `main` sets a heap of at most the pool − 64 MB, which the 3.25 GB heap region holds (`heap 3.12 GB (heap region 3.25 GB)` in the log, on the Mac and on Android) |
 | `shader_groups /=romfs` | [`game.tsv`](game.tsv) | every shader is in `common.dat` at the RomFS root. See [Shaders](#shaders) |
 | `zip_store .dat:.metallib` | [`game.tsv`](game.tsv) | the archives' entries are zstd frames and Ogg streams already |
-| `DM_VK_RAW_GMEM=1` | [`android_defaults.txt`](android_defaults.txt) | Android: raw global memory, which every solid and translucent mesh reads (see [Shaders](#shaders)). It's on by default only for Switch 2 games, and Frostpunk is a Switch 1 one |
+| `DM_VK_RAW_GMEM=1` | [`android_defaults.txt`](android_defaults.txt) | Android: raw global memory, which every solid and translucent mesh reads (see [Shaders](#shaders)). It's on by default only for Switch 2 games, and Frostpunk is a Switch 1 one. It takes effect on a Qualcomm Adreno or a Samsung Xclipse ([Android](#android)) |
 
 The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the survey, unchanged but for its comments. Its shader tables come from the Liquid archive reader. `pso_manifest.tsv` is still the empty provisional list.
 
@@ -73,6 +73,19 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
   - **What runs:** the title, the menu, the intro movie, the story screen and the city, with sound. Raw global memory is on (the AHardwareBuffer route, 618 pieces, 349 MiB placed), and the terrain, snow, lights and UI draw. City: 29.0 fps, frame p50 34.1 / p95 37.7 ms, GPU p50 17.8 ms (without the meshes). The sound dump runs at −17 to −32 dBFS; 1 underrun in 68,000 callbacks.
   - **What doesn't:** the Generator, the buildings and the props, which leave only their shadows and lights. Every pipeline with one of the 1,108 shaders that read raw global memory fails (`pipeline creation failed: VkResult -13`: 32 pipelines, about 242,000 draws left out in four minutes). Logcat says why: `AdrenoVK-0: Shader compilation failed for shaderType: 0 ... INTERNAL ERROR: Instruction OpConvertUToPtr not supported`. The translator turns raw global memory into `PhysicalStorageBuffer` pointers made with `OpConvertUToPtr` from 64-bit addresses (539 vertex and 569 fragment modules).
   - **Two rewrites tried on the device** (the modules swapped in `games/<id>/spv`, then put back): an `OpBitcast` from the 64-bit address fails `src expected to have two components`, and an `OpBitcast` through a `uvec2` (GL_EXT_buffer_reference_uvec2's form, valid by spirv-val) gets past that but crashes the compiler (`SIGSEGV in libllvm-qgl.so+0x2cc258`, building `7069f9743717cd32`). So this driver takes no physical pointer form tried; a newer driver or Turnip might, and a translation of raw global memory without pointers would.
+
+- **On a Galaxy Z Flip 7, 2026-11-11: the meshes draw.** Xclipse 950 with Samsung's driver 24.0.533 (0x6000215, Vulkan 1.3.279), Android 16, open. By hand from the title through A New Home's intro into the city, the game files sent with `push_game` (`defaults.txt` holding `DM_VK_RAW_GMEM=1`).
+  - **Raw global memory:** the driver compiles every pipeline of the shaders that read it, with no `pipeline creation failed`. It takes the AHardwareBuffer route (no `VK_EXT_map_memory_placed`). The pages read at 11–18 GB/s, so they're cached. About 614–618 pieces, 345–359 MiB placed.
+  - **Red lines:** only the sky's uniform slot, and no `c255` line.
+  - **From `main` 25cdf3e1, with `DM_VK_RAW_GMEM_ANYGPU=1`** (then needed on a GPU not from Qualcomm). The off run is the same launch without it. City, in 30 s windows:
+
+  | Run | fps | Frame p50 / p95 | GPU p50 | PSS | Generator, wreckage |
+  |---|---|---|---|---|---|
+  | On | 29.4–29.5 | 33.9–34.0 / 34.5 ms | 11.9–12.4 ms | 3.13 GB | drawn |
+  | Off | 29.4–29.5 | 33.9–34.0 / 34.5 ms | 13.0–13.3 ms | 2.93 GB | missing: only the Generator's base and lights |
+
+  - **With raw global memory allowed on Samsung's Xclipse** (no env switch), the same: 29.4–29.5 fps in the city, GPU p50 12.2–13.3 ms, PSS 3.04 GB, the meshes drawn.
+  - **A camera panned low to the crater's edge** showed large flat bright faces on the cliffs. Not compared with the Mac; it may be the terrain's hull and domain shaders (Open, below).
 
 ## Found on this game
 
