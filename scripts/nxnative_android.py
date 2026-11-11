@@ -1158,11 +1158,15 @@ class PerformancePage(QWidget):
         self.prof.verticalHeader().hide(); self.prof.setShowGrid(False); split.addWidget(self.prof); split.setSizes([700, 380])
         lay.addWidget(split, 1)
     def toggle(self):
-        if self.proc and self.proc.state() != QProcess.NotRunning: self.proc.kill(); self.b_run.setText('Watch the log'); return
+        if self.proc and self.proc.state() != QProcess.NotRunning: self.wanted = False; self.proc.kill(); self.b_run.setText('Watch the log'); return
         s = self.win.serial()
         if not s: self.win.toast(self.win.no_phone()); return
         self.proc = QProcess(self); self.proc.setProgram('adb'); self.proc.setArguments(['-s', s, 'logcat', '-T', '200', '-s', 'DroidPlay', 'nxnative'])   # the app's tag; nxnative from an app older than 0.5.0
-        self.proc.readyReadStandardOutput.connect(self.read); self.proc.start(); self.b_run.setText('Stop watching')
+        self.proc.readyReadStandardOutput.connect(self.read); self.proc.finished.connect(self.ended); self.proc.start(); self.b_run.setText('Stop watching'); self.wanted = True
+    def ended(self, *_):   # logcat ended without Stop watching: the phone dropped off (Wi-Fi). resume() starts it again when the phone is back
+        if getattr(self, 'wanted', False): self.b_run.setText('Watch the log'); self.log.appendHtml(f'<span style="color:{BUILD}">— the phone dropped off: the log goes on when it is back</span>')
+    def resume(self):
+        if getattr(self, 'wanted', False) and not (self.proc and self.proc.state() != QProcess.NotRunning) and self.win.serial(): self.toggle()
     def read(self):
         if not self.proc: return
         self.buf += bytes(self.proc.readAllStandardOutput()).decode('utf-8', 'replace')
@@ -1492,6 +1496,7 @@ class Window(QMainWindow):
                                                              not self.setup.step('phone').done and not self.st.value('serial', '')): self.go('setup')
         self.ids = {}   # serial → the phone's ID (phone_id.py), asked once per serial: its settings, backups and first-start notice are kept under it
         self.seen = {}   # every serial → ID this session, kept after a serial goes: Install again finds the phone a build was for on the serial it has now
+        self.lost, self.reconnecting, self.reconnect_at = None, False, 0.0   # the picked phone, gone off Wi-Fi: looked for by its ID (track_lost, reconnect)
         for k in self.st.allKeys():   # first-start notices kept under a Wi-Fi address, before IDs: the address is gone with its port, and the notice with it
             if k.startswith('firststart/') and k.count('/') == 2 and phone_id.wifi(k.split('/')[1]): self.st.remove(k)
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh_devices); self.timer.start(5000); self.refresh_devices()
@@ -1610,6 +1615,30 @@ class Window(QMainWindow):
     def set_serial(self, s):   # a row of the Phones page: the picker has one entry a phone, so a phone's Wi-Fi row picks its entry over the cable
         i = self.find_phone([s, self.ids.get(s)])
         if i >= 0: self.phone.setCurrentIndex(i)
+    def track_lost(self, was, devs):   # the picked phone gone from adb's ready list after it was there over Wi-Fi (asleep, roamed, a new port): looked for by its ID
+        # every RECONNECT_EVERY s for RECONNECT_FOR s. Back: its stale offline entry dropped, and the Performance page's log started again if it was running
+        here = {d.get('id') or d['serial']: d['serial'] for d in devs if d['state'] == 'device'}; s = self.serial()
+        if was and s and phone_id.wifi(s) and was not in here and not self.lost:
+            self.lost = {'id': was, 'name': self.models.get(s) or s, 'addr': s, 'until': time.time() + wifi.RECONNECT_FOR}
+        if not self.lost: return
+        if self.lost['id'] in here:
+            old, back = self.lost, here[self.lost['id']]; self.lost = None
+            gone = wifi.stale(devs, old['id'], self.seen, back)
+            if gone: bg(lambda: [adb_run(None, 'disconnect', g, timeout=10) for g in gone], lambda _: QTimer.singleShot(0, self.refresh_devices))
+            self.toast(f'{old["name"]} is back over Wi-Fi'); QTimer.singleShot(500, self.perf.resume); return
+        if time.time() > self.lost['until']: self.lost = None; return
+        self.reconnect()
+    def reconnect(self):   # once every RECONNECT_EVERY s while the phone is lost: its address on the network, by its serial number, else the last one it had
+        if self.reconnecting or time.time() < self.reconnect_at or not self.lost: return
+        lost = dict(self.lost); self.reconnecting, self.reconnect_at = True, time.time() + wifi.RECONNECT_EVERY
+        def look():
+            for a in wifi.reconnect_targets(lost['id'], adb_run(None, 'mdns', 'services', timeout=8)[1], lost['addr']):
+                if wifi.connect_result(*adb_run(None, 'connect', a, timeout=10))[0]: return a
+            return None
+        def got(a):
+            self.reconnecting = False
+            if a and not isinstance(a, Exception): self.refresh_devices()
+        bg(look, got)
     def phone_changed(self, _):
         s = self.serial()
         if s: self.st.setValue('serial', s); self.st.setValue('phone', self.phone_key(s))   # the phone by its ID too, which outlives a Wi-Fi port
@@ -1672,12 +1701,13 @@ class Window(QMainWindow):
                 r = []
             r = r or []
             was = self.phone_key(); self.ids = {d['serial']: d['id'] for d in r if d.get('id')}; self.seen.update(self.ids)   # the picked phone's ID as the last list had it
+            self.track_lost(was, r)
             if r == self.devs and adb == self.adb: return
             ident = lambda ds: [(d['serial'], d['state'], d.get('model'), d.get('name'), d.get('android')) for d in ds]   # noqa: E731
             same = self.devs is not None and adb == self.adb and ident(r) == ident(self.devs)
             self.devs, self.adb = r, adb
             if same: self.phones.fill(r, adb); self.setup_changed(); return   # only a battery level or the free space moved: the picker and the phone's games stay
-            keep = [was, self.st.value('phone', ''), self.st.value('serial', '')]   # the picked phone by its ID: the same phone over Wi-Fi once its cable is out
+            keep = [was, (self.lost or {}).get('id'), self.st.value('phone', ''), self.st.value('serial', '')]   # the picked phone by its ID: the same phone over Wi-Fi once its cable is out
             self.models = {d['serial']: d.get('name') or d.get('model') or d['serial'] for d in r}
             self.phone.blockSignals(True); self.phone.clear()
             for d in phone_id.one_per_phone([d for d in r if d['state'] == 'device']):   # one entry a phone, over the cable when it is on a cable and on Wi-Fi (the Phones page lists both)
@@ -1686,11 +1716,12 @@ class Window(QMainWindow):
             for d in r:
                 if d['state'] in ('unauthorized', 'authorizing', 'offline'):
                     off = d['state'] == 'offline'
-                    self.phone.addItem(icon('phone', ERR if off else BUILD, 16), ('Wake your phone (Wi-Fi)' if phone_id.wifi(d['serial']) else 'Plug your phone in again') if off
-                                       else 'Tap Allow on your phone', None)
+                    self.phone.addItem(icon('phone', ERR if off else BUILD, 16), ((f'Reconnecting to {self.lost["name"]} over Wi-Fi…' if self.lost else 'Wake your phone (Wi-Fi)')
+                                                                       if phone_id.wifi(d['serial']) else 'Plug your phone in again') if off else 'Tap Allow on your phone', None)
                     it = self.phone.model().item(self.phone.count() - 1); it.setEnabled(False)
                     it.setToolTip(re.sub(r'<[^>]+>', '', ex.explain(f'device {d["state"]}', phone=d.get('model', ''), wifi=phone_id.wifi(d['serial'])).body))
-            if not self.phone.count(): self.phone.addItem(icon('phone', TEXT3, 16), 'No phone connected' if adb else 'Install the tools to find phones', None)
+            if not self.phone.count(): self.phone.addItem(icon('phone', BUILD if self.lost else TEXT3, 16), f'Reconnecting to {self.lost["name"]} over Wi-Fi…' if self.lost and adb else
+                                                          'No phone connected' if adb else 'Install the tools to find phones', None)
             self.phone.setToolTip('The phone builds install to' if adb else 'DroidPlay finds phones with adb, which comes with the tools: Get started, step 2')
             i = self.find_phone(keep); self.phone.setCurrentIndex(i if i >= 0 else 0); self.phone.blockSignals(False)
             self.phones.fill(r, adb); self.phone_changed(0); self.setup_changed()

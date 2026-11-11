@@ -78,3 +78,19 @@ def disconnect_plan(serial):   # Disconnect, by the serial's kind → ('disconne
     # connected by itself over the network (adb disconnect can't name it: it adds :5555 to the name, and adb would connect it again anyway); ('usb', serial)
     t = phone_id.transport(serial)
     return ('disconnect' if t == 'tcp' else 'wireless off' if t == 'mdns' else 'usb'), serial
+
+
+RECONNECT_EVERY, RECONNECT_FOR = 20, 600   # seconds: how often a phone that dropped off Wi-Fi is looked for, and for how long
+
+
+def reconnect_targets(want, mdns_out, last):   # addresses to adb connect for the phone with ID want: the ones adb mdns services gives for its serial number (a new
+    # port after wireless debugging restarted), then the last one it had (the same port, after a sleep or a roam)
+    addrs = [addr for sn, addr in phone_id.mdns_services(mdns_out) if sn == want]
+    return addrs + [last] if last and phone_id.transport(last) == 'tcp' and last not in addrs else addrs
+
+
+def stale(devs, want, seen, now):   # the offline Wi-Fi entries a phone left behind, once it is back as serial now → serials to adb disconnect. devs: refresh_devices'
+    # list; seen: serial → ID, all known this session. adb keeps an offline ip:port entry after a drop, which the picker showed greyed beside the phone itself
+    ip = now.rsplit(':', 1)[0] if phone_id.transport(now) == 'tcp' else None
+    return [d['serial'] for d in devs if d['state'] == 'offline' and d['serial'] != now and phone_id.wifi(d['serial']) and
+            (seen.get(d['serial']) == want or phone_id.serialno_of(d['serial']) == want or (ip and d['serial'].rsplit(':', 1)[0] == ip))]

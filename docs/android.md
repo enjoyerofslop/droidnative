@@ -104,6 +104,11 @@ the ones you tick. **Disconnect** drops the phone picked in the list (or at the 
 by itself over the network would be connected again while Wireless debugging is on, so for that one DroidPlay offers to turn Wireless debugging off on the phone.
 A phone on its cable is unplugged to disconnect it.
 
+When the phone picked at the top drops off Wi-Fi (it slept, roamed, or Wireless debugging restarted on a new port), the list at the top says **Reconnecting to
+<phone> over Wi-Fi…** and DroidPlay looks for it every 20 seconds for ten minutes, by its serial number on the network and at its last address, and connects to
+it again. If the phone's Wi-Fi itself went off, Android turns Wireless debugging off with it: turn it on again on the phone. The Performance page's log carries
+on once the phone is back.
+
 ### From source
 
 On Linux or a Mac, or on Windows without Setup, `uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the

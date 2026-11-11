@@ -224,6 +224,19 @@ class WiFi(unittest.TestCase):   # PairDialog and Connect…: adb's mDNS list, p
         self.assertEqual(wifi.disconnect_plan('adb-e7879cce-DkIYY8._adb-tls-connect._tcp'), ('wireless off', 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp'))
         self.assertEqual(wifi.disconnect_plan('e7879cce'), ('usb', 'e7879cce'))
 
+    def test_a_phone_that_dropped_off_is_looked_for_by_its_id(self):   # its new port first (adb mdns services), then its old address
+        mdns = self.MDNS.replace('192.168.50.66:37853', '192.168.50.66:41011')
+        self.assertEqual(wifi.reconnect_targets('e7879cce', mdns, '192.168.50.66:37853'), ['192.168.50.66:41011', '192.168.50.66:37853'])
+        self.assertEqual(wifi.reconnect_targets('e7879cce', '', 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp'), [])   # an mDNS name is no address to connect to
+        self.assertEqual(wifi.reconnect_targets('aid-9774d56d682e549c', mdns, '10.0.0.7:5555'), ['10.0.0.7:5555'])   # no serial number to find it by: its address
+
+    def test_the_offline_entries_a_phone_left_are_dropped_once_it_is_back(self):
+        devs = [{'serial': '192.168.50.66:37853', 'state': 'offline'}, {'serial': '192.168.50.66:41011', 'state': 'device', 'id': 'e7879cce'},
+                {'serial': '10.0.0.7:5555', 'state': 'offline'}, {'serial': 'R5CY51ZLGKH', 'state': 'offline'}]
+        self.assertEqual(wifi.stale(devs, 'e7879cce', {}, '192.168.50.66:41011'), ['192.168.50.66:37853'])   # the same address, the old port
+        self.assertEqual(wifi.stale(devs, 'e7879cce', {'10.0.0.7:5555': 'e7879cce'}, 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp'), ['10.0.0.7:5555'])   # known by ID this session
+        self.assertEqual(wifi.stale(devs, 'e7879cce', {}, 'R5CY51ZLGKH'), [])   # back on its cable: an address's IP isn't known to be its
+
     def test_after_pairing_the_phones_connection_is_found(self):   # adb's own connection by mDNS name, or the service the phone offers at the same address
         devs = 'List of devices attached\nR5CY51ZLGKH\tdevice\nadb-e7879cce-DkIYY8._adb-tls-connect._tcp\tdevice\n'
         self.assertEqual(wifi.listed(devs, 'e7879cce', '192.168.50.66'), 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp')
