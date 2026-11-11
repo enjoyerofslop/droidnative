@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- DroidPlay on Android (DroidPlay Core's launcher app; the package keeps nxnative's name): a launcher of the games on the phone and a NativeActivity that runs one. lib/arm64-v8a/ holds a host per game, libdmhost_<title ID>.so
+<!-- DroidPlay on Android (DroidPlay Core's launcher app; the package keeps nxnative's name): a launcher of the games on the phone and a GameActivity that runs one. lib/arm64-v8a/ holds a host per game, libdmhost_<title ID>.so
      (dm/android/front_android.c), and libnxloader.so (dm/android/loader.c), which starts the one the launcher picked; the launcher, the touch controls and the text box
      are in classes.dex (dm/android/java) -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -13,12 +13,12 @@
         <profileable android:shell="true"/>
         <!-- the game, in a process of its own: a host is loaded once per process, so every launch (another game too) is a fresh one -->
         <!-- in a task of its own (taskAffinity): Launcher.endGame removes it whole, so the next game starts from its own intent, not the record of the one closed -->
-        <activity android:name="android.app.NativeActivity" android:exported="false" android:launchMode="singleTask" android:process=":game" android:taskAffinity="org.nxnative.android.game"
+        <activity android:name="org.nxnative.android.GameActivity" android:exported="false" android:launchMode="singleTask" android:process=":game" android:taskAffinity="org.nxnative.android.game"
             android:screenOrientation="sensorLandscape" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">
             <meta-data android:name="android.app.lib_name" android:value="nxloader"/>
         </activity>
-        <!-- the launcher (dm/android/java Launcher.java): the app's entry, the games on the phone, then a game's settings; Play starts the NativeActivity -->
+        <!-- the launcher (dm/android/java Launcher.java): the app's entry, the games on the phone, then a game's settings; Play starts GameActivity -->
         <activity android:name="org.nxnative.android.Launcher" android:exported="true"
             android:screenOrientation="sensorLandscape" android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">

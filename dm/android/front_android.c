@@ -10,6 +10,7 @@
 //   before the first one, and without a game, a status screen. The device's Vulkan capabilities are written to the log at start.
 //   Input: touches are the touchscreen (hle_touch.c); a physical controller is player 1's (buttons by position, Nintendo's layout).
 #include "dm.h"
+#include "prev_file.h"   // the previous start's log and dumps (android_main)
 #include "front.h"
 #include "dm_input.h"
 #include "nvn_obj.h"
@@ -648,9 +649,15 @@ void android_main(struct android_app *app) {
     snprintf(g_int, sizeof g_int, "%s", app->activity->internalDataPath);
     snprintf(g_game, sizeof g_game, "%s/games/%s", g_ext, DM_GAME_ID);
     mkdirs(g_ext); mkdirs(g_int);
+    char lp[620]; snprintf(lp, sizeof lp, "%s/log.txt", g_ext); int kept = keep_prev(lp);   // the previous start's log (prev_file.h), before log_reader truncates it
     log_start();
     LOG("DroidPlay on Android: %s (%s), files %s, internal %s", DM_GAME_NAME, DM_GAME_ID, g_game, g_int);   // a log's first line
     env_file(g_ext, "env.txt", 1); env_file(g_game, "launcher.txt", 0); env_file(g_game, "defaults.txt", 0);
+    {   // and its dumps, before the host opens them: the frame table, and each audio output's PCM (<file>, <file>.<N>)
+        kept += keep_prev(getenv("DM_NVN_TSV")); const char *ad = getenv("DM_AUDIO_DUMP");
+        if (ad && *ad) { kept += keep_prev(ad); for (int i = 1; i < 8; i++) { char p[1024]; snprintf(p, sizeof p, "%s.%d", ad, i); kept += keep_prev(p); } }
+        if (kept) LOG("the previous start's log and dumps: %d file%s kept beside the new ones, with .prev before the extension (log.prev.txt)", kept, kept == 1 ? "" : "s");
+    }
     vk_driver_dirs(g_ext, g_int);   // DM_VK_DRIVER: a driver beside env.txt, run from a copy in the internal files
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &g_env, NULL);
     app->onAppCmd = on_cmd; app->onInputEvent = on_input;
