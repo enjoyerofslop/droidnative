@@ -476,6 +476,9 @@ class Phone(Base):
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('cat ') and ba.MANIFEST in c[1]: return self.remote.get('manifest', '')
             if c == ['shell', 'getprop ro.build.version.sdk']: return self.remote.get('sdk', '')
             if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('cat ') and 'defaults.txt' in c[1]: return self.remote.get('defaults', '')
+            if c[:2] == ['shell', 'cat'] and c[2].endswith('/defaults.txt'):
+                if isinstance(self.remote.get('defaults'), Exception): raise self.remote['defaults']
+                return self.remote.get('defaults', '')
             if c == ['shell', 'pidof org.nxnative.android:game']: return self.remote.get('pid', '')
             if c[0] == 'push' and str(c[1]).endswith('.txt') and c[2].endswith('/defaults.txt'): self.remote['pushed_defaults'] = Path(c[1]).read_text()
             return ''
@@ -767,8 +770,22 @@ class VkDriverGameApp(Base):   # --game-apk --vk-driver: the driver and its NOTI
 
 
 class VkDriverSet(Phone):   # --set-vk-driver: an installed game's driver changed on the phone, with no build
+    def setUp(self):
+        super().setUp()
+        cm = mock.patch.object(ba, 'phone_host_takes_driver', lambda serial, gid, logs: self.remote.get('new_host', True)); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def test_an_app_too_old_for_drivers_is_refused(self):   # its host would load the driver with no hash check and no fallback
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, '/dev/kgsl-3d0': True, 'new_host': False})
+        with self.assertRaises(ba.BuildError): ba.set_vk_driver('S', GID, vkpkg().read(make_pkg(self.tmp)), [], self.tmp / 'logs')
+        self.assertFalse(any(c[0] == 'push' for c in self.cmds))
+        ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')   # going back to the system's driver needs no check
+
+    def test_a_host_takes_a_driver_by_its_mark(self):
+        new, old = self.tmp / 'new.so', self.tmp / 'old.so'; new.write_bytes(b'\x7fELF..' + ba.DRIVER_HOST_MARK + b'..'); old.write_bytes(b'\x7fELF....')
+        self.assertTrue(ba.host_takes_driver(new)); self.assertFalse(ba.host_takes_driver(old)); self.assertFalse(ba.host_takes_driver(self.tmp / 'none.so'))
+
     def test_the_driver_lines_are_replaced_and_its_records_cleared(self):
-        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, '/dev/kgsl-3d0': True, 'pid': '4242\n',
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, f'{g}/defaults.txt': True, '/dev/kgsl-3d0': True, 'pid': '4242\n',
                                                          'defaults': 'DM_LANG=en-US\r\nDM_VK_DRIVER=vk_drivers/old-00000000.so\nDM_VK_DRIVER_SHA256=00\nTU_DEBUG=sysmem\nDM_VK_RAW_GMEM=1\n'})
         vk = vkpkg().read(make_pkg(self.tmp))
         ba.set_vk_driver('S', GID, vk, ['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1'], self.tmp / 'logs')
@@ -780,10 +797,15 @@ class VkDriverSet(Phone):   # --set-vk-driver: an installed game's driver change
         self.assertTrue(any('takes effect at its next start' in m for m in self.said), self.said)
 
     def test_system_takes_the_driver_out(self):
-        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, 'defaults': 'DM_LANG=en-US\nDM_VK_DRIVER=vk_drivers/x.so\nDM_VK_DRIVER_SHA256=00\n'})
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, f'{g}/defaults.txt': True, 'defaults': 'DM_LANG=en-US\nDM_VK_DRIVER=vk_drivers/x.so\nDM_VK_DRIVER_SHA256=00\n'})
         ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')
         self.assertEqual(self.remote['pushed_defaults'], 'DM_LANG=en-US\n')
         self.assertFalse(any('vk_drivers' in ' '.join(c) for c in self.cmds if c[0] == 'push'))
+
+    def test_a_defaults_file_that_cant_be_read_stops_it(self):   # rather than writing it back without the game's own lines
+        g = f'{ba.REMOTE}/games/{GID}'; self.remote.update({f'{g}/game.json': True, f'{g}/defaults.txt': True, 'defaults': ba.BuildError('adb: device offline')})
+        with self.assertRaises(ba.BuildError): ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')
+        self.assertNotIn('pushed_defaults', self.remote)
 
     def test_a_game_not_on_the_phone_is_refused(self):
         with self.assertRaises(ba.BuildError): ba.set_vk_driver('S', GID, None, [], self.tmp / 'logs')
