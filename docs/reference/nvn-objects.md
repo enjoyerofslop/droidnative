@@ -703,6 +703,20 @@ Games read this count as a position in their own command memory and size their h
 
 ## NVN entry points
 
+### Dirty-page lookups that walked every pool
+
+- **Symptom:** with thousands of memory pools, threads that write guest memory are slow in `prep_write` (every host write into guest memory: write-backs, copies, file reads) or `on_fault` (every guest write to a protected page). A profile shows the time in those functions themselves, not in `mprotect`.
+- **Cause:** `on_fault`, `prep_write`, `nvn_dirty_open` and every miss of `find_span`'s last-range cache walked all the range slots in use, one per pool, so each call cost a pass over every tracked pool.
+- **Fix:** `nvn_dirty.c` keeps the live ranges in an index sorted by base, each entry with the largest end of it and of every entry before it (`ix_*`). A lookup bisects to the last range starting before the address's end and walks back only while an earlier range can still reach it, so ranges that share a host page are all found, as before. `find_span` still returns the lowest slot that holds the span.
+  - An index is never changed in place. Adding or removing a range builds a new one under the slot mutex and publishes it.
+  - Readers, the page-fault path among them, count themselves while they hold one, and a replaced index is freed once a writer sees no reader counted after the replacement.
+  - A reader still checks each candidate's slot (live, its current bounds), so a stale index can only skip a range just removed, and a range just added has no protected page yet.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on Android: with its storage buffers bound in place (DroidPlay Core #150), the Vulkan replay's completion thread spent 98% of its time in `prep_write`. The completion thread's share with the index is not measured on the device yet.
+- **Check:** `make -C dm/gfx/tests GAME=<id> t_dirty_index && ./t_dirty_index`.
+  - It lays 3,000 pools back to back at 4 KB, so neighbours share 16 KB pages, and protects them.
+  - Host writes and faulting guest writes at random places must dirty exactly the pools whose rounded range covers a written page. This is checked again after a third of the pools are removed and others added elsewhere, and while another thread adds and removes pools under the fault path.
+  - It passes against the old walk too. A 4 KB host pre-write with 4,000 pools takes 0.32 µs against 6.56 µs before (Apple silicon), and the fault-heavy race section makes twice the writes in its two seconds. `t_dirty_slots`, `t_dirty_race` and `t_dirty_retire_race` pass unchanged.
+
 ### Integer sampler border colours
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnSamplerBuilderSetBorderColorui` during renderer initialization.
