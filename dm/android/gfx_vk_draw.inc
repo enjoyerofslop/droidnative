@@ -102,13 +102,17 @@ static void *pcache_save_thread(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-pcache"); setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
     vkb_pipeline_cache_save(); atomic_store(&g_pc_busy, 0); return NULL;
 }
-static void pcache_made(void) {   // pipe_get made a pipeline (under g_bk)
-    if (atomic_fetch_add(&g_pc_new, 1) + 1 < PC_EVERY) return;
+// n: what the pipeline counts as. A compile that took long counts as PC_EVERY, so it alone asks for the file (gfx_vk_meshemu.inc: a task / mesh kernel's compute pipeline
+// takes 2 to 9 s on a Galaxy Z Flip 7, and a scene's 30 to 40 of them were made again at every start that was stopped before 64 more pipelines); 0: a present, which
+// writes what a request inside the gap left waiting
+static void pcache_made_n(int n) {   // under g_bk
+    if (atomic_fetch_add(&g_pc_new, n) + n < PC_EVERY) return;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); if (g_pc_last && now - g_pc_last < PC_GAP_NS) return;
     int idle = 0; if (!atomic_compare_exchange_strong(&g_pc_busy, &idle, 1)) return;
     g_pc_last = now; atomic_store(&g_pc_new, 0);
     pthread_t th; if (pthread_create(&th, NULL, pcache_save_thread, NULL)) atomic_store(&g_pc_busy, 0); else pthread_detach(th);
 }
+static void pcache_made(void) { pcache_made_n(1); }   // pipe_get made a pipeline (under g_bk)
 
 // ---------------- Shaders ----------------
 typedef struct { int binding, slot; uint32_t ext; } rb_cbuf;   // ext: bytes the shader reads of it (cb_ext_pick: res.json's or spv_cb_ext2's; 0 = all)
@@ -1967,7 +1971,8 @@ static void pipe_prep(const pipe_key *k) {   // under the lock: what pipe_make w
 // (prewarm_thread). DM_VK_ASYNC_PIPE=0 (env.txt): every pipeline built at once, on the replay thread
 enum { APQ = 256 };
 #define APQ_PENDING ((uintptr_t)1)   // a queued pipeline's pl until its thread fills it in (or, the build failed, clears it): never a layout of its own
-typedef struct { pipe_key k; pipe_t *pp; } apq_t;
+typedef struct { pipe_key k; pipe_t *pp; vshader *kern; } apq_t;   // kern: a task / mesh kernel's compute pipeline instead (gfx_vk_meshemu.inc memu_cpipe_bg)
+static void memu_cpipe_bg(vshader *s);
 static apq_t g_apq[APQ]; static unsigned g_apq_h, g_apq_t; static int g_apq_on;   // under g_apq_mu: the queue (head, tail), its threads started
 static pthread_mutex_t g_apq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_apq_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_apq_queued, g_apq_built, g_apq_failed, g_apq_left;   // under g_bk: pipelines queued, built, failed; draws left out waiting for one
@@ -1976,6 +1981,7 @@ static void *apipe_thread(void *arg) {
     for (;;) {
         pthread_mutex_lock(&g_apq_mu); while (g_apq_h == g_apq_t) pthread_cond_wait(&g_apq_cv, &g_apq_mu);
         apq_t q = g_apq[g_apq_t % APQ]; g_apq_t++; pthread_mutex_unlock(&g_apq_mu);
+        if (q.kern) { memu_cpipe_bg(q.kern); continue; }
         pipe_t tmp; memset(&tmp, 0, sizeof tmp); uint32_t ns = 0, nva = 0; VkPrimitiveTopology tp = 0; uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
         VkResult pr = pipe_make(&q.k, &tmp, &ns, &nva, &tp);
         double ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6;
@@ -1990,27 +1996,30 @@ static void *apipe_thread(void *arg) {
     }
     return NULL;
 }
-static int apipe_ok(const pipe_key *k) {   // under g_bk, right after rp_prepare (P is the draw's pass): whether a new pipeline may be built in the background
+static int apipe_any(void) {   // DM_VK_ASYNC_PIPE: pipelines may be built in the background at all
     static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_ASYNC_PIPE"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_VK_ASYNC_PIPE=0: pipelines met for the first time are built at once, on the replay thread"); }
-    if (!on || k->tf) return 0;
+    return on;
+}
+static int apipe_ok(const pipe_key *k) {   // under g_bk, right after rp_prepare (P is the draw's pass): whether a new pipeline may be built in the background
+    if (!apipe_any() || k->tf) return 0;
     int n = 0;
     for (int i = 0; i < 8; i++) { const vtex *v = P.cv[i]; if (!v) continue; n++; if (v->rt_runs < 3 || (v->desc.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) return 0; }
     if (P.dv) { n++; if (P.dv->rt_runs < 3) return 0; }
     return n > 0;
 }
-static int apipe_queue(const pipe_key *k, pipe_t *pp) {   // under g_bk: 1 = queued (pp stays without a pipeline until a thread has built it)
+static int apipe_queue(const pipe_key *k, pipe_t *pp, vshader *kern) {   // under g_bk: 1 = queued (pp stays without a pipeline until a thread has built it; kern: that kernel's pipeline instead)
     (void)pcache();   // made here, under the lock: pcache makes it on first use, which a build outside the lock must not race
     pthread_mutex_lock(&g_apq_mu);
     if (!g_apq_on) { g_apq_on = 1; for (int i = 0; i < 2; i++) { pthread_t th; if (!pthread_create(&th, NULL, apipe_thread, NULL)) pthread_detach(th); } }
-    int ok = g_apq_h - g_apq_t < APQ; if (ok) { g_apq[g_apq_h % APQ] = (apq_t){*k, pp}; g_apq_h++; pthread_cond_signal(&g_apq_cv); }
+    int ok = g_apq_h - g_apq_t < APQ; if (ok) { apq_t *q = &g_apq[g_apq_h % APQ]; memset(q, 0, sizeof *q); if (kern) q->kern = kern; else { q->k = *k; q->pp = pp; } g_apq_h++; pthread_cond_signal(&g_apq_cv); }
     pthread_mutex_unlock(&g_apq_mu);
-    if (ok) g_apq_queued++;
+    if (ok && !kern) g_apq_queued++;
     return ok;
 }
 static pipe_t *pipe_get(const pipe_key *k) {
     pipe_t *pp = nvn_hm_get(&g_pipes, k); if (pp) { if (!pp->p && pp->pl == (VkPipelineLayout)APQ_PENDING) g_apq_left++; return pp->p ? pp : NULL; }
     pp = calloc(1, sizeof *pp); nvn_hm_put(&g_pipes, k, pp);
-    if (apipe_ok(k)) { pipe_prep(k); pp->pl = (VkPipelineLayout)APQ_PENDING; if (apipe_queue(k, pp)) { g_apq_left++; return NULL; } pp->pl = VK_NULL_HANDLE; }
+    if (apipe_ok(k)) { pipe_prep(k); pp->pl = (VkPipelineLayout)APQ_PENDING; if (apipe_queue(k, pp, NULL)) { g_apq_left++; return NULL; } pp->pl = VK_NULL_HANDLE; }
     uint32_t ns, nva; VkPrimitiveTopology tp; VkResult pr = pipe_make(k, pp, &ns, &nva, &tp);
     if (pr == VK_SUCCESS) { pk_record(k); pcache_made(); }
     {   // which fields set a new pipeline apart from the last one with the same shaders and pass (the first 40): key churn

@@ -17,12 +17,13 @@ static const uint32_t MESHLAUNCH[] = {
 #include "shaders/meshlaunch_comp.inc"
 };
 enum { ME_HDR = 16, ME_PC = 8, ME_ALIGN = 256, ME_KBIND = 100, ME_TGS_MAX = 16 << 20 };   // ME_KBIND: the kernels' set 1 bindings, 100 to 103 (spv_meshemu.B_TASKOUT ...)   // launch list words before its entries (spv_meshemu.HDR); push constant bytes {first, base}
-typedef struct memu_t { int task, pay, threads, nrec, nout, ipw, verts; VkPipeline p; VkPipelineLayout pl; int bad; vshader *pvs; } memu_t;
+typedef struct memu_t { int task, pay, threads, nrec, nout, ipw, verts; VkPipeline p; VkPipelineLayout pl; int bad, pend; vshader *pvs; } memu_t;   // pend: its pipeline is being built in the background (memu_cpipe)
 static struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; int bad; } g_me;
 static vshader g_me_kset, g_me_lset;   // their layouts alone, for ds_get's sets kept by each chunk: the kernels' set 1 (four buffers), meshlaunch.comp's set (two)
 static VkDescriptorSetLayout g_me_vdsl;   // the pass-through vertex shaders' set: vtx
 static VkPipeline g_me_launch; static VkPipelineLayout g_me_lpl; static int g_me_kbad;
-static uint64_t g_me_draws, g_me_parts, g_me_skipped;
+static uint64_t g_me_draws, g_me_parts, g_me_skipped, g_me_left, g_me_kpipes, g_me_kbg, g_me_kcached;   // draws, their parts, skipped; left out while a kernel's pipeline was built; kernel pipelines made, of them in the background / from the driver's cache at once
+static _Atomic uint64_t g_me_kpipe_ns;
 static int memu_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_MESH_EMU"); on = !(e && *e == '0'); } return on && !g_mesh; }
 static int memu_facts(vshader *s, const jv *e) {   // res.json mesh_emu (null: spv_meshemu.py could not make the compute form)
     if (!e || js_int(e, "pay", 0) <= 0) return 0;
@@ -88,19 +89,58 @@ static int memu_kernels(void) {   // the emulation's set layouts and meshlaunch.
     if (r != VK_SUCCESS) { g_me_launch = VK_NULL_HANDLE; return 0; }
     g_me_kbad = 0; return 1;
 }
-static int memu_cpipe(vshader *s) {   // a task or mesh kernel's compute pipeline: its own set, the emulation's, the pool set when it reads the pool
-    memu_t *m = s->memu; if (m->p) return 1; if (m->bad) return 0;
-    m->bad = 1;
-    VkDescriptorSetLayout sl[POOL_SET + 1] = {s->dsl, g_me_kset.dsl, g_empty_dsl, g_empty_dsl, g_pool_dsl};
-    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, ME_PC};
-    VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = s->pool ? POOL_SET + 1 : 2, .pSetLayouts = sl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
-    if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &m->pl) != VK_SUCCESS) return 0;
+// A task or mesh kernel's compute pipeline: its own set, the emulation's, the pool set when it reads the pool. The compile is the driver's on a module of 100 to 560 KB,
+// and Samsung's Xclipse 950 compiler takes 2 to 9 s on the larger ones: on a Galaxy Z Flip 7 Kokiri Forest's first frame made 31 of them in 52 s on the replay thread,
+// the game waiting. So a kernel's first compile runs in the background, on the threads that build graphics pipelines met for the first time, and its draws are left out
+// until it exists:
+// - where a graphics pipeline's would (bg: apipe_ok, the draw's targets are drawn every frame);
+// - and on any target once the present has spent ME_SYNC_NS on kernel compiles at once: a new scene's mesh geometry then shows as its kernels arrive instead of the
+//   game stopping for all of them. A target drawn only once (which is why a graphics pipeline builds at once there) loses the draws past that, on a cold cache only.
+// A kernel the driver's cache has is no compile: where modules are identifiers (g_smid) it is asked for from the cache first and taken at once, on any target, so a
+// warm start leaves no draw out (43 of Kokiri Forest's in 8 ms there).
+// → 1 ready, 0 none (failed), -1 being built
+#define ME_SYNC_NS 500000000ull
+static uint64_t g_me_sync_ns, g_me_sync_frame;   // kernel compiles made at once in the present g_me_sync_frame
+static VkResult memu_cpipe_make(vshader *s, VkPipeline *out, uint64_t *ons) {   // with or without the replay's lock: the layout is made, the module is the shader's lmod
+    memu_t *m = s->memu;
     VkComputePipelineCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = m->pl,
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .pName = "main"}};   // its module: lm_pipeline
-    const char *pbk[4] = {s->key, NULL, NULL, NULL}; int pb = pb_begin('c', pbk, 0, 0, 0, 0);
-    VkResult r = lm_pipeline(NULL, &pc, &pc.stage, &s->mod, 1, &m->p); pb_end(pb);
-    if (r != VK_SUCCESS) { m->p = VK_NULL_HANDLE; static int n; if (n++ < 8) LOG("[RED] [vk] compute form of task / mesh shader %s: pipeline failed: its draws are skipped", s->key); return 0; }
-    m->bad = 0; return 1;
+    const char *pbk[4] = {s->key, NULL, NULL, NULL}; int pb = pb_begin('c', pbk, 0, 0, 0, 0); uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    VkResult r = lm_pipeline(NULL, &pc, &pc.stage, &s->mod, 1, out); pb_end(pb);
+    uint64_t ns = clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0; atomic_fetch_add(&g_me_kpipe_ns, ns); *ons = ns;
+    if (r != VK_SUCCESS) { *out = VK_NULL_HANDLE; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) LOG("[RED] [vk] compute form of task / mesh shader %s: pipeline failed (VkResult %d): its draws are skipped", s->key, r); }
+    else { static _Atomic int n; int k = atomic_fetch_add(&n, 1); if (k < 4 || ns > 500000000ull) LOG("[vk] compute form of task / mesh shader %s: pipeline made in %.1f ms", s->key, ns / 1e6); }
+    return r;
+}
+static int memu_cpipe_cached(vshader *s, VkPipeline *out) {   // the pipeline from the driver's cache by the module's identifier, without a compile (as lm_pipeline's first step)
+    lmod *l = s->mod; memu_t *m = s->memu; if (!g_smid || !l->idn || atomic_load(&l->m)) return 0;
+    VkPipelineShaderStageModuleIdentifierCreateInfoEXT sid = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_MODULE_IDENTIFIER_CREATE_INFO_EXT, .identifierSize = l->idn, .pIdentifier = l->id};
+    VkComputePipelineCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .flags = VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT, .layout = m->pl,
+        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = &sid, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .pName = "main"}};
+    if (vkCreateComputePipelines(g_vk.dev, pcache(), 1, &pc, NULL, out) == VK_SUCCESS) return 1;
+    *out = VK_NULL_HANDLE; return 0;
+}
+static void memu_cpipe_done(vshader *s, VkPipeline p, uint64_t ns) {   // under g_bk
+    memu_t *m = s->memu; m->pend = 0;
+    if (p) { m->p = p; g_me_kpipes++; pcache_made_n(ns > 250000000ull ? PC_EVERY : 1); } else m->bad = 1;   // (a long compile asks for the driver's cache file to be written: pcache_made_n)
+}
+static void memu_cpipe_bg(vshader *s) {   // an apipe thread (gfx_vk_draw.inc apipe_thread)
+    VkPipeline p = VK_NULL_HANDLE; uint64_t ns = 0; memu_cpipe_make(s, &p, &ns);
+    pthread_mutex_lock(&g_bk); memu_cpipe_done(s, p, ns); g_me_kbg++; pthread_mutex_unlock(&g_bk);
+}
+static int memu_cpipe(vshader *s, int bg) {
+    memu_t *m = s->memu; if (m->p) return 1; if (m->bad) return 0; if (m->pend) return -1;
+    if (!m->pl) {
+        VkDescriptorSetLayout sl[POOL_SET + 1] = {s->dsl, g_me_kset.dsl, g_empty_dsl, g_empty_dsl, g_pool_dsl};
+        VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, ME_PC};
+        VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = s->pool ? POOL_SET + 1 : 2, .pSetLayouts = sl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+        if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &m->pl) != VK_SUCCESS) { m->pl = VK_NULL_HANDLE; m->bad = 1; return 0; }
+    }
+    { VkPipeline p = VK_NULL_HANDLE; if (memu_cpipe_cached(s, &p)) { memu_cpipe_done(s, p, 0); g_me_kcached++; return 1; } }
+    uint64_t fr = atomic_load(&g_presents); if (fr != g_me_sync_frame) { g_me_sync_frame = fr; g_me_sync_ns = 0; }
+    if (bg || (g_me_sync_ns >= ME_SYNC_NS && apipe_any())) { m->pend = 1; if (apipe_queue(NULL, NULL, s)) return -1; m->pend = 0; }   // (a full queue: built now)
+    VkPipeline p = VK_NULL_HANDLE; uint64_t ns = 0; memu_cpipe_make(s, &p, &ns); memu_cpipe_done(s, p, ns); g_me_sync_ns += ns;
+    return m->p ? 1 : 0;
 }
 static VkDescriptorSet memu_set(vshader *l, uint32_t n, uint32_t base, const VkDeviceSize *off, const VkDeviceSize *len) {   // a set of l's layout over n arena ranges at bindings base on, from the current chunk
     VkDescriptorSet set = ds_get(l, 0); if (!set) return VK_NULL_HANDLE;
@@ -195,10 +235,17 @@ static int vk_memu_draw_(const p_draw *dw) {
     memu_t *m = ms->memu; if (!m || !m->pvs) { g_me_skipped++; return 0; }
     if (m->task && (!ts || !ts->memu)) { RED_ONCE(180, "mesh shader %s takes a task shader's payload, and its program has no task shader in compute form: draw skipped", ms->key); g_me_skipped++; return 0; }
     if (!m->task) ts = NULL;
-    if (!memu_arena() || !memu_kernels() || !memu_cpipe(ms) || (ts && !memu_cpipe(ts))) { g_drop[2]++; g_me_skipped++; return 0; }
+    if (!memu_arena() || !memu_kernels()) { g_drop[2]++; g_me_skipped++; return 0; }
     { vshader *vw[4] = {ms, fs, ts, NULL}; draw_view(vw, NULL, 0);   // what the stages read of guest memory: pending GPU writes to it land first
       for (int i = 0; i < 3; i++) if (vw[i]) stage_textures(vw[i]);
       if (ms->pool || (fs && fs->pool) || (ts && ts->pool)) pool_sync(); }
+    {   // the kernels' pipelines: a first compile may run in the background under the rule graphics pipelines have (apipe_ok, on the draw's targets), the draw left out meanwhile
+        if (!rp_prepare_(0)) { g_drop[1]++; g_me_skipped++; return 0; }
+        pipe_key ak; memset(&ak, 0, sizeof ak); int bg = apipe_ok(&ak);
+        int km = memu_cpipe(ms, bg), kt = ts ? memu_cpipe(ts, bg) : 1;   // (both asked for, so both build at once)
+        if (!km || !kt) { g_drop[2]++; g_me_skipped++; return 0; }
+        if (km < 0 || kt < 0) { g_me_left++; return 1; }
+    }
     static uint32_t cap_max; if (!cap_max) { const char *e = getenv("DM_VK_MESH_MAX"); cap_max = e && atoi(e) > 0 ? (uint32_t)atoi(e) : 4096; }
     VkDeviceSize per = me_up((VkDeviceSize)m->nrec * m->nout * 16) + me_up((VkDeviceSize)m->ipw * 4);   // a mesh workgroup's records and indices
     VkDeviceSize usable = g_me.size - 8 * ME_ALIGN, half = usable / 2;   // (the ranges' alignment)
