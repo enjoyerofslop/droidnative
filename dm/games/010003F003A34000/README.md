@@ -110,6 +110,8 @@ First run on Android, 2026-11-10: a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Eli
   - Not compared with the Mac or another phone (none has been in the forest yet). The Android host doesn't log per-thread CPU, so which game thread is busy isn't known.
 - **Sound:** `DM_AUDIO_DUMP` over the Continue start (202 s): silent on the controller screen and the Continue menu, as on the other phones; the title music and then the forest's on the front pair. No underrun in 616 reports during play or 49 after the restart.
 - **`[RED]`:** the same two kinds; no crash, no hang, and nothing wrong seen in the picture (Route 1, Viridian City, Route 2, the gatehouse, the forest's light).
+- **Open, the Z Flip 7 (Xclipse): a dark band over the lower third of the picture in Viridian Forest.** Seen on 2026-11-11 (Let's Go's host from `main` 526e4b77 with enjoyerofslop/droidplay-core#252, the `viridian_forest_flip` save): from the first frame after Continue, a flat near-black band with a faint straight top edge covers the bottom ~28% of the game's picture, where the path and grass south of the player should be. It's there before and after a wild battle, the menus and a save; the battle scene itself fills the whole frame.
+  - Not compared yet with another phone or the Mac in the same place, and the q120 run's screenshots weren't kept. Whether the band is the game's own darkness, a missing draw (the forest's lower canopy or a fog or shadow layer), or Xclipse-only isn't known.
 - **Not played:** Viridian Forest's trainers and its exit, Pewter City, aiming with motion.
 
 **Options → Open Pokémon GO Settings**, 2026-11-11 on the Z Flip 7 (enjoyerofslop/droidplay-core#220):
