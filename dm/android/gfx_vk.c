@@ -2406,7 +2406,7 @@ static void bound_preserve(void) {
 
 // The rest of the interface Metal gives and Android does not need yet
 void mtl_tex_gpu_written(const tex_t *t) { (void)t; }   // Metal's record of GPU-written storage (tex_cpu_content); tex_init_fill here decides by the pool's flags
-static int gm_game(void);   // gfx_vk_gmem.inc: a Switch 2 game's, or DM_VK_RAW_GMEM=1
+static int gm_game(void);   // gfx_vk_gmem.inc: the game turned raw global memory on (DM_VK_RAW_GMEM=1)
 void mtl_pool_addressed(const void *mem, uint64_t size) {   // raw global memory: which pools the game took a GPU address in (counted in gfx_vk_gmem.inc gm_stat); nothing for a game without it
     if (!gm_game()) return;
     pthread_mutex_lock(&g_pool_mu);
