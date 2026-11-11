@@ -1068,6 +1068,8 @@ class PhonesPage(QWidget):
         if not s: return
         how, s = wifi.disconnect_plan(s); name = self.win.models.get(s) or s
         if how == 'usb': self.win.toast(f'{name} is connected by its cable: unplug it to disconnect it'); return
+        self.win.let_go.update(dict.fromkeys({self.win.phone_key(s), s}, 'leaving'))   # dropped on purpose: not connected again behind the player's back (track_lost)
+        if self.win.lost and self.win.lost['id'] == self.win.phone_key(s): self.win.lost = None
         if how == 'wireless off':
             if QMessageBox.question(self, 'Disconnect', f'Turn off Wireless debugging on {name}? adb connected it by itself over the network and would connect it again '
                                     'while Wireless debugging is on. Turn it on again on the phone to reconnect.') != QMessageBox.Yes: return
@@ -1497,6 +1499,7 @@ class Window(QMainWindow):
         self.ids = {}   # serial → the phone's ID (phone_id.py), asked once per serial: its settings, backups and first-start notice are kept under it
         self.seen = {}   # every serial → ID this session, kept after a serial goes: Install again finds the phone a build was for on the serial it has now
         self.lost, self.reconnecting, self.reconnect_at = None, False, 0.0   # the picked phone, gone off Wi-Fi: looked for by its ID (track_lost, reconnect)
+        self.let_go = {}   # ID → 'leaving' or 'gone': phones the player disconnected (Disconnect), not looked for until they have gone and come back
         for k in self.st.allKeys():   # first-start notices kept under a Wi-Fi address, before IDs: the address is gone with its port, and the notice with it
             if k.startswith('firststart/') and k.count('/') == 2 and phone_id.wifi(k.split('/')[1]): self.st.remove(k)
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh_devices); self.timer.start(5000); self.refresh_devices()
@@ -1618,7 +1621,11 @@ class Window(QMainWindow):
     def track_lost(self, was, devs):   # the picked phone gone from adb's ready list after it was there over Wi-Fi (asleep, roamed, a new port): looked for by its ID
         # every RECONNECT_EVERY s for RECONNECT_FOR s. Back: its stale offline entry dropped, and the Performance page's log started again if it was running
         here = {d.get('id') or d['serial']: d['serial'] for d in devs if d['state'] == 'device'}; s = self.serial()
-        if was and s and phone_id.wifi(s) and was not in here and not self.lost:
+        listed = set(here) | set(here.values())   # by ID and by serial: an ID the first look hadn't read yet
+        for i in list(self.let_go):   # still listed a moment after Disconnect (adb takes a second), then gone; listed again later: looked for again when it next drops
+            if i not in listed: self.let_go[i] = 'gone'
+            elif self.let_go[i] == 'gone': del self.let_go[i]
+        if was and s and phone_id.wifi(s) and was not in here and not self.lost and was not in self.let_go and s not in self.let_go:
             self.lost = {'id': was, 'name': self.models.get(s) or s, 'addr': s, 'until': time.time() + wifi.RECONNECT_FOR}
         if not self.lost: return
         if self.lost['id'] in here:
