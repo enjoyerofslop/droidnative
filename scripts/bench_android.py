@@ -28,6 +28,7 @@ import device_lock   # noqa: E402  # pyright: ignore[reportMissingImports]   (dm
 PKG = 'org.nxnative.android'
 EXT = f'/storage/emulated/0/Android/data/{PKG}/files'
 GAME_PROC = PKG + ':game'
+RUNS = f'{EXT}/bench_runs'   # the runs' save folders (run_folder)
 TSV = f'{EXT}/bench_frames.tsv'   # the per-frame timing (DM_NVN_TSV)
 ADB = shutil.which('adb') or str(Path(os.environ.get('ANDROID_HOME', Path.home() / 'Library/Android/sdk')) / 'platform-tools/adb')
 TIMING = ('@t_s', '@frame_ms', '@gpu_ms', '@work_ms', '@draws')
@@ -211,14 +212,14 @@ def run_one(serial, folder, gid, route, n, out, args):
     st0, bt0 = thermal(serial)
     env_before = sh(serial, f'cat {EXT}/env.txt 2>/dev/null')
     # A folder of its own per run: what the game writes there is its own (drwxr-x---), which the shell can read but never delete, so a reused folder would hold the
-    # last run's save. The ones before are removed as far as the shell can; the rest goes with the app. bench_runs is made by mkdir under files/, so it is setgid
-    # ext_data_rw like files/, and only symbolic modes are given it below (a numeric one clears setgid, and a chmod cannot set it again on this storage)
-    run = f'{EXT}/bench_runs/{gid}_{int(time.time())}'
+    # last run's save. bench_runs is made by mkdir under files/, so it is setgid ext_data_rw like files/, and only symbolic modes are given it below (a numeric one
+    # clears setgid, and a chmod cannot set it again on this storage)
+    run = run_folder(gid)
     env = ['# written by scripts/bench_android.py for a benchmark run; put back as it was when the run ends', f'DM_SAVE={run}/save/{gid}',
            f'DM_NVN_TSV={TSV}', 'DM_NVN_TSV_CALLS=0', 'DM_FS=1'] + ([f'DM_KEYS={route["keys"]}'] if route['keys'] else []) + route['env'] + args.env   # DM_FS: file opens in the log, for ready patterns
     # bench_runs itself opened too (symbolically, keeping setgid), as build_android_from_nsp.py opens games/'s parent: the app is not in ext_data_rw on Android 16
     # (the Pad 3), so a drwxrws--- bench_runs kept it out of the save folder inside (errno 13), where the Odin 2's let it in
-    sh(serial, f'rm -rf {EXT}/bench_runs/* 2>/dev/null; mkdir -p {run}/save; chmod a+rwx {EXT}/bench_runs')
+    sh(serial, f'mkdir -p {run}/save; chmod a+rwx {RUNS}')
     if route['save']:
         src = next((p for p in (Path(folder) / route['save'], Path(folder).parent / route['save']) if p.is_dir()), None)
         if not src: sys.exit(f'route {route["name"]}: no save folder {route["save"]} beside {folder}')
@@ -259,6 +260,7 @@ def run_one(serial, folder, gid, route, n, out, args):
         adb(serial, 'pull', f'{run}/save/{gid}', str(tmp), timeout=600)
         if tmp.is_dir() and any(tmp.iterdir()): shutil.rmtree(keep, ignore_errors=True); tmp.rename(keep); print(f'  save kept in {keep}', flush=True)
         else: print(f'  no save to keep: the game made none on {serial}', flush=True)
+    remove_run(serial, run)
     (d / 'log.txt').write_bytes(adb_bytes(serial, 'exec-out', f'cat {EXT}/log.txt'))
     if env_before.strip(): adb(serial, 'push', str(write_tmp(d / 'env_before.txt', env_before)), f'{EXT}/env.txt')
     else: sh(serial, f'rm -f {EXT}/env.txt')
@@ -274,6 +276,20 @@ def run_one(serial, folder, gid, route, n, out, args):
     if died and not res['exit']: res['exit'] = f'stopped at {died} s'
     (d / 'result.json').write_text(json.dumps(res, indent=1), encoding='utf-8')
     return res
+
+
+# Each run removes its own folder when it ends, and no other: bench_runs also holds other sessions' folders on a shared test device (a run whose save is still being
+# read, a hand run's DM_SAVE), which emptying it at each start took from under them. As far as the shell can: what the game wrote there may be its own, and goes
+# with the app
+def run_folder(gid):
+    return f'{RUNS}/{gid}_{int(time.time())}'
+
+
+def remove_run(serial, run):
+    name = run[len(RUNS) + 1:]
+    if not run.startswith(RUNS + '/') or not name or '/' in name or name in ('.', '..') or '*' in name:   # one run's folder, never bench_runs or a pattern
+        raise ValueError(f'not a run folder: {run}')
+    sh(serial, f'rm -rf {shq(run)} 2>/dev/null')
 
 
 def shq(x):   # a path for the device's shell

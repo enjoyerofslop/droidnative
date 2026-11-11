@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# scripts/bench_android.py: which screen a run's screenshots are taken of on a phone with more than one (a Galaxy Z Fold 8 or Z Flip 7), from adb's dumpsys output
+# scripts/bench_android.py: which screen a run's screenshots are taken of on a phone with more than one (a Galaxy Z Fold 8 or Z Flip 7), from adb's dumpsys output;
+# and that a run removes its own save folder under bench_runs and no other
 import importlib.util, unittest
 from pathlib import Path
 from unittest import mock
@@ -79,6 +80,20 @@ class ShotDisplay(unittest.TestCase):
             ba.screenshot('s2'); ba.screenshot('s2')
         self.assertEqual(shot.call_args.args, ('s2', 'exec-out', 'screencap', '-p'))
         self.assertEqual(sh.call_count, 1)   # no dumpsys display: nothing to choose between
+
+
+class RunFolders(unittest.TestCase):
+    def test_a_run_removes_its_own_folder(self):
+        run = ba.run_folder('0400486024DEC000')
+        self.assertRegex(run, r'^' + ba.RUNS + r'/0400486024DEC000_\d+$')
+        with mock.patch.object(ba, 'sh') as sh: ba.remove_run('s1', run)
+        self.assertEqual(sh.call_args.args, ('s1', f'rm -rf {run} 2>/dev/null'))
+
+    def test_never_bench_runs_itself_or_a_pattern(self):   # other sessions' run folders live beside this run's
+        for bad in (ba.RUNS, ba.RUNS + '/', ba.RUNS + '/*', ba.RUNS + '/..', ba.RUNS + '/a/b', ba.EXT, '/sdcard/Download/x'):
+            with self.subTest(bad), mock.patch.object(ba, 'sh') as sh:
+                with self.assertRaises(ValueError): ba.remove_run('s1', bad)
+                sh.assert_not_called()
 
 
 if __name__ == '__main__':
