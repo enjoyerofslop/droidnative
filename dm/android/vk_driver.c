@@ -6,6 +6,7 @@
 //   a hook loads the player's driver in place of the vendor's. The loader in that copy still makes the window surface and the swapchain, which Turnip on Android lacks.
 //   A driver that cannot be copied or opened, or that offers no GPU, logs one [RED] line, and the system's driver runs.
 #include <dlfcn.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -119,7 +120,53 @@ int vk_driver_load(void) {
     return 1;
 }
 
+// The floating-point environment of the driver's compiler. The replay and its pipeline threads run on threads the game's NVN calls started, or on the game's own, so
+// they carry the game's FPCR: 0x1000000 (flush-to-zero) for Ocarina of Time. Qualcomm's compiler, run on the CPU inside vkCreate*Pipelines (Samsung's in
+// vkCreateShaderModule), then folds constants with denormals flushed and makes different code: Swap2-Native measured Ocarina of Time's scene about 2^12 too bright
+// at the bloom pass on driver 891.11, and BananaNative sets FPCR 0 around these calls (vka_fpenv.h). So the calls that compile (device, module, pipelines, and a
+// submit, where a driver may compile what it deferred) run with FPCR 0 and give the caller's back after; the game's own threads keep theirs. The pipeline cache's
+// file is named apart (gfx_vk_draw.inc pcache), so pipelines compiled under flush-to-zero are not taken from it. DM_VK_FP_HOST=0 (env.txt): the caller's FPCR, as before
+#if defined(__aarch64__)
+static int fp_host_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FP_HOST"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_FP_HOST=0: the driver compiles with the calling thread's FPCR"); } return v; }
+static inline uint64_t fp_enter(void) {
+    uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v));
+    if (v && fp_host_on()) {
+        static _Atomic int told; if (!atomic_exchange(&told, 1)) LOG("[vk] the calling thread's FPCR is %#llx: the driver compiles with FPCR 0 (DM_VK_FP_HOST=0: as it is)", (unsigned long long)v);
+        __asm__ volatile("msr fpcr, %0" :: "r"((uint64_t)0)); return v;
+    }
+    return 0;
+}
+static inline void fp_leave(uint64_t v) { if (v) __asm__ volatile("msr fpcr, %0" :: "r"(v)); }
+#else
+static inline uint64_t fp_enter(void) { return 0; }
+static inline void fp_leave(uint64_t v) { (void)v; }
+#endif
+int vk_fp_host(void) {   // 1: compiles run with FPCR 0 (the pipeline cache's file is named for it)
+#if defined(__aarch64__)
+    return fp_host_on();
+#else
+    return 0;
+#endif
+}
+static PFN_vkCreateDevice d_create_device; static PFN_vkCreateShaderModule d_create_module; static PFN_vkCreateGraphicsPipelines d_create_gp;
+static PFN_vkCreateComputePipelines d_create_cp; static PFN_vkQueueSubmit d_submit;
+static VKAPI_ATTR VkResult VKAPI_CALL fp_create_device(VkPhysicalDevice pd, const VkDeviceCreateInfo *ci, const VkAllocationCallbacks *a, VkDevice *d) {
+    uint64_t f = fp_enter(); VkResult r = d_create_device(pd, ci, a, d); fp_leave(f); return r; }
+static VKAPI_ATTR VkResult VKAPI_CALL fp_create_module(VkDevice d, const VkShaderModuleCreateInfo *ci, const VkAllocationCallbacks *a, VkShaderModule *m) {
+    uint64_t f = fp_enter(); VkResult r = d_create_module(d, ci, a, m); fp_leave(f); return r; }
+static VKAPI_ATTR VkResult VKAPI_CALL fp_create_gp(VkDevice d, VkPipelineCache c, uint32_t n, const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *p) {
+    uint64_t f = fp_enter(); VkResult r = d_create_gp(d, c, n, ci, a, p); fp_leave(f); return r; }
+static VKAPI_ATTR VkResult VKAPI_CALL fp_create_cp(VkDevice d, VkPipelineCache c, uint32_t n, const VkComputePipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *p) {
+    uint64_t f = fp_enter(); VkResult r = d_create_cp(d, c, n, ci, a, p); fp_leave(f); return r; }
+static VKAPI_ATTR VkResult VKAPI_CALL fp_submit(VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFence fe) {
+    uint64_t f = fp_enter(); VkResult r = d_submit(q, n, si, fe); fp_leave(f); return r; }
+
 void vk_driver_instance(VkInstance inst) {
 #define VKB_LOAD(f) f = (PFN_##f)g_gipa(inst, #f);
     VKB_FNS(VKB_LOAD)
+    if (vkCreateDevice) { d_create_device = vkCreateDevice; vkCreateDevice = fp_create_device; }   // through the FPCR guard (above)
+    if (vkCreateShaderModule) { d_create_module = vkCreateShaderModule; vkCreateShaderModule = fp_create_module; }
+    if (vkCreateGraphicsPipelines) { d_create_gp = vkCreateGraphicsPipelines; vkCreateGraphicsPipelines = fp_create_gp; }
+    if (vkCreateComputePipelines) { d_create_cp = vkCreateComputePipelines; vkCreateComputePipelines = fp_create_cp; }
+    if (vkQueueSubmit) { d_submit = vkQueueSubmit; vkQueueSubmit = fp_submit; }
 }

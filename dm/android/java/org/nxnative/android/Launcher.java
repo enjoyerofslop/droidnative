@@ -3,7 +3,7 @@
 //   Games: <external files>/games/<title ID>/, copied by scripts/build_android_from_nsp.py (icon.jpg and control.nacp give the icon, name and version). The APK carries a
 //   host per game packed on the computer, lib/arm64-v8a/libdmhost_<title ID>.so: a folder whose host this APK lacks is listed as needing an app update.
 //   Settings: the host's settings for that game, grouped into Game and Controls. Play writes the choices to the game's launcher.txt (KEY=VALUE per line) and starts the
-//   NativeActivity with the game's title ID (intent extra "game", read by loader.c), which reads that file after env.txt without overriding it (front_android.c
+//   GameActivity with the game's title ID (intent extra "game", read by loader.c), which reads that file after env.txt without overriding it (front_android.c
 //   env_file): a key env.txt sets is shown greyed out with its value. The choices are kept in SharedPreferences, per game. Defaults: the setting's own, or the game's
 //   defaults.txt (KEY=VALUE, written by the packing script: the game language picked with --language).
 //   The game runs in a process of its own (":game", AndroidManifest.xml): starting another game ends the one running, after asking.
@@ -16,7 +16,6 @@ package org.nxnative.android;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
-import android.app.NativeActivity;
 import android.content.ComponentName;
 import android.content.DialogInterface;
 import android.content.Intent;
@@ -379,11 +378,11 @@ public class Launcher extends Activity {
     void later(final String id, final boolean selftest) { ui.postDelayed(new Runnable() { public void run() { start(id, selftest); } }, 600); }   // after the old process is gone
     void start(String id, boolean selftest) {
         app.edit().putString("running", id).apply();
-        Intent i = new Intent(this, NativeActivity.class); i.putExtra("game", id); i.putExtra("selftest", selftest);
+        Intent i = new Intent(this, GameActivity.class); i.putExtra("game", id); i.putExtra("selftest", selftest);
         startActivity(i); overridePendingTransition(0, 0);
     }
     void resume() {
-        Intent i = new Intent(this, NativeActivity.class); i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        Intent i = new Intent(this, GameActivity.class); i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         startActivity(i); overridePendingTransition(0, 0);
     }
     ActivityManager.RunningAppProcessInfo gameProcess() {
@@ -394,12 +393,12 @@ public class Launcher extends Activity {
     }
     String runningGame() { return gameProcess() != null ? app.getString("running", null) : null; }
     // The game's task goes too: a singleTask activity whose process was killed is otherwise recreated from its first intent on the next start (the closed game's
-    // "game" extra; the new one only reaches onNewIntent, which NativeActivity ignores), and the game that was closed opened again
+    // "game" extra; the new one only reaches onNewIntent, which the game activity ignores), and the game that was closed opened again
     void endGame() {
         ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
         if (am != null) for (ActivityManager.AppTask t : am.getAppTasks()) {
             ComponentName b = t.getTaskInfo().baseActivity;
-            if (b != null && NativeActivity.class.getName().equals(b.getClassName())) t.finishAndRemoveTask();
+            if (b != null && GameActivity.class.getName().equals(b.getClassName())) t.finishAndRemoveTask();
         }
         ActivityManager.RunningAppProcessInfo p = gameProcess(); if (p != null) android.os.Process.killProcess(p.pid);
     }

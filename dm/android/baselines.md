@@ -148,6 +148,7 @@ Where this GPU differs from the Adreno above:
 - **64-lane subgroups in every stage** (stages 0x3d3f, sizes 32 to 64, a required size in compute only): `spv_wide` rewrote Brilliant Diamond's 23 `fwidth` fragment shaders.
   No vertex shader of the nine games packed for Android on the Mac uses subgroup operations. Compute shaders in Final Fantasy Resonance (1,199) and Mario Kart World (184) do, and stay as
   translated, with `spv_wide`'s red line; neither game has run on this phone.
+- **16-bit normalized formats it cannot filter:** R16_UNORM, R16G16_UNORM, R16G16B16A16_UNORM and their SNORM forms are sampled without linear filtering on this GPU. Brilliant Diamond's water simulation needs it, and drew Twinleaf's pond as a grid of white dashes until such textures were made in the 16-bit float formats ([16-bit normalized textures a GPU cannot filter](../../docs/reference/rendering.md#16-bit-normalized-textures-a-gpu-cannot-filter)).
 - **The cover screen:** folding the phone while the game plays puts it in the background (focus states 2 and 3, audio suspended) and shows Samsung's own cover home on the cover
   screen. The game process keeps running, and nothing crashes. Opening the phone brings back its lock screen first. Not seen:
   - the game's return after unlocking (the next install stopped it);
@@ -168,7 +169,7 @@ The first Adreno 730, 2026-11-10: a Moto Razr Plus 2023.
 |---|---|
 | **Super Mario Odyssey 1.4.1**, the opening cutscene (Start pressed on a fresh save) | 57.4–58.1 · 16.8–17.0 / 20.2 · GPU 12.5–12.6 (the warm-up 52.5) |
 | **Pokémon Brilliant Diamond 1.3.0**, language menu and Eterna City | **Crashes** at boot, before its first frame, in every launch (6 of 6): the driver's shader compiler |
-| **Final Fantasy Resonance 1.0.1**, the first field (the `battlefield` save) | **The GPU hangs** as the field appears, about 56 s in, in every run (3 of 3); no frame after it |
+| **Final Fantasy Resonance 1.0.1**, the first field (the `battlefield` save) | **The GPU hung** as the field appeared, about 56 s in, in every run (3 of 3), with no frame after it. With `spv_xor` (`main` 5c21a252, two runs, no warm-up): 19.9–20.0 · 50.4–50.7 / 59.8–60.3 · GPU 30.5, no hang |
 
 Where this GPU differs from the Adreno above:
 
@@ -178,7 +179,8 @@ Where this GPU differs from the Adreno above:
   - The game boots on the Adreno 650 (driver V@0746), the 740 (V@0676) and the 830 (V@0800), all newer drivers than this one. Not narrowed down yet.
 - **Final Fantasy Resonance's hang:** 55–60 fps through the load and the field's first frames. Then one submission ran 10.2–10.6 s on the GPU until the driver's hang recovery cut it short, its end timestamp never written; its last commands were compute dispatches.
   - The game kept running (sound, vsync) and drew no further frame.
-  - Its red line `a compute shader with Maxwell's 32-lane warp instructions on the GPU's 64-lane subgroups` (`e918336692525691`) shows on the other 64-lane GPUs too, where the field plays. Whether it causes the hang isn't known.
+  - Its red line `a compute shader with Maxwell's 32-lane warp instructions on the GPU's 64-lane subgroups` (`e918336692525691`) shows on the other 64-lane GPUs too, where the field plays. It isn't the hang's cause.
+  - **Found and fixed:** the particle simulation's warp reduction through the translator's butterfly shuffle comes back as garbage on this driver, so a sprite draw asked for billions of instances. `spv_xor` makes that shuffle ShuffleXor: [Maxwell's butterfly shuffle on the Adreno 730](../../docs/reference/rendering.md#maxwells-butterfly-shuffle-on-the-adreno-730).
 - **The flames:** the field's last frame before the hang has black pixel-art shapes along the road where its flames burn. That's the Ayn Odin 2's Adreno 740 picture before droidplay-core#135, whose run-time rows it turns on for Qualcomm's Adreno 7xx. So it points the same way for the 730, from one frozen frame: the hang came before the route's walk, and #135 wasn't run here.
 - **Odyssey** plays the opening at 57–58 fps, with GPU 12.5 ms against the Odin 2's 5.5 ms; the picture is right.
 - **Vulkan:**

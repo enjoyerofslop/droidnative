@@ -1,10 +1,11 @@
-"""dm/android/spv_wide.h (Maxwell's 32-lane warps as 32-lane parts of a wider subgroup: fragment shaders on the Adreno 830, whose subgroups have 64 lanes;
-compute, mesh and task modules are left), built for the PC and run on modules assembled with the NDK's spirv-as; spirv-val checks each result, and a guard
+"""dm/android/spv_wide.h (Maxwell's 32-lane warps as 32-lane parts of a wider subgroup: fragment and compute shaders on the Adreno 830, whose subgroups have 64
+lanes; mesh and task modules are left), built for the PC and run on modules assembled with the NDK's spirv-as; spirv-val checks each result, and a guard
 after the words it asked for checks that it writes no further. Skipped without the NDK.
 With DM_SPV_DIR=<a game's packed spv folder>, also run over every module there with the Adreno 830's stages (each result must pass spirv-val).
 With DM_TEST_SERIAL=<adb serial>, dm/android/tests/t_quad_shuffle.c is built for Android and run on that device with a fragment shader whose quad shuffles are
 the translator's SHFL helpers: rewritten, every pixel must read the right lanes of its quad; as translated, on a subgroup over 32 lanes, the pixels of lanes
-32 and up must not (what the rewrite is for)."""
+32 and up must not (what the rewrite is for). It also runs dm/android/tests/t_warp_reduce.c with test_spv_narrow's compute shader of whole-warp
+reductions: rewritten, its sum, minimum, maximum and OR must be the workgroup's; as translated, on a subgroup over 32 lanes, not all of them."""
 import ctypes
 import os
 from pathlib import Path
@@ -209,6 +210,45 @@ OpDecorate %out Location 0
 '''
 def votes_fs(n): return (VOTES_HEAD + ''.join(f'%e{i} = OpGroupNonUniformAllEqual %bool %scope %p\n%q{i} = OpSelect %u32 %e{i} %u1 %u0\n'
                                               f'%s{i + 1} = OpIAdd %u32 %s{i} %q{i}\n' for i in range(n)) + f'OpStore %out %s{n}\nOpReturn\nOpFunctionEnd\n')
+# A compute shader's warp-aggregated count as the translator writes it for a 32-lane host (as Ocarina of Time's 21d9f83e6027c565 does): BALLOT as the ballot's first word,
+# the lane's rank from the LT mask's component 0, and SHFL.IDX from the warp's leader
+AGG_CS = '''OpCapability Shader
+OpCapability GroupNonUniform
+OpCapability GroupNonUniformBallot
+OpCapability GroupNonUniformShuffle
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %lane %lt
+OpExecutionMode %main LocalSize 64 1 1
+OpDecorate %lane BuiltIn SubgroupLocalInvocationId
+OpDecorate %lt BuiltIn SubgroupLtMask
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%bool = OpTypeBool
+%u32 = OpTypeInt 32 0
+%i32 = OpTypeInt 32 1
+%v4u = OpTypeVector %u32 4
+%pu = OpTypePointer Input %u32
+%pv4u = OpTypePointer Input %v4u
+%lane = OpVariable %pu Input
+%lt = OpVariable %pv4u Input
+%scope = OpConstant %u32 3
+%u31 = OpConstant %u32 31
+%i0 = OpConstant %i32 0
+%true = OpConstantTrue %bool
+%main = OpFunction %void None %fn
+%l = OpLabel
+%L = OpLoad %u32 %lane
+%bal = OpGroupNonUniformBallot %v4u %scope %true
+%bx = OpCompositeExtract %u32 %bal 0
+%ltp = OpAccessChain %pu %lt %i0
+%ltm = OpLoad %u32 %ltp
+%below = OpBitwiseAnd %u32 %bx %ltm
+%rank = OpBitCount %u32 %below
+%lead = OpBitwiseAnd %u32 %bx %u31
+%s = OpGroupNonUniformShuffle %u32 %scope %rank %lead
+OpReturn
+OpFunctionEnd
+'''
 # A compute shader with SHFL.BFLY by 1 as the translator writes it for a 32-lane host
 COMPUTE_CS = '''OpCapability Shader
 OpCapability GroupNonUniform
@@ -336,11 +376,24 @@ class SpvWide(unittest.TestCase):
             self.val(out, f'votes{n}_out.spv')
             self.assertEqual([op for op in ops(out) if op in (334, 335, 336)], [])
 
-    def test_compute_and_mesh_left(self):   # only fragment shaders' shuffles were checked on a device
-        data = self.asm(COMPUTE_CS, 'cs')
+    def test_compute_rewritten(self):   # a warp-aggregated count: lanes 32-63 in their own warp's ballot word, mask word and leader
+        data = self.asm(AGG_CS, 'agg')
         w = (ctypes.c_uint32 * (len(data) // 4)).from_buffer_copy(data)
         self.assertEqual((self.lib.wanted(w, len(w), ADRENO_830), self.lib.wanted(w, len(w), FRAGMENT)), (COMPUTE, 0))
-        self.assertEqual(self.run_on(data), (None, STAGE))
+        out, what = self.run_on(data)
+        self.assertEqual(what, DONE)
+        self.val(out, 'agg_out.spv')
+        o = ops(out)
+        self.assertEqual((o.count(339), o.count(345)), (1, 1))   # the ballot and the shuffle stay
+        self.assertEqual(o.count(77), 1)   # OpVectorExtractDynamic: the ballot's word of the lane's warp
+        self.assertEqual(o.count(194), 2)   # lane >> 5, the warp: for that word and for the LT mask's access chain
+        out, what = self.run_on(self.asm(COMPUTE_CS, 'cs'))
+        self.assertEqual(what, DONE)
+        self.val(out, 'cs_out.spv')
+
+    def test_mesh_left(self):   # only fragment and compute shaders were checked on a device
+        data = self.asm(COMPUTE_CS, 'cs_mesh')
+        w = (ctypes.c_uint32 * (len(data) // 4)).from_buffer_copy(data)
         ep = next(i for i in range(5, len(w)) if w[i] & 0xffff == 15 and w[i] >> 16 >= 3)   # its entry point as MeshEXT's (not a valid mesh shader: scanned only)
         w[ep + 1] = 5365
         self.assertEqual((self.lib.wanted(w, len(w), FOLD), self.lib.wanted(w, len(w), ADRENO_830)), (MESH, 0))
@@ -350,10 +403,10 @@ class SpvWide(unittest.TestCase):
         text = HEAD[:HEAD.index('%L = OpLoad')] + 'OpReturn\nOpFunctionEnd\n'
         self.assertEqual(self.run_on(self.asm(text, 'fs_none')), (None, 0))
 
-    def test_operation_not_covered_left(self):   # the translator writes SHFL as Shuffle only; a relative shuffle or an arithmetic one is not Maxwell's
+    def test_operation_not_covered_left(self):   # the translator writes SHFL as Shuffle only (spv_xor makes its butterfly ShuffleXor); a relative shuffle or an arithmetic one is not Maxwell's
         text = FS.replace('OpCapability GroupNonUniformVote\n', 'OpCapability GroupNonUniformVote\nOpCapability GroupNonUniformShuffleRelative\n') \
-                 .replace('%sh1 = OpGroupNonUniformShuffle %f32 %scope %f %src1\n', '%sh1 = OpGroupNonUniformShuffleXor %f32 %scope %f %u1\n')
-        self.assertEqual(self.run_on(self.asm(text, 'fs_xor')), (None, KEPT))
+                 .replace('%sh1 = OpGroupNonUniformShuffle %f32 %scope %f %src1\n', '%sh1 = OpGroupNonUniformShuffleUp %f32 %scope %f %u1\n')
+        self.assertEqual(self.run_on(self.asm(text, 'fs_up')), (None, KEPT))
         text = FS.replace('OpCapability GroupNonUniformVote\n', 'OpCapability GroupNonUniformVote\nOpCapability GroupNonUniformArithmetic\n') \
                  .replace('%sz = OpLoad %u32 %size\n', '%sz = OpGroupNonUniformIAdd %u32 %scope Reduce %L\n')
         self.assertEqual(self.run_on(self.asm(text, 'fs_add')), (None, KEPT))
@@ -398,6 +451,28 @@ class SpvWide(unittest.TestCase):
         self.assertTrue(rewritten.strip().endswith('exit 0'), rewritten)
         m = re.search(r'subgroup size (\d+)', rewritten); assert m
         if int(m.group(1)) > 32: self.assertFalse(translated.strip().endswith('exit 0'), translated)   # lanes 32 and up read the first 32 lanes' quads, or themselves
+
+    @unittest.skipUnless(os.environ.get('DM_TEST_SERIAL'), 'DM_TEST_SERIAL not set')
+    def test_warp_reductions_on_a_device(self):   # compute: test_spv_narrow's whole-warp reductions (SHFL.BFLY by 1 to 16, lane 0 of each warp adds its result)
+        from test_spv_narrow import CS as REDUCE_CS
+        serial = os.environ['DM_TEST_SERIAL']
+        adb = shutil.which('adb') or str(Path(os.environ.get('ANDROID_HOME', '')) / 'platform-tools' / f'adb{EXE}')
+        exe = self.tmp / 't_warp_reduce'
+        cc = self.bin / ('aarch64-linux-android29-clang' + ('.cmd' if os.name == 'nt' else ''))
+        subprocess.run([cc, '-O1', '-Wall', '-Werror', REPO / 'dm/android/tests/t_warp_reduce.c', '-lvulkan', '-o', exe], check=True)
+        data = self.asm(REDUCE_CS, 'dev_cs'); out, what = self.run_on(data); self.assertEqual(what, DONE); assert out is not None
+        self.val(out, 'dev_cs_out.spv'); (self.tmp / 'cs_in.spv').write_bytes(data); (self.tmp / 'cs.spv').write_bytes(out)
+        d = '/data/local/tmp/dm_warp_reduce_wide'
+        subprocess.run([adb, '-s', serial, 'shell', 'mkdir', '-p', d], check=True)
+        for f in (exe, self.tmp / 'cs.spv', self.tmp / 'cs_in.spv'): subprocess.run([adb, '-s', serial, 'push', f, d], check=True, capture_output=True)
+        def on_device(cs):
+            r = subprocess.run([adb, '-s', serial, 'shell', f'cd {d} && chmod 755 t_warp_reduce && ./t_warp_reduce {cs}; echo "exit $?"'], capture_output=True, text=True)
+            print(r.stdout.strip()); return r.stdout
+        rewritten, translated = on_device('cs.spv'), on_device('cs_in.spv')
+        subprocess.run([adb, '-s', serial, 'shell', 'rm', '-r', d], capture_output=True)
+        self.assertTrue(rewritten.strip().endswith('exit 0'), rewritten)
+        m = re.search(r'subgroup size (\d+)', rewritten); assert m
+        if int(m.group(1)) > 32: self.assertFalse(translated.strip().endswith('exit 0'), translated)   # the second warp's steps keep its own value, and lane 32 never adds
 
 
 if __name__ == '__main__':

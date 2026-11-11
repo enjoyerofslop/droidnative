@@ -66,6 +66,14 @@ class Json(unittest.TestCase):
         self.assertTrue(ba.ANDROID_TESTED)
         self.assertEqual(sorted(g for g in ba.ANDROID_TESTED if g not in t), [])
 
+    def test_game_status_rows_start_with_a_tier(self):   # the README's tiers spelled as its tier table spells them: a hyphen typed for the en dash, or a bare "Playable", fails
+        tiers = ('Playable – minor issues through ', 'Playable – major issues through ', 'In-game', 'Menus', 'Boots', "Doesn't run")
+        table = (REPO / 'README.md').read_text(encoding='utf-8').split('| Game | Device | State |\n|---|---|---|\n', 1)[1].split('\n\n', 1)[0]
+        rows = [[c.strip() for c in line[1:-1].split('|')] for line in table.splitlines()]
+        self.assertGreater(len(rows), 10)
+        self.assertEqual([r[0] for r in rows if len(r) != 3], [])
+        self.assertEqual([r[0] for r in rows if not r[2].lstrip('*').startswith(tiers)], [])
+
 
 class Windows(unittest.TestCase):
     def test_loads_where_python_has_no_fcntl(self):   # Windows: build_ipa_from_nsp.py loads tree_tar.py, which imports fcntl; dm/android/tools/compat's stand-in is found
@@ -202,14 +210,19 @@ class GameApp(Base):   # droidplay-core issue #169: a game app whose DLC doesn't
         aoc = self.tmp / 'aoc'; (aoc / '2').mkdir(parents=True)
         with self.assertRaises(ba.BuildError): ba.dlc_images(aoc)
 
-    @unittest.skipUnless(JDK and ANDROID_JAR, 'needs a JDK (JAVA_HOME, or javac on PATH) and the Android SDK (ANDROID_HOME, or the Mac\'s default)')
-    def test_gamestart_reads_the_packers_pack(self):   # GameStart's own parser, run on a JVM over the SDK's android.jar stubs, against a pack this script wrote
-        assert JDK is not None and ANDROID_JAR is not None   # (the skip above)
+    def jvm(self, cls, code, *args):   # a class of GameStart's package compiled with the app's Java and run on a JVM over the SDK's android.jar stubs → its output
+        assert JDK is not None and ANDROID_JAR is not None   # (the callers' skip)
         javac, java = JDK; jar = ANDROID_JAR
+        src = self.tmp / f'jsrc_{cls}'; out = self.tmp / f'jout_{cls}'; src.mkdir(); out.mkdir()
+        (src / f'{cls}.java').write_text('package org.nxnative.android;   // GameStart\'s helpers are package-private\n' + code)
+        javas = [str(p) for p in (REPO / 'dm/android/java').rglob('*.java')] + [str(src / f'{cls}.java')]
+        subprocess.run([javac, '-source', '8', '-target', '8', '-Xlint:none', '-nowarn', '-bootclasspath', str(jar), '-cp', str(jar), '-d', str(out), *javas], check=True, capture_output=True)
+        return subprocess.run([java, '-cp', f'{jar}{os.pathsep}{out}', f'org.nxnative.android.{cls}', *map(str, args)], check=True, capture_output=True, text=True).stdout
+
+    @unittest.skipUnless(JDK and ANDROID_JAR, 'needs a JDK (JAVA_HOME, or javac on PATH) and the Android SDK (ANDROID_HOME, or the Mac\'s default)')
+    def test_gamestart_reads_the_packers_pack(self):   # GameStart's own parser, run on a JVM, against a pack this script wrote
         made, inside, info, stage, game, aoc = self.make(False, 512 << 10)
-        src = self.tmp / 'jsrc'; out = self.tmp / 'jout'; src.mkdir(); out.mkdir()
-        (src / 'PackCheck.java').write_text('''package org.nxnative.android;   // GameStart's parsers are package-private
-import java.io.RandomAccessFile;
+        out = self.jvm('PackCheck', '''import java.io.RandomAccessFile;
 public class PackCheck { public static void main(String[] a) throws Exception {
     RandomAccessFile f = new RandomAccessFile(a[0], "r"); long at = Long.parseLong(a[1]), size = Long.parseLong(a[2]);
     byte[] h = new byte[16]; f.seek(at); f.readFully(h); int n = GameStart.dlcCount(h);
@@ -217,12 +230,64 @@ public class PackCheck { public static void main(String[] a) throws Exception {
     for (long[] r : GameStart.dlcRecords(head, size - at)) System.out.println(r[0] + " " + r[1] + " " + r[2]);
     head[16] = 0; head[17] = 0; System.out.println(GameStart.dlcRecords(head, size - at) == null ? "bad index refused" : "bad index taken");
 } }
-''')
-        javas = [str(p) for p in (REPO / 'dm/android/java').rglob('*.java')] + [str(src / 'PackCheck.java')]
-        subprocess.run([javac, '-source', '8', '-target', '8', '-Xlint:none', '-nowarn', '-bootclasspath', str(jar), '-cp', str(jar), '-d', str(out), *javas], check=True, capture_output=True)
-        r = subprocess.run([java, '-cp', f'{jar}{os.pathsep}{out}', 'org.nxnative.android.PackCheck', str(made[1]), str(info['dlc_at']), str(info['data_bytes'])], check=True, capture_output=True, text=True)
+''', made[1], info['dlc_at'], info['data_bytes'])
         _, recs, _ = ba.dlc_pack(ba.dlc_images(aoc))
-        self.assertEqual(r.stdout.split('\n'), [f'{i} {o} {n}' for i, o, n in recs] + ['bad index refused', ''])
+        self.assertEqual(out.split('\n'), [f'{i} {o} {n}' for i, o, n in recs] + ['bad index refused', ''])
+
+    # droidplay-core issue #169 again: a ZIP without ZIP64 holds 65,535 entries, and Mario Kart 8 Deluxe's shaders with its DLC passed that at 492 MB
+    def spv_folder(self, n):   # a synthetic spv folder of n tiny files, as the translator names them (no game files)
+        spv = self.tmp / f'spv{n}'; spv.mkdir()
+        for i in range(n): (spv / f'{i:016x}{".z" if i % 3 == 0 else ""}.spv').write_bytes(i.to_bytes(4, 'little'))
+        return spv
+
+    def test_shaders_past_the_entry_limit_go_in_one_entry(self):
+        import zipfile
+        g, game, aoc = self.stage(); spv = self.spv_folder(65_600); out = self.tmp / 'out'; work = self.tmp / 'work'; (work / 'logs').mkdir(parents=True)
+        meta = {'title_id': GID, 'name': 'Test Game', 'romfs_bytes': (game / 'RomFS.img').stat().st_size}
+        with mock.patch.object(ba.bi, 'run', lambda cmd, *a, **k: Path(cmd[cmd.index('-o') + 1]).write_bytes(b'apk')):
+            ba.make_game_app('sdk', mock.Mock(id=GID), game, g / 'code', spv, g / 'font', aoc, 'DM_LANG=en-US\n', g / 'host.so', meta, work, work / 'logs', {}, out, False)
+        stage = work / 'game_app'; listed = (stage / 'files.txt').read_text().split()
+        self.assertFalse((stage / 'spv').exists()); self.assertIn(ba.SPV_ZIP, listed); self.assertLess(len(listed), 100)   # the APK's entries: a handful, not 65,600
+        with zipfile.ZipFile(stage / ba.SPV_ZIP) as z:
+            infos = z.infolist()
+            self.assertEqual(len(infos), 65_600); self.assertTrue(all(i.compress_type == zipfile.ZIP_STORED for i in infos))
+            self.assertEqual(z.read('0000000000000003.z.spv'), (3).to_bytes(4, 'little'))
+
+    def test_too_many_files_is_named(self):   # the files the APK must carry, past the entry limit even with the shaders packed
+        parts = {'code': 90 * MB, 'shaders': 500 * MB, 'font': 22 * MB, 'the rest': MB}
+        with self.assertRaises(ba.BuildError) as e:
+            ba.game_app_plan(parts, 0, 1 << 30, False, files={'code': 70_000, 'shaders': 1, 'font': 3, 'the rest': 6})
+        for want in ('70,010 files', 'code 70,000', 'shaders 1', '65,535 entries', 'without --game-apk'): self.assertIn(want, str(e.exception))
+        self.assertEqual(ba.game_app_plan(parts, MB, 1 << 30, False, files={'code': 100}, dlc_files=ba.GAME_APP_ENTRIES), (False, False))   # DLC whose files don't fit goes beside
+
+    def test_build_apk_names_the_limit_it_hit(self):   # zipfile raises one LargeZipFile for every limit; the message says which
+        import zipfile
+        spec = importlib.util.spec_from_file_location('build_apk', REPO / 'dm/android/tools/build_apk.py'); assert spec and spec.loader
+        bapk = importlib.util.module_from_spec(spec); spec.loader.exec_module(bapk)
+        writing = ['assets/game/spv/e94e9c942d2987fd.z.spv', 18_856, 65_535, 492_500_937]
+        m = bapk.zip64_message('x.apk', zipfile.LargeZipFile('Files count would require ZIP64 extensions'), writing)
+        self.assertIn('reached 65,535 entries', m); self.assertNotIn('2 GiB', m)
+        m = bapk.zip64_message('x.apk', zipfile.LargeZipFile('Zipfile size would require ZIP64 extensions'), writing)
+        self.assertIn('passed 2 GiB (492,500,937 bytes written)', m); self.assertNotIn('65,535', m)
+
+    @unittest.skipUnless(JDK and ANDROID_JAR, 'needs a JDK (JAVA_HOME, or javac on PATH) and the Android SDK (ANDROID_HOME, or the Mac\'s default)')
+    def test_gamestart_unpacks_the_packers_shaders(self):   # GameStart.unzip, run on a JVM, over the script's spv.zip, and a name that leaves the folder refused
+        import zipfile
+        spv = self.spv_folder(300); z = self.tmp / 'spv.zip'; ba.pack_spv(spv, z)
+        bad = self.tmp / 'bad.zip'
+        with zipfile.ZipFile(bad, 'w') as b: b.writestr('../outside.spv', b'x')
+        dst = self.tmp / 'unpacked'
+        out = self.jvm('UnzipCheck', '''import java.io.*;
+public class UnzipCheck { public static void main(String[] a) throws Exception {
+    System.out.println(GameStart.unzip(new FileInputStream(a[0]), new File(a[1]), new byte[1 << 16], null));
+    try { GameStart.unzip(new FileInputStream(a[2]), new File(a[3]), new byte[1 << 16], null); System.out.println("taken"); }
+    catch (IOException e) { System.out.println("refused"); }
+} }
+''', z, dst, bad, self.tmp / 'bad_dst')
+        self.assertEqual(out.split(), ['300', 'refused'])
+        self.assertEqual(sorted(p.name for p in dst.iterdir()), sorted(p.name for p in spv.iterdir()))
+        self.assertTrue(all((dst / p.name).read_bytes() == p.read_bytes() for p in spv.iterdir()))
+        self.assertFalse((self.tmp / 'outside.spv').exists())
 
 
 class Setup(unittest.TestCase):   # --setup (dm/android/tools/host_setup.py): what --check finds missing, installed where the script looks; nothing is downloaded here

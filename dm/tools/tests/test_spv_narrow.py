@@ -4,8 +4,8 @@ asked for checks that it writes no further. Skipped without the NDK.
 With DM_SPV_DIR=<a game's packed spv folder>, also run over every module there with 16-lane fragment and compute subgroups (each result must pass spirv-val
 wherever the module itself does).
 With DM_TEST_SERIAL=<adb serial>, dm/android/tests/t_warp_reduce.c is built for Android and run on that device with a compute shader whose whole-warp reductions
-are the translator's: rewritten for the device's subgroup size where it is under 32, its sum, minimum, maximum and OR must be the workgroup's; where it is 32 or
-more, as translated."""
+are the translator's: rewritten for the device's subgroup size where it is under 32, its sum, minimum, maximum and OR must be the workgroup's; where it is 32,
+as translated. Over 32 the reductions are spv_wide's (test_spv_wide.py's test_warp_reductions_on_a_device), and this test is skipped."""
 import ctypes
 import os
 from pathlib import Path
@@ -299,6 +299,7 @@ class SpvNarrow(unittest.TestCase):
             result = on_device('cs_out.spv')
         else: result = translated
         subprocess.run([adb, '-s', serial, 'shell', 'rm', '-r', d], capture_output=True)
+        if size > 32: self.skipTest(f'{size}-lane subgroups: spv_wide rewrites these reductions (test_spv_wide.py), and as translated the second warp keeps its own values')
         self.assertTrue(result.strip().endswith('exit 0'), result)
 
 
