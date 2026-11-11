@@ -116,9 +116,12 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
   that the next `mmap` of anyone (the driver's `vkMapMemory`, a heap) could take. The game's next request over the same range then unmapped whatever had landed there.
 - **Fix:** the duplicate is made where the kernel puts it (`mremap` without `MREMAP_FIXED`, which touches nothing when it is refused), and only then moved to the fixed
   destination. Should the move fail, the destination is mapped inaccessible again, so it stays reserved.
-- **Check:** `dm/android/tests/t_vm_remap.c` (a device test, `-DDM_TESTS=ON`): after a refused request the reservation is whole and a mapping made afterwards lies
-  outside it; a shareable source is aliased at the destination and reads and writes the same memory. On a Galaxy S25 Edge (kernel 6.6.77) the old stand-in fails the
-  first two checks and the new one passes all eight.
+- **Check:**
+  - `dm/android/tests/t_vm_remap.c` (a device test, `-DDM_TESTS=ON`): after a refused request the reservation is whole and a mapping made afterwards lies
+    outside it; a shareable source is aliased at the destination and reads and writes the same memory. On a Galaxy S25 Edge (kernel 6.6.77) the old stand-in fails the
+    first two checks and the new one passes all eight.
+  - Mario Kart World on a Pixel 9 Pro XL (Mali-G715), menus into a Mushroom Cup race, default settings and raw global memory: 4 of 4 runs failed without the change
+    (three faults in Mali's driver, two of them `memset`s inside a failed request's destination, and one freeze) and 4 of 4 ran the race out with it.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), which makes about 9,000 such requests in the menus and a race. On a Galaxy S25 Edge an
   84 MB request failed, a 17 MB arena block was mapped inside its destination, the same request failed again 71 s later, and the replay faulted writing the block 15 ms
   after that. On a OnePlus Pad 3 the driver faulted at a submission right after a run of such requests.
