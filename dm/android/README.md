@@ -232,6 +232,16 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators:
   one of them fails on the player's driver, the front end destroys what it made, `vkb_fallback` destroys the device and the instance, and both are made again on the
   system's driver, in the same process (`vkb()` is made under a mutex, not a `pthread_once`, for this). A later window (after the app comes back) can't: the game's
   textures and pipelines are on the device by then.
+- Start records and the crash guard (`vk_driver.c`): a driver that crashes or hangs the game would do it at every start. Before the driver opens, the host writes
+  `{"state": "trying", …}` to `<external files>/vk_driver_state/<driver file>.json`, and the same state to the game's `games/<title ID>/vk_driver_result.txt`
+  (`driver=`, `result=`, `reason=`, `time=` lines, for the desktop app). Then: `ok` after 120 presented frames or 30 s of the game (a first start's pipeline compile
+  takes longer), `fell back` (any fallback above), `crashed` (crash.c's `crash_set_pc_hook`: the crashing thread's pc, lr or a return address in its first 16
+  frames lies in the driver's mapping, from `/proc/self/maps`), `device lost` (`gpu_fault_log`). A start that finds `crashed`, `device lost` or `trying` (a start
+  that ended before `ok`) runs the system's driver once and writes `skipped`, with a `[RED]` line and a line on the status screen, which also names the driver in use
+  or why it isn't; the next start tries the driver again. A start without `DM_VK_DRIVER` removes the game's result file; on a phone without KGSL the result is
+  `not used`. The host's crash handler goes in as the host starts (`main.c`), after the device and the first window, so a crash in the driver before then is
+  left as `trying`, which skips the driver once too. `DM_VK_DRIVER_FAIL=crash` crashes in the driver's code (a `vkCreateSampler` with no create info) at the
+  replay's first use of the device, to try the guard.
 - A phone without `/dev/kgsl-3d0` (a Mali or Xclipse GPU) doesn't open `DM_VK_DRIVER` at all, with one plain `[vk] DM_VK_DRIVER` line: Turnip drives Qualcomm's
   kernel driver, KGSL, and `libadrenotools.so` is not loaded, so its constructor doesn't patch the linker.
 - Each driver keeps its own pipeline cache: `DM_PIPELINE_CACHE` with `.<driver file name>` after it (`gfx_vk_draw.inc` `pcache`).

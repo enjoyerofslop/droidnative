@@ -44,6 +44,13 @@ const char *vk_driver_name(void);
 int vk_driver_fail(const char *step);
 int vk_driver_fallback(const char *why);
 const char *vk_result_str(VkResult r);   // VK_ERROR_INITIALIZATION_FAILED, ... for a log line
+// The DM_VK_DRIVER start records (vk_driver.c, "Start records and the crash guard"). vk_driver_game: the game's folder and title ID (the front end, before vkb).
+// vk_driver_ok: the game ran long enough to count as a good start; vk_driver_lost: the device was lost. vk_driver_note: the status screen's line about the driver (NULL:
+// none chosen), warn when it isn't the one chosen
+void vk_driver_game(const char *dir, const char *id);
+void vk_driver_ok(void);
+void vk_driver_lost(VkResult r);
+const char *vk_driver_note(int *warn);
 int vk_fp_host(void);   // vk_driver.c: the driver's compiles run with FPCR 0 (DM_VK_FP_HOST); the pipeline cache's file is named for it
 
 typedef struct {

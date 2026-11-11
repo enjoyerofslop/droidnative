@@ -397,6 +397,9 @@ static int lsnap_on(void), wb_revert_on(void), wb_absorb_on(void), up_range_on(v
 static int chunks_init(void) {
     static int ok = -1; if (ok >= 0) return ok;
     ok = 0; if (!vkb()) return 0;
+    // A test of the crash guard (vk_driver.c crash_hook): the driver reads a create info at address 0. Here, at the replay's first use of the device, since the host's
+    // crash handler goes in only as the host starts (main.c), after the device and the first window: a crash before it leaves the record at trying
+    if (vk_driver_fail("crash")) { LOG("[vk] DM_VK_DRIVER_FAIL=crash: the driver is about to crash, on purpose"); VkSampler s; vkCreateSampler(g_vk.dev, NULL, NULL, &s); }
     fgpu_on(); stg_pool_on(); lsnap_on(); wb_revert_on(); wb_absorb_on(); up_range_on(); wb_words_on(); ds_recycle();   // read before the completion thread starts (sp_done reads g_sp_on, draw_chunk_reset the recycling switch)
     { const char *e = getenv("DM_VK_CHUNKS"); int n = e ? atoi(e) : 0; if (n > 0) g_nchunk = n < 2 ? 2 : n > NCHUNK_MAX ? NCHUNK_MAX : n;
       LOG("[vk] chunks in flight: up to %d%s", g_nchunk, g_nchunk != NCHUNK_DEF ? " (DM_VK_CHUNKS)" : ""); }
@@ -584,6 +587,7 @@ static uint64_t g_flushes;
 enum { GPU_SLOW_NS = 200000000 };   // a chunk this long on the GPU (64 draws by default, 512 with DM_VK_MID_DRAWS=512) is a hang or as good as one
 static void gpu_fault_log(VkResult r) {   // once, from whichever thread sees the loss first
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
+    vk_driver_lost(r);   // a DM_VK_DRIVER driver's lost device: the next start runs the system's driver once
     if (!g_fault_info) { LOG("[RED] [vk] the GPU was lost (%d); the driver offers no VK_EXT_device_fault to say why", r); return; }
     VkDeviceFaultCountsEXT fc = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
     VkResult q = g_fault_info(g_vk.dev, &fc, NULL);

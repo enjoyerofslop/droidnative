@@ -420,6 +420,7 @@ static void status_draw(void) {
         text("Loading the game...", u, y, 0.55f * u, 0xFFFFD080); y += 0.8f * u;
     }
     if (st == ST_SELFTEST || st == ST_PASS) { text(getenv("DM_FORCE_SELFTEST") ? "Self test (from the launcher)" : "No game in Android/data/org.nxnative.android/files/games/" DM_GAME_ID "/", u, y, 0.55f * u, 0xFFA0A0A0); y += 0.8f * u; }
+    { int warn; const char *vn = vk_driver_note(&warn); if (vn) { text(vn, u, y, 0.55f * u, warn ? 0xFFFFD080 : 0xFFA0A0A0); y += 0.8f * u; } }   // the DM_VK_DRIVER driver, or why not
     pthread_mutex_lock(&g_txt_mu); snprintf(line, sizeof line, "%.120s", g_last); pthread_mutex_unlock(&g_txt_mu);
     text(line, u, (float)g_ext2.height - u, 0.45f * u, 0xFF909090);
     // bitmap → staging buffer (RGBA bytes; swapped to BGRA for a BGRA swapchain)
@@ -673,6 +674,14 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
 
 // ---------- Lifecycle ----------
 static int g_started;
+// A start on a DM_VK_DRIVER driver counts as good (vk_driver.c vk_driver_ok) after 120 presented frames or 30 s of the game, so a crash or hang before then makes the next start
+// skip the driver once. A driver's first start compiles the game's pipelines with the status screen up, for over a minute in Brilliant Diamond: that is not a failure
+static void driver_proven(void) {
+    static int done; static uint64_t t0; int st = atomic_load(&g_state);
+    if (done || (st != ST_GAME && st != ST_PASS)) return;
+    if (!t0) t0 = mono_ns();
+    if (st == ST_PASS || atomic_load(&g_frames) >= 120 || mono_ns() - t0 >= 30000000000ull) { done = 1; vk_driver_ok(); }
+}
 static void on_cmd(struct android_app *app, int32_t cmd) {
     int game = atomic_load(&g_state) == ST_GAME;
     switch (cmd) {
@@ -705,6 +714,7 @@ void android_main(struct android_app *app) {
         if (kept) LOG("the previous start's log and dumps: %d file%s kept beside the new ones, with .prev before the extension (log.prev.txt)", kept, kept == 1 ? "" : "s");
     }
     vk_driver_dirs(g_ext, g_int);   // DM_VK_DRIVER: a driver beside env.txt, run from a copy in the internal files
+    vk_driver_game(g_game, DM_GAME_ID);   // and its start records: games/<title ID>/vk_driver_result.txt
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &g_env, NULL);
     app->onAppCmd = on_cmd; app->onInputEvent = on_input;
     // The screen stays on while the game's window is up, as the launcher's does: Android counts only its own input events as activity, so a cutscene, a game
@@ -719,5 +729,6 @@ void android_main(struct android_app *app) {
             if (g_sc) break;
         }
         if (!frame_draw()) status_draw();
+        driver_proven();
     }
 }

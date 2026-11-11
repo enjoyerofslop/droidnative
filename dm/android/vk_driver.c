@@ -8,6 +8,8 @@
 //   instance, find the GPU's graphics queue or the window extensions, or make the device (gfx_vk.c vk_create, through vk_driver_fallback), or the first window's surface
 //   or swapchain (front_android.c vk_window_first): a player's choice of driver must never leave a game without a picture. On a phone without an Adreno GPU, DM_VK_DRIVER is not opened at all.
 #include <dlfcn.h>
+#include <signal.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -23,7 +25,14 @@ static char g_ext[512], g_int[512], g_name[256];   // vk_driver_dirs; g_name: th
 
 void vk_driver_dirs(const char *ext, const char *internal) { snprintf(g_ext, sizeof g_ext, "%s", ext); snprintf(g_int, sizeof g_int, "%s", internal); }
 const char *vk_driver_name(void) { return g_name[0] ? g_name : NULL; }
-#define DRV_RED(drv, fmt, ...) LOG("[RED] [vk] DM_VK_DRIVER %s: " fmt, drv, ##__VA_ARGS__)
+static char g_why[300];   // the last DRV_RED line's text up to "; the system's driver": why the DM_VK_DRIVER driver isn't running, for its records and the status screen
+static void __attribute__((format(printf, 2, 3))) drv_red(const char *drv, const char *fmt, ...) {
+    char b[1024]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
+    LOG("[RED] [vk] DM_VK_DRIVER %s: %s", drv, b);
+    char *cut = strstr(b, "; the system's driver"); if (cut) *cut = 0;
+    snprintf(g_why, sizeof g_why, "%s", b);
+}
+#define DRV_RED(drv, fmt, ...) drv_red(drv, fmt, ##__VA_ARGS__)
 
 // src → <dir><name> (dir: <internal>/vk_driver/), unless the copy there has src's size and time already. Read-only once written, as Android 14 asks of code an app loads
 // from its own files. → 0 with errno set
@@ -49,14 +58,20 @@ static int copy_in(const char *src, const char *dir, const char *name) {
 
 // Whether the file at path is mapped in this process: when adrenotools' hook cannot put the player's driver in place, it opens the vendor's instead and says so only in
 // logcat. By device and inode, as /proc/self/maps lists them (its path column may name the file through another mount, /data/data for /data/user/0). (Not
-// dl_iterate_phdr: <link.h> clashes with dm.h's ELF types)
+// dl_iterate_phdr: <link.h> clashes with dm.h's ELF types). Its addresses, from the lowest mapping's start to the highest's end, are kept for the crash guard (crash_hook)
+static uint64_t g_lo, g_hi;
 static int mapped(const char *path) {
     struct stat st; if (stat(path, &st)) return 0;
     FILE *f = fopen("/proc/self/maps", "re"); if (!f) return 0;
-    char line[1024]; unsigned maj, mnr; unsigned long long ino; int found = 0;
-    while (!found && fgets(line, sizeof line, f))
-        found = sscanf(line, "%*s %*s %*s %x:%x %llu", &maj, &mnr, &ino) == 3 && ino == (unsigned long long)st.st_ino && maj == major(st.st_dev) && mnr == minor(st.st_dev);
-    fclose(f); return found;
+    char line[1024]; unsigned maj, mnr; unsigned long long lo, hi, ino; uint64_t l = 0, h = 0;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "%llx-%llx %*s %*s %x:%x %llu", &lo, &hi, &maj, &mnr, &ino) == 5 && ino == (unsigned long long)st.st_ino && maj == major(st.st_dev) && mnr == minor(st.st_dev)) {
+            if (!l || lo < l) l = lo;
+            if (hi > h) h = hi;
+        }
+    fclose(f);
+    if (h) { g_lo = l; g_hi = h; }
+    return h != 0;
 }
 
 // The GPU a driver offers, on an instance made for the question: a Turnip built for another Adreno generation opens and then has none
@@ -121,21 +136,122 @@ static int open_system(void) {
 // run on, and libadrenotools.so's constructor (liblinkernsbypass) would patch the linker for nothing. Only a missing node counts: one SELinux keeps from a stat is still there
 static int adreno(void) { struct stat st; return !stat("/dev/kgsl-3d0", &st) || errno != ENOENT; }
 
+// ---------------- Start records and the crash guard ----------------
+// A driver that crashes the game, hangs it or loses the GPU would do so again at every start. So each start with a DM_VK_DRIVER driver is recorded, and one that went wrong
+// makes the next start run on the system's driver, once, saying why in the log and on the status screen (vk_driver_note); the start after that tries the driver again.
+// The records are in the external files, where the desktop app can read and clear them over adb (the app isn't debuggable: its internal files are out of reach):
+//   vk_driver_state/<driver file>.json      the driver's last start, whatever the game: {"state": …, "game": <title ID>, "time": <Unix time>, "reason": …}
+//   games/<title ID>/vk_driver_result.txt   this game's last start: driver=, result= (a state), reason=, time= lines; removed at a start without DM_VK_DRIVER
+// The states: trying (written before the driver opens), ok (120 frames presented or 30 s of the game: a first start compiles for longer than that), fell back (it failed and
+// the system's driver ran), crashed (in the driver's code), device lost, skipped and not used (no Adreno GPU: the result file only). A start that finds crashed, device lost
+// or trying (a start that ended before ok: a crash the handler did not see, a hang the player ended, or a game closed in its first 30 s) skips the driver and writes skipped
+static char g_game_dir[600], g_game_id[40], g_state[700], g_result[700], g_drv[256], g_note[300];
+static int g_note_warn; static _Atomic int g_bad;   // g_bad: crashed or device lost was written, which ok must not replace
+void vk_driver_game(const char *dir, const char *id) { snprintf(g_game_dir, sizeof g_game_dir, "%s", dir); snprintf(g_game_id, sizeof g_game_id, "%s", id); }
+const char *vk_driver_note(int *warn) { if (warn) *warn = g_note_warn; return g_note[0] ? g_note : NULL; }
+
+static void esc(char *o, size_t n, const char *s, int json) {   // control characters as spaces; for JSON, quotes and backslashes escaped too
+    size_t k = 0;
+    for (; *s && k + 2 < n; s++) { if (json && (*s == '"' || *s == '\\')) o[k++] = '\\'; o[k++] = (unsigned char)*s < 0x20 ? ' ' : *s; }
+    o[k] = 0;
+}
+static void put(const char *path, const char *text) {   // whole or not at all (a rename); from the crash handler too, so no allocation and no lock
+    char tmp[720]; snprintf(tmp, sizeof tmp, "%s.%d.new", path, (int)gettid());
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666); if (fd < 0) return;
+    size_t n = strlen(text); int ok = write(fd, text, n) == (ssize_t)n;
+    if (close(fd) || !ok || rename(tmp, path)) unlink(tmp);
+}
+static void record(const char *state, const char *reason) {
+    char r[400], b[1200]; long long t = (long long)time(NULL);
+    if (g_state[0]) { esc(r, sizeof r, reason, 1); snprintf(b, sizeof b, "{\"state\": \"%s\", \"game\": \"%s\", \"time\": %lld, \"reason\": \"%s\"}\n", state, g_game_id, t, r); put(g_state, b); }
+    if (g_result[0]) { esc(r, sizeof r, reason, 0); snprintf(b, sizeof b, "driver=%s\nresult=%s\nreason=%s\ntime=%lld\n", g_drv, state, r, t); put(g_result, b); }
+}
+static void record_paths(const char *drv, int state) {   // drv NULL: no DM_VK_DRIVER, so this game's old result goes
+    char d[600];
+    if (!drv) { if (g_game_dir[0]) { snprintf(d, sizeof d, "%s/vk_driver_result.txt", g_game_dir); unlink(d); } return; }
+    const char *b = strrchr(drv, '/') ? strrchr(drv, '/') + 1 : drv;
+    snprintf(g_drv, sizeof g_drv, "%s", b);
+    if (state && g_ext[0] && *b) { snprintf(d, sizeof d, "%s/vk_driver_state", g_ext); mkdir(d, 0777); snprintf(g_state, sizeof g_state, "%s/%s.json", d, b); }
+    if (g_game_dir[0]) snprintf(g_result, sizeof g_result, "%s/vk_driver_result.txt", g_game_dir);
+}
+static int jstr(const char *b, const char *key, char *o, size_t n) {   // a string field of a record, as record writes it
+    char k[32]; snprintf(k, sizeof k, "\"%s\": \"", key);
+    const char *s = strstr(b, k); size_t i = 0;
+    if (s) for (s += strlen(k); *s && *s != '"' && i + 1 < n; s++) { if (*s == '\\' && s[1]) s++; o[i++] = *s; }
+    o[i] = 0; return s != NULL;
+}
+// The driver's last start went wrong: 1 when this start skips it (and skipped is written, so the next one tries it again)
+static int skip_once(void) {
+    char b[2048], st[32] = "", why[300] = "", game[40] = ""; size_t n = 0;
+    FILE *f = g_state[0] ? fopen(g_state, "re") : NULL;
+    if (f) { n = fread(b, 1, sizeof b - 1, f); fclose(f); }
+    b[n] = 0; jstr(b, "state", st, sizeof st); jstr(b, "reason", why, sizeof why); jstr(b, "game", game, sizeof game);
+    static const char *const bad[][3] = {{"crashed", "crashed in the driver", ""}, {"device lost", "lost the GPU device", ""},
+                                         {"trying", "ended in its first 30 s", ": a crash or hang the host could not catch, or the game was closed"}};
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
+        if (strcmp(st, bad[i][0])) continue;
+        char r[sizeof g_why]; int other = game[0] && strcmp(game, g_game_id);
+        snprintf(r, sizeof r, "the last start with it%s%s%s %s%s%s%s%s", other ? " (title " : "", other ? game : "", other ? ")" : "", bad[i][1],
+                 why[0] ? " (" : "", why, why[0] ? ")" : "", bad[i][2]);
+        DRV_RED(g_drv, "%s; the system's driver this time, and the next start tries it again", r);
+        record("skipped", r);
+        snprintf(g_note, sizeof g_note, "Vulkan driver: the system's this time, as the last start with %s %s", g_drv, bad[i][1]); g_note_warn = 1;
+        return 1;
+    }
+    return 0;
+}
+static void fell_back(const char *why) {
+    record("fell back", why);
+    snprintf(g_note, sizeof g_note, "Vulkan driver: the system's; %s: %.200s", g_drv, why); g_note_warn = 1;
+}
+static int in_drv(uint64_t a) { return a >= g_lo && a < g_hi; }
+// crash.c, in the signal handler of the first thread that crashed: a crash in the driver's code is recorded. Its pc, its lr, or a return address in the first 16 frames of
+// its frame chain (an abort or a libc fault the driver called) in the driver's mapping
+static void crash_hook(int sig, uint64_t pc, uint64_t lr, uint64_t fp) {
+    if (!g_name[0] || !g_hi || sig == SIGALRM) return;   // (SIGALRM: the run's time limit, wherever it finds the thread)
+    uint64_t at = in_drv(pc) ? pc : in_drv(lr) ? lr : 0;
+    for (int i = 0; !at && i < 16 && fp && !(fp & 7); i++) {
+        uint64_t w[2]; vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) break;
+        if (in_drv(w[1])) at = w[1];
+        if (w[0] <= fp) break;
+        fp = w[0];
+    }
+    if (!at) return;
+    char why[160], line[400]; snprintf(why, sizeof why, "signal %d at %s+%#llx", sig, g_name, (unsigned long long)(at - g_lo));
+    atomic_store(&g_bad, 1); record("crashed", why);
+    int n = snprintf(line, sizeof line, "[RED] [vk] DM_VK_DRIVER %s: the crash below is in its code (%s), so the next start runs the system's driver once\n", g_name, why);
+    if (n > 0 && write(2, line, (size_t)n) < 0) {}
+}
+void vk_driver_ok(void) { static int done; if (g_name[0] && !done && !atomic_load(&g_bad)) { done = 1; record("ok", ""); } }
+void vk_driver_lost(VkResult r) { if (g_name[0]) { atomic_store(&g_bad, 1); record("device lost", vk_result_str(r)); } }
+
 int vk_driver_load(void) {
     const char *drv = getenv("DM_VK_DRIVER");
-    if (drv && *drv && !adreno()) LOG("[vk] DM_VK_DRIVER %s: not used, this GPU is not an Adreno (no /dev/kgsl-3d0) and Turnip drivers are for Adreno GPUs only: the system's driver runs", drv);
-    else if (drv && *drv) g_gipa = open_custom(drv);
+    int on = drv && *drv, kgsl = on && adreno();
+    record_paths(on ? drv : NULL, kgsl);
+    if (on && !kgsl) {
+        LOG("[vk] DM_VK_DRIVER %s: not used, this GPU is not an Adreno (no /dev/kgsl-3d0) and Turnip drivers are for Adreno GPUs only: the system's driver runs", drv);
+        record("not used", "not an Adreno GPU (no /dev/kgsl-3d0)");
+        snprintf(g_note, sizeof g_note, "Vulkan driver: the system's (%s is for Adreno GPUs only)", g_drv); g_note_warn = 1;
+    } else if (kgsl && !skip_once()) {
+        record("trying", "");
+        if ((g_gipa = open_custom(drv))) {
+            void crash_set_pc_hook(void (*)(int, uint64_t, uint64_t, uint64_t)); crash_set_pc_hook(crash_hook);
+            snprintf(g_note, sizeof g_note, "Vulkan driver: %s (DM_VK_DRIVER)", g_name); g_note_warn = 0;
+        } else fell_back(g_why);
+    }
     if (g_gipa) {
         VKB_FNS_GLOBAL(VKB_LOAD_GLOBAL)
         if (vkCreateInstance && vkEnumerateInstanceExtensionProperties) return 1;
-        DRV_RED(g_name, "it has no vkCreateInstance; the system's driver instead"); g_name[0] = 0;
+        DRV_RED(g_name, "it has no vkCreateInstance; the system's driver instead"); g_name[0] = 0; fell_back(g_why);
     }
     return open_system();
 }
 
 // DM_VK_DRIVER_FAIL=<step> (env.txt, a test): that step fails while the DM_VK_DRIVER driver runs, as if the driver had failed it, so the fallback can be tried on a phone
-// whose driver works. Steps: instance, gpu, queue, extensions, device (gfx_vk.c vk_try), swapchain (the first window's, front_android.c vk_window_up). The system's driver
-// it falls back to is left alone
+// whose driver works. Steps: instance, gpu, queue, extensions, device (gfx_vk.c vk_try), swapchain (the first window's, front_android.c vk_window_up), and crash (a crash in
+// the driver's code at the replay's first use of the device, gfx_vk.c chunks_init, for the crash guard above). The system's driver it falls back to is left alone
 int vk_driver_fail(const char *step) {
     const char *e = getenv("DM_VK_DRIVER_FAIL");
     return g_name[0] && e && !strcmp(e, step);
@@ -145,6 +261,7 @@ int vk_driver_fallback(const char *why) {
     if (!g_name[0]) return 0;
     DRV_RED(g_name, "%s; the system's driver instead", why);
     g_name[0] = 0; g_gipa = NULL;   // (its library stays loaded, as after a failed probe)
+    fell_back(why);
     return open_system();
 }
 
