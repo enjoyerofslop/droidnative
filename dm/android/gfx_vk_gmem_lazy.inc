@@ -264,6 +264,7 @@ static int gm_sink_make(void) {
     vkBindBufferMemory(g_vk.dev, g_sink_b, g_sink_m, 0);
     if (vkMapMemory(g_vk.dev, g_sink_m, 0, VK_WHOLE_SIZE, 0, &p) == VK_SUCCESS) { memset(p, 0, (size_t)mr.size); vkUnmapMemory(g_vk.dev, g_sink_m); }
     VkBufferDeviceAddressInfoKHR ai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR, .buffer = g_sink_b}; g_sink_gpu = g_gm_bda(g_vk.dev, &ai);
+    if (g_gm_np && g_sink_gpu) { pthread_mutex_lock(&g_gm_mu); gm_np_write(0, g_sink_b, GM_CHUNK); pthread_mutex_unlock(&g_gm_mu); }   // slot 0 (gfx_vk_gmem_noptr.inc)
     return g_sink_gpu != 0;
 }
 // gm_table: the chunks not placed as ranges onto the sink, appended to *seg from n on (grown as needed). → the new count. Skipped when the placement lock is busy (the next build has them)
@@ -272,8 +273,8 @@ static int gm_sink_ranges(uint64_t (**seg)[3], int *cap, int n) {
     for (int i = 0; i < g_nlz; i++) for (uint32_t k = 0; k < g_lz[i].nch; k++) {
         if (g_lz[i].st[k] == LZ_PLACED) continue;
         if (n == *cap) { *cap = *cap ? 2 * *cap : 1024; *seg = realloc(*seg, (size_t)*cap * sizeof **seg); if (!*seg) die("raw global memory: the table's ranges"); }
-        uint64_t a = g_lz[i].lo + (uint64_t)k * GM_CHUNK; (*seg)[n][0] = a; (*seg)[n][1] = gm_lz_end(&g_lz[i], k); (*seg)[n++][2] = g_sink_gpu - a; }
+        uint64_t a = g_lz[i].lo + (uint64_t)k * GM_CHUNK; (*seg)[n][0] = a; (*seg)[n][1] = gm_lz_end(&g_lz[i], k); (*seg)[n++][2] = (g_gm_np ? 0 : g_sink_gpu) - a; }
     pthread_mutex_unlock(&g_gm_pl);
     return n;
 }
-static int gm_sink_is(const uint64_t e[3]) { return g_sink_gpu && e[0] + e[2] == g_sink_gpu; }
+static int gm_sink_is(const uint64_t e[3]) { return g_sink_gpu && e[0] + e[2] == (g_gm_np ? 0 : g_sink_gpu); }

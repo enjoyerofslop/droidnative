@@ -10,7 +10,7 @@ typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha; 
 static _Atomic uint64_t g_lm_ids, g_lm_hit, g_lm_miss;   // modules known by their identifier; pipelines the driver's cache gave for identifiers; pipelines that needed modules after all
 static __thread int t_pool_info;   // what spv_pool did to the modules lm_code made since sh_get cleared it
 // The module's code as it is made (to free): the file; a fragment shader variant's unwritten inputs made constants (spv_drop_inputs), else the vertex pipeline's
-// storage made read-only where the GPU needs it (spv_readonly); then the pool set (spv_pool_fit), the subgroup rewrites (spv_fit) and, last, the set's binding numbers compacted (spv_bind.h). first: the module's first
+// storage made read-only where the GPU needs it (spv_readonly); then physical pointers through the pools' array where the driver refuses them (gm_np_code), the pool set (spv_pool_fit), the subgroup rewrites (spv_fit) and, last, the set's binding numbers compacted (spv_bind.h). first: the module's first
 // making, which tells *b0, logs and dumps (made again for a pipeline, it says nothing new)
 static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, uint64_t e5, const spv_bmap *bm, int first, int *b0, size_t *onw) {
     size_t n = 0; uint32_t *code = spv_read(path, &n); if (!code) return NULL;
@@ -36,6 +36,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, uint64_t e5
             free(s); free(o);
         }
     }
+    uint32_t *np = NULL; size_t npn = gm_np_code(code, n, path, first, &np); if (npn) { free(code); code = np; n = npn; }   // raw memory without physical pointers (spv_noptr.h)
     uint32_t *pf = NULL; size_t pn = spv_pool_fit(code, n, path, &pf); if (pn) { free(code); code = pf; n = pn; }   // the texture pool by ID moved into the pool set
     uint32_t *fit = NULL; size_t fn = spv_fit(code, n, path, &fit); if (fn) { free(code); code = fit; n = fn; }
     uint32_t *ly = NULL; size_t ln = spv_fit_layer(code, n, path, &ly); if (ln) { free(code); code = ly; n = ln; }

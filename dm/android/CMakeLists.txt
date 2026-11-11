@@ -51,7 +51,7 @@ endif()
 list(GET GLSLC 0 GLSLC)
 file(MAKE_DIRECTORY ${GEN}/shaders)
 set(SHADER_INC)
-foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag bc_decode.comp gmem_test.comp upscale_square.comp)
+foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag bc_decode.comp gmem_test.comp gmem_test_noptr.comp gmem_probe.comp upscale_square.comp)
   add_custom_command(OUTPUT ${GEN}/shaders/${s}.inc
     COMMAND ${GLSLC} --target-env=vulkan1.1 -O -mfmt=c ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s} -o ${GEN}/shaders/${s}.inc
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s})

@@ -37,6 +37,7 @@
 #include "spv_narrow.h"   // each subgroup of a GPU narrower than 32 lanes a warp of its own (gfx_vk_draw.inc spv_fit_narrow)
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
 #include "spv_tgspill.h"   // compute shared memory past the GPU's limit from a storage buffer (gfx_vk_draw.inc spv_fit_tgs)
+#include "spv_noptr.h"   // raw global memory through a descriptor array, for drivers that refuse OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
 #include "spv_precise.h"   // Maxwell's FMUL and FADD unfused in the shaders that place vertices (gfx_vk_draw.inc spv_fit_precise)
 #include "spv_bind.h"   // a set's far-apart binding numbers made dense, for drivers that size a layout by its highest (gfx_vk_draw.inc sh_get, gfx_vk_lmod.inc lm_code)
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
@@ -81,6 +82,9 @@ static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name)
 #include "gfx_vk_memreport.inc"   // DM_VK_MEMREPORT: the driver's memory reports, by object type
 static int gm_want(const VkExtensionProperties *e, uint32_t n); static void *gm_feat_query(void *next); static int gm_feat_take(const char **dext, uint32_t *nde);   // raw global memory's
 static void *gm_feat_enable(void *next); static void gm_device_made(void);   // device part (gfx_vk_gmem.inc, DM_VK_RAW_GMEM)
+static int g_gm_np;   // raw global memory without physical pointers (gfx_vk_gmem_noptr.inc): the pools' descriptor array, and modules rewritten by spv_noptr
+static int gm_np_take(const VkPhysicalDeviceDescriptorIndexingFeaturesEXT *d, int listed, const char **dext, uint32_t *nde); static int gm_np_enable(VkPhysicalDeviceDescriptorIndexingFeaturesEXT *d);
+static size_t gm_np_code(const uint32_t *code, size_t nw, const char *what, int first, uint32_t **out);
 // A step of vk_try that failed: why, for its [RED] line (or the fallback's). forced: DM_VK_DRIVER_FAIL made it fail
 static int vk_failed(char *why, size_t n, const char *what, const char *call, VkResult r, int forced) {
     if (forced) snprintf(why, n, "%s (DM_VK_DRIVER_FAIL)", what);
@@ -129,8 +133,8 @@ static int vk_try(char *why, size_t nwhy) {
           VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &dp}; vkGetPhysicalDeviceProperties2(g_vk.pd, &p2); id = dp.driverID;
           LOG("[vk] driver ID %d: %s, %s", (int)id, dp.driverName, dp.driverInfo); }
       g_qcom_driver = id ? id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY : g_vk.props.vendorID == 0x5143 && (g_vk.props.driverVersion & 0x80000000u); }
-    const char *dext[15]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
-                                              // shader module identifier, pipeline creation cache control and display timing; raw global memory's (gm_feat_take) take what of the 15 is left
+    const char *dext[16]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
+                                              // shader module identifier, pipeline creation cache control and display timing; raw global memory's (gm_feat_take, gm_np_take) take what of the 16 is left
     if (has_ext(de, nd, "VK_KHR_swapchain")) { dext[nde++] = "VK_KHR_swapchain"; g_vk.has_swapchain = 1; }
     // A DM_VK_DRIVER driver must offer what the window needs (front_android.c vk_init refuses a device without it); the system's driver goes on without, as before
     if (vk_driver_name() && ((forced = vk_driver_fail("extensions")) || !g_vk.has_surface || !g_vk.has_swapchain)) {
@@ -161,6 +165,7 @@ static int vk_try(char *why, size_t nwhy) {
     // pipelines from the driver's cache by their modules' identifiers, the modules made only when it lacks one (gfx_vk_lmod.inc). DM_VK_MODULE_ID=0: modules made at once
     int smid; { const char *e = getenv("DM_VK_MODULE_ID"); smid = !(e && *e == '0') && has_ext(de, nd, "VK_EXT_shader_module_identifier") && has_ext(de, nd, "VK_EXT_pipeline_creation_cache_control"); }
     int gm = gm_want(de, nd);   // raw global memory (gfx_vk_gmem.inc): asked for only with DM_VK_RAW_GMEM=1
+    int dix = has_ext(de, nd, "VK_EXT_descriptor_indexing"), gmdi = gm && (dix || VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 2 || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1);   // its descriptor array's features
     free(de);
     VkPhysicalDeviceFeatures want = {.textureCompressionBC = f.textureCompressionBC, .textureCompressionASTC_LDR = f.textureCompressionASTC_LDR,
                                      .textureCompressionETC2 = f.textureCompressionETC2, .independentBlend = f.independentBlend, .geometryShader = f.geometryShader,
@@ -181,7 +186,7 @@ static int vk_try(char *why, size_t nwhy) {
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .pNext = &dp};
     void *qn = dfault ? (void *)&ff : (void *)&dp;
     VkPhysicalDeviceRobustness2FeaturesEXT rbq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT, .pNext = qn}; if (g_null_desc) qn = &rbq;
-    VkPhysicalDeviceDescriptorIndexingFeaturesEXT diq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = qn}; if (g_nonuni) qn = &diq;
+    VkPhysicalDeviceDescriptorIndexingFeaturesEXT diq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = qn}; if (g_nonuni || gmdi) qn = &diq;
     VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT pcq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT, .pNext = qn};
     VkPhysicalDeviceShaderModuleIdentifierFeaturesEXT smq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MODULE_IDENTIFIER_FEATURES_EXT, .pNext = &pcq}; if (smid) qn = &smq;
     if (gm) qn = gm_feat_query(qn);
@@ -195,6 +200,7 @@ static int vk_try(char *why, size_t nwhy) {
     smid = smid && smq.shaderModuleIdentifier && pcq.pipelineCreationCacheControl;
     if (smid) { dext[nde++] = "VK_EXT_pipeline_creation_cache_control"; dext[nde++] = "VK_EXT_shader_module_identifier"; }
     if (gm) gm = gm_feat_take(dext, &nde);
+    if (gm && gmdi) gm_np_take(&diq, dix, dext, &nde);   // the pools' descriptor array, for a driver that refuses OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT dve = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT, .vertexAttributeInstanceRateDivisor = dv.vertexAttributeInstanceRateDivisor};
     VkPhysicalDeviceHostQueryResetFeaturesEXT hqe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT, .pNext = divisor ? &dve : NULL, .hostQueryReset = VK_TRUE};
     VkPhysicalDeviceShaderDrawParametersFeatures dpe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES, .pNext = hqr ? (void *)&hqe : divisor ? (void *)&dve : NULL, .shaderDrawParameters = dp.shaderDrawParameters};
@@ -206,7 +212,8 @@ static int vk_try(char *why, size_t nwhy) {
     VkPhysicalDeviceFaultFeaturesEXT ffe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .pNext = &dpe, .deviceFault = VK_TRUE};
     void *en = dfault ? (void *)&ffe : (void *)&dpe;
     VkPhysicalDeviceRobustness2FeaturesEXT rbe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT, .pNext = en, .nullDescriptor = VK_TRUE}; if (g_null_desc) en = &rbe;
-    VkPhysicalDeviceDescriptorIndexingFeaturesEXT die = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = en, .shaderSampledImageArrayNonUniformIndexing = VK_TRUE}; if (g_nonuni) en = &die;
+    VkPhysicalDeviceDescriptorIndexingFeaturesEXT die = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT, .pNext = en, .shaderSampledImageArrayNonUniformIndexing = g_nonuni ? VK_TRUE : VK_FALSE};
+    if ((gm && gm_np_enable(&die)) || g_nonuni) en = &die;
     VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT pce = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT, .pNext = en, .pipelineCreationCacheControl = VK_TRUE};
     VkPhysicalDeviceShaderModuleIdentifierFeaturesEXT sme = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MODULE_IDENTIFIER_FEATURES_EXT, .pNext = &pce, .shaderModuleIdentifier = VK_TRUE}; if (smid) en = &sme;
     if (gm) en = gm_feat_enable(en);

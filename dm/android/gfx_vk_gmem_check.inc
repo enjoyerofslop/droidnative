@@ -5,6 +5,9 @@
 static const uint32_t k_gm_test_cs[] =
 #include "shaders/gmem_test.comp.inc"
 ;
+static const uint32_t k_gm_test_np_cs[] =   // without physical pointers: the pools' descriptor array at set 1 (gfx_vk_gmem_noptr.inc)
+#include "shaders/gmem_test_noptr.comp.inc"
+;
 static void gm_selftest(void) {
     const char *e = getenv("DM_VK_RAW_GMEM_TEST"); if (!e || *e != '1' || !g_ngm) return;
     uintptr_t addr[64]; uint32_t ent[64]; int n = 0;
@@ -16,14 +19,15 @@ static void gm_selftest(void) {
         addr[n] = g_gm[i].lo + off; ent[n++] = (uint32_t)i + 1;
     }
     pthread_mutex_unlock(&g_gm_mu);
-    VkShaderModuleCreateInfo mc = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_gm_test_cs, .pCode = k_gm_test_cs};
+    VkShaderModuleCreateInfo mc = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = g_gm_np ? sizeof k_gm_test_np_cs : sizeof k_gm_test_cs, .pCode = g_gm_np ? k_gm_test_np_cs : k_gm_test_cs};
     VkDescriptorSetLayoutBinding lb[2] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
     VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = lb};
     VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2}; VkDescriptorPoolCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps};
     VkShaderModule m = VK_NULL_HANDLE; VkDescriptorSetLayout dsl = VK_NULL_HANDLE; VkPipelineLayout pl = VK_NULL_HANDLE; VkPipeline pp = VK_NULL_HANDLE; VkDescriptorPool dp = VK_NULL_HANDLE;
     VkCommandPool cp = VK_NULL_HANDLE; VkFence f = VK_NULL_HANDLE; stg_t io = {0}; const char *why = NULL;
     if (vkCreateShaderModule(g_vk.dev, &mc, NULL, &m) || vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &dsl)) why = "module or set layout";
-    VkPipelineLayoutCreateInfo plc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl};
+    VkDescriptorSetLayout pls[2] = {dsl, g_np_dsl};
+    VkPipelineLayoutCreateInfo plc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = g_gm_np ? 2 : 1, .pSetLayouts = pls};
     if (!why && vkCreatePipelineLayout(g_vk.dev, &plc, NULL, &pl)) why = "pipeline layout";
     VkComputePipelineCreateInfo cc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"}, .layout = pl};
     if (!why && vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &cc, NULL, &pp)) why = "pipeline";
@@ -42,6 +46,7 @@ static void gm_selftest(void) {
         vkUpdateDescriptorSets(g_vk.dev, 2, w, 0, NULL);
         VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
         vkBeginCommandBuffer(cb, &bi); vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pp); vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);
+        if (g_gm_np) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 1, 1, &g_np_ds, 0, NULL);
         vkCmdDispatch(cb, 1, 1, 1);
         VkMemoryBarrier hb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL, 0, NULL);
@@ -55,7 +60,8 @@ static void gm_selftest(void) {
             if (memcmp(want, got + 4 * i, 16) && bad++ < 8) LOG("[RED] [vk] raw global memory self-test: %#lx (entry %u) read %08x %08x %08x %08x on the GPU, %08x %08x %08x %08x on the CPU", (unsigned long)addr[i], ent[i],
                 got[4 * i], got[4 * i + 1], got[4 * i + 2], got[4 * i + 3], want[0], want[1], want[2], want[3]); }
         int nz = 0; for (int i = 0; i < n; i++) nz += (got[4 * i] | got[4 * i + 1] | got[4 * i + 2] | got[4 * i + 3]) != 0;
-        LOG("%s[vk] raw global memory self-test (DM_VK_RAW_GMEM_TEST): %d of %d 16-byte reads through the pool table on the GPU match the CPU's bytes (%d of them not all zero)", bad ? "[RED] " : "", n - bad, n, nz);
+        LOG("%s[vk] raw global memory self-test (DM_VK_RAW_GMEM_TEST): %d of %d 16-byte reads through the pool table on the GPU match the CPU's bytes (%d of them not all zero)%s", bad ? "[RED] " : "", n - bad, n, nz,
+            g_gm_np ? ", through the pools' descriptor array" : "");
     } else LOG("[RED] [vk] raw global memory self-test (DM_VK_RAW_GMEM_TEST): not run, its %s failed", why);
     if (f) vkDestroyFence(g_vk.dev, f, NULL); if (cp) vkDestroyCommandPool(g_vk.dev, cp, NULL); if (dp) vkDestroyDescriptorPool(g_vk.dev, dp, NULL); stg_free(&io);
     if (pp) vkDestroyPipeline(g_vk.dev, pp, NULL); if (pl) vkDestroyPipelineLayout(g_vk.dev, pl, NULL); if (dsl) vkDestroyDescriptorSetLayout(g_vk.dev, dsl, NULL); if (m) vkDestroyShaderModule(g_vk.dev, m, NULL);
