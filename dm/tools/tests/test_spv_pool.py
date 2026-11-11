@@ -5,6 +5,7 @@ import ctypes
 import faulthandler
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -16,6 +17,7 @@ import unittest
 from test_spv_readonly import NDK, HOST, EXE   # noqa: E402
 
 REPO = Path(__file__).resolve().parents[3]
+SCRATCH = int(re.search(r'#define SPV_POOL_SCRATCH (\d+)', (REPO / 'dm/android/spv_pool.h').read_text()).group(1))   # scratch words per id, as spv_pool.h says
 N = 65536
 faulthandler.enable()   # a crash in the library prints the Python stack (the Linux runner's exit 139 said nothing more)
 
@@ -179,7 +181,7 @@ class SpvPool(unittest.TestCase):
 
     def run_on(self, data, mark=1):
         n = len(data) // 4; w = (ctypes.c_uint32 * n).from_buffer_copy(data); bound = w[3]
-        s = (ctypes.c_uint32 * (9 * bound))(); need = ctypes.c_size_t(); info = ctypes.c_int()
+        s = (ctypes.c_uint32 * (SCRATCH * bound))(); need = ctypes.c_size_t(); info = ctypes.c_int()
         k = self.lib.run(w, n, N, mark, s, None, 0, ctypes.byref(need), ctypes.byref(info))   # the size it asks for, then the rewrite
         if not need.value: return None, info.value
         o = (ctypes.c_uint32 * need.value)()

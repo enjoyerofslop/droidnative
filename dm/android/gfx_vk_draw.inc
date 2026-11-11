@@ -604,9 +604,10 @@ static vshader *sh_get(const char *key) {
     s->upsq = (uint8_t)upsq_match(s);   // an upscaler network to replace: listed (1), or by its interface (2; gfx_vk_upsq.inc)
     // the texture and sampler pools read by ID (handle 0x40000000, the arrays as long as the ID ranges) are the pool set's, not the stage's (spv_pool.h); the first such shader
     // starts the pool set, so a game without one never makes it
+    int pb[8], pn[8], np = 0;   // the pool arrays' bindings and lengths: spv_pool moves the bindings after them down by those lengths, and so does this (below)
     int haspool = 0; for (int i = 0; i < s->ntx; i++) haspool |= s->tx[i].handle == 0x40000000 && s->tx[i].cbuf_slot == 0 && s->tx[i].array > 32;
     if (haspool && pool_on()) {
-        int k = 0; for (int i = 0; i < s->ntx; i++) { if (s->tx[i].handle == 0x40000000 && s->tx[i].cbuf_slot == 0 && s->tx[i].array > 32) s->pool = 1; else s->tx[k++] = s->tx[i]; }
+        int k = 0; for (int i = 0; i < s->ntx; i++) { if (s->tx[i].handle == 0x40000000 && s->tx[i].cbuf_slot == 0 && s->tx[i].array > 32) { s->pool = 1; if (np < 8) { pb[np] = s->tx[i].binding; pn[np++] = s->tx[i].array; } } else s->tx[k++] = s->tx[i]; }
         s->ntx = k;
     }
     memset(s->vin, 'f', sizeof s->vin);
@@ -619,6 +620,14 @@ static vshader *sh_get(const char *key) {
     snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(p, &s->b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
       if (w) { spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
+    if (np) {   // after spv_cb_ext, which finds the constant buffers in the file by their bindings there
+#define SH_POOL_DOWN(b_) do { int sh_ = 0; for (int q_ = 0; q_ < np; q_++) if (pb[q_] < (b_)) sh_ += pn[q_]; if (sh_ <= (b_)) (b_) -= sh_; } while (0)
+        for (int i = 0; i < s->ncb; i++) SH_POOL_DOWN(s->cb[i].binding);
+        for (int i = 0; i < s->nsb; i++) SH_POOL_DOWN(s->sb[i].binding);
+        for (int i = 0; i < s->ntx; i++) SH_POOL_DOWN(s->tx[i].binding);
+        for (int i = 0; i < s->nim; i++) SH_POOL_DOWN(s->im[i].binding);
+#undef SH_POOL_DOWN
+    }
     if (s->stage == SH_VS) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(p, &s->b0); }
     if (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(p, &s->b0); }
     if (!s->mod) return NULL;

@@ -13,6 +13,9 @@
 //   first and stored only when the bit is clear, so nearly every read costs a load. In a loop header the block is not split (its merge instruction must stay in it),
 //   and the bit is stored unconditionally. A fragment shader whose result the store cannot change (no discard, no depth or sample mask written, no stores of its own)
 //   keeps its depth test before it runs (EarlyFragmentTests), as dmsh_build.py does on the Mac.
+// - The bindings after the pool arrays in their own set move down by the arrays' lengths, which the translator left them past: Ocarina of Time's constant buffers
+//   at 2,101,263 behind two image arrays and the sampler array. A driver may size a set layout by its highest binding: Mali's held 104 MB of native heap for one such
+//   shader's layout and 16 MB for each pipeline layout over it, 6.6 GB at the title. gfx_vk_draw.inc sh_get moves the shader's bindings down the same way.
 // A module with a use of a pool variable this does not cover (a whole array loaded, passed to a function) is left as it is (SPV_POOL_FAIL).
 // Self-contained (no libc), like spv_limits.h, so that dm/tools/tests/test_spv_pool.py builds it alone and runs it over a game's shaders on the PC.
 #pragma once
@@ -23,7 +26,7 @@ enum { SPV_POOL_IMG = 1, SPV_POOL_SMP = 2, SPV_POOL_CMP = 4, SPV_POOL_MARK = 8, 
 // n: the image binding's elements; set and bindings in the replay's pool set; mark: add the reads' marks (the GPU stores from fragment and compute shaders);
 // mark_vtx: also from vertex, tessellation, geometry, task and mesh shaders (vertexPipelineStoresAndAtomics)
 struct spv_pool_cfg { uint32_t n, set, b_img, b_smp, b_cmp, b_seen; int mark, mark_vtx; };
-#define SPV_POOL_SCRATCH 9   // scratch words per id of the module's bound (w[3])
+#define SPV_POOL_SCRATCH 11   // scratch words per id of the module's bound (w[3])
 
 static size_t spv_pool_put(uint32_t *o, size_t k, uint32_t op, const uint32_t *a, uint32_t na) { o[k++] = (na + 1) << 16 | op; for (uint32_t q = 0; q < na; q++) o[k++] = a[q]; return k; }
 #define SPV_POOL_PUT(op, ...) do { const uint32_t a_[] = {__VA_ARGS__}; k = spv_pool_put(o, k, (op), a_, (uint32_t)(sizeof a_ / sizeof *a_)); } while (0)
@@ -51,7 +54,8 @@ static size_t spv_pool(const uint32_t *w, size_t n, const struct spv_pool_cfg *c
     if (n < 5 || w[0] != 0x07230203) return 0;
     uint32_t bound = w[3], ver = w[1];
     uint32_t *def = scratch, *a1 = scratch + bound, *a2 = scratch + 2 * (size_t)bound, *fl = scratch + 3 * (size_t)bound, *x1 = scratch + 4 * (size_t)bound,
-             *x2 = scratch + 5 * (size_t)bound, *x3 = scratch + 6 * (size_t)bound, *lab = scratch + 7 * (size_t)bound, *tmp = scratch + 8 * (size_t)bound;
+             *x2 = scratch + 5 * (size_t)bound, *x3 = scratch + 6 * (size_t)bound, *lab = scratch + 7 * (size_t)bound, *tmp = scratch + 8 * (size_t)bound,
+             *bset = scratch + 9 * (size_t)bound, *bnum = scratch + 10 * (size_t)bound;   // each variable's DescriptorSet and Binding as the module has them
     for (size_t i = 0; i < SPV_POOL_SCRATCH * (size_t)bound; i++) scratch[i] = 0;
 #define ID(x) ((x) && (x) < bound)
     // The module's globals: capabilities, extensions, the stage, decorations, types, constants, variables
@@ -71,6 +75,7 @@ static size_t spv_pool(const uint32_t *w, size_t n, const struct spv_pool_cfg *c
             case 71: if (len > 2 && ID(w[i + 1])) {   // OpDecorate
                 uint32_t t = w[i + 1], d = w[i + 2];
                 if (d == 34) fl[t] |= F_SET; if (d == 33) fl[t] |= F_BIND;
+                if (d == 34 && len > 3) bset[t] = w[i + 3]; if (d == 33 && len > 3) bnum[t] = w[i + 3];
                 if (d == 11 && len > 3) { if (w[i + 3] == 22 || w[i + 3] == 5014) no_early = 1; if (w[i + 3] == 20) fl[t] |= F_SMASK; }   // FragDepth, FragStencilRefEXT; SampleMask
             } break;
             case 20: if (len > 1 && ID(w[i + 1])) { def[w[i + 1]] = op; if (!tb) tb = w[i + 1]; } break;
@@ -97,6 +102,8 @@ static size_t spv_pool(const uint32_t *w, size_t n, const struct spv_pool_cfg *c
     *info = SPV_POOL_FAIL;
     if (!fn0 || !tu || tu_late) return 0;
     for (uint32_t v = 1; v < bound; v++) if ((fl[v] & (F_PIMG | F_PSMP)) && (fl[v] & (F_SET | F_BIND)) != (F_SET | F_BIND)) return 0;   // the decorations it moves
+    uint32_t pv[8], npv = 0;   // the pool variables, whose set and binding the bindings after them in that set move down past (their arrays' lengths)
+    for (uint32_t v = 1; v < bound; v++) if (fl[v] & (F_PIMG | F_PSMP)) { if (npv == 8) return 0; pv[npv++] = v; }
     // The function bodies: the pool's access chains and loads, the samples that need the comparison samplers, what the fragment shader writes, loop headers
     int discard = 0, self_write = 0; uint32_t nac = 0, naci = 0, nredir = 0, nnu = 0, codes = 0, need_iu = 0, need_ii = 0, nb = bound, cur = 0, smpvar = 0;
     for (size_t i = fn0; i < n; ) {
@@ -199,6 +206,11 @@ static size_t spv_pool(const uint32_t *w, size_t n, const struct spv_pool_cfg *c
             o[k++] = (len + add) << 16 | 15; for (uint32_t q = 1; q < len; q++) o[k++] = w[i + q];
             if (seen) o[k++] = seen; if (cmp) o[k++] = cmp;
             i += len; continue;
+        }
+        if (op == 71 && len > 3 && ID(w[i + 1]) && w[i + 2] == 33 && !(fl[w[i + 1]] & (F_PIMG | F_PSMP)) && (fl[w[i + 1]] & F_SET)) {   // another binding: below the arrays before it
+            uint32_t t = w[i + 1], b = w[i + 3], sh = 0;
+            for (uint32_t q = 0; q < npv; q++) if (bset[pv[q]] == bset[t] && bnum[pv[q]] < b) sh += (fl[pv[q]] & F_PIMG) ? 1u << 20 : 4096u;
+            if (sh && sh <= b) { SPV_POOL_PUT(71, t, 33, b - sh); i += len; continue; }
         }
         if (op == 71 && len > 3 && ID(w[i + 1]) && (fl[w[i + 1]] & (F_PIMG | F_PSMP)) && (w[i + 2] == 34 || w[i + 2] == 33)) {   // a pool variable's set and binding
             SPV_POOL_PUT(71, w[i + 1], w[i + 2], w[i + 2] == 34 ? cfg->set : (fl[w[i + 1]] & F_PIMG) ? cfg->b_img : cfg->b_smp); i += len; continue; }
