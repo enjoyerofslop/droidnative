@@ -672,6 +672,21 @@ class VkDriver(Base):   # --vk-driver (dm/android/tools/vk_driver_pkg.py): a dri
             with self.assertRaises(v.PackageError, msg=p.name) as e: v.read(p)
             self.assertIn(why, str(e.exception), p.name)
 
+    def test_a_malformed_package_is_a_package_error(self):   # never a traceback: the CLI and the desktop app's Add your own say why
+        v = vkpkg()
+        cut = self.tmp / 'cut.so'; cut.write_bytes(elf()[:300])   # the dynamic section and the tables past the file's end
+        b = bytearray(elf(sections=False)); i = b.find(struct.pack('<q', 10), 0x300)   # DT_STRSZ's entry (unread) becomes a DT_HASH 4 bytes before the file's end
+        b[i:i + 16] = struct.pack('<qQ', 4, len(b) - 4)
+        self.assertEqual(v.check_elf(bytes(b)), [])   # read without struct.error: the table past the end is passed over, the symbols counted another way
+        z = make_pkg(self.tmp, 'odd.zip')   # an entry with a compression method zipfile lacks (99, AE-x encryption's)
+        raw = bytearray(z.read_bytes())
+        for sig in (b'PK\x03\x04', b'PK\x01\x02'):
+            i = -1
+            while (i := raw.find(sig, i + 1)) >= 0: raw[i + (8 if sig == b'PK\x03\x04' else 10):i + (10 if sig == b'PK\x03\x04' else 12)] = struct.pack('<H', 99)
+        odd = self.tmp / 'odd2.zip'; odd.write_bytes(bytes(raw))
+        for p in (cut, odd):
+            with self.assertRaises(v.PackageError, msg=p.name): v.read(p)
+
     def test_only_mesas_switches_go_beside_a_driver(self):
         v = vkpkg()
         self.assertEqual(v.parse_env(['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1']), ['FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1'])
