@@ -12,6 +12,7 @@ sys.path.insert(0, str(REPO / 'dm/android/desktop'))
 import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop, put on the path above)
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]
+import phone_gpu as gpu   # noqa: E402  # pyright: ignore[reportMissingImports]
 
 ROWS_OK = [{'name': n, 'ok': True, 'detail': '', 'fix': ''} for n in ('Python module lz4', '.NET SDK 10', 'Android SDK', 'NDK', 'CMake', 'build-tools 36.0.0',
                                                                        'platform android-35', 'adb', 'JDK keytool', 'JDK javac', 'signing key', 'game hosts')]
@@ -287,3 +288,25 @@ class Guide(unittest.TestCase):   # PhoneGuide: the brand picked from what adb s
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PhoneGpu(unittest.TestCase):   # the Phones page's GPU column (phone_gpu.py): which drivers can run on a phone is a matter of its GPU
+    def test_the_gles_line_names_the_renderer(self):
+        self.assertEqual(gpu.gles_renderer('GLES: Qualcomm, Adreno (TM) 830, OpenGL ES 3.2 V@0800.0 (GIT@1a2b, I0123) (Date:01/01/26)\n'), 'Adreno (TM) 830')
+        self.assertEqual(gpu.gles_renderer('GLES: ARM, Mali-G715, OpenGL ES 3.2 v1.r47p0-01eac0'), 'Mali-G715')
+        self.assertEqual(gpu.gles_renderer(''), '')
+
+    def test_adreno_by_number_mali_xclipse_by_name(self):
+        self.assertEqual(gpu.classify('Adreno (TM) 650'), {'kind': 'adreno', 'adreno': 650, 'label': 'Adreno 650'})
+        self.assertEqual(gpu.classify('Adreno (TM) 840', 'adreno', 'SM8850')['adreno'], 840)
+        self.assertEqual(gpu.classify('Mali-G715')['label'], 'Mali-G715')
+        self.assertEqual(gpu.classify('Samsung Xclipse 950')['kind'], 'xclipse')
+        self.assertEqual(gpu.classify('PowerVR Rogue GE8320')['kind'], 'powervr')
+
+    def test_without_a_renderer_the_properties_decide(self):
+        self.assertEqual(gpu.classify('', 'adreno', ''), {'kind': 'adreno', 'adreno': None, 'label': 'Adreno'})
+        self.assertEqual(gpu.classify('', '', 'SM8475')['kind'], 'adreno')
+        self.assertEqual(gpu.classify('', '', 'SC9863A')['kind'], 'unknown')   # Unisoc's, not Qualcomm's
+        self.assertEqual(gpu.classify('', 'mali', 'Tensor G4')['kind'], 'mali')
+        self.assertEqual(gpu.classify('', 'samsung', 's5e9955'), {'kind': 'xclipse', 'adreno': None, 'label': 'Xclipse'})   # a Galaxy Z Flip 7: no GLES line at all
+        self.assertEqual(gpu.classify('Some GPU')['kind'], 'other')
