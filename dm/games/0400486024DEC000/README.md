@@ -106,6 +106,17 @@ DroidPlay Core's first Switch 2 attempt, on a Galaxy Z Fold 8 (SM-F971U1: Snapdr
 - Open, in order: raw global memory on Vulkan. It needs the table, `VK_KHR_buffer_device_address`, guest pools the GPU reads at a device address kept in step with the CPU, and the write log for stores. The Fold has no `VK_EXT_external_memory_host`, so the pools need mirrors, or guest memory made Vulkan or dma-buf memory from the start, as Banana Native maps it. #83, the task and mesh draws, is still a draft. After those: the CPU's `submit+present` (about 460 ms a frame); memory (10.2 GB of the 11.3, with 4.9 GB in zram: tight once the forest draws; leads: fewer texture bytes on the GPU, a file-backed guest pool as `DM_GUEST_FILE` gives the iPhone, or guest memory as Vulkan memory, as Banana Native maps it); the GPU time (Banana Native found agl's NDSR upscaler at 58.5 ms a frame on this GPU from register spills of gathered HMMA tiles, and false colours from shader-image views made without storage use, `vt_create`); the title's movie picture without nn::ndve's network; the CPU read of indirect mesh records.
 - Banana Native (git.eden-emu.dev/moceure/BananaNative) runs this game on Adreno 840 phones and documents most of the above; its notes are where #85's cause came from.
 
+- **On a Galaxy Z Flip 7 (Xclipse 950, Samsung's driver 24.0.533), 2026-11-11:** memory, then the picture.
+  - **Memory:** the game was killed loading Kokiri Forest at 13.9 GB, swap exhausted. The driver keeps 64 bytes per binding number in each set and pipeline layout, and the constant buffers sit at 1,048,576 and up ([Set layouts sized by their highest binding number](../../../docs/reference/rendering.md#set-layouts-sized-by-their-highest-binding-number)).
+  - **With the binding numbers made dense,** on a local test build: OoT's opt-in to raw global memory, image eviction and this.
+    - The start-up list's 193 pipelines rebuild in 4.2 s with a native heap of about 170 MB (9.4 GB before).
+    - Kokiri Forest loads with the HUD and the minimap, 8.6 GB at most, with no kill. The first load's 720 pipelines took 140 s.
+    - Raw global memory's stores reach the AHardwareBuffer route: 12 store ranges logged, 5,025 write-log entry bits, the sink counter 0.
+  - **Open, the picture:** the 3D view is solid red, or red noise with the game's own upscaler network (`DM_VK_UPSCALER_SQUARE=0`). It stays red with raw global memory off.
+    - A frame dump shows Kokiri drawn in the 1440x810 scene target (Link, the trees, the rocks, the sky), so the red comes later in the frame: the post-processing, upscaling or output.
+    - One lead: the red line naming the 2560x1440 sRGB target (format 43) the GPU can't store to.
+    - Not compared with the Fold's dumps yet.
+
 ## Saves
 
 The game autosaves into `slot_00` and `slot_01`, with `option.sav` and `account.sav`. The Load screen lists them and reloading works. A save's thumbnail is a 543x306 JPEG in `caption.sav`, made from a copy of a texture to a buffer. A manual save (Menu, System, Save) on the current build has the picture (slot 02, mean colour 138 / 123 / 86). The autosaves in the work folder's saves, made on older chains, hold a black one. Open: an autosave made on the current build has not been looked at.
@@ -142,6 +153,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Set layouts sized by their highest binding number](../../../docs/reference/rendering.md#set-layouts-sized-by-their-highest-binding-number): on a Galaxy Z Flip 7, its constant buffers at 1,048,576 and up cost 64 to 192 MB a layout, about 9 GB over Kokiri Forest.
 - [A start-up list entry with a mesh shader in its vertex slot](../../../docs/reference/rendering.md#a-start-up-list-entry-with-a-mesh-shader-in-its-vertex-slot): on a OnePlus Pad 3, every start crashed the Adreno 830's compiler a few seconds in, on an entry with mesh shader `0c1ffecd02018fb0` in the vertex slot that another build had written to the start-up list.
 
 - [The 60 Hz link at 40 fps in fullscreen on a ProMotion screen](../../../docs/reference/frame-rate.md#the-60-hz-link-at-40-fps-in-fullscreen-on-a-promotion-screen): 40 fps in fullscreen on an M5 Pro MacBook Pro with the GPU at 10 ms of the 16.7, every present one 120 Hz refresh late and every other display-link tick skipped; the screen's fixed 60 Hz mode held 60.0 fps there and fullscreen now switches to it, with the 120 Hz link (59 fps) for screens with no such mode.

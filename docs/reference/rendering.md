@@ -1984,6 +1984,26 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** Brilliant Diamond on a Galaxy Z Flip 7 (Xclipse 950), warm cache: the first frame at 3.29 s against 9.7 to 17.9 s on `main`, its frame 1 1.2 s against 7.7 to 15 s. All 3,082 pipelines came from identifiers, with no module made; the language menu and Eterna City at 60 fps, as on `main`.
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) on a Galaxy Z Flip 7 ([Android baselines](../../dm/android/baselines.md), the Xclipse 950).
 
+### Set layouts sized by their highest binding number
+
+- **Symptom:** Android only: memory runs out as a game builds its pipelines. The game process grows by 64 to 192 MB with many new pipelines, and the low-memory killer ends it while a scene loads. The growth isn't in shader modules or the pipeline cache, and destroying the pipelines doesn't give it back. Ocarina of Time on a Galaxy Z Flip 7 went from 3.8 GB at the title to 13.9 GB while loading Kokiri Forest. Its start-up list of 191 pipelines alone took the driver's heap to 9.4 GB.
+- **Cause:** Samsung's Xclipse driver (24.0.533) keeps 64 bytes per binding number, up to a layout's highest binding.
+  - The cost is paid in `vkCreateDescriptorSetLayout`, and again in every `vkCreatePipelineLayout` that uses that set layout.
+  - A probe with one uniform buffer: binding 7 costs 0 MB, 65,535 costs 4 MB, 1,048,576 costs 64 MB, and 2,101,266 costs 128 MB.
+  - The translator puts some of NVN2's constant buffers far apart. 4,823 of Ocarina of Time's 42,848 shaders bind one at 1,048,576 or more, and its Kokiri fragment shaders use 2,101,266 (`0x201012`).
+  - How it was found: the driver library's heap imports were redirected to counters by thread and call stack (a test build only). simpleperf can't run on this phone (SELinux), and heapprofd disconnects from the host's threads.
+- **Fix:** each binding at 1024 or past it gets a dense number, in the old order, from just past the set's other bindings and past the capture variant's feedback buffers at 100 to 103 (`spv_bind.h`).
+  - `sh_get` makes the map from `res.json` before the shader's modules, and gives its layout and `stage_set`'s writes the new numbers once the matching of `res.json` against the file (`spv_cb_ext`) is done.
+  - `lm_code` rewrites the module's `OpDecorate … Binding` last, after every other rewrite. The lazy module (`gfx_vk_lmod.inc`) keeps the map, so a module made later for a pipeline gets the same numbers.
+  - Nothing on disk changes, so there's no ANDROID_CHAIN bump.
+  - It applies on every GPU. Only these shaders' modules change, so the driver's pipeline cache misses once for them. The start-up list's records name shaders, not bindings, so they still hold. `DM_VK_BIND_COMPACT=0` keeps the old numbers.
+- **Check:** on the Galaxy Z Flip 7:
+  - **Start-up list:** Ocarina of Time's 193-record list rebuilt in 4.2 s, with the native heap at 157 to 173 MB and 3.8 GB in total at the title (9.4 GB of heap and 12.9 GB in total before).
+  - **Kokiri Forest:** it loaded, with 95 shaders (341 bindings) renumbered, at 8.6 GB at most and no kill.
+  - **Other games:** Brilliant Diamond (60.0 fps at Verity Lakefront) and Frostpunk (29.6 fps in the city) had no shader renumbered and draw as before.
+  - **Tests:** `test_spv_bind.py` checks the map and the rewrite. Over Ocarina of Time's spv folder, 4,897 of 59,199 modules change, all pass spirv-val, and no two resources share a binding.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a Galaxy Z Flip 7 (Xclipse 950).
+
 ### A crash in the driver's shader compiler names the pipelines being built
 
 - **Symptom:** Android only: a crash in the Vulkan driver's shader compiler (`libllvm-qgl.so` in the stack) while a game builds pipelines, and nothing in the log says which shaders, or on which thread.

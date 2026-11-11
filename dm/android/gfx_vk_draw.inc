@@ -138,6 +138,7 @@ typedef struct {
     uint8_t gm;   // binds the raw pool table (a storage buffer under DMSH_GMEM_MAP_CB_SLOT): 1, 2 with the stores' write log too (gfx_vk_gmem.inc)
     uint64_t e5[2]; void *cpe5[2];   // compute: sets of storage image bindings bound to E5B9G9R9 textures, and its pipeline for each with those packed (cpipe_e5, spv_e5.h)
     uint8_t upsq;   // a compute shader DM_VK_UPSCALER_SQUARE_CS lists: its dispatches are replaced (gfx_vk_upsq.inc)
+    const spv_bmap *bmap;   // its set's binding numbers compacted (spv_bind.h): NULL when none is at SPV_BIND_FROM or past it; its modules and its layout take it
 } vshader;
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
 // never matched the draw before, and stage_set wrote every set of every stage: Breath of the Wild about 7,500 a frame, vkUpdateDescriptorSets 3.4 ms a frame of the
@@ -524,13 +525,13 @@ static int pool_on(void); static void pool_note_shader(vshader *s, int info); st
 static lmod *ps_variant(vshader *s, uint32_t miss) {
     for (int i = 0; i < s->nvar; i++) if (s->var[i].miss == miss) return s->var[i].m;
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
-    lmod *m = lm_new(p, miss, NULL);
+    lmod *m = lm_new(p, miss, s->bmap, NULL);
     LOG("[vk] fragment shader %s: inputs at locations %#x are written by no earlier stage of a pipeline: a variant reads them as zero%s", s->key, miss, m ? "" : " [RED] (variant failed: the pipeline keeps the shader as it is)");
     if (!m) m = s->mod;
     if (s->nvar < 4) { s->var[s->nvar].miss = miss; s->var[s->nvar++].m = m; }
     return m;
 }
-static lmod *sh_module(const char *path, int *b0) { return lm_new(path, 0, b0); }   // *b0 |= the module reads the support buffer (spv_b0_used)
+static lmod *sh_module(const vshader *s, const char *path, int *b0) { return lm_new(path, 0, s->bmap, b0); }   // *b0 |= the module reads the support buffer (spv_b0_used)
 // Ryujinx's TextureFormat names (an image's declared format) → Vulkan, with the texel size
 static const struct { const char *n; VkFormat f; int bytes; } DECL_FMT[] = {
     {"R8Unorm", VK_FORMAT_R8_UNORM, 1}, {"R8Snorm", VK_FORMAT_R8_SNORM, 1}, {"R8Uint", VK_FORMAT_R8_UINT, 1}, {"R8Sint", VK_FORMAT_R8_SINT, 1},
@@ -581,6 +582,31 @@ static int ds_fits(const VkDescriptorSetLayoutBinding *b, uint32_t nb) {
 static uint64_t g_ds_toobig;   // shaders whose layout fits no pool (ds_fits): their draws are dropped
 static int upsq_match(const vshader *s); static int upsq_run(const vshader *s);   // gfx_vk_upsq.inc
 static vtex *g_upsq_src, *g_upsq_dst; static VkImageView g_upsq_src_iv;   // a listed upscaler's input and output, as stage_set binds them for the dispatch at hand (gfx_vk_upsq.inc)
+// A shader's set with far-apart binding numbers (spv_bind.h): the map from its res.json, made before its modules, which take it (lm_code); sh_bind_apply gives its
+// layout and stage_set's writes the new numbers once the matching of res.json against the file (spv_cb_ext) is done. DM_VK_BIND_COMPACT=0: the numbers as they are
+static uint64_t g_bind_shaders, g_bind_entries;
+static int bind_compact_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_BIND_COMPACT"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_BIND_COMPACT=0: binding numbers as the translator gave them"); } return v; }
+static void sh_bind_map(vshader *s) {
+    if (!bind_compact_on()) return;
+    uint32_t b[CB_MAX + 16 + 64 + 16 + 4]; int nb = 0;
+    for (int i = 0; i < s->ncb; i++) b[nb++] = (uint32_t)s->cb[i].binding;
+    for (int i = 0; i < s->nsb; i++) b[nb++] = (uint32_t)s->sb[i].binding;
+    for (int i = 0; i < s->ntx; i++) b[nb++] = (uint32_t)s->tx[i].binding;
+    for (int i = 0; i < s->nim; i++) b[nb++] = (uint32_t)s->im[i].binding;
+    spv_bmap m; int n = spv_bmap_make(b, nb, &m);
+    if (n < 0) { RED_ONCE(179, "shader %s: more than %d bindings at %u or past it: their numbers are left as they are, and a driver that sizes a layout by its highest binding keeps memory for each", s->key, SPV_BIND_MAX, SPV_BIND_FROM); return; }
+    if (!n) return;
+    spv_bmap *c = malloc(sizeof *c); if (!c) return; *c = m; s->bmap = c;
+    g_bind_shaders++; g_bind_entries += (uint64_t)n;
+    static int nl; if (nl++ < 4) LOG("[vk] shader %s: %d binding numbers made dense (%u -> %u%s; spv_bind.h, DM_VK_BIND_COMPACT=0: off)", s->key, n, m.from[0], m.to[0], n > 1 ? ", ..." : "");
+}
+static void sh_bind_apply(vshader *s) {
+    const spv_bmap *m = s->bmap; if (!m) return;
+    for (int i = 0; i < s->ncb; i++) s->cb[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->cb[i].binding);
+    for (int i = 0; i < s->nsb; i++) s->sb[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->sb[i].binding);
+    for (int i = 0; i < s->ntx; i++) s->tx[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->tx[i].binding);
+    for (int i = 0; i < s->nim; i++) s->im[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->im[i].binding);
+}
 static vshader *sh_get(const char *key) {
     char k[16]; memcpy(k, key, 16);
     vshader *s = nvn_hm_get(&g_sh, k); if (s) return s->ok ? s : NULL;
@@ -615,12 +641,14 @@ static vshader *sh_get(const char *key) {
     a = js_get(&r, "tf");   // [[outputs, stride] or [] per feedback buffer]
     for (int b = 0; a && a->t == 3 && b < a->n && b < 4; b++) if (a->kid[b].t == 3 && a->kid[b].n == 2) s->tf_stride[b] = (uint32_t)a->kid[b].kid[1].num;
     js_free(&r);
+    sh_bind_map(s);   // before its modules: they and the layout below take the same numbers
     t_pool_info = 0;
-    snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(p, &s->b0);
+    snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(s, p, &s->b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
       if (w) { spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
-    if (s->stage == SH_VS) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(p, &s->b0); }
-    if (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(p, &s->b0); }
+    sh_bind_apply(s);   // the layout and stage_set's writes from here on: the numbers the modules have (the matching above read the file's)
+    if (s->stage == SH_VS) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(s, p, &s->b0); }
+    if (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(s, p, &s->b0); }
     if (!s->mod) return NULL;
     // a pool read spv_pool left, or pool arrays res.json names that it found no variable for: their arrays would be in no layout
     if (s->pool && !(t_pool_info & (SPV_POOL_IMG | SPV_POOL_SMP)) && !(t_pool_info & SPV_POOL_FAIL)) { t_pool_info |= SPV_POOL_FAIL; static int nl; if (nl++ < 8) LOG("[RED] [vk] shader %s: res.json names texture pool arrays its module does not have as spv_pool knows them: its draws are dropped", s->key); }
@@ -1584,7 +1612,7 @@ static pthread_mutex_t g_alpha_mu = PTHREAD_MUTEX_INITIALIZER;   // one variant 
 static lmod *ps_alpha_mod_locked(vshader *s, uint32_t miss) {
     for (int i = 0; i < s->navar; i++) if (s->avar[i].miss == miss) return s->avar[i].m;
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
-    lmod *m = lm_new_a(p, miss, 1, NULL);   // the code goes through spv_alpha.h (lm_code), and its identifier is of the test in it
+    lmod *m = lm_new_a(p, miss, 1, s->bmap, NULL);   // the code goes through spv_alpha.h (lm_code), and its identifier is of the test in it
     if (s->navar < 4) { s->avar[s->navar].miss = miss; s->avar[s->navar++].m = m; }
     if (m) { static int nl; if (nl++ < 8) LOG("[vk] fragment shader %s: alpha-test variant (its function a specialization constant, the reference a push constant)", s->key); }
     return m;
@@ -3221,7 +3249,7 @@ static cpipe_t *cpipe_e5(vshader *s, uint64_t mask) {
     int slot = !s->cpe5[0] ? 0 : !s->cpe5[1] ? 1 : -1;
     if (slot < 0) { RED_ONCE(127, "compute shader %s binds E5B9G9R9 textures at a third set of image bindings (%#llx): its pipelines are kept for two, so this dispatch is skipped", s->key, (unsigned long long)mask); return NULL; }
     char p[700]; snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key);
-    lmod *m = lm_new_e(p, 0, 0, mask, NULL);
+    lmod *m = lm_new_e(p, 0, 0, mask, s->bmap, NULL);
     cpipe_t *cp = calloc(1, sizeof *cp); if (!cp) return NULL;
     s->cpe5[slot] = cp; s->e5[slot] = mask; if (!m) return NULL;   // kept with no pipeline: not tried again
     return cpipe_make(s, cp, &m);
