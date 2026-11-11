@@ -241,7 +241,9 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None):
     sh = work / 'shader'
     own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional or derived profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
     got = {}
-    def promote(reason): got['g'] = derive(reason); return got['g']   # the split calls it only after its strict DLC-only or additive-compute comparison passed
+    def promote(reason):   # the split calls it only after its strict DLC-only or additive-compute comparison passed, and only when derive was given
+        assert derive is not None
+        got['g'] = derive(reason); return got['g']
     dd = (lambda: promote('the installed DLC shader content differs from the registered tables')) if derive and not own else None
     dc = (lambda: promote('the reader decoded additional compute kernels from this registered build')) if derive and not own else None
     try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own,   # its own stage (a DLC's shaders too)
@@ -1152,6 +1154,7 @@ def main(argv):
             with phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Unreal shaders') if serial else contextlib.nullcontext():
                 ue_decode(sdirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game)
         def derive_shader_tables(reason):   # build_ipa_from_nsp.py main's: the registered profile with the split's shader tables, everything else as registered
+            assert g is not None   # main stopped earlier without a profile; a nested function keeps no narrowing
             pdir = work / 'profile'
             bi.derive_profile(g, pdir / g.id, pkg_ver, game, g.words('modules'), app, shader_only=True)
             os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = os.pathsep.join([str(pdir)] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d and d != str(pdir)])
