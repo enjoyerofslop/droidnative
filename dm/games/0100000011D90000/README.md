@@ -57,6 +57,12 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
   - **Saves:** the manual save and the game's autosave committed, and Continue loaded each.
   - **Sound:** an audio dump has sound from the title on, at −30 to −38 dBFS (the game's two outputs written together).
   - No `[RED]` line, no crash. BC textures are decoded on the CPU (the Mali-G715 has none). The first launch took 90 s to its first frame (the pipeline list), the later ones 6 s.
+- 2026-11-10, Android, a Moto Razr Plus 2023 (SM8475, Adreno 730 with Qualcomm's driver V@0615.98, Vulkan 1.1.128, Android 16), open, on its inner screen, BD's host from `main` at `5736949c` (with #174's layer-output fallback, which this driver needs to boot), played by hand with adb input from a new game in an empty save folder: the language, Rowan, the look and both names (`DM_KBD`), the TV scene, Mom, Twinleaf, Barry's house and room, Route 201, Lake Verity with Rowan and Dawn, the briefcase and Turtwig, and **the first battle**, a wild Starly, won with Tackle. Then a save at Verity Lakefront, a cold start, and Continue loaded it there.
+  - **60 fps:** 55.8–60.0 fps in every 30 s of the 19-minute launch after the first (frame p50 16.6–17.1 ms), GPU p50 11.3–14.0 ms; the battle 59.8 fps, frame p95 18.9 ms, GPU 12.9 ms. The starter screen didn't slow down here (58.8–59.8 fps).
+  - **Saves:** the manual save and the game's autosaves committed (`save commit #4` the last), and Continue after a cold start loaded the save.
+  - **Sound:** an audio dump over the cold start has sound from the title on, at −30 to −38 dBFS RMS, peaks −13 dBFS; no underrun in 22 reports.
+  - No `[RED]` line, no crash. The driver's subgroups have 64 lanes, so the 23 `fwidth` shaders run as rewritten; #183's ShuffleXor rewrite, on for this driver, finds no butterfly shuffle in BD's shaders. Twinleaf's pond is calm water, as on the Pixel 9 Pro XL, so the grid of white dashes the Z Flip 7 showed there is the Xclipse's alone.
+
 
 ## Found on this game
 
