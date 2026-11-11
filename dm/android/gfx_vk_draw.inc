@@ -772,9 +772,18 @@ static void gc_release(gc_ent *e) {   // its region back to its class's list, fo
     gc_reg *r = malloc(sizeof *r); if (!r) return;
     *r = (gc_reg){e->blk, e->off, e->seq, g_gc_free[e->cls]}; g_gc_free[e->cls] = r; g_gc_bytes -= 256ull << e->cls;
 }
-static void gc_evict(void) {   // the kept copies no draw used in the last few seconds
-    uint64_t now = atomic_load(&g_presents);
-    for (uint32_t i = 0; i < g_gc.cap; i++) { gc_ent *e = g_gc.vals[i]; if (e && e->state == 1 && e->seen + 120 < now) { gc_release(e); e->state = 0; e->dirty = 0; } }
+// The kept copies no draw used in the last few seconds are let go when a new one finds no room. The walk covers the whole table (tens of thousands of entries), so it is
+// made at most once a present, and after one that freed nothing only every 60th: Mario Kart World's race asked 16 to 43 times a frame with the cache full, and the walks
+// were 3 to 9 ms of the replay's frame on a Galaxy S25 Edge (gc_evict under gc_alloc). DM_VK_GC_EVICT_PACE=0 (env.txt): a walk at every request, as before
+static uint64_t g_gc_evicts, g_gc_evicted, g_gc_evict_skips;   // walks made, copies they let go, requests that found a walk not due
+static int gc_evict(void) {   // → 1 when it walked
+    uint64_t now = atomic_load(&g_presents); static uint64_t next; static int pace = -1;
+    if (pace < 0) { const char *e = getenv("DM_VK_GC_EVICT_PACE"); pace = !(e && *e == '0'); }
+    if (pace && now < next) { g_gc_evict_skips++; return 0; }
+    uint64_t n = 0;
+    for (uint32_t i = 0; i < g_gc.cap; i++) { gc_ent *e = g_gc.vals[i]; if (e && e->state == 1 && e->seen + 120 < now) { gc_release(e); e->state = 0; e->dirty = 0; n++; } }
+    g_gc_evicts++; g_gc_evicted += n; next = now + (n ? 1 : 60);
+    return 1;
 }
 static uint8_t *gc_alloc(int cls, int *blk, VkDeviceSize *off) {
     uint64_t done = __atomic_load_n(&g_seq_done, __ATOMIC_ACQUIRE);
@@ -794,7 +803,7 @@ static uint8_t *gc_alloc(int cls, int *blk, VkDeviceSize *off) {
             vkBindBufferMemory(g_vk.dev, b->b, b->m, 0); vkMapMemory(g_vk.dev, b->m, 0, GC_BLOCK, 0, (void **)&b->p); g_gc_nblk++;
             continue;
         }
-        if (pass == 0) { gc_evict(); for (gc_reg **pp = &g_gc_free[cls]; *pp; pp = &(*pp)->next) if ((*pp)->seq <= done) {
+        if (pass == 0) { if (!gc_evict()) return NULL; for (gc_reg **pp = &g_gc_free[cls]; *pp; pp = &(*pp)->next) if ((*pp)->seq <= done) {
             gc_reg *r = *pp; *pp = r->next; *blk = r->blk; *off = r->off; free(r); return g_gc_blk[*blk].p + *off; } }
     }
     return NULL;

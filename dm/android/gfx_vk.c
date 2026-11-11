@@ -2533,8 +2533,10 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         (unsigned long long)g_fwd_early, (unsigned long long)g_fwd_look, fwd_early());
     if (memo_log()) LOG("[vk] memo textures: %llu elements taken as stage_textures resolved them, %llu resolved again; samplers %llu found per ID, %llu made or looked up; image generation %llu (cumulative; gfx_vk_draw.inc tex_once, DM_VK_TEX_ONCE %d)",
         (unsigned long long)g_tc_hit, (unsigned long long)g_tc_again, (unsigned long long)g_sc_hit, (unsigned long long)g_sc_made, (unsigned long long)g_vt_gen, tex_once());
-    LOG("[vk] geometry kept on the GPU: %llu index / vertex bindings and %llu read-only storage buffer bindings from kept copies, %llu copies kept (%llu MB now), %llu copied per draw (cumulative; gfx_vk_draw.inc gc_get, sb_keep)",
-        (unsigned long long)(g_gc_hit - g_gc_sb), (unsigned long long)g_gc_sb, (unsigned long long)g_gc_made, (unsigned long long)(g_gc_bytes >> 20), (unsigned long long)g_gc_copy);
+    LOG("[vk] geometry kept on the GPU: %llu index / vertex bindings and %llu read-only storage buffer bindings from kept copies, %llu copies kept (%llu MB now), %llu copied per draw; "
+        "%llu walks for room let %llu copies go, %llu requests found no walk due (cumulative; gfx_vk_draw.inc gc_get, sb_keep, gc_evict)",
+        (unsigned long long)(g_gc_hit - g_gc_sb), (unsigned long long)g_gc_sb, (unsigned long long)g_gc_made, (unsigned long long)(g_gc_bytes >> 20), (unsigned long long)g_gc_copy,
+        (unsigned long long)g_gc_evicts, (unsigned long long)g_gc_evicted, (unsigned long long)g_gc_evict_skips);
     { static unsigned long long f0; static uint64_t g0, w0; uint64_t g = atomic_load(&g_gpu_ns), w = atomic_load(&g_chunk_wait_ns);
       if (frame > f0) LOG("[vk] GPU busy %.2f ms per frame over the last %llu frames (%llu command buffers in all); the replay waited %.2f ms per frame for a free one of %d", (double)(g - g0) / 1e6 / (double)(frame - f0), frame - f0,
                           (unsigned long long)atomic_load(&g_gpu_chunks), (double)(w - w0) / 1e6 / (double)(frame - f0), g_nchunk);
