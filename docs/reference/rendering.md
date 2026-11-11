@@ -2231,6 +2231,13 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - **Which drivers:** at the device's making, on a device with runtime descriptor arrays, non-uniform storage-buffer indexing, update-after-bind storage buffers and partially bound slots, a probe pipeline (`shaders/gmem_probe.comp`, a pointer made by `OpConvertUToPtr` as the translator makes it) is built; the array is used only if the driver refuses it. The Adreno 830 and 840 build it and keep physical pointers. `DM_VK_RAW_GMEM_NOPTR=1` uses the array without the probe; `=0` never does.
   - **Self-test:** with the array, `DM_VK_RAW_GMEM_TEST=1` reads through it (`shaders/gmem_test_noptr.comp`).
 - **Check:** `dm/tools/tests/test_spv_noptr.py` builds `spv_noptr.h` and runs it on modules in the helper's form: uint, `uvec4` and `vec4` loads, a `vec4` store and an atomic, at SPIR-V 1.3 and 1.5 (the array in the entry point's interface); a `ulong` used elsewhere keeps `Int64`; the array goes to the set asked for; a pointer copied, a pointer bitcast from a vector, and a 64-bit pointee are left as they are. Every result passes `spirv-val`. With `DM_SPV_DIR` set to Ocarina of Time's chain-6 shaders, all 3,147 modules that declare physical pointers are rewritten and pass `spirv-val` at their own SPIR-V version, none left.
+  - **Frostpunk on a Moto Razr Plus 2023** (Adreno 730, V@0615.98, Vulkan 1.1.128, 7 descriptor sets bound at once, 524,288 update-after-bind storage buffers a stage), the phone's app with only Frostpunk's host replaced, the route into the city, 2026-11-11:
+    - the probe is refused (`VkResult -13`, the driver's `OpConvertUToPtr not supported`), the array is at set 5 with 8,192 slots, and 96 modules are rewritten, none left;
+    - no pipeline fails (31 with `DM_VK_RAW_GMEM_NOPTR=0`, as before), and the Generator and the wreckage draw (a crater without);
+    - `DM_VK_RAW_GMEM_TEST=1`: 64 of 64 reads through the array match the CPU's bytes;
+    - 29.4-29.5 fps either way; GPU p50 27.1-28.3 ms in four launches against 17.1 ms without the meshes. A 16-slot array, no `NonUniform` decorations and every fetch made twice (a test build) each left the GPU time there, so the array isn't what the meshes cost on this driver;
+    - `DM_VK_RAW_GMEM_NOPTR_SET=3`: the same picture and times with the array at set 3.
+  - **Not run yet:** Ocarina of Time on the Ayn Odin 2 (Adreno 740), and the array against pointers on a driver that takes both.
 
 ### A texture without NVN's image flag bound to an image slot (Android)
 
