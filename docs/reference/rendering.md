@@ -2100,6 +2100,34 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - with `DM_FPS_TARGET=30`, 30.0 fps (frame p95 38.4–38.9 ms, replay 17.3–17.5 ms) against 29.2–29.6 fps without it;
   - at the 60 fps target it stayed at 20 fps in four runs of five.
 
+### Descriptor set writes on the replay thread with the recorder on (Android)
+
+- **Symptom:** with `DM_VK_RECORDER=1`, `vkUpdateDescriptorSets` is still in the replay thread's profile, as its largest call into the driver: 5.3 ms a frame of Mario
+  Kart World's race on a Galaxy S25 Edge (about 2,400 draws, 5,000 sets), 2.1 of Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8, 10.4 of the race on a OnePlus Pad 3 with raw global
+  memory.
+- **Cause:** the recorder took the `vkCmd*` calls and the submissions, and a set was written on the replay thread before its bind was queued.
+- **Fix:** the writes go through the ring too (`gfx_vk_rec.inc` `rec_vkUpdateDescriptorSets`, record `R_UPDDS`), packed by `rec_desc.h` (each write with its image
+  infos, buffer infos or buffer views), ahead of the set's bind, so the recorder writes a set before it binds it, as the replay did.
+  - Every write of the replay takes the same road (transform feedback's bindings, the texture pool's set, the copies' and decodes' sets), so two writes of one set
+    keep their order and never run on two threads.
+  - A set's pool is reset, or the set handed out again, only once its chunk completed, after the recorder submitted it and so after every write queued for it.
+  - The replay may take sets from a pool while the recorder writes others of it: Vulkan asks for one thread at a time per set written and per pool allocated from.
+  - A call this cannot pack (a `pNext` chain, copies between sets, more than 128 writes or 256 KB: the texture pool's first whole write) is made directly after a drain.
+  - `DM_VK_REC_DESC=0` (env.txt): the writes stay on the replay thread, as before. Without the recorder nothing changes.
+- **Check:**
+  - `dm/tools/tests/test_rec_desc.py`: a set with every kind of descriptor comes back whole from its packed block after the caller's arrays are reused; chains, unknown
+    types and oversized calls are left to a direct call.
+  - Mario Kart World's race on a Galaxy S25 Edge (Adreno 830), recorder on, in the replay thread's profile: `vkUpdateDescriptorSets` 5.3 ms a frame with
+    `DM_VK_REC_DESC=0`, the packing and queuing 0.6 ms with it, and no driver code left on the thread; the recorder thread used 41% of a core. The race's picture was
+    right, and 4.2 million writes were queued with none made directly.
+  - Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8 (Adreno 840), main's defaults: the replay 30.7 ms a frame with the recorder against 35.2 without, of which the
+    report-address set's walks (`rc_occ_has`, `rc_occ_add`) are 21.0 and 19.9; so everything else is 9.7 ms against 15.3. 17.4 against 17.8 fps: the GPU holds the frame
+    there, at 43 ms. The forest was lit as before. With `DM_VK_MID_DRAWS=512` as well it fell to 10.2 fps (the GPU 64 ms a frame), and with set reuse it stayed at 17.1.
+  - Breath of the Wild's `outdoors` route there (the recorder and set reuse are its defaults; a host on the phone's installed base with this change): the replay 16.4–16.9 ms
+    a frame against 18.5–18.6 with `DM_VK_REC_DESC=0` at 3,630 draws, 29.8 fps and the same picture both ways.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) and
+  [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Descriptor sets bound again within a chunk (Android)
 
 - **Symptom:** a game with thousands of draws a frame spends a large part of the replay thread in `vkUpdateDescriptorSets`: about 7,300 sets a frame in Breath of the Wild. The Odin 2's profile of 2026-11-07 put it at 3.4 ms a frame.
