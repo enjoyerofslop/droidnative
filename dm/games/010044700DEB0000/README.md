@@ -3,7 +3,7 @@
 The cartridge's base game, 1.0.0, SDK **8.2.0** (`NintendoSDK_NVN-8_2_0`, `NintendoSDK_gfx-8_2_0`). It holds **Assassin's Creed IV: Black Flag** and **Assassin's Creed Rogue** on Ubisoft's **AnvilNext**, with Havok and Wwise. It renders with **NVN**. The RomFS is 120 files, 10.95 GB in all: 28 `.forge` archives, 15 Wwise `.pck` banks, 75 Bink movies (`.bik`, `.bk2`), a `.txt` and a `.lang` file.
 
 - **On the Mac:** In-game. Black Flag boots straight to its title, menus and opening storm at sea, with the player in control at 30 fps. The ship, Edward and the crew are drawn, and no shader the run asks for is missing from the map. The shaders come from the `.forge` archives; see [Shaders](#shaders).
-- **On Android:** In-game on a Moto Razr Plus 2023, at about 30 fps, with the same picture as the Mac. Edward walks the deck to the ship's wheel, the save loads, and sound plays. Sailing wasn't reached. See [Android](#android).
+- **On Android:** In-game on a OnePlus Pad 3 and a Moto Razr Plus 2023, at 30 fps, with the same picture as the Mac. Edward walks the deck to the ship's wheel, the save loads, and sound plays. Sailing wasn't reached. See [Android](#android).
 
 ## What it needs
 
@@ -49,6 +49,8 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made (the sur
 
 ## Android
 
+### Moto Razr Plus 2023
+
 - **Tested 2026-11-10 on a Moto Razr Plus 2023** (Adreno 730, Qualcomm's driver V@0615.98, Vulkan 1.1, Android 16), from this branch as a game app (`--game-apk`). The RomFS went over as the app's OBB file, and the phone's DroidPlay was left alone.
   - **The run:** scripted over adb, with `DM_CTL` presses and `DM_KBD=Abstergo` in the app's `env.txt`. No hand play.
   - **The control file:** create it with mode 666. A file `adb shell` makes in the app's folder is 660 and owned by `shell`, the app can't open it, and the presses are lost without a red line.
@@ -65,6 +67,18 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made (the sur
 - **Sound:** the game opens AudioOut (6 channels, from `main`) and the audio renderer. Neither underran.
   - **The dump:** 140 s of `DM_AUDIO_DUMP` holds signal throughout: RMS 170 to 2,500 in 5 s windows, with peaks to 27,500, louder once the game loaded. Nobody listened to it.
 - **Red lines:** none from the game in either session.
+
+### OnePlus Pad 3
+
+- **Tested 2026-11-11** (Adreno 830), from main 7a17f7af with this branch merged in (`ANDROID_CHAIN` 6). It ran as a game app with the RomFS as its OBB, the same way as on the Razr, and the tablet's DroidPlay (0.7.5-26-ga91a6a64) was left alone. Scripted over adb, no hand play.
+- **Route:** as on the Razr. The title's attract trailer, the menus and the name prompt, then a new game into the opening storm, and Edward walked along the deck and up to the wheel. The take-wheel prompt wasn't caught this time either.
+- **Frame rate:** 30.0 fps over 5 minutes of the opening, frame time p50 33.1 ms and p95 40.9 ms, with 0.2% of frames over 50 ms. That's steadier than the Razr. The GPU was busy 12.3 ms a frame.
+  - **During the attract trailer** (Bink), frames ran 45 to 68 ms with the GPU at 1.6 ms, and 3% were over 50 ms. Time on the CPU, not looked into.
+- **Memory:** 1.44 GB PSS (1.56 GB RSS) in the opening, of the tablet's 11.7 GB, with 179 MB of Vulkan images.
+- **Saves:** after a restart, Story Mode lists the opening's save and loads it back into the storm.
+- **Sound:** the AudioOut dump holds signal in 55 of 58 ten-second windows (the silent ones at the start), with peaks to 27,500. Nobody listened.
+- **Red lines:** none, and no crash.
+- **The lightning-like bright frames** show here too, now and then.
 
 ## Open
 
