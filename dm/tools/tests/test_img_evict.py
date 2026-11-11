@@ -1,0 +1,88 @@
+"""dm/android/img_evict.h, the Vulkan replay's image eviction rules (gfx_vk_evict.inc), built with the system's C compiler and called through ctypes: which
+images are clean (their content still in guest memory), which another image over their storage overwrote, and that the sweep over a pool's images finds every
+overwritten one whatever their order. Skipped without a C compiler."""
+import ctypes
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+REPO = Path(__file__).resolve().parents[3]
+CC = (['xcrun', 'clang'] if sys.platform == 'darwin' and shutil.which('xcrun') else
+      [c] if (c := shutil.which('clang') or shutil.which('cc') or shutil.which('gcc')) else None)
+
+
+class Ent(ctypes.Structure):   # ie_ent
+    _fields_ = [('pool', ctypes.c_uint64), ('lo', ctypes.c_int64), ('hi', ctypes.c_int64), ('last_present', ctypes.c_uint64), ('last_w', ctypes.c_uint64), ('p', ctypes.c_void_p)]
+
+
+@unittest.skipIf(CC is None or os.name == 'nt', 'no C compiler')
+class ImageEviction(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        src = cls.tmp / 'e.c'
+        src.write_text('#include "img_evict.h"\n'
+                       '__attribute__((visibility("default"))) int clean(int w, int pr, int pkg, int sh, int f, uint64_t last, uint64_t now, uint64_t age) '
+                       '{ return ie_clean(w, pr, pkg, sh, f, last, now, age); }\n'
+                       '__attribute__((visibility("default"))) int over(const ie_ent *a, const ie_ent *b, uint64_t now, uint64_t age) { return ie_overwritten(a, b, now, age); }\n'
+                       '__attribute__((visibility("default"))) void sweep(ie_ent *e, uint32_t n, uint64_t now, uint64_t age, uint8_t *mark) { ie_sweep(e, n, now, age, mark); }\n')
+        subprocess.run([*CC, '-shared', '-fPIC', '-O1', '-Wall', '-Wextra', '-Werror', '-I', str(REPO / 'dm/android'), str(src), '-o', str(cls.tmp / 'e.so')], check=True)
+        cls.lib = ctypes.CDLL(str(cls.tmp / 'e.so'))
+        cls.lib.clean.argtypes = [ctypes.c_int] * 5 + [ctypes.c_uint64] * 3
+        cls.lib.over.argtypes = [ctypes.POINTER(Ent), ctypes.POINTER(Ent), ctypes.c_uint64, ctypes.c_uint64]
+        cls.lib.sweep.argtypes = [ctypes.POINTER(Ent), ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint8)]
+
+    def clean(self, gpu_w=0, pool_read=0, pkg=0, shared=0, filled=0, last=0, now=1000, age=600):
+        return self.lib.clean(gpu_w, pool_read, pkg, shared, filled, last, now, age)
+
+    def test_clean_needs_its_content_in_guest_memory_and_an_idle_age(self):
+        self.assertTrue(self.clean(pkg=1))   # a packaged texture, 1000 presents without a lookup
+        self.assertTrue(self.clean(shared=1, filled=1))   # a shared one filled from its storage
+        self.assertFalse(self.clean(shared=1))   # a shared one the GPU gave its content: not its storage's
+        self.assertFalse(self.clean(pkg=1, gpu_w=1))   # written by the GPU since
+        self.assertFalse(self.clean(pkg=1, pool_read=1))   # read through the texture pool by ID
+        self.assertFalse(self.clean(pkg=1, last=500))   # looked up 500 presents ago, under the age
+        self.assertTrue(self.clean(pkg=1, last=400))   # exactly the age
+
+    def over(self, a, b, now=1000, age=30):
+        return self.lib.over(ctypes.byref(Ent(*a)), ctypes.byref(Ent(*b)), now, age)
+
+    def test_overwritten_needs_a_later_write_over_half_of_it(self):
+        # (pool, lo, hi, last lookup, last write)
+        a = (1, 0, 1000, 900, 900)
+        self.assertTrue(self.over(a, (1, 0, 1000, 950, 950)))   # the same storage, written after a's last lookup
+        self.assertFalse(self.over(a, (1, 0, 1000, 950, 900)))   # written in the same present as a's last lookup
+        self.assertFalse(self.over(a, (1, 0, 1000, 950, 800)))   # written before it
+        self.assertFalse(self.over(a, (1, 0, 1000, 950, 0)))   # never written: only read
+        self.assertFalse(self.over(a, (2, 0, 1000, 950, 950)))   # another pool
+        self.assertFalse(self.over(a, (1, 1000, 2000, 950, 950)))   # next to it, not over it
+        self.assertTrue(self.over(a, (1, 500, 2000, 950, 950)))   # over half of it
+        self.assertFalse(self.over(a, (1, 501, 2000, 950, 950)))   # under half: an edge a padded layout clips
+        self.assertTrue(self.over(a, (1, 0, 1000, 950, 950), now=930))   # exactly the age
+        self.assertFalse(self.over(a, (1, 0, 1000, 950, 950), now=929))   # under it
+
+    def sweep(self, ents, now=1000, age=30):
+        arr = (Ent * len(ents))(*[Ent(*e, i) for i, e in enumerate(ents)]); mark = (ctypes.c_uint8 * len(ents))()
+        self.lib.sweep(arr, len(ents), now, age, mark)
+        return {arr[i].p if arr[i].p is not None else 0 for i in range(len(ents)) if mark[i]}   # the original indices marked
+
+    def test_the_sweep_finds_every_overwritten_image_in_any_order(self):
+        ents = [(7, 4096, 8192, 900, 900),    # 0: an old target over the second half of 3's storage, 4 wrote over it later: overwritten
+                (3, 0, 4096, 990, 990),       # 1: pool 3, used now
+                (7, 0, 16384, 995, 995),      # 2: the scene's new target over all of pool 7's region: it overwrote 0 and 3
+                (7, 0, 4096, 800, 800),       # 3: an old target at the region's start: overwritten by 2
+                (3, 0, 4096, 500, 0),         # 4: pool 3, a texture never written, idle, under 1 which was written after it: overwritten
+                (7, 16384, 20000, 100, 100),  # 5: next to 2, not over it: kept
+                (3, 8192, 9000, 10, 0)]       # 6: alone in pool 3: kept
+        self.assertEqual(self.sweep(ents), {0, 3, 4})
+        self.assertEqual(self.sweep(list(reversed(ents))), {6 - 0, 6 - 3, 6 - 4})   # the same images, given in the other order
+        self.assertEqual(self.sweep(ents, age=150), {3, 4})   # a longer age: 0, looked up 100 presents ago, stays
+        self.assertEqual(self.sweep([]), set())
+
+
+if __name__ == '__main__':
+    unittest.main()

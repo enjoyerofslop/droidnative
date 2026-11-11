@@ -17,8 +17,9 @@
 // tells the draws' caches.
 // DM_VK_IMAGE_EVICT=0 (env.txt): images stay until their storage is taken over or their pool goes, as before. DM_VK_IMAGE_EVICT_LOG=1: a line at every scan (the memory
 // line comes every 300 frames, and a scene's targets come and go in less)
-#define EV_AGE 1800
-#define EV_ALIAS_AGE 120
+#include "img_evict.h"   // the rules, checked on the host (dm/tools/tests/test_img_evict.py)
+#define EV_AGE 600
+#define EV_ALIAS_AGE 30
 #define EV_EVERY 30
 static int ev_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IMAGE_EVICT"); v = !(e && *e == '0'); } return v; }
 static uint64_t ev_env(const char *name, long def) { const char *e = getenv(name); return (uint64_t)(e && atol(e) > 0 ? atol(e) : def); }
@@ -28,29 +29,19 @@ static uint64_t ev_alias_age(void) { static uint64_t a; if (!a) a = ev_env("DM_V
 static uint64_t g_ev_n[2], g_ev_bytes[2], g_ev_back;   // images evicted and their bytes (clean, overwritten), evicted storage made again (cumulative)
 static nvn_hmap g_ev_store = {.klen = 8};   // the storage of evicted images not made again yet: the lookup that makes one again counts it (ev_made)
 static void ev_made(vtex *v) { uint64_t k = (uint64_t)(uintptr_t)v->store; if (k && g_ev_store.n && nvn_hm_del(&g_ev_store, &k)) g_ev_back++; }
-static int ev_clean(const vtex *v, uint64_t now) {
-    return v->img && !v->gpu_w && !v->pool_read && (v->pkg || (v->shared && v->filled)) && now - v->last_present >= ev_age();
-}
-// The shared images by pool and offset; each pair whose storage overlaps is looked at once (every later entry that starts before this one ends overlaps it)
-typedef struct { uint64_t pool; int64_t lo, hi; vtex *v; } ev_ent;
-static int ev_cmp(const void *a, const void *b) { const ev_ent *x = a, *y = b; return x->pool != y->pool ? (x->pool < y->pool ? -1 : 1) : x->lo != y->lo ? (x->lo < y->lo ? -1 : 1) : 0; }
-static void ev_overwritten(uint64_t now) {
+static int ev_clean(const vtex *v, uint64_t now) { return v->img && ie_clean(v->gpu_w, v->pool_read, v->pkg, v->shared, v->filled, v->last_present, now, ev_age()); }
+static void ev_overwritten(uint64_t now) {   // the shared images another one over their storage overwrote (ie_sweep)
     if (!g_share.n) return;
-    ev_ent *e = malloc((size_t)g_share.n * sizeof *e); if (!e) return;
+    ie_ent *e = malloc((size_t)g_share.n * sizeof *e); uint8_t *mark = malloc(g_share.n); if (!e || !mark) { free(e); free(mark); return; }
     uint32_t n = 0;
     for (uint32_t i = 0; i < g_share.cap && n < g_share.n; i++) {
         vtex *v = g_share.vals[i]; if (!v) continue;
         share_key k; memcpy(&k, g_share.keys + (size_t)i * g_share.klen, sizeof k);
-        nvn_texlayout L; nvn_tex_layout(&k.d, &L); e[n++] = (ev_ent){k.pool, k.off, k.off + (int64_t)(L.size ? L.size : 1), v};
+        nvn_texlayout L; nvn_tex_layout(&k.d, &L); e[n++] = (ie_ent){k.pool, k.off, k.off + (int64_t)(L.size ? L.size : 1), v->last_present, v->last_w, v};
     }
-    qsort(e, n, sizeof *e, ev_cmp);
-    // only an overlap of at least half the image counts: layouts are padded, and an image another one only clips at its edge kept its content on the console
-    for (uint32_t i = 0; i < n; i++) for (uint32_t j = i + 1; j < n && e[j].pool == e[i].pool && e[j].lo < e[i].hi; j++) {
-        vtex *a = e[i].v, *b = e[j].v; int64_t ov = (e[j].hi < e[i].hi ? e[j].hi : e[i].hi) - e[j].lo;
-        if (b->last_w > a->last_present && now - a->last_present >= ev_alias_age() && !a->evict && 2 * ov >= e[i].hi - e[i].lo) a->evict = 3;
-        if (a->last_w > b->last_present && now - b->last_present >= ev_alias_age() && !b->evict && 2 * ov >= e[j].hi - e[j].lo) b->evict = 3;
-    }
-    free(e);
+    ie_sweep(e, n, now, ev_alias_age(), mark);
+    for (uint32_t i = 0; i < n; i++) { vtex *v = e[i].p; if (mark[i] && !v->evict) v->evict = 3; }
+    free(e); free(mark);
 }
 static void vt_evict(void) {   // under g_bk, at a present
     static uint64_t last; uint64_t now = atomic_load(&g_presents);
