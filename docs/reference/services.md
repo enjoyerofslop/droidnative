@@ -973,7 +973,8 @@ Most service calls can be found before they crash, before the first boot or the 
 ### Time zone rules, calendar conversion and the network clock
 
 - **Fix:** hooked: `time::ToPosixTime` (host `mktime`), and `time::ToPosixTime` with an explicit rule (the host's zone, as for `ToCalendarTime`); `time::LoadTimeZoneRule` and the `ToCalendarTime` overload with a rule (the host's zone is used); `time::StandardNetworkSystemClock::IsAccuracySufficient` (offline: no). `time::GetDayOfWeek` is a pure computation and needs nothing.
-- **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11, `ToPosixTime`); [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11, the rest); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`GetDayOfWeek`); [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (19.3.11, `ToPosixTime` with an explicit rule, found in the imports before it was met).
+- **The network clock's time:** `time::StandardNetworkSystemClock::GetCurrentTime` is the host's clock, as the user clock: a Switch keeps the network clock from its last time sync, so one that has ever been online reads it offline too, and the host's clock is set from the network. Accuracy stays "not sufficient". Games date their saves by it. With the call failing, Divinity: Original Sin 2 kept a PosixTime of 2 (`ToCalendarTime: first conversion 2 → 1969-12-31 18:00`), showed every save as 18:00:02 31/12/1969, and Continue, which takes the newest save, loaded an older one. Pokémon Sword and Shield, Brilliant Diamond and Animal Crossing: New Horizons import it too. `t_time` checks it reads the host's clock.
+- **Found on:** [Divinity: Original Sin 2](../../dm/games/010027400CDC6000/README.md) (SDK 8.2.0, the network clock's time); [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11, `ToPosixTime`); [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11, the rest); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`GetDayOfWeek`); [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (19.3.11, `ToPosixTime` with an explicit rule, found in the imports before it was met).
 
 ### Steady clock, clock snapshots and user clocks
 
@@ -1191,6 +1192,16 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** `SetGraphicsTargetFrameRate` maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3 (`SetGraphicsTargetFrameRateAuto` to mode 0) and calls `SetGraphicsFrameLengthMode`, which locks the gs graphics server's context and sends it the mode. The host has no graphics server, so the context is null.
 - **Fix:** `SetGraphicsFrameLengthMode` is hooked and logs the mode once per change; both `oe` paths reach it. The host paces by the window's present interval (`hle_oe.c`).
 - **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md): 60 / its present interval at boot.
+
+### Switch 2 SDK calls whose service the host does not serve: refresh rates, GL / GR, native memory
+
+- **Symptom:** a Switch 2 game stops at start-up: an `sf` abort (`0xe15`) under `nn::hid::GetGlGrButtonConfigState`, or a crash with a corrupted frame pointer after `nn::vi::QueryDisplayCurrentRefreshRate`.
+- **Cause:** each SDK body talks to a system service (vi, hid) whose session the host never opens. The refresh rate is one 32-bit Hz value and a bool: an answer of two 64-bit words overwrote the caller's saved frame pointer.
+- **Fix:**
+  - `hle_vi.c`: `QueryDisplayCurrentRefreshRate` answers 60 Hz, the display's own. `QueryDisplayAvailableRefreshRates` lists 60 Hz alone. `SetDisplay120HzRefreshRateCapability` is logged and does nothing.
+  - `hle_hid.c`: `GetGlGrButtonConfigState` answers no GL / GR button assigned.
+  - `hle_oe.c`: `gs::sdk::CreateNativeMemory` gives the range's address as its handle (the host reads game memory in place), and `DestroyNativeMemory` does nothing. Both are only seen as imports so far, never called, so the 8-byte handle is not checked yet.
+- **Found on:** Nintendo Switch 2 Welcome Tour (`040057C02159A000`, SDK 20.5.29) in DeathKhan/nx2android on an Ayn Odin 3, at start-up: it asks for the refresh rates at `main+0x307a0` (`tcn::tdemo::Is60Hz`). The other calls it stopped on there (`vi::InitializeWithVrrLfcEnabled`, `hid::SetSceneIdForPrivateApp`, `oe::QueryApplicationGpuTimeSpan`) come with seedds/nxnative#1425, its profile's PR.
 
 ### The display's largest buffer
 

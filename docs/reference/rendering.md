@@ -2304,6 +2304,24 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - `dm/tools/tests/test_spv_layer.py` checks the rewrite against the module the translator would write without the built-ins, and runs it over a game's packed shaders (`DM_SPV_DIR`; each result must pass `spirv-val`).
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) on a Moto Razr Plus 2023 (Adreno 730): it boots on the phone's own driver. Mesa's Turnip (`DM_VK_DRIVER`) compiled the same modules as they were, past the crashing pipeline.
 
+
+### Vertex shaders' FMUL and FADD kept unfused (Android)
+
+- **Symptom:** Android only, on the Pixel 9 Pro XL (Mali-G715). No red line. Super Mario Odyssey's Cap Kingdom ground showed hard-edged square blocks, bright and dark, with hatched borders, seen from above at the level's start; where the blocks lie changes from run to run and with the camera.
+- **Cause:** the blocks are where the G-buffer pass's ground draws (vertex shader `1ed83b718ff1b4e0`, material `b6384a85afd3ef94`) fail their less-or-equal depth test and leave the previous frame's picture. The depth comes from a depth pre-pass that draws the same four meshes with another vertex shader (`410fba6259254fc0`, colour mask 0) just before.
+  - Both compute the same position with the same constants, but add the matrix products in another order (`(r1·c8.y + r0·c8.x) + r2·c8.z` against `(r0·c8.x + r1·c8.y) + r2·c8.z`).
+  - The translator writes Maxwell's FMUL and FADD as `OpFMul` and `OpFAdd` without `NoContraction`, so the driver may fuse a multiply into the following add. Which product it fuses differs between the two shaders, and the depths differ in their last bits. `invariant gl_Position` is on both; it doesn't hold when the expressions differ.
+  - The Mac had the same blocks until every Metal compile preserved invariance ([Super Mario Odyssey](../../dm/games/0100000000010000/README.md)).
+  - Not the cause: 16-lane subgroups (the ground's shaders use none), the fog's FFT passes (rounding their butterfly index changed the fog texture but not the blocks), texture formats.
+- **Fix:** `spv_fit_precise` (`dm/android/spv_precise.h`, after `spv_fit_layer` in `lm_code`) decorates every `OpFAdd`, `OpFSub`, `OpFMul`, `OpFNegate` and `OpVectorTimesScalar` result `NoContraction` in a module whose entry point is a vertex, tessellation, geometry or mesh stage.
+  - That is what Maxwell does: it rounds each FMUL and FADD apart and fuses only where the program says FFMA (kept as `Fma`).
+  - On every GPU; fragment and compute shaders are left as translated. `DM_SPV_PRECISE=0`: as translated.
+  - Changed modules make new pipelines: the first launch after the change builds them again (Brilliant Diamond about 90 s on the Pixel).
+- **Check:** on the Pixel, Odyssey's Cap Kingdom start from `saves/bench_ship`: with the rewrite no block in a warm-up and two runs; with `DM_SPV_PRECISE=0` on the same build the blocks are back. The final picture's hard-edged 8×8 cells: 77 before, 11 after.
+  - Frame rate unchanged: Odyssey 60 fps (GPU p50 9.4–9.6 ms against 8.9–9.1), Brilliant Diamond's Eterna City 59.7–59.9 fps (GPU 14.9 ms, as before, the same brightness), Final Fantasy Resonance's field 31.5–32.1 fps (GPU 20.8–21.2 ms).
+  - `test_spv_precise.py`, and over Odyssey's packed modules (`DM_SPV_DIR`): 14,819 rewritten, all pass `spirv-val`.
+  - Not run on an Adreno or the Xclipse yet.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) on the Pixel 9 Pro XL.
 ### 16-bit normalized textures a GPU cannot filter
 
 - **Symptom:** Android only, on Samsung's Xclipse 950 (Galaxy Z Flip 7): Brilliant Diamond's pond in Twinleaf Town is drawn as a regular grid of crisp white dashes on pale lavender, where the Pixel 9 Pro XL, the Moto Razr Plus 2023 and the Mac draw calm water with the bank reflected in it. No `[RED]` line. A frame dump shows the water's own pass is not at fault: its 512×512 R16G16_UNORM height field (two textures the game ping-pongs every frame) holds values pinned at 0 and 1 in a checkerboard, where a calm pond sits near 0.5.

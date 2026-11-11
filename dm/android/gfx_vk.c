@@ -34,6 +34,7 @@
 #include "spv_e5.h"   // E5B9G9R9 storage images through R32_UINT views, RGB9E5 packed by the shader (vt_storage_up, gfx_vk_draw.inc cpipe_e5)
 #include "spv_narrow.h"   // each subgroup of a GPU narrower than 32 lanes a warp of its own (gfx_vk_draw.inc spv_fit_narrow)
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
+#include "spv_precise.h"   // Maxwell's FMUL and FADD unfused in the shaders that place vertices (gfx_vk_draw.inc spv_fit_precise)
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
 #include "nvn_queue.h"   // the queue scheduler (hle_nvn.c nvn_queue.inc): event publication and GPU progress
