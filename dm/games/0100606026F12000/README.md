@@ -55,6 +55,25 @@ Status: brought up on the Mac: the first-boot brightness screen, the title, a ne
 - **Resolved: a `jump table <addr>` assertion on an ordinary byte table near the start of the text** (`main+0x219234`, `adr x18; ldrb w0,[x17,x16]; add x18,x18,x0,lsl #2; br x18`). `func_of` made every site before the first FDE a function of one instruction, so no form saw the `adr` in front of the `br`. The text before the first FDE is now one function, from the end of the data block before it (or the text's start), as a gap between two FDEs already was.
 - **Resolved: the rewrite never finished, the Mac swapped, the rewriter's footprint reached 100 GB.** A stretch without FDEs is one function to `func_of`, and its detailed disassembly costs about 880 bytes an instruction once built (2.6 KB while capstone builds it): 21.6 million instructions. A function longer than 256 KB is now analysed in pieces (`pieces` in `patch_nso.py`), cut only right after a `ret` / `br` / `b` where no conditional branch and no `b` within 64 KB crosses. Counting `b` up to 1 MB left only 21,385 cut points in the 82 MB (tail calls between neighbours) and pieces of up to 6.5 MB; with 64 KB there are 185,228, and no piece is over 256 KB (the two stretches: 28 and 344 pieces). The rewrite then takes 13 minutes at about 2.7 GB resident on a loaded Mac. It came out the same as with `b` counted up to 1 MB (3 and 136 pieces), so the analysis does not depend on where the cuts fall.
 
+## Android: a new game by hand on the Odin 2
+
+Played by hand on an Ayn Odin 2 (SM8550, Adreno 740, Qualcomm's driver 0x802a4000, Android 13) on 2026-11-11, adb gamepad and stick input, main `793535a0` (`ANDROID_CHAIN` 6) swapped into the device's own APK, a private `DM_SAVE`:
+
+- **The stretch:** the brightness screen, New Game on Normal, the crystal legend and the real-time opening, the tutorials, the first field (Battlefield) and its autosave, then three battles:
+  - three soldiers, by Attack;
+  - two Magitek Armor, by Thundaga on all (Attack does nothing in that tutorial battle), then the machine that follows, by a Limit Burst;
+  - after the canyon past the field, the armoured giant, by summoning Bahamut.
+
+  Then the story scenes after it, up to the knights by the crystal.
+- **Shaders:** the opening, the field and the first two battles ran on chain 5's shaders, where the field's flames are missing. Then the 91,906 files chain 6 changes were copied over, and the rest ran on chain 6. After a cold start the log names `vk_pos_rows`, and the field's flames are drawn.
+- **Save:** the game saves only by autosave (its System Menu has Load, Help, Options and Return to Title). It autosaved on entering the field and again after the second battle. After a cold start the title offered Continue, which loaded the second save at the spot it was made.
+- **Frame rate** (target 60, the profile's `fps_target`), from the log's frame counter in windows of about 30 s, loads and the first minute left out:
+  - chain 6 (the field, the canyon, the third battle, the story scenes): median 52.1 fps, the lowest window 43.1; the story scenes at 60;
+  - chain 5 (the opening, the field, the first two battles): median 44.4, the lowest window 38.3.
+- **Sound:** `DM_AUDIO_DUMP` of the game's 6-channel output through the chain-6 session, 773 s: −24 to −41 dBFS RMS in every 30 s window, no window silent, none at full scale. The second dumped output (2 channels) was silent throughout. 10 underruns in the session's 262 callback reports.
+- **Red lines:** `unbound ND / cube image slot: a ND array stand-in` and `image of format … bound where the shader declares format …: skipped`, once each. No crash or hang.
+- **Cosmetic, not yet compared with the Mac:** the flames nearest the camera drawn as coarse blocks, a herringbone stripe on the canyon's rock textures, and faint horizontal lines across the picture.
+
 ## Mac routes
 
 - The first boot shows the brightness screen. From a fresh save, `DM_KEYS="f600:A,f1500:A,f1700:A,f1850:Up,f1950:A,f2400:A*36/150,f7950:B,f8100:B,f8250:B,f8400:B"` takes New Game, Normal, "Yes", the opening and the tutorials into the first field (about frame 9,600 at 30 fps; B closes a tutorial on its last page, the stick turns its pages).
@@ -79,6 +98,7 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- **Android, Odin 2:** the flames nearest the camera drawn as coarse blocks, a herringbone stripe on rock textures and faint horizontal lines across the picture, not yet compared with the Mac; and the field and battles at a median 52 fps, under 95% of the 60 target ([Android: a new game by hand on the Odin 2](#android-a-new-game-by-hand-on-the-odin-2)).
 - The engine region's gate (4.06 GB instead of the 4064 MB `game_args` gave) has not been run on this game yet: the `[mem] Unreal's engine region` line in a boot's log shows it.
 - **Known:** once in two runs, the frames that begin the new game's load bind 2D textures where a base pass shader declares 3D ones (red `texture type mismatch` lines, under a black screen). The host now binds the zero 3D texture there ([A 2D texture in a 3D slot binds the zero 3D texture](../../../docs/reference/rendering.md#a-2d-texture-in-a-3d-slot-binds-the-zero-3d-texture)); not run on this game since.
 - 11 shaders do not build (3 geometry, 8 compute with 3D image atomics); none met so far.
