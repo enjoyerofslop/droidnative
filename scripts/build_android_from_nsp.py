@@ -617,9 +617,10 @@ def run_adb(args, log=None, check=True, timeout=None):   # adb with these argume
     finally:
         with _running_lock: _running.discard(p)
     if log: log.write_text(out + err)
-    text = (out + err).strip()
-    why = getattr(p, 'stalled', '') or (p.returncode and (LOST.search(text) or (p.returncode == 255 and not text)) and 'adb lost the phone')
-    if why: raise PhoneLost(f'{" ".join(cmd)}: {why}' + (f': {text[-300:]}' if text else ''), (text.splitlines() or [why])[-1][:200] if not getattr(p, 'stalled', '') else why)
+    text, stalled = (out + err).strip(), getattr(p, 'stalled', '')
+    if stalled or (p.returncode and (LOST.search(text) or (p.returncode == 255 and not text))):
+        why = stalled or (text.splitlines()[-1][:200] if text else f'exit status {p.returncode} with no output')
+        raise PhoneLost(f'{" ".join(cmd)}: adb lost the phone: {why}', why)
     # the exit status too: a step that printed nothing left only "failed:" (droidplay-core issue #37), with no way to tell a missing program (127), adb losing the phone (255)
     # and a command that failed (1)
     if p.returncode and check: raise BuildError(f'{" ".join(cmd)} failed (exit status {p.returncode}): {text[-400:] if text else "no output"}')
@@ -641,8 +642,13 @@ def stop_stalled(why):   # the stall watchdog's (counting): every adb process ru
 # Over Wi-Fi a phone drops off when it sleeps, roams to another access point or restarts wireless debugging (a new port), and comes back as the same serial, as
 # another address, or by its mDNS name. An install waits for it by its ID (phone_key), connects to it again where it can, and takes the step it was on again
 RECONNECT_WAIT = 180.0   # --reconnect-wait: how long a lost phone is waited for before the install stops
-MAX_DROPS = 6            # more losses than this in one run stop it: the link is too poor to finish over
-_drops = 0
+MAX_DROPS = 5            # more losses than this in a row with nothing copied between them stop the run: the link is too poor to finish over. A count per run
+# stopped a real one: Link's Awakening over a Wi-Fi link that dropped after every few 256 MiB pieces, 5.9 of its 6.2 GB on the phone and still moving
+_drops, _streak, _progress, _streak_at = 0, 0, 0, -1   # losses this run; losses in a row; pieces copied so far (moved); _progress at the last loss
+
+
+def moved():   # a piece of a large copy reached the phone: the next loss starts a new run of them
+    global _progress; _progress += 1
 
 
 def ask_id(serial):   # a serial adb lists now → the phone's ID, or None; kept only when it answered
@@ -688,13 +694,13 @@ def survives_drops(f):   # f taken again once the phone is back, when adb lost i
     # the phone holds (push_resumable's part, push_tar's manifest)
     @functools.wraps(f)
     def run(serial, *a, **k):
-        global _drops
+        global _drops, _streak, _streak_at
         while True:
             try: return f(serial, *a, **k)
             except PhoneLost as e:
-                _drops += 1
-                if _drops > MAX_DROPS:
-                    raise BuildError(f'{e}\nadb lost the phone {_drops} times in this install, so the connection is too poor to finish over: ' +
+                _drops += 1; _streak = _streak + 1 if _progress == _streak_at else 1; _streak_at = _progress
+                if _streak > MAX_DROPS:
+                    raise BuildError(f'{e}\nadb lost the phone {_streak} times in a row with nothing copied in between, so the connection is too poor to finish over: ' +
                                      ('move the phone closer to the router (5 GHz), or use a USB cable' if phone_id.wifi(_now.get(serial, serial)) else 'try another cable or USB port') +
                                      ', then install again') from e
                 reacquire(serial, e.why)
@@ -851,7 +857,7 @@ def push_resumable(serial, local, remote, log):
                 data = f.read(min(CHUNK, size - have)); piece.write_bytes(data)
                 adb(serial, 'push', piece, tmp, log=log)
                 adb(serial, 'shell', f'cat {sh_quote(tmp)} >> {sh_quote(part)} && rm {sh_quote(tmp)}')
-                have += len(data)
+                have += len(data); moved()
     piece.unlink(missing_ok=True)
     if remote_size(serial, part) != size: raise BuildError(f'{part} is not {size:,} bytes after the copy: run the install again')
     adb(serial, 'shell', f'mv -f {sh_quote(part)} {sh_quote(remote)}')

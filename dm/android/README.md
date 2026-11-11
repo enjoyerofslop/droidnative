@@ -96,7 +96,7 @@ own words (`device '…' not found`, `device offline`, `error: closed`, exit sta
 60 s plus the bytes at 0.5 MB/s for a copy) or a copy whose byte count stood still for 90 s (`counting`). The install, the folder copies, the RomFS copy and the
 game's copy as a whole then wait up to `--reconnect-wait` seconds (180) for the phone by its ID (`reacquire`): its serial again, or another serial with its ID,
 connecting over Wi-Fi to its old address and to the address `adb mdns services` gives for its serial number; every later call goes to the serial it came back
-as. Each step can run again, and the RomFS copy goes on from `RomFS.img.partial`. More than six losses in one run stop it.
+as. Each step can run again, and the RomFS copy goes on from `RomFS.img.partial`. More than five losses in a row with no piece copied between them stop it.
 
 ### A game app
 
