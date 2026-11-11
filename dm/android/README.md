@@ -99,7 +99,9 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
 
 - **What the APK carries:** the game's host alone (the NativeActivity's library; no loader) and the game's files under `assets/game/`, laid out as `games/<id>/` with a
   `files.txt` list. Its entry is `java GameStart`, which unpacks everything but the RomFS to `Android/data/<package>/files/games/<id>/` at the first start and after an
-  update, where `front_android.c` finds the game, then starts the NativeActivity in its own process.
+  update, where `front_android.c` finds the game, then starts the NativeActivity in its own process. The translated shaders are one entry, `spv.zip` (a stored ZIP of
+  the `spv` folder, which GameStart unpacks into `spv/`), because an APK without ZIP64 holds at most 65,535 entries and a game's shaders are files of their own
+  (Mario Kart 8 Deluxe's passed that, issue #169); the other files are counted against that limit before packing.
 - **The RomFS is read where it lies, never copied.** GameStart opens it and sets `DM_ROMFS=fd:<descriptor>:<offset>:<length>` in the process's environment, which
   `dm/host/romfs_image.h` (`romfs_image_spec`) reads as that part of an open file. It looks in order:
   1. a stored entry of the APK, `assets/game/RomFS.img`, packed when the APK stays under 2 GiB (Python's zipfile writes no bigger ZIP without ZIP64, which `apksigner` can't read);
