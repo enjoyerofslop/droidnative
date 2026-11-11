@@ -880,6 +880,13 @@ def vk_driver_arg(a):   # --vk-driver / --vk-driver-env → (vk_driver_pkg.Drive
     except vkpkg.PackageError as e: raise BuildError(f'--vk-driver: {e}') from None
 
 
+def game_app_driver(vk):   # a game app is a file to share: a proprietary driver (Qualcomm's, from another device) has no licence to pass on, so it goes with an install only
+    sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
+    why = vkpkg.proprietary(vk)
+    if why: raise BuildError(f'--game-apk: {vk.library} looks like a proprietary driver ({why}). A game app is made to share, and such a driver may not be passed on: '
+                             'install it on your own phone with --vk-driver instead')
+
+
 def push_vk_driver(serial, vk, env, logs):
     """The driver → files/vk_drivers/<its name> (not again when the phone has it); → the lines for the game's defaults.txt, or none on a phone it can't run on"""
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
@@ -1105,6 +1112,7 @@ def main(argv):
         bi.PROG.end(); return
     vk, vk_env = vk_driver_arg(a)
     if vk and (a.apk_only or a.migrate or a.update_shaders or (a.no_push and not a.game_apk)): raise BuildError('--vk-driver goes with an install to a phone, --push-only or --game-apk')
+    if vk and a.game_apk: game_app_driver(vk)
     if a.apk_only or a.migrate:
         logs = data_dir() / 'logs'; logs.mkdir(parents=True, exist_ok=True)
         serial = a.serial or os.environ.get('ANDROID_SERIAL') or pick_device()

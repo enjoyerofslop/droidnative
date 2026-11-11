@@ -6,7 +6,7 @@
 # Each driver goes onto the phone under a name of its own, <stem>-<first 8 hex digits of its SHA-256>.so (installed_name): builders name theirs alike
 # (libvulkan_freedreno.so), and the host keeps a pipeline cache per driver file name and copies a file again only when its size or time changes.
 #   python3 dm/android/tools/vk_driver_pkg.py <package or .so>     what the package holds, as JSON, or why it can't be used (exit 1)
-import hashlib, io, json, posixpath, re, struct, sys, zipfile
+import hashlib, io, json, posixpath, re, struct, sys, zipfile, zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +16,7 @@ MAX_LIB = 64 << 20         # the driver: Turnip builds are about 19 MB
 META_FIELDS = ('schemaVersion', 'name', 'description', 'author', 'packageVersion', 'vendor', 'driverVersion', 'minApi', 'libraryName')
 ENV_ALLOWED = ('TU_DEBUG', 'FD_DEV_FEATURES')   # Mesa's switches a catalog entry may set beside the driver (a 740 on One UI needs FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1)
 GLIBC = ('libc.so.6', 'libm.so.6', 'libdl.so.2', 'libpthread.so.0', 'librt.so.1', 'ld-linux-aarch64.so.1')
+QUALCOMM_LIBS = ('libgsl.so', 'libllvm-qgl.so', 'libllvm-glnext.so', 'libadreno_utils.so')   # what Qualcomm's own driver needs and Mesa's doesn't
 REMOTE_DIR = 'vk_drivers'  # beside env.txt on the phone: DM_VK_DRIVER=vk_drivers/<name> in a game's defaults.txt (the host takes it relative to env.txt's folder)
 
 
@@ -29,6 +30,7 @@ class Driver:
     meta: dict | None    # meta.json, when the package has one
     sha256: str          # of the .so, hex
     source: str          # the file it was read from
+    needed: tuple = ()   # its DT_NEEDED libraries
 
     @property
     def name(self): return installed_name(self.library, self.sha256)
@@ -66,12 +68,21 @@ def read(path):
     elif raw_head[:2] == b'PK':
         data, meta, library = _read_zip(p)
     else: raise PackageError(f'{p.name} is neither a driver package (.zip) nor a driver library (.so)')
-    problems = check_elf(data)
+    try: problems = check_elf(data)
+    except (struct.error, IndexError, ValueError, OverflowError) as e:   # a header pointing past the file's end, say: what is malformed is said, not a traceback
+        raise PackageError(f'{library}{"" if library == p.name else " in " + p.name} is a malformed ELF file ({e})') from e
     if problems: raise PackageError(f'{library}{"" if library == p.name else " in " + p.name} is not an Android arm64 Vulkan driver: ' + '; '.join(problems))
-    return Driver(data, library, meta, hashlib.sha256(data).hexdigest(), str(p))
+    return Driver(data, library, meta, hashlib.sha256(data).hexdigest(), str(p), tuple(elf_needed(data)))
 
 
 def _read_zip(p):
+    try: return _read_zip_entries(p)
+    except PackageError: raise
+    # an encrypted entry (RuntimeError), a compression method zipfile lacks (NotImplementedError), a damaged stream: refused with why, never a traceback
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, zlib.error, EOFError, OSError, ValueError) as e: raise PackageError(f'{p.name} could not be read as a zip: {e}') from e
+
+
+def _read_zip_entries(p):
     try: z = zipfile.ZipFile(p)
     except zipfile.BadZipFile as e: raise PackageError(f'{p.name} is not a readable zip: {e}') from e
     with z:
@@ -106,24 +117,33 @@ def _read_zip(p):
 
 def check_elf(data):
     """Why data is not an Android arm64 Vulkan driver (an empty list: it is one). Read with struct, never loaded"""
+    return _elf(data)[0]
+
+
+def elf_needed(data):   # its DT_NEEDED libraries (none for a file check_elf refuses early)
+    try: return _elf(data)[1]
+    except (struct.error, IndexError, ValueError, OverflowError): return []
+
+
+def _elf(data):   # → (problems, DT_NEEDED)
     out = []
-    if len(data) < 64 or data[:4] != b'\x7fELF': return ['not an ELF file']
+    if len(data) < 64 or data[:4] != b'\x7fELF': return ['not an ELF file'], []
     if data[4] != 2: out.append('not 64-bit')
-    if data[5] != 1: return out + ['not little-endian']
+    if data[5] != 1: return out + ['not little-endian'], []
     e_type, e_machine = struct.unpack_from('<HH', data, 16)
     if e_type != 3: out.append('not a shared object')
     if e_machine != 183: out.append(f'built for machine {e_machine}, not arm64 (183)')
-    if out: return out
+    if out: return out, []
     e_phoff, e_shoff = struct.unpack_from('<QQ', data, 32)
     e_phentsize, e_phnum, e_shentsize, e_shnum, _ = struct.unpack_from('<HHHHH', data, 54)
     loads, dyn = [], None
     for i in range(e_phnum):
         o = e_phoff + i * e_phentsize
-        if o + 56 > len(data): return ['its program headers run past its end']
+        if o + 56 > len(data): return ['its program headers run past its end'], []
         p_type, _, p_offset, p_vaddr, _, p_filesz, _ = struct.unpack_from('<IIQQQQQ', data, o)
         if p_type == 1: loads.append((p_vaddr, p_offset, p_filesz))
         elif p_type == 2: dyn = (p_offset, p_filesz)
-    if not dyn: return ['no dynamic section (PT_DYNAMIC)']
+    if not dyn: return ['no dynamic section (PT_DYNAMIC)'], []
     def at(vaddr):   # a virtual address → its file offset, through the PT_LOAD that holds it
         for v, o, n in loads:
             if v <= vaddr < v + n: return o + (vaddr - v)
@@ -135,7 +155,7 @@ def check_elf(data):
         if d_tag == 1: needed.append(d_val)
         else: tags.setdefault(d_tag, d_val)
     strtab = at(tags[5]) if 5 in tags else None
-    if strtab is None: return ['no dynamic string table']
+    if strtab is None: return ['no dynamic string table'], []
     def cstr(off):
         end = data.find(b'\0', off)
         return data[off:end if end >= 0 else len(data)].decode('utf-8', 'replace')
@@ -154,7 +174,8 @@ def check_elf(data):
             lo = e_shoff + sh_link * 64
             if lo + 64 <= len(data): symstr = struct.unpack_from('<IIQQQQIIQQ', data, lo)[4]
             break
-    if count is None and 4 in tags and at(tags[4]) is not None: count = struct.unpack_from('<II', data, at(tags[4]))[1]
+    h = at(tags[4]) if 4 in tags else None
+    if count is None and h is not None and h + 8 <= len(data): count = struct.unpack_from('<II', data, h)[1]
     if count is None and symtab is not None and strtab > symtab: count = (strtab - symtab) // 24
     hmi = False
     if symtab is not None and count:
@@ -162,18 +183,29 @@ def check_elf(data):
             st_name, st_info, _, st_shndx = struct.unpack_from('<IBBH', data, symtab + i * 24)
             if st_shndx and (st_info >> 4) in (1, 2) and cstr(symstr + st_name) == 'HMI': hmi = True; break
     if not hmi: out.append("doesn't export HMI, the hardware module Android's Vulkan loader looks up")
-    return out
+    return out, libs
 
 
-def notice(d):
-    """The NOTICE a game app carries beside a driver it packs: what it is, who built it, and Mesa's licence terms (a copy the player makes for their own devices,
-    which still carries them)"""
+def proprietary(d):
+    """Why d looks like a proprietary driver (Qualcomm's, taken from another device) rather than a Mesa build, or '': its meta.json's vendor, or the libraries it
+    needs. A game app is a file to share, and there is no licence to pass such a driver on"""
+    vendor = str((d.meta or {}).get('vendor') or '').strip()
+    if vendor and vendor.lower() != 'mesa': return f"its meta.json names {vendor} as its vendor, not Mesa"
+    q = [n for n in d.needed if n in QUALCOMM_LIBS]
+    return f"it needs {', '.join(q)}, Qualcomm's own driver libraries" if q else ''
+
+
+def notice(d, licence=''):
+    """The NOTICE a game app carries beside a Mesa driver it packs: what it is and who built it, Mesa's licence (its core is MIT, whose notice copies keep), and
+    the builder's own terms as far as they are known (licence: as DroidPlay's catalog records them, '' when not known). Not for a proprietary driver (proprietary)"""
     m = d.meta or {}
     who = ', '.join(f'{k}: {m[k]}' for k in ('name', 'author', 'driverVersion', 'packageVersion', 'vendor') if m.get(k))
-    return (f'This app carries a Vulkan driver the player chose: {d.library} (SHA-256 {d.sha256}){" — " + who if who else ""}.\n'
-            'It is not part of DroidPlay. Turnip is part of Mesa (https://mesa3d.org); a build like this one is made and published by its builder, whose release page\n'
-            'has its source and patches, if any. Mesa is free software: its core is under the MIT licence, and some of its files carry other free licences\n'
-            '(https://docs.mesa3d.org/license.html). The MIT licence\'s terms, which apply to this copy:\n\n'
+    own = (f"The builder's own changes, as DroidPlay's driver catalog records their terms: {licence}." if licence else
+           "The builder's own changes may carry terms of their own: they are the builder's to state, on its release page.")
+    return (f'This app carries a Vulkan driver chosen when it was built: {d.library} (SHA-256 {d.sha256}){" — " + who if who else ""}.\n'
+            'It is not part of DroidPlay. It is a build of Turnip, part of Mesa (https://mesa3d.org), made and published by its builder.\n'
+            f'{own}\n'
+            "Mesa's core is under the MIT licence, whose notice follows; files of Mesa under other licences carry their own (https://docs.mesa3d.org/license.html).\n\n"
             'Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"),\n'
             'to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,\n'
             'and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\n'
