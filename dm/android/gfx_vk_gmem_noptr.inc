@@ -23,9 +23,16 @@ static const uint32_t k_gm_probe_cs[] =
 #include "shaders/gmem_probe.comp.inc"
 ;
 // DM_VK_RAW_GMEM_NOPTR_NU=0 (env.txt, a diagnostic): the accesses without NonUniform decorations, for telling what a driver's non-uniform indexing costs; wrong where the
-// lanes of one draw reach different pieces. DM_VK_RAW_GMEM_NOPTR_SLOTS=<n> (a diagnostic): an array of at most n slots, for telling what its length costs.
+// lanes of one draw reach different pieces. DM_VK_RAW_GMEM_NOPTR_VEC=0: a 4-vector load as four fetches of a word, as at first, not two of a uvec4 (spv_noptr.h
+// SPV_NOPTR_VEC). DM_VK_RAW_GMEM_NOPTR_SLOTS=<n> (a diagnostic): an array of at most n slots, for telling what its length costs.
 // DM_VK_RAW_GMEM_NOPTR_SET=3 (a diagnostic): the array at SPV_NOPTR_SET_LOW on a GPU that binds 6 sets, to try what a GPU that binds 4 gets
-static int gm_np_nu(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_NOPTR_NU"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAW_GMEM_NOPTR_NU=0: the pools' array is indexed without NonUniform decorations"); } return v; }
+static int gm_np_opt(void) {   // spv_noptr's options
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_RAW_GMEM_NOPTR_NU"), *x = getenv("DM_VK_RAW_GMEM_NOPTR_VEC"); v = (e && *e == '0' ? 0 : SPV_NOPTR_NU) | (x && *x == '0' ? 0 : SPV_NOPTR_VEC);
+        if (!(v & SPV_NOPTR_NU)) LOG("[vk] DM_VK_RAW_GMEM_NOPTR_NU=0: the pools' array is indexed without NonUniform decorations");
+        if (!(v & SPV_NOPTR_VEC)) LOG("[vk] DM_VK_RAW_GMEM_NOPTR_VEC=0: a 4-vector load through the pools' array is four fetches of a word"); }
+    return v;
+}
 static int gm_np_env(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_VK_RAW_GMEM_NOPTR"); v = e && *e == '1' ? 1 : e && *e == '0' ? 0 : -1; } return v; }
 // After the device's features are read (vk_try): whether it has what the array needs, and VK_EXT_descriptor_indexing to enable when the driver lists it (core from Vulkan 1.2)
 static int gm_np_take(const VkPhysicalDeviceDescriptorIndexingFeaturesEXT *d, int listed, const char **dext, uint32_t *nde) {
@@ -135,7 +142,7 @@ static size_t gm_np_code(const uint32_t *code, size_t nw, const char *what, int 
     uint32_t *sc = malloc(3 * (size_t)code[3] * 4); size_t k = 0; int why = 0;
     for (size_t cap = 2 * nw + 4096; sc && !k && cap <= 16 * nw + 4096; cap *= 4) {   // a vector access becomes several: rarely past twice the words
         free(*out); *out = malloc(cap * 4); if (!*out) break;
-        k = spv_noptr(code, nw, g_np_set, gm_np_nu(), sc, *out, cap, &why); if (why != SPV_NOPTR_ROOM) break; }
+        k = spv_noptr(code, nw, g_np_set, gm_np_opt(), sc, *out, cap, &why); if (why != SPV_NOPTR_ROOM) break; }
     free(sc);
     if (!k) { free(*out); *out = NULL; }
     if (!first) return k;

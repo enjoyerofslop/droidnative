@@ -1,0 +1,16 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_ARB_gpu_shader_int64 : require
+// Raw global memory's self-test on a driver that takes the pools' descriptor array (gfx_vk_gmem_check.inc gm_selftest, DM_VK_RAW_GMEM_TEST=1; gfx_vk_gmem_noptr.inc):
+// gmem_test.comp with its pointer made as the translator's helper makes it, a v2uint bitcast to ulong (packUint2x32) and OpConvertUToPtr. It is never built as it
+// is: spv_noptr rewrites it at run time as it rewrites the game's shaders, so the test reads through the very accesses they do (a vector load in two fetches, at
+// addresses that are multiples of 4 and not of 16 too)
+layout(local_size_x = 64) in;
+layout(buffer_reference, buffer_reference_align = 4) readonly buffer U4 { uvec4 v; };
+layout(set = 0, binding = 0, std430) readonly buffer Tab { uint w[]; } tab;
+layout(set = 0, binding = 1, std430) buffer Io { uvec4 req[64]; uvec4 got[64]; } io;   // req: the address's low and high words, the table entry
+void main() {
+    uint i = gl_LocalInvocationID.x; uvec4 r = io.req[i]; uint e = r.z * 8u;
+    uint lo = r.x + tab.w[e + 4u], hi = r.y + tab.w[e + 5u] + (lo < r.x ? 1u : 0u);
+    io.got[i] = U4(packUint2x32(uvec2(lo, hi))).v;
+}
