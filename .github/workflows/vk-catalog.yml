@@ -12,6 +12,11 @@ on:
 
 permissions:
   contents: read
+  issues: write   # the weekly run opens an issue when an entry no longer matches its release
+
+defaults:
+  run:
+    shell: bash   # -o pipefail: the check's exit status through tee
 
 jobs:
   check:
@@ -28,4 +33,15 @@ jobs:
       - name: Each entry's zip against its release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python dm/android/tools/vk_catalog.py check
+        run: python dm/android/tools/vk_catalog.py check | tee check.txt
+      - name: An issue for a changed or missing asset (the weekly run; one at a time)
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title='Vulkan driver catalog: an entry no longer matches its release'
+          if [ -z "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[].number')" ]; then
+            { echo 'dm/android/tools/vk_catalog.py check found:'; echo; echo '```text'; cat check.txt; echo '```'; echo
+              echo 'The desktop app refuses an asset that changed (its hash check), so the entry needs a pull request: pinned anew after checking the new file, or removed.'; } > body.md
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+          fi

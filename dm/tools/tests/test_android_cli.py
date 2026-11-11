@@ -764,6 +764,12 @@ class VkDriverGameApp(Base):   # --game-apk --vk-driver: the driver and its NOTI
         with self.assertRaises(ba.BuildError): ba.game_app_driver(q)
         ba.game_app_driver(v.read(make_pkg(self.tmp)))   # a Mesa build goes in
 
+    def test_the_notice_takes_the_catalogs_licence(self):   # T30's entry says its builder published no licence: the NOTICE says so rather than guessing
+        v = vkpkg(); d = v.read(make_pkg(self.tmp))
+        self.assertEqual(ba.catalog_licence(d), '')   # not in the catalog
+        t30 = json.loads((REPO / 'dm/android/vk_drivers.json').read_text())['drivers'][0]
+        d.sha256 = t30['library_sha256']; self.assertIn('No licence file', ba.catalog_licence(d))
+
     def test_gamestart_clears_an_old_driver_at_an_update(self):   # a rebuild without --vk-driver leaves no 19 MB driver behind
         src = (REPO / 'dm/android/java/org/nxnative/android/GameStart.java').read_text()
         self.assertRegex(src, r'new String\[\] \{[^}]*"vk_driver"[^}]*\}\) rm\(')

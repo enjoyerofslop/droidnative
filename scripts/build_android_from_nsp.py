@@ -467,7 +467,7 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
         # ignores it on a phone without an Adreno GPU: a game app goes to phones this computer never sees
         sys.path.insert(0, str(REPO / 'dm/android/tools')); import vk_driver_pkg as vkpkg   # pyright: ignore[reportMissingImports]
         (stage / 'vk_driver').mkdir(); (stage / 'vk_driver' / vk.name).write_bytes(vk.data)
-        (stage / 'vk_driver' / 'NOTICE').write_text(vkpkg.notice(vk), encoding='utf-8', newline='\n')
+        (stage / 'vk_driver' / 'NOTICE').write_text(vkpkg.notice(vk, catalog_licence(vk)), encoding='utf-8', newline='\n')
         defaults += ''.join(ln + '\n' for ln in vkpkg.defaults_lines(f'games/{g.id}/vk_driver/{vk.name}', vk.sha256, vk_env))
         say(f'Vulkan driver: {vk.describe()}, in the app as vk_driver/{vk.name} (sha256 {vk.sha256[:12]}…); used on Adreno phones, the phone\'s own driver elsewhere')
     (stage / 'defaults.txt').write_text(defaults, encoding='utf-8', newline='\n')   # \n on Windows too, as the phone's files are
@@ -878,6 +878,12 @@ def vk_driver_arg(a):   # --vk-driver / --vk-driver-env → (vk_driver_pkg.Drive
             return None, []
         return vkpkg.read(Path(a.vk_driver).expanduser()), env
     except vkpkg.PackageError as e: raise BuildError(f'--vk-driver: {e}') from None
+
+
+def catalog_licence(vk):   # the builder's terms as dm/android/vk_drivers.json records them for this driver (by its hash), for a game app's NOTICE; '' when it isn't listed
+    try: drivers = json.loads((REPO / 'dm/android/vk_drivers.json').read_text(encoding='utf-8')).get('drivers') or []
+    except (OSError, ValueError): return ''
+    return next((e.get('licence') or '' for e in drivers if e.get('library_sha256') == vk.sha256), '')
 
 
 def game_app_driver(vk):   # a game app is a file to share: a proprietary driver (Qualcomm's, from another device) has no licence to pass on, so it goes with an install only
