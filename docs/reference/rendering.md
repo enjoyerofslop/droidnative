@@ -1990,6 +1990,7 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Cause:** Samsung's Xclipse driver (24.0.533) keeps 64 bytes per binding number, up to a layout's highest binding.
   - The cost is paid in `vkCreateDescriptorSetLayout`, and again in every `vkCreatePipelineLayout` that uses that set layout.
   - A probe with one uniform buffer: binding 7 costs 0 MB, 65,535 costs 4 MB, 1,048,576 costs 64 MB, and 2,101,266 costs 128 MB.
+  - Arm's Mali-G715 driver (a Pixel 9 Pro XL) sizes them the same way: 104 MB of native heap for such a shader's set layout and 16 MB for each pipeline layout over it. Ocarina of Time's start-up list of 621 pipelines took the native heap to 6.7 GB within 12 s, and Android 17's per-app memory limiter killed the game at Kokiri Forest's load. These are the Mali bring-up's measurements for #277, which moved only the bindings behind the pool arrays; this entry's fix replaces it.
   - The translator puts some of NVN2's constant buffers far apart. 4,823 of Ocarina of Time's 42,848 shaders bind one at 1,048,576 or more, and its Kokiri fragment shaders use 2,101,266 (`0x201012`).
   - How it was found: the driver library's heap imports were redirected to counters by thread and call stack (a test build only). simpleperf can't run on this phone (SELinux), and heapprofd disconnects from the host's threads.
 - **Fix:** each binding at 1024 or past it gets a dense number, in the old order, from just past the set's other bindings and past the capture variant's feedback buffers at 100 to 103 (`spv_bind.h`).
