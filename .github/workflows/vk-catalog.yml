@@ -1,0 +1,47 @@
+# The Vulkan driver catalog (dm/android/vk_drivers.json) against its builders' releases: each pinned zip still there, the same size, with the SHA-256 digest
+# GitHub lists for it (dm/android/tools/vk_catalog.py check; nothing is downloaded). An owner can replace an asset under the same name, which the desktop
+# app's hash check then refuses, so a failed run here means an entry needs a pull request. Weekly, and on a pull request that changes the catalog.
+name: vk-catalog
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  pull_request:
+    paths: ['dm/android/vk_drivers.json', 'dm/android/tools/vk_catalog.py']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # the weekly run opens an issue when an entry no longer matches its release
+
+defaults:
+  run:
+    shell: bash   # -o pipefail: the check's exit status through tee
+
+jobs:
+  check:
+    name: Vulkan driver catalog against its releases
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+      - name: Each entry's zip against its release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python dm/android/tools/vk_catalog.py check | tee check.txt
+      - name: An issue for a changed or missing asset (the weekly run; one at a time)
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title='Vulkan driver catalog: an entry no longer matches its release'
+          if [ -z "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[].number')" ]; then
+            { echo 'dm/android/tools/vk_catalog.py check found:'; echo; echo '```text'; cat check.txt; echo '```'; echo
+              echo 'The desktop app refuses an asset that changed (its hash check), so the entry needs a pull request: pinned anew after checking the new file, or removed.'; } > body.md
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+          fi

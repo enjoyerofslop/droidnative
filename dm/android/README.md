@@ -260,6 +260,11 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators:
 - A phone without `/dev/kgsl-3d0` (a Mali or Xclipse GPU) doesn't open `DM_VK_DRIVER` at all, with one plain `[vk] DM_VK_DRIVER` line: Turnip drives Qualcomm's
   kernel driver, KGSL, and `libadrenotools.so` is not loaded, so its constructor doesn't patch the linker.
 - Each driver keeps its own pipeline cache: `DM_PIPELINE_CACHE` with `.<driver file name>` after it (`gfx_vk_draw.inc` `pcache`).
+- **The catalog** DroidPlay for Windows offers drivers from is `dm/android/vk_drivers.json`: each entry a builder's own GitHub release asset pinned by the zip's
+  and the driver's SHA-256, with the Adreno numbers the builder lists (`gpus`) and DroidPlay's own runs (`tested`), changed by pull request and shipped with releases.
+  `dm/android/desktop/vk_drivers.py` reads it for the app: an entry's mark against a phone's GPU (`phone_gpu.py`), its download from the release checked by both
+  hashes, and a player's own driver checked by `vk_driver_pkg`. A game app's driver `NOTICE` gives the builder's terms as the catalog records them (`catalog_licence`). `dm/android/tools/vk_catalog.py check` compares each zip with the digest GitHub lists for it, without
+  downloading (weekly and on a catalog pull request: `.github/workflows/vk-catalog.yml`, whose weekly run opens an issue when an entry no longer matches); `vk_catalog.py entry` makes a new entry's checked fields from a package.
 - `build_android_from_nsp.py` builds the three libraries with every host and packs them into both kinds of app (`build_apk.py --lib`).
 - Tried with Mr. Purple's Turnip T30 (Mesa 26.3.0-devel, Vulkan 1.4.359) on an Odin 2 (Adreno 740, Android 13) and a Retroid Pocket 5 (Adreno 650, Android 13), with
   `scripts/bench_android.py`. It loads and draws on both. Super Mario Odyssey's opening: Odin 2 59.9 fps (GPU 3.5 ms against 5.7 on Qualcomm's driver), Retroid

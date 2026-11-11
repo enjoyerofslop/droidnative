@@ -1,10 +1,14 @@
 """DroidPlay for Windows' first run, as the desktop app (scripts/nxnative_android.py) shows it, from its Qt-free helpers in dm/android/desktop: the "Get started"
 checklist's four steps worked out from what the computer has (first_run.py), Install tools' one bar across --setup's stages, and plain words for what went wrong
 with the report for #help (explain.py), matched against the packing script's, nx_extract's and adb's own messages. No PySide6, phone or network needed."""
+import hashlib
+import http.server
+import json
 from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 
 REPO = Path(__file__).resolve().parents[3]
@@ -13,6 +17,11 @@ import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]
 import phone_gpu as gpu   # noqa: E402  # pyright: ignore[reportMissingImports]
+import vk_drivers as vkd   # noqa: E402  # pyright: ignore[reportMissingImports]
+sys.path.insert(0, str(REPO / 'dm/android/tools'))
+import vk_catalog   # noqa: E402  # pyright: ignore[reportMissingImports]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_android_cli import elf, make_pkg   # noqa: E402  (a minimal Android driver ELF and an AdrenoTools package around it)
 
 ROWS_OK = [{'name': n, 'ok': True, 'detail': '', 'fix': ''} for n in ('Python module lz4', '.NET SDK 10', 'Android SDK', 'NDK', 'CMake', 'build-tools 36.0.0',
                                                                        'platform android-35', 'adb', 'JDK keytool', 'JDK javac', 'signing key', 'game hosts')]
@@ -310,3 +319,75 @@ class PhoneGpu(unittest.TestCase):   # the Phones page's GPU column (phone_gpu.p
         self.assertEqual(gpu.classify('', 'mali', 'Tensor G4')['kind'], 'mali')
         self.assertEqual(gpu.classify('', 'samsung', 's5e9955'), {'kind': 'xclipse', 'adreno': None, 'label': 'Xclipse'})   # a Galaxy Z Flip 7: no GLES line at all
         self.assertEqual(gpu.classify('Some GPU')['kind'], 'other')
+
+
+class VkCatalog(unittest.TestCase):   # the Vulkan driver catalog (dm/android/vk_drivers.json) and the desktop app's side of it (vk_drivers.py)
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
+        self.cat = {e['id']: e for e in vkd.load()}
+
+    def test_the_catalog_reads_and_pins_both_hashes(self):
+        t30 = self.cat['turnip-mrpurple-t30']
+        self.assertEqual(t30['zip_sha256'][:8], 'f65b2d33'); self.assertEqual(t30['library_sha256'][:8], '1d80dfa0')   # the package DroidPlay tested
+        for e in self.cat.values():
+            for r in e['tested']: self.assertTrue(vkd.in_ranges(r['gpu'], e['gpus']), f'{e["id"]} tested on the {r["gpu"]}, which its gpus leave out')
+
+    def test_marks_against_a_phone(self):
+        t30, faux = self.cat['turnip-mrpurple-t30'], self.cat['turnip-faux123-1.2.10']
+        m = vkd.mark(t30, gpu.classify('Adreno (TM) 650'), '33', '0100000011D90000')
+        self.assertEqual(m['kind'], vkd.TESTED); self.assertIn('Brilliant Diamond', m['rows'][0][1])   # this game's run first
+        self.assertEqual(vkd.mark(t30, gpu.classify('Adreno (TM) 722'))['kind'], vkd.OTHER_GPU)   # T30 dropped the 710/720 family
+        self.assertEqual(vkd.mark(faux, gpu.classify('Adreno (TM) 722'))['kind'], vkd.SUPPORTED)
+        self.assertEqual(vkd.mark(t30, gpu.classify('Mali-G715'))['kind'], vkd.NOT_ADRENO)
+        self.assertEqual(vkd.mark(t30, gpu.classify('', 'adreno'))['kind'], vkd.UNKNOWN)
+        self.assertIn('API 30', vkd.mark(t30, gpu.classify('Adreno (TM) 650'), '29')['warn'])
+        self.assertIn("doesn't have", vkd.mesh_note(t30)); self.assertIn("isn't known", vkd.mesh_note(self.cat['turnip-stevenmxz-gen8-v39']))
+
+    def test_a_bad_catalog_is_refused(self):
+        bad = json.loads(vkd.CATALOG.read_text()); bad['drivers'][0]['env'] = ['DM_VK_RAW_GMEM=1']
+        f = self.tmp / 'c.json'; f.write_text(json.dumps(bad))
+        with self.assertRaises(ValueError): vkd.load(f)
+
+    def serve(self, files):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = files.get(self.path)
+                self.send_response(200 if body is not None else 404); self.send_header('Content-Length', str(len(body or b''))); self.end_headers(); self.wfile.write(body or b'')
+            def log_message(self, *a): pass
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start(); self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        return f'http://127.0.0.1:{server.server_address[1]}'
+
+    def entry(self, base, data, lib=None):
+        lib = elf() if lib is None else lib
+        return {'id': 'test-driver', 'name': 'Test driver', 'url': base + '/turnip.adpkg.zip', 'zip_sha256': hashlib.sha256(data).hexdigest(), 'size': len(data),
+                'library': 'vulkan.purple.so', 'library_sha256': hashlib.sha256(lib).hexdigest(), 'library_size': len(lib)}
+
+    def test_download_checked_by_both_hashes(self):
+        data = make_pkg(self.tmp).read_bytes(); base = self.serve({'/turnip.adpkg.zip': data}); e = self.entry(base, data)
+        f = vkd.download(e, self.tmp / 'dl')
+        self.assertEqual(f.read_bytes(), data); self.assertEqual(vkd.cached(e, self.tmp / 'dl'), f)
+        other = make_pkg(self.tmp, 'other.zip', data=elf(pad=64)).read_bytes()   # same name, another driver: the zip's hash refuses it
+        base2 = self.serve({'/turnip.adpkg.zip': other})
+        with self.assertRaises(ValueError): vkd.download(self.entry(base2, data), self.tmp / 'dl2')
+        self.assertFalse(any((self.tmp / 'dl2').rglob('*.zip*')))
+        e3 = self.entry(base2, other, lib=elf())   # the zip as pinned, but the driver inside isn't the one the catalog names
+        with self.assertRaises(ValueError): vkd.download(e3, self.tmp / 'dl3')
+        with self.assertRaises(vkd.Cancelled): vkd.download(self.entry(base, data), self.tmp / 'dl4', cancelled=lambda: True)
+
+    def test_a_players_own_driver_is_checked_and_kept(self):
+        r = vkd.import_custom(make_pkg(self.tmp), self.tmp / 'drivers')
+        self.assertEqual(r['id'], 'custom-' + hashlib.sha256(elf()).hexdigest()[:8]); self.assertFalse(r['proprietary'])
+        self.assertTrue(Path(r['file']).is_file())
+        meta = {'schemaVersion': 1, 'name': 'Q', 'description': '', 'author': 'Q', 'packageVersion': '1', 'vendor': 'Qualcomm', 'driverVersion': '891', 'minApi': 33,
+                'libraryName': 'vulkan.adreno.so'}
+        self.assertTrue(vkd.import_custom(make_pkg(self.tmp, 'q.zip', 'vulkan.adreno.so', meta=meta), self.tmp / 'drivers')['proprietary'])
+        so = self.tmp / 'not.so'; so.write_bytes(elf(needed=('libc.so.6',)))
+        with self.assertRaises(vkd.vkpkg.PackageError): vkd.import_custom(so, self.tmp / 'drivers')
+
+    def test_the_weekly_check_names_a_changed_or_gone_asset(self):
+        e = self.cat['turnip-faux123-1.2.10']; name = e['url'].rsplit('/', 1)[1]
+        rel = lambda digest, n=name: {'assets': [{'name': n, 'size': e['size'], 'digest': digest}]}   # noqa: E731
+        self.assertEqual(vk_catalog.check([e], lambda url: rel(f'sha256:{e["zip_sha256"]}')), [])
+        self.assertIn('has changed', vk_catalog.check([e], lambda url: rel('sha256:' + '0' * 64))[0])
+        self.assertIn('no longer', vk_catalog.check([e], lambda url: rel('x', 'other.zip'))[0])
