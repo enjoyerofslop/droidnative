@@ -262,6 +262,7 @@ void front_android_present(const tex_t *t, const int crop[4]) { (void)t; (void)c
 // ---------- Vulkan ----------
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkSurfaceKHR g_surf; static VkSwapchainKHR g_sc; static VkImage g_img[8]; static uint32_t g_nimg; static VkFormat g_fmt; static VkExtent2D g_ext2;
+static int g_sc_srgb, g_sc_has_srgb;   // the swapchain made in R8G8B8A8_SRGB; the surface lists it (sc_encoding)
 static VkCommandPool g_cpool; static VkCommandBuffer g_cb; static VkBuffer g_stg; static VkDeviceMemory g_stgm; static void *g_stgp; static VkDeviceSize g_stg_sz;
 static VkFence g_fence; static VkSemaphore g_acq, g_done;
 static char g_vk_why[160];   // the call that failed last, for the fallback's line (vk_window_first)
@@ -330,8 +331,10 @@ static int vk_window_up(ANativeWindow *w) {
     VkSurfaceCapabilitiesKHR cap; VKC(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, g_surf, &cap));
     uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surf, &nf, NULL);
     VkSurfaceFormatKHR fm[32]; if (nf > 32) nf = 32; vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, g_surf, &nf, fm);
-    g_fmt = fm[0].format; VkColorSpaceKHR cs = fm[0].colorSpace;
-    for (uint32_t i = 0; i < nf; i++) if (fm[i].format == VK_FORMAT_R8G8B8A8_UNORM) { g_fmt = fm[i].format; cs = fm[i].colorSpace; }
+    g_fmt = fm[0].format; VkColorSpaceKHR cs = fm[0].colorSpace; g_sc_has_srgb = 0;
+    for (uint32_t i = 0; i < nf; i++) if (fm[i].format == VK_FORMAT_R8G8B8A8_SRGB) g_sc_has_srgb = 1;
+    VkFormat want = g_sc_srgb && g_sc_has_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;   // the frame's encoding (sc_encoding)
+    for (uint32_t i = 0; i < nf; i++) if (fm[i].format == want) { g_fmt = fm[i].format; cs = fm[i].colorSpace; }
     g_ext2 = cap.currentExtent.width != 0xFFFFFFFFu ? cap.currentExtent : (VkExtent2D){(uint32_t)ANativeWindow_getWidth(w), (uint32_t)ANativeWindow_getHeight(w)};
     // The picture is drawn upright in the window's orientation (the extent above) with the identity transform, and the compositor rotates it for the
     // display; the current transform (90° in landscape) would ask for a picture drawn pre-rotated
@@ -463,6 +466,17 @@ static uint64_t g_shown;
 // The swapchain follows the window: made again when the window's size differs from it, or when presenting reports it out of date. Launched while the screen was
 // locked, the app got a 1x1 window first and kept a 1x1 swapchain, which the compositor stretched over the screen (one texel of the picture: whole-screen colour flicker)
 static int g_sc_stale;
+// The swapchain in the presented frame's encoding. A blit from an sRGB image decodes it to linear, and one into a UNORM image stores linear values unencoded, so
+// Link's Awakening's RGBA8_SRGB window shown in a UNORM swapchain was a gamma too dark (its bytes are right: the dump's present.png showed them). With the
+// swapchain in sRGB as well, the blit decodes and encodes again and carries the frame's bytes. Made again when the frame's encoding changes, where the surface
+// lists R8G8B8A8_SRGB (Android's surfaces do); DM_VK_SC_SRGB=0 keeps UNORM, as before
+static int sc_encoding(VkFormat f) {   // 1: the swapchain is to be made again (the frame not shown)
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_SC_SRGB"); on = !(e && *e == '0'); }
+    int srgb = on && (f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_A8B8G8R8_SRGB_PACK32);
+    if (srgb == g_sc_srgb || (srgb && !g_sc_has_srgb)) return 0;
+    LOG("[front] the frame is %s (format %d): swapchain made again in %s", srgb ? "sRGB" : "not sRGB", (int)f, srgb ? "R8G8B8A8_SRGB" : "R8G8B8A8_UNORM");
+    g_sc_srgb = srgb; g_sc_stale = 1; return 1;
+}
 static void sc_follow_window(void) {
     if (!g_app || !g_app->window || !g_sc) return;
     int ww = ANativeWindow_getWidth(g_app->window), wh = ANativeWindow_getHeight(g_app->window);
@@ -509,6 +523,7 @@ static int frame_draw(void) {
     if (!g_sc || (st != ST_GAME && st != ST_DEMO)) return 0;
     vkb_frame fr; if (!vkb_frame_lock(&fr)) return 0;
     if (fr.n == g_shown) { vkb_frame_unlock(); return 1; }
+    if (sc_encoding(fr.fmt)) { vkb_frame_unlock(); return 1; }   // shown once the swapchain is made again (sc_follow_window)
     vkWaitForFences(g_dev, 1, &g_fence, 1, UINT64_MAX);
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(g_dev, g_sc, 100000000ull, g_acq, VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) g_sc_stale = 1;   // made again before the next frame (sc_follow_window); not on SUBOPTIMAL, which the identity transform in landscape gives every frame

@@ -344,6 +344,16 @@ Numbered in the order they were found, so links to a number stay right:
     - **Rare long frames** of 90–120 ms remain in warm battles: a few pipelines the background builder leaves to the replay thread (a target drawn for the first
       time), about 48 ms each, and an 84 ms submission with none, not explained yet.
 
+17. **Fixed: Final Fantasy Resonance's first field had no flames on the Odin 2**: the pixel-art flames along the road were black holes, where the Pad 3 and the S25 Edge
+    drew them.
+    - Its 35 flame cards a frame (vertex shader `19274e72bf8f5d0d`) were binned nowhere. Qualcomm's Adreno 740 driver bins a pass with a position-only copy of
+      the vertex shader, and that copy read Unreal's clip matrix (c3 rows 0-3, constant indices) as garbage. Turnip (`DM_VK_DRIVER`) drew them.
+    - **Fix.** `spv_android.py` `pos_rows` (`ANDROID_CHAIN` 6) lets a vertex shader's position read its constant buffer rows at run time, behind a specialization constant the
+      replay sets only on Qualcomm's Adreno 7xx driver and only for the vertex shaders a game's profile names (FF's `vk_pos_rows`: the flames' vertex shader)
+      ([rendering.md](../../docs/reference/rendering.md#a-vertex-shaders-position-lost-in-the-adreno-740s-binning-copy)).
+    - **Check** (the Odin 2, main `b75f9719` against the fix, a warm-up and 2 runs each): FF's field at 42.1 fps on both, GPU 12.4 ms on main without the flames and
+      13.0 ms with them; Animal Crossing's island 8.6–8.8 ms on both, Skyward Sword HD's Skyloft 3.7–3.8 ms on both, as their profiles name no shader.
+
 ## Reading the numbers
 
 - **Cold pipelines.** Because of problem 5 (since fixed), every run here began without the driver binaries of the pipelines earlier runs made, most of all on

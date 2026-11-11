@@ -28,7 +28,7 @@ static int shadow_rt(const p_set_rt *rt) {   // OP_SET_RT, under the replay's lo
     if (g_sh_on < 0) shadow_load();
     if (!g_sh_on || !rt->depth) return 0;
     for (int i = 0; i < rt->n && i < 8; i++) if (rt->color[i]) return 0;
-    vtex *v = vt_get(rt->depth); if (!v) return 0;
+    vtex *v = vt_get_w(rt->depth); if (!v) return 0;
     uint32_t lv = rt->has_dview && rt->dview.set_levels ? rt->dview.base_level : 0, w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
     if (g_sh_sq ? w != h || w < g_sh_sq : w != g_sh_w || h != g_sh_h) return 0;
     static struct { uint32_t w, h; int f; } seen[4]; static int nseen;   // the first shapes caught, each logged once: a run's log names the game's shadow maps

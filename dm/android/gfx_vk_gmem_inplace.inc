@@ -23,15 +23,19 @@ static int gm_seg_at(uintptr_t a) {   // the piece holding a, or -1 (caller hold
 }
 // a read-only storage buffer [addr, addr + n): 1 with *b, *off, *range the piece's buffer to bind; 0: copy it as before. The replay's thread, under g_bk, with a chunk open
 static int gm_inplace(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *off, VkDeviceSize *range) {
-    if (!n || n > g_vk.props.limits.maxStorageBufferRange || !C || !g_ngm || !ip_on() || !gm_on()) return 0;
+    if (!n || n > g_vk.props.limits.maxStorageBufferRange || !C || (!g_ngm && !atomic_load(&g_lz_any)) || !ip_on() || !gm_on()) return 0;   // (nothing placed yet but chunked pools: a binding may place its chunks)
     static struct { uint64_t a, n, seq; } memo[512];   // the stamps already made by this chunk: a buffer is often bound by many draws of one chunk
     unsigned h = (unsigned)((addr >> 6) ^ (addr >> 17) ^ n) & 511;
     VkDeviceSize al = g_vk.props.limits.minStorageBufferOffsetAlignment ? g_vk.props.limits.minStorageBufferOffsetAlignment : 1;
     pthread_mutex_lock(&g_gm_mu);
     int i = gm_seg_at((uintptr_t)addr);
-    if (i < 0) { pthread_mutex_unlock(&g_gm_mu); return 0; }
+    if (i < 0) {   // in a chunked pool, its chunks not placed yet: placed now, for this binding (gfx_vk_gmem_lazy.inc)
+        pthread_mutex_unlock(&g_gm_mu);
+        if (!gm_lazy_bind(addr, n)) return 0;
+        pthread_mutex_lock(&g_gm_mu);
+        if ((i = gm_seg_at((uintptr_t)addr)) < 0) { pthread_mutex_unlock(&g_gm_mu); return 0; } }
     const gm_seg *s = &g_gm[i]; VkDeviceSize o = (VkDeviceSize)(addr - s->lo);
-    if (addr + n > s->hi) { pthread_mutex_unlock(&g_gm_mu); g_ip_span++; return 0; }
+    if (addr + n > s->hi) { pthread_mutex_unlock(&g_gm_mu); g_ip_span++; gm_lazy_cross(addr); return 0; }   // (a chunked pool: made one allocation at the next submission, gfx_vk_gmem_lazy.inc)
     if (o % al) { pthread_mutex_unlock(&g_gm_mu); g_ip_unal++; return 0; }
     if (s->rd && !(memo[h].a == addr && memo[h].n == n && memo[h].seq == C->seq)) {
         uint64_t sq = C->seq; for (size_t p = (size_t)(o >> 12), e = (size_t)((o + n - 1) >> 12); p <= e; p++) s->rd[p] = sq;

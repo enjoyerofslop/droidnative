@@ -481,6 +481,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_android_oodle` covers the rounds (a two-layer chain settles in two rounds, with no zeros sent), the job and output formats, and the header test. It passes on macOS and on Windows 11 (Python 3.14).
 - **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), with `DM_UE_DECODE=phone` and the Android extraction's archives moved away, a OnePlus Pad 3 doing the decode: 5,919 shader groups (74,244 shaders) in three jobs of 2 to 3 s, the whole step 22 s with the host built and installed. Both archives and the stamp came out byte-identical to the Mac host's.
 
+### A phone's Oodle job counted as unfinished after it finished
+
+- **Symptom:** the Android build stops at its UE shader decode with `the Oodle job on the phone did not finish (… DM_OODLE_JOB: OodleLZ_Decompress at main+0x…)`, or `(the game stopped before it decoded anything)`, and `logs/oodle_phone_1.log` either ends at that line or is empty. The phone shows the game start and close within a second. logcat names no crash: `Zygote: Process … exited cleanly (0)`.
+- **Cause:** the job succeeded. The host writes its whole output, logs `records decoded` and calls `_exit` (`dm/host/hle_oodle.c`). On Android, stderr reaches `log.txt` and logcat through a thread that reads a pipe (`front_android.c` `log_reader`), and `_exit` can end the process before that thread has written the last lines. `scripts/android_oodle.py` took the job as done only when `log.txt` said `records decoded`, so it reported a failure and deleted the good output. On an Ayn Odin 2 every job's log stopped at the decoder's address; on an AYN Thor `log.txt` stayed empty (droidplay-core#228), so the thread had written nothing at all.
+- **Fix:** when the game has exited without that line, `android_oodle.py` takes the job's output file if the game left one. The copy's size check and `read_out` then check it is whole, as they do for any job. A job that stops early without output now adds to its log what the phone shows (`Phone.evidence`): `ls -l` of the app's files folder, logcat's lines of the app, of Zygote and ActivityManager starting and ending its process, and of any crash, and the Launcher's toast for a missing game or host.
+- **Check:** `test_android_oodle` (`PhoneTest`): a game gone without its last line is taken at its output, which needs no evidence; a gone game without output names the early stop and logs `ls -l` and logcat. Both fail on the code before the fix.
+- **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md) on an Ayn Odin 2 (Adreno 740, Android 13), built on a Mac with `DM_UE_DECODE=phone`. Before the fix the first job stopped the build; with it, three jobs decoded 74,244 shaders, and both archives and the stamp were byte-identical to the Mac host's. A tester's AYN Thor (Adreno 740, Android 13), building on Windows, hit it first (droidplay-core#228).
+
 ### IoStore patch containers keep their shader groups in the base container
 
 - **Symptom:** `ValueError: …/Glow-Switch_0_P.utoc: shader group 0 has no chunk` from `uepak.py io_archive` while the NSP script decodes the shaders (`decode_ue_shaders`, after `[4/8] UE shader decode`).
@@ -845,6 +853,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - Integer textures and images read and written through float declarations (an `RGBA8_UINT` texture read by `texture3d<float>` and bit-cast, `R16_UINT` / `R32_UINT` buffers through `texture_buffer<float>`, integer stores into a float-declared `texture3d` image) were checked on an Apple GPU: all keep the integer bits, so they need no facts.
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the volumetric lightmap's indirection texture, the light grid buffers).
+
+### Texture array layers keep integer locals
+
+- **Symptom:** a material's array layers all return layer 0's sample, although the bound image view has every layer. On an Adreno, Ocarina of Time's three lightmap layers read the first, and its lighting came out much brighter before bloom.
+- **Cause:** `StructuredProgram.GetVarTypeFromUses` types a copied or selected local by the instruction table's type for its first use, and the table gives FP32 for every `TextureSample` source, the integer array layer too. A layer picked by `MOV 1` or `MOV 2` on two paths went through float locals as the bit patterns 1 and 2 (denormals), bit-cast back to an integer before the sample converts it. The SPIR-V has no relaxed precision on that path and every step keeps the bits, but Adreno's large fragment pipelines read the converted layer as 0 (a compute shader with the same steps did not), so this is a driver's path, not a general rule.
+- **Fix:** `GetSourceVarType` types the layer source of a `TextureSample` on an array texture S32, at the index `GenerateSampledImageLoad` and `GenerateTextureSample` read it from: after the texture's and a separate sampler's descriptor-array indices, the texture's coordinates. The locals keep the integer up to the conversion at the sample; other sources keep the table's types. A chain change: `StructuredProgram.cs` is in the chain's fingerprint (`dmsh_chain.py`), and Android's `ANDROID_CHAIN` 6 translates its older outputs again.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 -m unittest dm/tools/tests/test_texture_layer_type.py`: the old translator writes the two layers as the floats `2.8e-45` and `1.4e-45`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on Android, by DeathKhan's nx2android fork ([5164b63](https://github.com/DeathKhan/nx2android/commit/5164b63d07bc3613c2fba4beb4d4817ddd11a476)). Not seen on the Mac.
 
 ### Integer-typed vertex inputs fed normalized formats
 
@@ -1243,6 +1259,22 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#shaders): 168 compute shaders of `DrivePassShaderDefault` declare 48 KB (`spvUnsafeArray<uint, 12288>`), 84 of them with barriers and none with shared atomics; all 168 compile rewritten. From the title to the first race all their dispatches are direct, of 1 to 3 workgroups, 6 a frame in the race.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_tg_spill.py` (the rewritten kernel compiles where the Metal compiler is installed, and with Xcode runs over 1,024 workgroups on this Mac's GPU, each summing data its workgroup wrote to its shared memory); `make -C dm/gfx/tests check_t_tg_spill` runs `dispatch` over 1,024 such workgroups, direct and indirect, the indirect counts written by the GPU after the CPU's copy named one workgroup.
 
+### Compute shared memory past the GPU's limit on Vulkan
+
+- **Symptom:** Android only, on Qualcomm's Adreno 830 driver (0x80320001 on a Galaxy S25 Edge, 0x8032004a on a OnePlus Pad 3): a compute dispatch that never ends. Three submissions in a row run about 250 ms until the driver's hang recovery cuts them short, then `vkQueueSubmit failed: -4` (the device lost), with fault addresses that look like floats (`0x3f800580`) or null plus an offset. GPU breadcrumbs (`DM_VK_BC`) name the dispatch, begun and never ended.
+- **Cause:** the translator declares Maxwell's shared memory as a Workgroup array of 32-bit words at its full size, up to 48 KB. A Vulkan module may declare at most `maxComputeSharedMemorySize`, which is 32,768 bytes on that driver. Qualcomm's compiler takes the module anyway, and the dispatch runs in 0.2 ms when it is the only work. In the game it hangs. Turnip on the same GPU and Samsung's Xclipse 950 driver run the same module. The Mac moves such memory out ([Compute shared memory past 32 KB](#compute-shared-memory-past-32-kb)); the Android path left it in place.
+- **Fix:** `spv_tgspill.h`, run in `lm_code` (`gfx_vk_draw.inc` `spv_fit_tgs`) only on a module whose Workgroup storage is past the GPU's limit (`DM_VK_SHARED_MAX` sets a smaller one; `DM_SPV_TGSPILL=0` turns it off):
+  - Each Workgroup array gets a place in one storage buffer at binding `SPV_TGS_BINDING` (110): a region per workgroup at the workgroup's index in the dispatch's grid, from `WorkgroupId` and `NumWorkgroups`, computed at the entry point's start into a Private variable. Each array has its own offset in the region.
+  - Every access chain on an array becomes one on the buffer.
+  - Barriers and atomics with Workgroup memory semantics also take UniformMemory, so they order the buffer's writes as they did the shared memory's.
+  - `sh_get` adds the binding to the shader's layout. `stage_set` binds a slice of the chunk's arena of the groups times the region's size (`g_cdim`, an indirect dispatch's counts read already).
+  - A module whose arrays aren't all of one 32-bit type, or that uses them otherwise than through one element, stays as it is, with a red line.
+- **Check:**
+  - `dm/tools/tests/test_spv_tgspill.py`: the rewritten module passes `spirv-val`, has no Workgroup storage left, binds the buffer at 110, adds `NumWorkgroups` to the interface, gives the barrier's and the atomic's semantics UniformMemory, and places the second array at its offset. Arrays of vectors, and a whole-array use, are left alone.
+  - With `DM_SPV_DIR` set to Mario Kart World's packed shaders: all 168 of its compute modules past 32 KB are rewritten and valid.
+  - Mario Kart World on a OnePlus Pad 3 with Qualcomm's driver: about 11 minutes through the attract drive, the menus and a race with no slow submission or GPU loss. With `DM_SPV_TGSPILL=0`, the GPU was lost 17 s in.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) on a Galaxy S25 Edge and a OnePlus Pad 3: `2a89b6d4df731b8d`, a 24-bone skeleton's animation, then `a8310cf7c7acd0fe`, both among the 168 kernels of `DrivePassShaderDefault` that declare 48 KB.
+
 ### Uniform references past the first kilobyte
 
 - **Symptom:** `[RED] shader <key>_b reflection conversion failed: fetch call 0: frag_pos uniform reference out of range`; the shader does not load and its draws are skipped.
@@ -1523,6 +1555,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Note:** run standalone on fixed inputs, 4 times each, the 10 translated dispatches gave the same output every time on an M4 Pro, on chain `dedc9391c30b` and on `39417042cfe8` ([issue 1893](https://github.com/seedds/nxnative/issues/1893) reported outputs that change from run to run on an M1 Pro, measured by another harness; not reproduced).
 - **Note:** the host's network rounds each HMMA's f16 accumulator once per 8 products, as the translated helper does since [HMMA rounds its f16 accumulator once per 8 products](#hmma-rounds-its-f16-accumulator-once-per-8-products) (resolved; before that both rounded after every product, as `simdgroup_half8x8` does, and differed from the Switch in the low bits of most HMMAs). The host's network follows the helper, and `test_ndve_engine.py` fails when the two differ.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate): its title and opening movies ([issue 1375](https://github.com/seedds/nxnative/issues/1375), PR #1894).
+
+### The NDVE movie network left out on Vulkan
+
+- **Symptom:** (Android, Vulkan) on an Adreno 740 (Ayn Odin 2, Qualcomm's driver 0x802a4000), Ocarina of Time's title and menus run at 0.8 fps from about 5 s after launch. Every frame's submission takes about 1,200 ms on the GPU (`[RED] [vk] submission <n> took 1200 ms on the GPU`), and the movie behind the title is black. On an Adreno 840 (Galaxy Z Fold 8) the title ran at 30 fps, with 36.8 ms of its 38 ms GPU frame in one dispatch.
+- **Cause:** `nn::ndve`'s network ([the NDVE movie network by the host](#the-ndve-movie-network-by-the-host)) dispatches 14 compute shaders a movie frame. Translated, they are emulated HMMA: SPIR-V modules of up to 2.2 MB, straight-line code with thousands of local variables and no loops. Qualcomm's compiler (Adreno 840) never finished the largest U-Net shader, so the U-Net's 8 were left out. The colour conversion before it (`49dff010b9832251`), and the last convolution (`5a7d69b067a7f011`) and NDSR upscaler (`4f41ccf24f163e0d`) after it, still ran without the U-Net's output, for a picture that stayed black. A `prof_now` frame on the Adreno 740 times the upscaler at 790 ms and the last convolution at 432 ms, against 36.8 ms for the last convolution on the 840. With no loop in either shader, nothing bounds them: why the 740's driver is so much slower on them is not known.
+- **Fix:** `gfx_vk_draw.inc` `ndve_left_out` leaves out every compute shader of `Movie/Ndve/Ndve-Nvn2-vid_seq5.dat` (`shader_map.tsv`: 2 NDSR, 20 NDVE), as Banana Native does. The movie stays black, as it was. `DM_VK_NDVE=1` runs them.
+- **Check:** Odin 2, a host from this change swapped into the device's own APK, `bench_android.tsv` route `title`: 60.0 fps, frame p50 16.7 / p95 18.7 ms, GPU p50 1.27 ms, against 0.8 fps and 1,199 ms before. The log says the network's dispatches are left out, and has no slow-submission line. The title's movie background is black before and after.
+- **Open:** the movie itself on Vulkan: the decoded AV1 picture shown without the network, or the network as the host's own compute kernels, as `ndve_engine.metal` does on the Mac.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android): its title and menus on an Odin 2.
 
 ### Driver-segment reads outside fragment shaders
 

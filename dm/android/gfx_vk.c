@@ -36,7 +36,9 @@
 #include "ds_texels.h"   // depth / stencil readbacks rebuilt in NVN's layouts (mtl_read_texels, copy_t2b)
 #include "spv_narrow.h"   // each subgroup of a GPU narrower than 32 lanes a warp of its own (gfx_vk_draw.inc spv_fit_narrow)
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
+#include "spv_tgspill.h"   // compute shared memory past the GPU's limit from a storage buffer (gfx_vk_draw.inc spv_fit_tgs)
 #include "spv_precise.h"   // Maxwell's FMUL and FADD unfused in the shaders that place vertices (gfx_vk_draw.inc spv_fit_precise)
+#include "spv_bind.h"   // a set's far-apart binding numbers made dense, for drivers that size a layout by its highest (gfx_vk_draw.inc sh_get, gfx_vk_lmod.inc lm_code)
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
 #include "nvn_queue.h"   // the queue scheduler (hle_nvn.c nvn_queue.inc): event publication and GPU progress
@@ -278,6 +280,7 @@ static int stg_new(stg_t *s, VkDeviceSize n) {
     s->n = n; return 1;
 }
 static void stg_free(stg_t *s) { if (s->b) { vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); atomic_fetch_add(&g_stg_frees, 1); } memset(s, 0, sizeof *s); }
+#include "gfx_vk_bc.inc"   // DM_VK_BC: GPU breadcrumbs around every dispatch, read when the GPU hangs or is lost
 
 // ---------------- Submissions: chunks ----------------
 // The commands go to the GPU in chunks: a command buffer with everything the GPU reads through it (staging buffers, the draws' arena, descriptor pools, texel
@@ -609,12 +612,13 @@ static void gpu_fault_log(VkResult r) {   // once, from whichever thread sees th
         LOG("[vk]   fault: %s at %#llx (precision %#llx)", (unsigned)ad[i].addressType < 7 ? kind[ad[i].addressType] : "?", (unsigned long long)ad[i].reportedAddress, (unsigned long long)ad[i].addressPrecision);
     for (uint32_t i = 0; i < fc.vendorInfoCount; i++)
         LOG("[vk]   vendor: \"%s\", code %#llx, data %#llx", vd[i].description, (unsigned long long)vd[i].vendorFaultCode, (unsigned long long)vd[i].vendorFaultData);
+    bc_report("device lost", 0);
 }
 // the completion thread: c took ns on the GPU, its fence gave fr; cut: its end timestamp was never written (the driver's hang recovery skipped the rest of it)
 static void gpu_slow(chunk *c, VkResult fr, uint64_t ns, int cut) {
     if (fr != VK_SUCCESS) gpu_fault_log(fr);
     static int nrep; if (nrep >= 3) return;
-    nrep++; int n = c->ncr < CR_MAX ? c->ncr : CR_MAX;
+    nrep++; bc_report("a slow submission", c->seq); int n = c->ncr < CR_MAX ? c->ncr : CR_MAX;
     LOG("[RED] [vk] submission %llu took %.0f ms on the GPU%s%s (the one before had completed): it recorded %d passes, draws and dispatches, the last %d of them:", (unsigned long long)c->seq, ns / 1e6,
         cut ? ", its end timestamp never written (the driver's hang recovery cut it short)" : "", fr == VK_ERROR_DEVICE_LOST ? ", and its fence reports the device lost" : "", c->ncr, n);
     for (int k = 0; k < n;) {   // a run of the same crumb (Breath of the Wild's chunks hold runs of 17 alike draws) is one line, "× run"
@@ -1043,19 +1047,24 @@ static void *chunk_thread(void *arg) {
 // Kept sorted by start, found by binary search, and remembered per thread (the last PC_RECENT pools found, valid while g_pool_gen is unchanged: every add and removal bumps it),
 // as nvn_mtl.m's pool index does. Every uniform and storage buffer of every draw asks here whether it lies in a pool; a scan of every pool under the lock took 20% of Breath of
 // the Wild's render thread on an Ayn Odin 2 (mtl_addr inlined into stage_set, about 3,300 draws a frame)
-typedef struct { const uint8_t *lo, *hi; uint8_t how; } pool_rng;   // how: the GPU addresses the game took in it (mtl_pool_addressed): bit 0 a buffer's (the whole pool), bit 1 a texture's
+typedef struct { const uint8_t *lo, *hi; uint8_t how; int flags; } pool_rng;   // how: the GPU addresses the game took in it (mtl_pool_addressed): bit 0 a buffer's (the whole pool), bit 1 a texture's; flags: NVN's
 static pool_rng *g_pools; static int g_npool, g_cappool; static pthread_mutex_t g_pool_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_pool_gen = 1;
 enum { PC_RECENT = 8 };
 static __thread struct { uint64_t gen; unsigned next; pool_rng r[PC_RECENT]; } t_pc;   // an empty entry has hi NULL
 static void gm_place(const void *mem, uint64_t size, int live), gm_unplace(const void *mem);   // raw global memory (gfx_vk_gmem.inc): the pool's pages as placed Vulkan memory, with DM_VK_RAW_GMEM=1
+// The pool's NVN flags, which hle_nvn.c gives just before mtl_pool_add on the same thread (a weak hook there): raw global memory leaves shader-code pools unplaced (gfx_vk_gmem.inc)
+static __thread const void *t_pf_mem; static __thread int t_pf_flags;
+void mtl_pool_flags(const void *mem, uint64_t size, int flags) { (void)size; t_pf_mem = mem; t_pf_flags = flags; }
+static int gm_code_skip(int flags);   // gfx_vk_gmem.inc
 void mtl_pool_add(const void *mem, uint64_t size) {
-    gm_place(mem, size, 0);   // a pool made again where one had a buffer address: placed now, before the replay knows the range (gfx_vk_gmem.inc)
+    int flags = t_pf_mem == mem ? t_pf_flags : 0;
+    if (!gm_code_skip(flags)) gm_place(mem, size, 0);   // a pool made again where one had a buffer address: placed now, before the replay knows the range (gfx_vk_gmem.inc)
     pthread_mutex_lock(&g_pool_mu);
     if (g_npool == g_cappool) { g_cappool = g_cappool ? 2 * g_cappool : 64; g_pools = realloc(g_pools, g_cappool * sizeof *g_pools); }
     int at = g_npool; while (at > 0 && g_pools[at - 1].lo > (const uint8_t *)mem) at--;   // pools come and go rarely: a move keeps the order
     memmove(g_pools + at + 1, g_pools + at, (size_t)(g_npool - at) * sizeof *g_pools); g_npool++;
-    g_pools[at] = (pool_rng){mem, (const uint8_t *)mem + size};
+    g_pools[at] = (pool_rng){mem, (const uint8_t *)mem + size, 0, flags};
     atomic_fetch_add_explicit(&g_pool_gen, 1, memory_order_release);
     pthread_mutex_unlock(&g_pool_mu);
 }
@@ -1240,6 +1249,7 @@ typedef struct {
     int pkg; uint64_t stamp, seen; const void *span; uint8_t *edge[2]; uint32_t edge_n[2];
     uint64_t rt_last; uint32_t rt_runs;   // the last present (+1) that drew into it as a pass's target, and in how many presents in a row up to it (gfx_vk_draw.inc rt_note)
     int refs, shared, mutable_, fixed_fmt; uint64_t used;   // mutable_: views in another format of the same texel size (a texture view's format); fixed_fmt: only its format and its sRGB twin (vt_create)   // texture objects (serials) resolving to it; in the sharing table; g_fence at its last lookup
+    uint64_t mem_bytes, last_present, last_w; uint8_t gpu_w, filled, pool_read, evict;   // eviction (gfx_vk_evict.inc): its memory's size, the presents of its last lookup and its last write by the GPU, written by the GPU since it was made, filled from its storage, read through the texture pool by ID, chosen
     VkImageUsageFlags usage; int ext_store;   // its usage; ext_store: STORAGE for views of another format only (EXTENDED_USAGE, vt_storage_up), so each view takes the usage its format has (view_get)
 } vtex;
 static nvn_hmap g_tex = {.klen = 8}, g_cpuw = {.klen = 8};   // serial → vtex; serials the CPU wrote (WriteTexels). Keyed by the 8-byte serial
@@ -1263,12 +1273,15 @@ void vkb_frame_forget(uint64_t serial);
 // g_vt_gen: bumped (under g_bk) whenever a vtex is freed or a serial stops resolving to the vtex it did (vt_destroy, the g_tex deletions): a draw's textures resolved in
 // stage_textures are used again in stage_set only while it has not moved (gfx_vk_draw.inc tex_once)
 static uint64_t g_vt_gen = 1;
+static uint64_t g_im_live, g_im_n;   // the textures' image memory alive and their count (under g_bk; the periodic line reads them as they are)
+static void im_in(vtex *v, uint64_t b) { v->mem_bytes = b; g_im_live += b; g_im_n++; }
+static void im_out(vtex *v) { if (v->mem_bytes) { g_im_live -= v->mem_bytes; g_im_n--; v->mem_bytes = 0; } }
 static void vt_destroy(vtex *v) {   // with the replay's lock held; the front end may be drawing the image: it is taken off the presented frame first (vkb_frame_forget waits for that)
     if (!v) return;
     g_vt_gen++;
     vkb_frame_forget(v->serial);
     if (v->img) views_drop(v->img);   // the image, its views and framebuffers go when the current chunk completes: recorded and submitted commands may use them
-    dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem);
+    dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem); im_out(v);
     free(v->edge[0]); free(v->edge[1]); free(v);
 }
 static void vt_clear_new(vtex *v) {   // fresh Switch memory reads as 0
@@ -1375,7 +1388,7 @@ static vtex *vt_create(const tex_t *t) {
     uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     VkMemoryAllocateInfo ma = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt == UINT32_MAX ? vkb_mem_type(mr.memoryTypeBits, 0) : mt};
     if (vkAllocateMemory(g_vk.dev, &ma, NULL, &v->mem) != VK_SUCCESS) { RED_ONCE(16, "image memory of %llu bytes failed", (unsigned long long)mr.size); vkDestroyImage(g_vk.dev, v->img, NULL); free(v); return NULL; }
-    vkBindImageMemory(g_vk.dev, v->img, v->mem, 0);
+    vkBindImageMemory(g_vk.dev, v->img, v->mem, 0); im_in(v, mr.size);
     vt_clear_new(v);
     return v;
 }
@@ -1432,8 +1445,8 @@ static int vt_storage_up(vtex *v) {
     vkCmdCopyImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, nr, r);
     cb_barrier();
     vkb_frame_forget(v->serial);
-    views_drop(v->img); dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem);
-    v->img = img; v->mem = mem; v->usage = u; v->ext_store = ext; v->mutable_ = 1; v->fixed_fmt = 0; g_vt_gen++;
+    views_drop(v->img); dead_add(3, (uint64_t)v->img); dead_add(4, (uint64_t)v->mem); im_out(v);
+    v->img = img; v->mem = mem; v->usage = u; v->ext_store = ext; v->mutable_ = 1; v->fixed_fmt = 0; g_vt_gen++; im_in(v, mr.size);
     if (g_st_up++ < 8) LOG("[vk] texture ser=%llu %ux%u format %d bound to an image slot without storage use: made again with it%s (%llu so far)", (unsigned long long)v->serial, v->w, v->h, f,
                            ext ? (f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 ? ", stored through an R32_UINT view, RGB9E5 packed by the shader" : ", stored through its UNORM twin") : "", (unsigned long long)g_st_up);
     return 1;
@@ -1623,7 +1636,8 @@ static int tex_once(void);   // gfx_vk_draw.inc
 static _Atomic int g_vkb_up;
 static int vkb_up(void) { if (atomic_load_explicit(&g_vkb_up, memory_order_acquire)) return 1; if (!vkb()) return 0; if (tex_once()) atomic_store_explicit(&g_vkb_up, 1, memory_order_release); return 1; }
 // The image of a texture: made at first use; a texture whose content lives in guest memory is uploaded, and uploaded again when its pages were written
-static vtex *vt_get(const tex_t *ct) {
+static void ev_made(vtex *v);   // gfx_vk_evict.inc
+static vtex *vt_get_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial || !vkb_up()) return NULL;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(30, "texture object no longer valid (magic %#x)", t->magic); return NULL; }
@@ -1650,12 +1664,15 @@ static vtex *vt_get(const tex_t *ct) {
         if (s) { vt_ref(t->serial, s); s->used = atomic_load(&g_fence); return s; }
     }
     if (!(v = vt_create(t))) return NULL;
-    v->used = atomic_load(&g_fence);
+    v->used = atomic_load(&g_fence); ev_made(v);
     if (pkg) { v->pkg = 1; if (vt_upload(v, t, 1)) { g_pkg_uploads++; edges_take(v, t); } }
-    else if (t->pool) { tex_init_fill(v, t); share_take_over(&k); nvn_hm_put(&g_share, &k, v); v->shared = 1; }
+    else if (t->pool) { v->filled = (uint8_t)tex_init_fill(v, t); share_take_over(&k); nvn_hm_put(&g_share, &k, v); v->shared = 1; }
     vt_ref(t->serial, v);
     return v;
 }
+static vtex *vt_get(const tex_t *ct) { vtex *v = vt_get_(ct); if (v) v->last_present = atomic_load(&g_presents); return v; }   // its last lookup, for eviction (gfx_vk_evict.inc)
+// A lookup for what the GPU writes (a pass's target, a copy's or a clear's destination): such an image's content is the GPU's from then on, not its storage's, so it is never evicted
+static vtex *vt_get_w(const tex_t *ct) { vtex *v = vt_get(ct); if (v) { v->gpu_w = 1; v->last_w = v->last_present; } return v; }
 // A memory pool's Finalize (mtl_alias_drop_pool): the textures made on its storage go, as nvn_mtl.m evicts its shared textures; their serials may be met again on other storage
 void vt_drop_pool(const void *pool) {
     void vkb_frame_forget(uint64_t serial);
@@ -1674,6 +1691,7 @@ void vt_drop_pool(const void *pool) {
     }
     pthread_mutex_unlock(&g_bk);
 }
+#include "gfx_vk_evict.inc"   // images no draw has used for a while, evicted when their content is still in guest memory (vt_evict)
 void mtl_tex_init(const tex_t *t) { (void)t; }
 static void tex_drop(uint64_t serial) {   // g_bk held
     vtex *v = nvn_hm_del(&g_tex, &serial); nvn_hm_del(&g_cpuw, &serial);
@@ -1792,7 +1810,7 @@ static int ds_up(vtex *v, uint32_t nvn_format, unsigned level, unsigned layer0, 
 // leaves part of each row unwritten: a pool slice holds an earlier slice's bytes, so it is zeroed first and the guest gets what a buffer of its own gave (zeros)
 static void stg_zero_ds(stg_sl s, VkDeviceSize n, const vtex *v) { if (s.p && s.st >= SP_ST && v->aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) memset(s.p, 0, n); }
 static void copy_b2t(const p_copy_b2t *c) {
-    vtex *v = vt_get(c->tex); if (!v) return;
+    vtex *v = vt_get_w(c->tex); if (!v) return;
     unsigned level, layer0; if (!tex_level_layer(v, &c->view, c->has_view, &level, &layer0)) return;
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh); if (!bpb) return;
     size_t rb = (size_t)((c->r.width + bw - 1) / bw) * bpb, rows = (c->r.height + bh - 1) / bh;
@@ -1845,7 +1863,7 @@ static int fmt_int(VkFormat f) {   // an integer colour format (vk_of_mtl's): a 
 }
 static int ds_copy_draw(vtex *s, vtex *d, unsigned sl, unsigned sz, unsigned dl, unsigned dz, const p_copy_t2t *c);   // gfx_vk_dscopy.inc: one a blit cannot make, drawn
 static void copy_t2t(const p_copy_t2t *c) {
-    vtex *s = vt_get(c->src), *d = vt_get(c->dst); if (!s || !d) return;
+    vtex *s = vt_get(c->src), *d = vt_get_w(c->dst); if (!s || !d) return;
     unsigned sl, sz, dl, dz;
     if (!tex_level_layer(s, &c->sv, c->has_sv, &sl, &sz) || !tex_level_layer(d, &c->dv, c->has_dv, &dl, &dz)) return;
     VkCommandBuffer cbuf = cb(); if (!cbuf) return;
@@ -1955,7 +1973,7 @@ static VkClearColorValue clear_value(VkFormat f, const float rgba[4]) {
 }
 static void clear_color(const p_clear_color *cc) {
     if (!R.has_rt || cc->index < 0 || cc->index >= R.rt.n || !R.rt.color[cc->index]) { RED_ONCE(60, "color clear of target %d, which is not set", cc->index); return; }
-    vtex *v = vt_get(R.rt.color[cc->index]); if (!v) return;
+    vtex *v = vt_get_w(R.rt.color[cc->index]); if (!v) return;
     VkImageSubresourceRange rg = view_range(v, &R.rt.cview[cc->index], R.rt.has_cview[cc->index], VK_IMAGE_ASPECT_COLOR_BIT); rg.levelCount = 1;
     if ((cc->mask & 0xf) != 0xf || !full_scissor(v, rg.baseMipLevel)) { if (cc->mask & 0xf) clear_color_pass(cc); return; }
     // a full clear of a target the size of the bound targets' pass: in the pass (vkCmdClearAttachments), on a tiler a clear of the tile memory, instead of writing the
@@ -1967,7 +1985,7 @@ static void clear_color(const p_clear_color *cc) {
 }
 static void clear_ds(const p_clear_ds *cd) {
     if (!R.has_rt || !R.rt.depth) { RED_ONCE(62, "depth-stencil clear with no depth target set"); return; }
-    vtex *v = vt_get(R.rt.depth); if (!v) return;
+    vtex *v = vt_get_w(R.rt.depth); if (!v) return;
     VkImageAspectFlags a = (cd->depth_mask ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | ((cd->stencil_mask & 0xff) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
     a &= v->aspect; if (!a) return;
     if (((cd->stencil_mask & 0xff) && (cd->stencil_mask & 0xff) != 0xff) || !full_scissor(v, 0)) { clear_ds_pass(cd, a); return; }
@@ -1978,7 +1996,7 @@ static void clear_ds(const p_clear_ds *cd) {
     vkCmdClearDepthStencilImage(c, v->img, VK_IMAGE_LAYOUT_GENERAL, &dv, 1, &rg); cb_barrier();
 }
 static void clear_tex(const p_clear_tex *ct) {
-    vtex *v = vt_get(ct->tex); if (!v) return;
+    vtex *v = vt_get_w(ct->tex); if (!v) return;
     VkImageSubresourceRange rg = view_range(v, &ct->view, ct->has_view, VK_IMAGE_ASPECT_COLOR_BIT); rg.levelCount = 1;
     uint32_t w = v->w >> rg.baseMipLevel ? v->w >> rg.baseMipLevel : 1, h = v->h >> rg.baseMipLevel ? v->h >> rg.baseMipLevel : 1;
     if ((ct->mask & 0xf) != 0xf || ct->r.xoffset || ct->r.yoffset || (uint32_t)ct->r.width < w || (uint32_t)ct->r.height < h) { RED_ONCE(64, "texture clear of a region or with a channel mask: not done yet"); return; }
@@ -1989,6 +2007,7 @@ static void clear_tex(const p_clear_tex *ct) {
 }
 
 static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip);   // below (the pass dump's PNGs)
+#include "gfx_vk_posrows.inc"   // the vertex shaders whose position reads its constant buffer rows at run time (vk_pos_rows)
 #include "gfx_vk_draw.inc"
 
 // The front end's first window failed on a DM_VK_DRIVER driver (front_android.c vk_window_first), which has destroyed what it made: the device and instance are destroyed
@@ -2091,6 +2110,7 @@ static int rc_skips(void) {   // the clear or draw at hand is dropped
 }
 void mtl_sub_begin(void) {
     pthread_mutex_lock(&g_bk); t_bk_sub = 1; hint_note();
+    gm_lazy_tick();   // chunks of large pools placed between submissions (gfx_vk_gmem_lazy.inc)
     static __thread int placed; if (!placed) { placed = 1; void dm_android_place_thread(int done); dm_android_place_thread(0); }
     if (place_log_on()) { int c = sched_getcpu(); g_place_cpu[c >= 0 && c < 16 ? c : 15]++; g_place_n++; }
 }
@@ -2358,6 +2378,7 @@ static uint64_t g_pace_per; static int g_pace_due;   // the period of the presen
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     pthread_mutex_lock(&g_bk);
     vtex *v = vt_get(t); flush(); rec_drain();   // the frame's chunks on the queue before the front end's blit of it (rec_submit)
+    vt_evict();   // images no draw has used for a while (gfx_vk_evict.inc)
     dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents));
     if (prof_on()) { all_wait(); prof_write(); }
     if (atomic_load(&g_presents) == 30) prewarm_start();   // the pipelines of earlier sessions (gfx_vk_draw.inc), once the game draws
@@ -2464,6 +2485,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     frame, mb, g_tex.n, (unsigned long long)g_pkg_uploads, (unsigned long long)g_pkg_reuploads, (unsigned long long)(g_up_bytes >> 20), (unsigned long long)g_lsnap, (unsigned long long)g_lsnap_stale,
     (unsigned long long)atomic_load(&g_lwb_whole), (unsigned long long)atomic_load(&g_lwb_diff), (unsigned long long)(atomic_load(&g_lwb_bytes) >> 10), (unsigned long long)atomic_load(&g_lwb_same),
     atomic_load(&g_lwb_ns) / 1e6, (unsigned long long)atomic_load(&g_ab_taken), (unsigned long long)atomic_load(&g_ab_noted), (unsigned long long)atomic_load(&g_ab_clean), (unsigned long long)atomic_load(&g_ab_differ), (unsigned long long)atomic_load(&g_ab_refused));
+    ev_stat();
     if (wb_revert_on()) rv_stat(frame);
     {   static unsigned long long f0; static uint64_t n0, b0, r0, t0;   // since the last line, a frame on average
         uint64_t n = atomic_load(&g_awb_n), b = atomic_load(&g_awb_bytes), r = atomic_load(&g_awb_rb), t = atomic_load(&g_wb_ns); double fr = frame > f0 ? (double)(frame - f0) : 1;
@@ -2513,10 +2535,10 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
       if (frame > f0) LOG("[vk] GPU busy %.2f ms per frame over the last %llu frames (%llu command buffers in all); the replay waited %.2f ms per frame for a free one of %d", (double)(g - g0) / 1e6 / (double)(frame - f0), frame - f0,
                           (unsigned long long)atomic_load(&g_gpu_chunks), (double)(w - w0) / 1e6 / (double)(frame - f0), g_nchunk);
       f0 = frame; g0 = g; w0 = w; }
-    LOG("[vk] occlusion queries %llu, samples-passed reports %llu, timestamp reports %llu, queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu, made for pipelines' builds %llu, kept ones used again %llu (cumulative)",
+    LOG("[vk] occlusion queries %llu, samples-passed reports %llu, timestamp reports %llu, queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu, made for pipelines' builds %llu, kept ones used again %llu; shaders with binding numbers made dense %llu (%llu bindings; spv_bind.h) (cumulative)",
         (unsigned long long)g_q_queries, (unsigned long long)g_q_reports, (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
         (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6,
-        (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)atomic_load(&g_lm_tmp), (unsigned long long)atomic_load(&g_lm_reuse));
+        (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)atomic_load(&g_lm_tmp), (unsigned long long)atomic_load(&g_lm_reuse), (unsigned long long)g_bind_shaders, (unsigned long long)g_bind_entries);
     LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig);
     pool_stats();
     shadow_line();
@@ -2620,7 +2642,7 @@ void mtl_pool_addressed(const void *mem, uint64_t size) {   // raw global memory
     if (!gm_game()) return;
     pthread_mutex_lock(&g_pool_mu);
     int i = pool_find((const uint8_t *)mem, size ? size : 1);
-    int whole = i >= 0 && (const uint8_t *)mem == g_pools[i].lo && (const uint8_t *)mem + size >= g_pools[i].hi, first = whole && !(g_pools[i].how & 1);
+    int whole = i >= 0 && (const uint8_t *)mem == g_pools[i].lo && (const uint8_t *)mem + size >= g_pools[i].hi, first = whole && !(g_pools[i].how & 1) && !gm_code_skip(g_pools[i].flags);
     if (i >= 0) g_pools[i].how |= whole ? 1 : 2;
     pthread_mutex_unlock(&g_pool_mu);
     if (first) gm_place(mem, size, 1);   // a buffer's address: raw pointers may reach the pool from now on, so its pages become placed Vulkan memory before the game has it

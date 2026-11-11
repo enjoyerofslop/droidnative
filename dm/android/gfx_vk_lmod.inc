@@ -12,13 +12,13 @@
 // build, from the files through the same rewrites, and destroyed once the pipeline exists, which Vulkan allows. A start-up list or a game's shader warm-up builds
 // many pipelines in a row over a few shared vertex shaders, so the last modules made are kept for the next builds that name them (lk_take): DM_VK_MODULE_LAZY=N
 // keeps N idle ones (64 by default; 1 nearly none). DM_VK_MODULE_LAZY=0: every module made at once and kept
-typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha; uint64_t e5; uint8_t id[VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT]; char path[]; } lmod;   // miss: ps_variant's (0: the file as it is); alpha: spv_alpha.h's test added to the code
+typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha; uint64_t e5; const spv_bmap *bm; uint8_t id[VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT]; char path[]; } lmod;   // miss: ps_variant's (0: the file as it is); alpha: spv_alpha.h's test added to the code
 static _Atomic uint64_t g_lm_ids, g_lm_hit, g_lm_miss, g_lm_tmp, g_lm_reuse;   // modules known by their identifier; pipelines the driver's cache gave for identifiers; pipelines that needed modules after all; g_lm_lazy's modules made for builds, and kept ones a build used again
 static __thread int t_pool_info;   // what spv_pool did to the modules lm_code made since sh_get cleared it
 // The module's code as it is made (to free): the file; a fragment shader variant's unwritten inputs made constants (spv_drop_inputs), else the vertex pipeline's
-// storage made read-only where the GPU needs it (spv_readonly); then the pool set (spv_pool_fit) and the subgroup rewrites (spv_fit). first: the module's first
+// storage made read-only where the GPU needs it (spv_readonly); then the pool set (spv_pool_fit), the subgroup rewrites (spv_fit) and, last, the set's binding numbers compacted (spv_bind.h). first: the module's first
 // making, which tells *b0, logs and dumps (made again for a pipeline, it says nothing new)
-static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, uint64_t e5, int first, int *b0, size_t *onw) {
+static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, uint64_t e5, const spv_bmap *bm, int first, int *b0, size_t *onw) {
     size_t n = 0; uint32_t *code = spv_read(path, &n); if (!code) return NULL;
     if (e5) {   // a compute variant whose storage images at these bindings are E5B9G9R9 textures bound through R32_UINT views (spv_e5.h): RGB9E5 packed and unpacked by the shader
         uint32_t *s = malloc(5 * (size_t)code[3] * 4), *o = NULL; size_t need = 0, k = 0; int what = 0;
@@ -45,6 +45,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, uint64_t e5
     uint32_t *pf = NULL; size_t pn = spv_pool_fit(code, n, path, &pf); if (pn) { free(code); code = pf; n = pn; }   // the texture pool by ID moved into the pool set
     uint32_t *fit = NULL; size_t fn = spv_fit(code, n, path, &fit); if (fn) { free(code); code = fit; n = fn; }
     uint32_t *ly = NULL; size_t ln = spv_fit_layer(code, n, path, &ly); if (ln) { free(code); code = ly; n = ln; }
+    uint32_t *ts = NULL; size_t tn = spv_fit_tgs(code, n, path, &ts); if (tn) { free(code); code = ts; n = tn; }   // shared memory past the GPU's limit (spv_tgspill)
     uint32_t *pr = NULL; size_t prn = spv_fit_precise(code, n, path, &pr); if (prn) { free(code); code = pr; n = prn; }   // FMUL and FADD unfused where vertices are placed
     if (alpha) {   // NVN's alpha test, run in a wrapper entry point (spv_alpha.h); a shader it does not apply to is no module
         size_t cap = n + 256; uint32_t *o = malloc(cap * 4), fn_id = 0;
@@ -53,6 +54,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, uint64_t e5
         if (!on) { free(o); if (first) LOG("[RED] [vk] fragment shader %s: an alpha test is set, but the shader has no float vec4 colour 0 to test (an integer target or no such output): the draw keeps the shader as it is", path); return NULL; }
         code = o; n = on;
     }
+    if (bm) spv_bind_remap(code, n, bm);   // last, so every rewrite above saw the numbers the file has (spv_bind.h; sh_get gave the layout the same map)
     *onw = n; return code;
 }
 static VkShaderModule lm_create(const uint32_t *code, size_t nw, const char *what) {
@@ -64,10 +66,10 @@ static VkShaderModule lm_create(const uint32_t *code, size_t nw, const char *wha
 }
 // The module of a .spv file (and a fragment shader's variant): its identifier where the GPU takes identifiers, its path alone with g_lm_lazy, else made now. NULL: no
 // file, or the driver refused it (with identifiers or g_lm_lazy, a refusal shows when a pipeline is built)
-static lmod *lm_new_e(const char *path, uint32_t miss, int alpha, uint64_t e5, int *b0) {
-    size_t n = 0; uint32_t *code = lm_code(path, miss, alpha, e5, 1, b0, &n); if (!code) return NULL;
+static lmod *lm_new_e(const char *path, uint32_t miss, int alpha, uint64_t e5, const spv_bmap *bm, int *b0) {
+    size_t n = 0; uint32_t *code = lm_code(path, miss, alpha, e5, bm, 1, b0, &n); if (!code) return NULL;
     size_t pl = strlen(path) + 1; lmod *l = calloc(1, sizeof *l + pl); if (!l) { free(code); return NULL; }
-    memcpy(l->path, path, pl); l->miss = miss; l->alpha = alpha; l->e5 = e5;
+    memcpy(l->path, path, pl); l->miss = miss; l->alpha = alpha; l->e5 = e5; l->bm = bm;
     if (g_smid) {
         VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = n * 4, .pCode = code};
         VkShaderModuleIdentifierEXT id = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_IDENTIFIER_EXT};
@@ -78,10 +80,10 @@ static lmod *lm_new_e(const char *path, uint32_t miss, int alpha, uint64_t e5, i
     if (!l->idn && !g_lm_lazy) { VkShaderModule m = lm_create(code, n, path); if (!m) { free(code); free(l); return NULL; } atomic_store(&l->m, m); }
     free(code); return l;
 }
-static lmod *lm_new_a(const char *path, uint32_t miss, int alpha, int *b0) { return lm_new_e(path, miss, alpha, 0, b0); }
-static lmod *lm_new(const char *path, uint32_t miss, int *b0) { return lm_new_a(path, miss, 0, b0); }
+static lmod *lm_new_a(const char *path, uint32_t miss, int alpha, const spv_bmap *bm, int *b0) { return lm_new_e(path, miss, alpha, 0, bm, b0); }
+static lmod *lm_new(const char *path, uint32_t miss, const spv_bmap *bm, int *b0) { return lm_new_a(path, miss, 0, bm, b0); }
 static VkShaderModule lm_make(const lmod *l) {   // a new module from its file; VK_NULL_HANDLE: the driver refused it
-    size_t n = 0; uint32_t *code = lm_code(l->path, l->miss, l->alpha, l->e5, 0, NULL, &n); if (!code) return VK_NULL_HANDLE;
+    size_t n = 0; uint32_t *code = lm_code(l->path, l->miss, l->alpha, l->e5, l->bm, 0, NULL, &n); if (!code) return VK_NULL_HANDLE;
     VkShaderModule made = lm_create(code, n, l->path); free(code); return made;
 }
 static VkShaderModule lm_module(lmod *l) {   // the module itself, made now when it was its identifier only; VK_NULL_HANDLE: the driver refused it
