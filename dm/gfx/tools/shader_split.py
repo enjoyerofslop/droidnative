@@ -2833,10 +2833,17 @@ def scan_blob(d, label, out, depth=0, left=None):
         for m in re.finditer(b'NDSR', d):
             if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
         return
+    # A header the scan finds whose sections lie outside the file or fail their checks is left out alone, with a red line, not the file: Assassin's Creed: The Rebel
+    # Collection's .forge archives keep their shaders in compressed chunks, and five of them hold one BNSH header as compressed data's literal bytes, its offsets garbage
+    # (DataNX.forge @0x2b476795, a program at 0xba800002e496d5d). Ended by that header, the file counted as unreadable, which stops a registered profile's build
+    bad = []
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         if m.start() + 0x20 > len(d): continue   # too near the end for a BNSH header
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
-        if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc': out.extend(bnsh_shaders(d, m.start(), label))
+        if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc':
+            try: out.extend(bnsh_shaders(d, m.start(), label))
+            except SystemExit as e: bad.append(str(e).removeprefix('[RED] '))   # red(): this header's reason
+    if bad: print(f'[RED] {label}: {len(bad)} BNSH header(s) the scan found cannot be read and are left out (first: {bad[0]})', flush=True)
     if MGFX in d: out.extend(mgfx_shaders(d, label))
     if NEEDLE in d: out.extend(needle_shaders(d, label))
     if SUMO_NX in d or NVNSH in d: out.extend(sumo_shaders(d, label))
