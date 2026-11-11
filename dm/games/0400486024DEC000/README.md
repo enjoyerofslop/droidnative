@@ -77,6 +77,23 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 
 ## Android
 
+**State for 0.8.0 (2026-11-11):** In-game, blocked by the frame rate. The tier's target is the profile's 60 fps (`fps_target`), and no phone reaches half of it yet. This game's `android_defaults.txt` turns on raw global memory (`DM_VK_RAW_GMEM=1`) and the upscaler replacement (`DM_VK_UPSCALER_SQUARE=1`); with them, and with images evicted ([Images no draw looks up for a while, evicted](../../../docs/reference/rendering.md#images-no-draw-looks-up-for-a-while-evicted-android)), the picture is right and the first story scene no longer ends the game. From a Mac save:
+
+- **Adreno 830 and 840 (Qualcomm's driver):** Kokiri Forest, Saria's scene played through to Link back in control, and the Sacred Grove's Mad Scrub fight, all lit (Link, Saria and the scrubs), with no kill. Galaxy S25 Edge: 3 runs of 3. Galaxy Z Fold 8: 5 launches of the 0.8.0 build.
+  - Frame rate 13–18 fps. On the Fold, the median frame interval gives 17 fps in Kokiri Forest, 16 in Saria's scene and 22 in the Grove. Submission is CPU-bound at about 20 µs a draw, and Saria's slow shots draw twice as often as the forest.
+  - The Fold's frame rate falls by up to 1.5 fps once it reaches Android's thermal status 3 (severe), where the thermal cap closes the performance hint session. Compare runs only from the same starting thermal status.
+  - Memory on the Fold: about 10.4 GB of PSS at Saria's scene at most, the image memory 1.4–2.2 GB, raw global memory 0.4–0.46 GB placed.
+- **Xclipse 950 (Galaxy Z Flip 7):** lit at about 12 fps, 8.25 GB at most.
+- **Mali (Pixel 9 Pro XL):** lit at about 9 fps with the E5B9G9R9 storage view (#281); the native heap is about 0.4 GB with the dense binding numbers (#276).
+- **Adreno 7xx on older Qualcomm drivers** (the Ayn Odin 2's 740 at V@0676, the Moto Razr Plus 2023's 730 at V@0615): the characters are dark, because the driver rejects `OpConvertUToPtr`, the pointer conversion raw global memory's shaders use. With Turnip T30 the 740 draws them lit at about 9 fps. Pointer-free raw global memory is in progress (#286).
+- **Open:**
+  - the frame rate;
+  - the mesh-shaded foliage, left out: the Vulkan replay has no mesh stage yet. #83 draws it on `VK_EXT_mesh_shader`, but leaves white tears in the distant canopy, which aren't the mist shader's NaN (`5ad65c0eefd09c7f` and the light-tile pass `ea1bf96b72e72476` skipped, the tears stay);
+  - pale, flat water patches on Adreno;
+  - a stall of about 10 s at the first start, and after a shader-chain update, while Kokiri Forest's pipelines build.
+
+The history below is dated; the state above supersedes it.
+
 DroidPlay Core's first Switch 2 attempt, on a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Elite Gen 5, Adreno 840 with Qualcomm's driver 0x8034a013 and Vulkan 1.4.295, Android 17, 11.3 GB of RAM), branch `android/upstream-sync-20261110` (#76) with #82-#87 and #94, 2026-11-09/10. Packed with `build_android_from_nsp.py` from the NUP (the shared Mac build folder's extraction). All 42,848 shaders translate for chain 5, the 520 task and mesh shaders included, none failed; translation took 44 minutes on an M5 Pro, against 34 for chain 4, most of it in `spv_android.py`'s single-process post-pass.
 
 - What it took to draw: the dirty-texture poll (#82: the host did not link, then the replay deadlocked at its first texture rewrite), task and mesh shaders on `VK_EXT_mesh_shader` (#83), AV1 on MediaCodec (#84; `c2.qti.av1.decoder`), the fiber's pointer authentication keys (#85: SIGILL at `sdk+0x16d40c` in `nn.npln.GrpcDispatcher`, as Bionic gives each thread its own A key), nn::ndve's U-Net left out (#86: Qualcomm's compiler never finished `e6be82d835fbe4d3`) and the PlayReport::Send hook on ELF (#87: an abort in PlayRepo after a save loads).
@@ -106,7 +123,7 @@ DroidPlay Core's first Switch 2 attempt, on a Galaxy Z Fold 8 (SM-F971U1: Snapdr
     - the driver folding away the translated shaders' `isnan` tests (`SignedZeroInfNanPreserve`);
     - constant buffers copied only up to their extents.
   - The HUD (hearts, minimap, prompts, the area name) draws in every case.
-- Open, in order: raw global memory on Vulkan. It needs the table, `VK_KHR_buffer_device_address`, guest pools the GPU reads at a device address kept in step with the CPU, and the write log for stores. The Fold has no `VK_EXT_external_memory_host`, so the pools need mirrors, or guest memory made Vulkan or dma-buf memory from the start, as Banana Native maps it. #83, the task and mesh draws, is still a draft. After those: the CPU's `submit+present` (about 460 ms a frame); memory (10.2 GB of the 11.3, with 4.9 GB in zram: tight once the forest draws; leads: fewer texture bytes on the GPU, a file-backed guest pool as `DM_GUEST_FILE` gives the iPhone, or guest memory as Vulkan memory, as Banana Native maps it); the GPU time (Banana Native found agl's NDSR upscaler at 58.5 ms a frame on this GPU from register spills of gathered HMMA tiles, and false colours from shader-image views made without storage use, `vt_create`); the title's movie picture without nn::ndve's network; the CPU read of indirect mesh records.
+- Open, in order (as of 2026-11-10; raw global memory has landed since, #150 and #217): raw global memory on Vulkan. It needs the table, `VK_KHR_buffer_device_address`, guest pools the GPU reads at a device address kept in step with the CPU, and the write log for stores. The Fold has no `VK_EXT_external_memory_host`, so the pools need mirrors, or guest memory made Vulkan or dma-buf memory from the start, as Banana Native maps it. #83, the task and mesh draws, is still a draft. After those: the CPU's `submit+present` (about 460 ms a frame); memory (10.2 GB of the 11.3, with 4.9 GB in zram: tight once the forest draws; leads: fewer texture bytes on the GPU, a file-backed guest pool as `DM_GUEST_FILE` gives the iPhone, or guest memory as Vulkan memory, as Banana Native maps it); the GPU time (Banana Native found agl's NDSR upscaler at 58.5 ms a frame on this GPU from register spills of gathered HMMA tiles, and false colours from shader-image views made without storage use, `vt_create`); the title's movie picture without nn::ndve's network; the CPU read of indirect mesh records.
 - Banana Native (git.eden-emu.dev/moceure/BananaNative) runs this game on Adreno 840 phones and documents most of the above; its notes are where #85's cause came from.
 
 - **On a Galaxy Z Flip 7 (Xclipse 950, Samsung's driver 24.0.533), 2026-11-11:** memory, then the picture.
@@ -116,7 +133,7 @@ DroidPlay Core's first Switch 2 attempt, on a Galaxy Z Fold 8 (SM-F971U1: Snapdr
     - Kokiri Forest loads with the HUD and the minimap, 8.6 GB at most, with no kill. The first load's 720 pipelines took 140 s.
     - With main, #217, #244 and this: bench_android's `kokiri` route a warm-up and three times, each at about 8.2 GB, with a native heap of 140–150 MB and no kill. The window ran at 15.7, 11.7, 15.9 and 15.7 fps, GPU p50 40–54 ms. Saria's scene played to its end ("You should hurry. Catch me up later!") at 9.5 GB at most, where the Fold was killed, at 8–18 fps.
     - Raw global memory's stores reach the AHardwareBuffer route: 12 store ranges logged, 5,025 write-log entry bits, the sink counter 0.
-  - **Open, the picture:** the 3D view is solid red, or red noise with the game's own upscaler network (`DM_VK_UPSCALER_SQUARE=0`). It stays red with raw global memory off.
+  - **Open then, the picture** (lit since; see the state for 0.8.0 above): the 3D view was solid red, or red noise with the game's own upscaler network (`DM_VK_UPSCALER_SQUARE=0`). It stays red with raw global memory off.
     - A frame dump shows Kokiri drawn in the 1440x810 scene target (Link, the trees, the rocks, the sky), so the red comes later in the frame: the post-processing, upscaling or output.
     - One lead: the red line naming the 2560x1440 sRGB target (format 43) the GPU can't store to.
     - Not compared with the Fold's dumps yet.
