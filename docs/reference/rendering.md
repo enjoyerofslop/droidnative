@@ -2117,21 +2117,18 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** OnePlus Pad 3 (Adreno 830, Qualcomm's driver), Ocarina of Time's `kokiri` route on a test build with #191, #193 and #189. With this change Kokiri Forest is lit as it should be: rocks, moss, lanterns, Navi, a Kokiri, leaves and fog. With `DM_VK_FP_HOST=0`, the same run is the yellow-white blow-out. 3.7 against 3.8 fps, GPU 47 against 46 ms: no cost.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
-### Ocarina of Time's upscaler network draws noise on the Adreno 830 (Android)
+### Ocarina of Time's upscaler network, replaced for speed (Android)
 
-- **Symptom:** Android, Ocarina of Time in Kokiri Forest on a OnePlus Pad 3 (Adreno 830): white streaks of noise over the whole picture, the HUD drawn over them. Before #167 the forest was black there.
-- **Cause:** the game upscales its 1440x810 scene to 1920x1080 with a neural network in one compute dispatch (agl's NDSR, `fa3033d05c0a41d6`, matrix tiles through shared memory). Its output is noise on this GPU. #167 made the storage images feeding it valid, and the noise appeared.
-  - Skipping that one dispatch (a test build) leaves the picture clean.
-  - DeathKhan's nx2android fork met the same on the Odin 3's Adreno 830 (`8569eeb`), and Banana Native measured the network at 58.5 ms a frame on the Galaxy Z Fold 8.
-- **Fix:** the network is replaced by a bilinear scale and a signed square (`gfx_vk_upsq.inc`, `shaders/upscale_square.comp`), the fork's idea written anew. No network detail is added.
-  - `DM_VK_UPSCALER_SQUARE_CS` lists the networks' compute shader keys; the game's `android_defaults.txt` names `fa3033d05c0a41d6`.
-  - `stage_set` notes such a shader's first texture and first image, and `vk_dispatch` runs the replacement in place of the network's dispatch. It samples the input at each output texel's centre, writes `x * |x|` into an RGBA16F intermediate and blits that into the output. The input holds square-root encoded colour and the output linear colour.
-  - The decode is the fork's audited one, so it's kept to its formats: an E5B9G9R9, B10G11R11 or RGBA16F input and a B10G11R11 output. Any other pair, or a GPU that can't filter, store or blit them, runs the network, with a red line (126-129). `=0` runs every network.
-  - Not the title's 2560x1440 sRGB target: that is written by `4f41ccf24f163e0d`, the title movie's compositor, which reads the movie network's output (the replay skips that network's U-Net). It stays skipped by default (#167's `DM_VK_STORAGE_UP=1`).
-- **Check:** Kokiri Forest on the Pad 3 (route `kokiri`, a test build with #150 and #83 merged, one run each):
-  - the noise is gone; the forest is black underneath, for the fog's NaN and the task and mesh draws the 830's driver can't run (no `VK_EXT_mesh_shader`);
-  - main's default (no raw global memory): 4.1 fps and frame p50 240-242 ms either way. GPU p50 rises from 44.6 to 62.8 ms, about as with the network's dispatch skipped (61.1 ms): the passes after it cost more on a clean picture than on the noise;
-  - with raw global memory (#150, `DM_VK_RAW_GMEM=1`): 1.5 → 4.0 fps, frame p50 390 → 247 ms, submit CPU 343 → 209 ms.
+- **Symptom:** Android, Ocarina of Time in Kokiri Forest on a OnePlus Pad 3 (Adreno 830): the frame's tail is one compute dispatch, the upscaler network, 21 ms of the frame's 45 ms of GPU work, and the game waits for it in `nvnSyncWait` (stream C, q99, raw global memory on). Before #193 and #189 its output was streak noise.
+- **Cause:** the game upscales its 1440x810 scene to 1920x1080 with a neural network in one compute dispatch (agl's NDSR: HMMA tiles through shared memory, emulated). It picks one of four networks by its dynamic resolution: `fa3033d05c0a41d6`, `7c511cc23ff85d14`, `b106afba1a18faa9` and `d99fbeeb53d38847`.
+  - Its noise was not the network's: its input, `a335c1db6270c355`'s E5B9G9R9 texture, was never written ([An E5B9G9R9 texture bound to a compute shader's image slot](#an-e5b9g9r9-texture-bound-to-a-compute-shaders-image-slot-android), #193), and its warp operations ran on 64-lane subgroups ([Maxwell's 32-lane warps in a wider subgroup](#maxwells-32-lane-warps-in-a-wider-subgroup), #189). With both, the network draws the picture right.
+  - What is left is its cost.
+- **Fix:** an opt-in swap, the game's default through its `android_defaults.txt` (`DM_VK_UPSCALER_SQUARE=1`): the network is replaced by a bilinear scale and a signed square (`gfx_vk_upsq.inc`, `shaders/upscale_square.comp`), DeathKhan's nx2android idea written anew. No network detail is added.
+  - **Which shaders:** by interface, as BananaNative matches them (`ndsr_iface`): one combined 2D texture, one 2D storage image loaded and stored (no atomics), one read-only storage buffer, nothing else (`upsq_match`). All four networks have it, and so do 49 more of the game's compute shaders, other networks. `DM_VK_UPSCALER_SQUARE_CS` still lists keys besides.
+  - **Which dispatches:** only one whose input is E5B9G9R9 and whose output is a larger B10G11R11 image (`upsq_run`). E5B9G9R9 is the networks' square-root input; a B10G11R11 input is linear (BananaNative), and the square would be wrong for it. Any other dispatch of those shaders runs as the game made it.
+  - **What:** it samples the input at each output texel's centre, writes `x * |x|` into an RGBA16F intermediate and blits that into the output.
+  - `DM_VK_UPSCALER_SQUARE=0` (or `DM_VK_UPSCALER_SQUARE_CS=0`) runs the network. A GPU that can't filter, store or blit those formats runs it too, with a red line (129).
+- **Check:** OnePlus Pad 3 (Adreno 830), Kokiri Forest with raw global memory on (#150): replaced, the frame goes from 103 to 62 ms (10.4 to 15.8 fps), with `nvnSyncWait` from 21 to 1 ms (stream C, q99). The picture against the network's is in the PR.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2).
 
 ### A render pass with colour slot 0 empty hangs a later pass on the Adreno 830 (Android)

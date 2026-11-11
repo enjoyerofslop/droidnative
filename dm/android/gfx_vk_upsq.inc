@@ -2,25 +2,42 @@
 // Ocarina of Time upscales its 1440x810 scene to 1920x1080 with a neural network in one compute dispatch (agl's NDSR, fa3033d05c0a41d6: HMMA tiles through shared
 // memory). On the OnePlus Pad 3's Adreno 830 its output is noise over the whole picture once its inputs are valid storage images (#167), and Banana Native measured it at
 // 58.5 ms a frame on the Galaxy Z Fold 8's Adreno 840. DeathKhan's nx2android fork replaced it on the Odin 3's Adreno 830 (8569eeb); the idea is theirs, written anew here.
-// - Which dispatches: those of the compute shaders DM_VK_UPSCALER_SQUARE_CS lists (keys, comma separated: a game's android_defaults.txt). stage_set notes the shader's
-//   first texture and first image as it binds them (g_upsq_src, g_upsq_dst), and vk_dispatch records this in place of the network's dispatch.
+// - Which dispatches: with DM_VK_UPSCALER_SQUARE=1 (Ocarina of Time's android_defaults.txt), a compute shader with the network's interface: one combined 2D texture, one
+//   2D storage image it loads and stores (no atomics), one read-only storage buffer, and nothing else. The game picks one of four networks by its dynamic resolution
+//   (fa3033d05c0a41d6, 7c511cc23ff85d14, b106afba1a18faa9, d99fbeeb53d38847), all of that interface, as BananaNative matches them (ndsr_iface); so do 49 more of its compute
+//   shaders, other networks. So a dispatch is replaced only when its input is E5B9G9R9 (a335c1db6270c355's square-root colour, the networks' input) and its output a larger
+//   B10G11R11 image; any other runs as it is. DM_VK_UPSCALER_SQUARE_CS lists keys to replace besides (comma separated). stage_set notes the shader's first texture and first
+//   image as it binds them (g_upsq_src, g_upsq_dst), and vk_dispatch records this in place of the network's dispatch.
 // - What: shaders/upscale_square.comp samples the input bilinearly at each output texel's centre and writes x * |x| into an RGBA16F intermediate of the output's size,
-//   which a blit converts into the output. The network's input holds square-root encoded colour and its output linear colour; the decode is the fork's audited
-//   contract, kept to the formats it was audited with: an E5B9G9R9, B10G11R11 or RGBA16F input and a B10G11R11 output. Any other pair runs the network, with a red line.
-// DM_VK_UPSCALER_SQUARE_CS=0 (env.txt): every network runs, even one a game's defaults list
+//   which a blit converts into the output. The network's input holds square-root encoded colour and its output linear colour, so the square is the decode; only an
+//   E5B9G9R9 input is that encoding (a B10G11R11 one is linear, as BananaNative found), so that input and a B10G11R11 output is the one pair replaced. A listed key with
+//   another runs the network with a red line.
+// DM_VK_UPSCALER_SQUARE=0 or DM_VK_UPSCALER_SQUARE_CS=0 (env.txt): every network runs, as the game made it
 static const uint32_t k_upsq_cs[] =
 #include "shaders/upscale_square.comp.inc"
 ;
 static VkShaderModule g_upsq_m; static VkDescriptorSetLayout g_upsq_dsl; static VkPipelineLayout g_upsq_pl; static VkPipeline g_upsq_p; static VkSampler g_upsq_smp;
 static struct { VkImage img; VkDeviceMemory mem; VkImageView iv; uint32_t w, h; } g_upsq_tmp;   // the RGBA16F intermediate, kept while the output's size stays
 static uint64_t g_upsq_n;   // dispatches replaced
+static int upsq_off(void) { const char *a = getenv("DM_VK_UPSCALER_SQUARE"), *b = getenv("DM_VK_UPSCALER_SQUARE_CS"); return (a && !strcmp(a, "0")) || (b && !strcmp(b, "0")); }
 static int upsq_listed(const char *key) {   // whether DM_VK_UPSCALER_SQUARE_CS lists the compute shader key (16 hex digits)
     static char l[1024]; static int init;
     if (!init) { init = 1; const char *e = getenv("DM_VK_UPSCALER_SQUARE_CS"); snprintf(l, sizeof l, "%s", e && strcmp(e, "0") ? e : "");
-        if (e && !strcmp(e, "0")) LOG("[vk] DM_VK_UPSCALER_SQUARE_CS=0: a game's upscaler network runs as it is");
-        else if (l[0]) LOG("[vk] upscaler networks replaced by a bilinear scale and a signed square: %s (DM_VK_UPSCALER_SQUARE_CS)", l); }
+        if (l[0]) LOG("[vk] upscaler networks replaced by a bilinear scale and a signed square: %s (DM_VK_UPSCALER_SQUARE_CS)", l); }
     for (const char *p = l; *p; ) { if (!strncmp(p, key, 16) && (p[16] == ',' || !p[16])) return 1; p = strchr(p, ','); if (!p) break; p++; }
     return 0;
+}
+// 1: a listed key; 2: the network's interface with DM_VK_UPSCALER_SQUARE=1 (the dispatch still checks its formats and sizes: upsq_run); 0: neither, or switched off
+static int upsq_match(const vshader *s) {
+    static int mode = -1;
+    if (mode < 0) { const char *e = getenv("DM_VK_UPSCALER_SQUARE"); mode = upsq_off() ? 0 : e && *e == '1';
+        if (upsq_off()) LOG("[vk] DM_VK_UPSCALER_SQUARE=0: a game's upscaler network runs as it is");
+        else if (mode) LOG("[vk] DM_VK_UPSCALER_SQUARE=1: an upscaler network of the NDSR interface, square-root E5B9G9R9 colour in, is replaced by a bilinear scale and a signed square"); }
+    if (s->stage != SH_CS || upsq_off()) return 0;
+    if (upsq_listed(s->key)) return 1;
+    if (!mode) return 0;
+    return s->nsb == 1 && !(s->sb[0].flags & 1) && s->ntx == 1 && s->tx[0].type == 3 && s->tx[0].array <= 1 && !s->tx[0].separate
+        && s->nim == 1 && s->im[0].type == 3 && s->im[0].array <= 1 && s->im[0].flags == 7 ? 2 : 0;   // images' flags 7: loaded and stored, no atomics
 }
 static int upsq_init(void) {   // the shader, sampler, layouts and pipeline, once; 0 when they cannot be made (the network then runs)
     static int failed; if (g_upsq_p) return 1; if (failed) return 0;
@@ -79,12 +96,12 @@ static VkDescriptorSet upsq_set(VkImageView src) {   // one of the current chunk
     return set;
 }
 // In place of a listed network's dispatch, with what stage_set noted: 1 when recorded, 0 when it cannot be (the caller dispatches the network)
-static int upsq_run(void) {
+static int upsq_run(const vshader *sh) {
     vtex *s = g_upsq_src, *d = g_upsq_dst; VkImageView siv = g_upsq_src_iv;
     if (!s || !d || !siv || s == d || s->conv || d->conv || s->samples > 1 || d->samples > 1 || d->type != VK_IMAGE_TYPE_2D || d->aspect != VK_IMAGE_ASPECT_COLOR_BIT || d->w < s->w || d->h < s->h) return 0;
-    int in_ok = s->fmt == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 || s->fmt == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || s->fmt == VK_FORMAT_R16G16B16A16_SFLOAT;
-    if (!in_ok || d->fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
-        RED_ONCE(128, "upscaler replacement: input format %d and output format %d are not the pair its decode was audited with: the network runs", s->fmt, d->fmt); return 0; }
+    if (s->fmt != VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 || d->fmt != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || (d->w == s->w && d->h == s->h)) {   // not the NDSR networks' square-root input, or no upscale
+        if (sh->upsq == 1) RED_ONCE(128, "upscaler replacement: input format %d and output format %d are not the pair it decodes (E5B9G9R9 square-root colour in, B10G11R11 out): the network runs", s->fmt, d->fmt);
+        return 0; }
     VkFormatProperties ip, op, tp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, s->fmt, &ip); vkGetPhysicalDeviceFormatProperties(g_vk.pd, d->fmt, &op);
     vkGetPhysicalDeviceFormatProperties(g_vk.pd, VK_FORMAT_R16G16B16A16_SFLOAT, &tp);
     if (!(ip.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) || !(op.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) || !(d->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
@@ -103,7 +120,7 @@ static int upsq_run(void) {
     vkCmdBlitImage(c, g_upsq_tmp.img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_NEAREST);
     cb_barrier(); bf_reset();   // the next draw or dispatch binds its own state again (a compute pipeline and push constants through another layout)
     crumb('c', "upscale_square", "", (d->w + 7) / 8, (d->h + 7) / 8);
-    if (g_upsq_n++ < 4) LOG("[vk] upscaler network replaced: s%llu %ux%u (vk%d) scaled to s%llu %ux%u (vk%d) by a bilinear filter and a signed square",
-                            (unsigned long long)s->serial, s->w, s->h, s->fmt, (unsigned long long)d->serial, d->w, d->h, d->fmt);
+    if (g_upsq_n++ < 4) LOG("[vk] upscaler network %s replaced (%s): s%llu %ux%u (vk%d) scaled to s%llu %ux%u (vk%d) by a bilinear filter and a signed square", sh->key,
+                            sh->upsq == 1 ? "listed" : "by its interface", (unsigned long long)s->serial, s->w, s->h, s->fmt, (unsigned long long)d->serial, d->w, d->h, d->fmt);
     return 1;
 }

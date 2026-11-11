@@ -558,7 +558,7 @@ static int ds_fits(const VkDescriptorSetLayoutBinding *b, uint32_t nb) {
     return 1;
 }
 static uint64_t g_ds_toobig;   // shaders whose layout fits no pool (ds_fits): their draws are dropped
-static int upsq_listed(const char *key); static int upsq_run(void);   // gfx_vk_upsq.inc
+static int upsq_match(const vshader *s); static int upsq_run(const vshader *s);   // gfx_vk_upsq.inc
 static vtex *g_upsq_src, *g_upsq_dst; static VkImageView g_upsq_src_iv;   // a listed upscaler's input and output, as stage_set binds them for the dispatch at hand (gfx_vk_upsq.inc)
 static vshader *sh_get(const char *key) {
     char k[16]; memcpy(k, key, 16);
@@ -572,7 +572,6 @@ static vshader *sh_get(const char *key) {
     jv r; js_parse(txt, &r); free(txt);
     const jv *st = js_get(&r, "stage"); const char *sn = st && st->s ? st->s : "vs";
     s->stage = !strcmp(sn, "ps") ? SH_PS : !strcmp(sn, "gs") ? SH_GS : !strcmp(sn, "cs") ? SH_CS : !strcmp(sn, "vs") ? SH_VS : SH_TS;
-    s->upsq = s->stage == SH_CS && upsq_listed(s->key);
     s->vkstage = s->stage == SH_PS ? VK_SHADER_STAGE_FRAGMENT_BIT : s->stage == SH_GS ? VK_SHADER_STAGE_GEOMETRY_BIT : s->stage == SH_CS ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_VERTEX_BIT;
     s->set = js_int(&r, "set", s->stage == SH_PS ? 1 : s->stage == SH_GS ? 2 : 0);
     const jv *a = js_get(&r, "cbufs"); uint32_t rext[CB_MAX] = {0};   // rext: res.json's extents (cb_ext_pick)
@@ -580,6 +579,7 @@ static vshader *sh_get(const char *key) {
     a = js_get(&r, "sbufs");
     for (int i = 0; a && i < a->n && s->nsb < 16; i++) { const jv *o = &a->kid[i]; s->sb[s->nsb++] = (rb_sbuf){js_int(o, "binding", 0), js_int(o, "slot", 0), js_int(o, "cb_slot", 0), js_int(o, "cb_offset", 0), js_int(o, "flags", 0)}; }
     rb_tex_read(js_get(&r, "textures"), s->tx, &s->ntx, 64); rb_tex_read(js_get(&r, "images"), s->im, &s->nim, 16);
+    s->upsq = (uint8_t)upsq_match(s);   // an upscaler network to replace: listed (1), or by its interface (2; gfx_vk_upsq.inc)
     // the texture and sampler pools read by ID (handle 0x40000000, the arrays as long as the ID ranges) are the pool set's, not the stage's (spv_pool.h); the first such shader
     // starts the pool set, so a game without one never makes it
     int haspool = 0; for (int i = 0; i < s->ntx; i++) haspool |= s->tx[i].handle == 0x40000000 && s->tx[i].cbuf_slot == 0 && s->tx[i].array > 32;
@@ -3165,7 +3165,7 @@ static int vk_dispatch(const p_dispatch *dp) {
         if (ds_again(t, 2)) return 0;
     }
     if (!ok) return 0;
-    if (s->upsq && upsq_run()) { g_dispatches++; C->ndraw++; return 1; }   // a game's upscaler network replaced (gfx_vk_upsq.inc)
+    if (s->upsq && upsq_run(s)) { g_dispatches++; C->ndraw++; return 1; }   // a game's upscaler network replaced (gfx_vk_upsq.inc)
     if (g_e5_need) { cpipe_t *ce = cpipe_e5(s, g_e5_need); if (!ce) return 0; cp = ce; }   // E5B9G9R9 storage images: the pipeline that packs RGB9E5 into their R32_UINT views
     VkCommandBuffer c = cb(); if (!c) return 0;
     cb_barrier();
