@@ -591,6 +591,8 @@ class LibraryPage(QWidget):
         self.menu.addSeparator()
         act('Update the app on the phone', lambda: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.after_task), bool(s and ba.library()))
         act('Remove from the phone…', lambda: self.win.phones.remove_game(g.id, g.name), bool(s and g.id in self.win.phone_games))
+        act('Import a save to the phone…', lambda: self.win.phones.import_save(g.id, g.name), bool(s and g.id in self.win.phone_games))
+        act('Restore its save from a backup…', lambda: self.win.phones.restore_backup(g.id, g.name), bool(s and g.id in self.win.phone_games))
         self.menu.addSeparator()
         act('Open the game folder', lambda: reveal(g.folder))
         act('Remove from the collection…', lambda: self.remove(g))
@@ -916,7 +918,8 @@ class PhonesPage(QWidget):
         lay.addSpacing(10); self.ph = label('The picked phone', 'h2'); lay.addWidget(self.ph); self.app = label('—', 'meta', wrap=True); lay.addWidget(self.app)
         self.games = QListWidget(); lay.addWidget(self.games, 1)
         row = QHBoxLayout()
-        for text, fn, name in (('Update the app', self.update_app, None), ('Back up saves to this computer', self.backup, None), ('Move the old one-game install…', self.migrate, 'ghost')):
+        for text, fn, name in (('Update the app', self.update_app, None), ('Back up saves to this computer', self.backup, None), ('Restore a backup…', self.restore_all, None),
+                               ('Move the old one-game install…', self.migrate, 'ghost')):
             b = QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
             if name: b.setObjectName(name)
         row.addStretch(); lay.addLayout(row)
@@ -1001,6 +1004,27 @@ class PhonesPage(QWidget):
             if then and ok: then()
             elif then and QMessageBox.question(self, 'Backup', f'No backup was copied ({out}). Go on anyway? The old save stays on the phone either way.') == QMessageBox.Yes: then()
         bg(run, got)
+    # A save sent to the phone's files/import/<title ID>/ (build_android_from_nsp.py --import-save / --restore-backup): DroidPlay on the phone shows what it found and asks,
+    # keeps the save it has in its files/backups/, then swaps the new one in (dm/android/java LauncherSaves.incoming)
+    def import_save(self, gid, name):
+        s = self.win.serial()
+        if not s: return
+        b = QMessageBox(QMessageBox.Question, 'Import a save', f'A save for {name} on {self.win.phone_name()}: a save folder (an emulator\'s, a JKSV, EdiZon or Checkpoint backup, '
+                        'a PC port\'s), or a zip of one.\n\nDroidPlay on the phone shows the save it found and asks before swapping it in, and keeps the save it has first.',
+                        QMessageBox.Cancel, self)
+        folder = b.addButton('A folder…', QMessageBox.AcceptRole); archive = b.addButton('A zip or other archive…', QMessageBox.AcceptRole); b.exec()
+        if b.clickedButton() is folder: path = QFileDialog.getExistingDirectory(self, f'The save folder for {name}', str(Path.home()))
+        elif b.clickedButton() is archive: path = QFileDialog.getOpenFileName(self, f'A save archive for {name}', str(Path.home()), 'Archives (*.zip *.rar *.7z *.tar *.tgz *.gz);;All files (*)')[0]
+        else: return
+        if path: self.win.builds.start(f'Import a save for {name}', ['--import-save', path, '--title', gid, '--serial', s], after=self.win.refresh_phone)
+    def restore_all(self): self.restore_backup()   # a button's clicked(checked) would pass its bool as gid
+    def restore_backup(self, gid=None, name=None):   # one game's save from a backup Back up saves pulled, or every game's in it
+        s = self.win.serial()
+        if not s: return
+        mine = ba.data_dir() / 'backups' / re.sub(r'[^\w.-]', '_', s)
+        start = mine if mine.is_dir() else ba.data_dir() / 'backups'
+        path = QFileDialog.getExistingDirectory(self, f'A backup holding {name}\'s save' if name else 'A save backup to put back (every game in it)', str(start if start.is_dir() else Path.home()))
+        if path: self.win.builds.start('Restore a save backup', ['--restore-backup', path, *(['--title', gid] if gid else []), '--serial', s], after=self.win.refresh_phone)
     def remove_game(self, gid, name):
         s = self.win.serial()
         if not s or QMessageBox.question(self, 'Remove', f'Delete {name} from {self.win.phone_name()}? Its save stays in the app.') != QMessageBox.Yes: return

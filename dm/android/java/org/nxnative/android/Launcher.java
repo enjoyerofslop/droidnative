@@ -112,6 +112,7 @@ public class Launcher extends Activity {
         toast("The game " + id + " is not on this phone, or this app has no host for it");
     }
 
+    @Override protected void onResume() { super.onResume(); saves.incoming(); }   // a save the computer sent (LauncherSaves.incoming)
     @Override public void onBackPressed() { if (game != null) showGames(); else super.onBackPressed(); }
     @Override protected void onActivityResult(int req, int res, Intent data) { if (!saves.result(req, res, data)) super.onActivityResult(req, res, data); }
 

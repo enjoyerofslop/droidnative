@@ -52,6 +52,8 @@ cream on ink, with a monochrome layer), which `tools/build_apk.py` links unless 
   with `edizon_save_metadata.json`; Checkpoint's `0x<title ID> <name>/`), else takes the folder as the save itself, matched by file names against the game's save on the
   phone when there is one. It keeps the game's save as a backup (`files/backups/<time>-<id>/`) before swapping the new one in by renames through `<save>.swap`, the
   host's own convention (`plat_android.c`), and never while the game runs. Earlier saves lists the backups that hold the game's save, and puts one back the same way.
+  A save from the computer (`build_android_from_nsp.py --import-save` / `--restore-backup`, the desktop app's Import a save and Restore a backup) is pushed to
+  `files/import/<id>/`, opened to the app, and taken by the launcher when it comes to the front, through the same find, dialogs and swap (`LauncherSaves.incoming`).
   Only `user.*` extended attributes travel with a save: a backup's `security.selinux` rows name its own phone's labels.
 - **Updates keep the saves.** Every APK is signed with `~/.android/nxnative-debug.jks` and installed with `adb install -r`; the scripts never uninstall.
 
@@ -139,7 +141,8 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   on phone* (no build) and *Play*. A game without a profile gets *Experimental build* (`--no-push`: the survey, a provisional profile in `<NSP folder>/<id>_build/profile`,
   found through `DM_GAMES_DIR`); once built it is marked *Experimental* and installs like the others.
 - **Phones**: the adb devices over USB and Wi-Fi (*Pair over Wi-Fi*, *Connect*, *Discover*, *Disconnect*); for the phone picked at the top, the app version and the games
-  on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`) and *Remove game from phone* (its save stays).
+  on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`), *Restore a backup* and *Remove game from
+  phone* (its save stays); a game's *Manage* menu has *Import a save to the phone* and *Restore its save from a backup*.
 - **Builds**: the running build's stages, progress bars and messages, from `--progress json` (or a console build's journal); *Stop* ends it and its tools.
 - **Performance**: `adb logcat -s DroidPlay` with tiles for the figures the host prints (frame time, GPU busy, replay CPU and draws, game speed, the wait for the GPU) and a frame-time
   chart; *Profile a frame* asks for a frame's GPU times per pass (`files/prof_now`) and groups them; *Thermal* shows the phone's cooling state.

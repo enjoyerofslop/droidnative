@@ -5,6 +5,8 @@
 #   python scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys> --push-only [--serial ...]   install the app and copy a game built before, without building
 #   python scripts/build_android_from_nsp.py --apk-only [--serial ...]                                  the app with every game host built on this computer, installed
 #   python scripts/build_android_from_nsp.py --migrate --title <title ID> [--serial ...]               a one-game install's folder (files/game) into files/games/<title ID>
+#   python scripts/build_android_from_nsp.py --import-save <folder | archive> --title <title ID> [--serial ...]   a save for that game, swapped in by the app after it asks
+#   python scripts/build_android_from_nsp.py --restore-backup <backup folder> [--title <title ID>] [--serial ...]   a game's save (or every game's) from Back up saves' copy
 #   python scripts/build_android_from_nsp.py --check | --info <NSP folder>                              requirements / the game's details, as JSON (the desktop app)
 #   python scripts/build_android_from_nsp.py --setup [--accept-android-licenses]                         install what --check finds missing (Windows: dm/android/tools/host_setup.py)
 #   python scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys> --game-apk [--xapk] [--out <folder>]   the game in an app of its own, to install anywhere (make_game_app)
@@ -812,6 +814,99 @@ def migrate_legacy(serial, gid, nacp_local=None):
     return True
 
 
+# ---------------- Saves from the computer ----------------
+# adb can't write the app's internal storage, where the saves are (saves/<title ID>), so a save to swap in goes to files/import/<title ID>/. The launcher takes it at its
+# start or when it comes back to the front (LauncherSaves.incoming), finds the save in it as an import from Android's file picker does (Saves.java: a DroidPlay backup,
+# yuzu and its successors, Ryujinx, JKSV, EdiZon, Checkpoint, or the folder as it is), asks, keeps the game's save in files/backups/<time>-<title ID>/ and swaps the new
+# one in. --import-save sends a folder under its own name (which can say whose save it is) or an archive's files; --restore-backup sends a game's save from a backup that
+# Back up saves to this computer pulled, in the backup's own layout (saves/<title ID>/, xattrs.tsv)
+IMPORT = f'{REMOTE}/import'
+SAVE_DIR = re.compile(r'(?i)(0[1-7][0-9a-f]{14})(_device)?')   # Saves.TITLE: a title ID's folder, never a Ryujinx save ID (00…) or a system save's (80…)
+
+
+def save_title_ids(root, own_name=True):   # the title IDs a save's files give, as Saves.java reads them: folder names (root's own too, with own_name), Checkpoint's 0x<id>, EdiZon's json, JKSV's meta, Ryujinx's ExtraData0
+    ids = set()
+    for p in [root] * own_name + [*root.rglob('*')]:
+        if p.is_dir():
+            m = re.fullmatch(r'(?i)(?:0x)?(0[1-7][0-9a-f]{14})(?:_device| .*)?', p.name)
+            if m: ids.add(m[1].upper())
+        elif p.name == 'edizon_save_metadata.json':
+            m = re.search(r'"title_id"\s*:\s*"(0[1-7][0-9A-Fa-f]{14})"', p.read_text(encoding='utf-8', errors='replace'))
+            if m: ids.add(m[1].upper())
+        elif p.name in ('.nx_save_meta.bin', 'ExtraData0'):   # JKSV: "JKSV", a revision byte, then the title ID; Ryujinx: the title ID first
+            b = p.read_bytes()[:13]; at = 5 if p.name.startswith('.') else 0
+            if len(b) >= at + 8 and (at == 0 or b[:4] == b'JKSV') and any(b[at:at + 8]): ids.add(f'{struct.unpack_from("<Q", b, at)[0]:016X}')
+    return ids
+
+
+def unpack_save(src, dst):   # an archive's files → dst: Python's zipfile (Stored, Deflate, bzip2, LZMA), else tar (bsdtar, on Windows 10 and later and on a Mac: RAR, 7z)
+    import zipfile
+    shutil.rmtree(dst, ignore_errors=True); dst.mkdir(parents=True); method = None
+    try:
+        with zipfile.ZipFile(src) as z: z.extractall(dst)   # names that would leave dst are cut down to stay inside it
+        return
+    except NotImplementedError as e: method = e   # Deflate64, which Windows' own zip uses for big files: bsdtar (libarchive 3.7) doesn't read it either
+    except zipfile.BadZipFile: pass   # not a zip
+    shutil.rmtree(dst); dst.mkdir()
+    try: r = subprocess.run(['tar', '-xf', str(src), '-C', str(dst)], capture_output=True, text=True, errors='replace')
+    except OSError as e: raise BuildError(f"{src.name} isn't a zip, and there's no tar here to unpack it ({e}): unpack it with another tool and send the folder") from None
+    if r.returncode and method: raise BuildError(f"{src.name} is packed with a compression Python and tar don't read ({method}): unpack it with Windows' Explorer "
+                                                 "(Extract all), which wrote it, or another tool, then send the folder")
+    if r.returncode:
+        raise BuildError(f"{src.name} can't be unpacked here ({(r.stderr or r.stdout).strip()[-300:] or f'tar exit status {r.returncode}'}): unpack it with another tool and send the folder")
+
+
+def send_save(serial, gid, local, parent, name, logs):
+    dst = f'{IMPORT}/{gid}'
+    adb(serial, 'shell', f'rm -rf {sh_quote(dst)} && mkdir -p {sh_quote(dst)}')
+    push_dir(serial, local, parent, name, logs / 'adb_push_save.log')
+    adb(serial, 'shell', f'find {sh_quote(dst)} -name {MANIFEST} -delete', check=False)   # a copy as a tar leaves its manifest, which isn't the save's
+    open_tree(serial, dst)
+    # the launcher takes it when it comes to the front: brought there now, unless a game is being played (a jump to the launcher would interrupt it)
+    if not adb(serial, 'shell', f'pidof {PKG}:game', check=False).strip(): adb(serial, 'shell', 'am', 'start', '-n', f'{PKG}/.Launcher', check=False)
+
+
+@says_when_phone_full
+def import_save(serial, gid, src, work, logs):   # a save folder or archive → files/import/<gid>/ on the phone
+    gid = gid.upper(); src = Path(src).expanduser()
+    if not src.exists(): raise BuildError(f'no such file or folder: {src}')
+    if src.is_file(): local = work / 'save_import' / gid; unpack_save(src, local); parent, name = IMPORT, gid
+    else: local, parent, name = src, f'{IMPORT}/{gid}', src.name
+    if not any(f.is_file() for f in local.rglob('*')): raise BuildError(f'{src} holds no files')
+    ids = save_title_ids(local, own_name=src.is_dir())   # an archive's folder here is named by gid
+    if ids and gid not in ids:
+        say(f'[RED] {src.name} gives the title ID{"s" if len(ids) > 1 else ""} {", ".join(sorted(ids))}, not {gid}: it may be another game\'s save. '
+            'The app on the phone shows what it found and asks before swapping it in')
+    send_save(serial, gid, local, parent, name, logs)
+    say(f'sent to {IMPORT}/{gid}: DroidPlay on the phone shows the save it found for {gid} and asks before swapping it in (it keeps the save there in files/backups/ first)')
+
+
+def backup_games(folder):   # title ID → (the backup folder, its saves/<id>[_device] folders): the newest by name of the backups under folder holding that game (Launcher.backup's layout)
+    out = {}
+    for saves in sorted(p for p in [Path(folder), *Path(folder).rglob('saves')] if p.name == 'saves' and p.is_dir()):
+        parts = {}
+        for k in saves.iterdir():
+            m = SAVE_DIR.fullmatch(k.name)
+            if m and k.is_dir() and any(f.is_file() for f in k.rglob('*')): parts.setdefault(m[1].upper(), []).append(k)
+        for gid, ks in parts.items(): out[gid] = (saves.parent, ks)   # sorted: a later backup (its time) replaces an earlier one
+    return out
+
+
+@says_when_phone_full
+def restore_backup(serial, folder, gid, work, logs):   # a game's save (gid), or every game's, from a backup on this computer → files/import/<id>/ on the phone
+    games = backup_games(folder)
+    if not games: raise BuildError(f'{folder} holds no DroidPlay save backup: a folder with saves/<title ID>/ in it, as Back up saves makes')
+    if gid and gid.upper() not in games: raise BuildError(f'{folder} holds no save of {gid.upper()}; it has {", ".join(sorted(games))}')
+    on = set(adb(serial, 'shell', f'ls {sh_quote(REMOTE + "/games")} 2>/dev/null', check=False).upper().split())
+    for g in [gid.upper()] if gid else sorted(games):
+        if g not in on: say(f'{g}: not on the phone, so its save is left out'); continue
+        root, ks = games[g]; local = work / 'save_restore' / g; shutil.rmtree(local, ignore_errors=True)
+        for k in ks: shutil.copytree(k, local / 'saves' / (g + ('_device' if k.name.lower().endswith('_device') else '')))
+        if (root / 'xattrs.tsv').is_file(): shutil.copy2(root / 'xattrs.tsv', local / 'xattrs.tsv')
+        send_save(serial, g, local, IMPORT, g, logs)
+        say(f'{g}: the save in {root} sent to {IMPORT}/{g}: DroidPlay on the phone asks before putting it back (it keeps the save there in files/backups/ first)')
+
+
 @says_when_phone_full
 def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, meta):
     """The game's files → files/games/<gid>/ (the RomFS with --sync: a repeat copies only what changed)"""
@@ -1006,7 +1101,10 @@ def main(argv):
     ap.add_argument('--update-shaders', action='store_true', help='pull the shaders a game compiled at run time on the phone, translate the new ones and copy them (no app build)')
     ap.add_argument('--apk-only', action='store_true', help='pack the app with every game host built on this computer and install it')
     ap.add_argument('--migrate', action='store_true', help="move a one-game install's files/game to files/games/<--title> on the phone")
-    ap.add_argument('--title', help='the title ID for --migrate')
+    ap.add_argument('--title', help='the title ID for --migrate, --import-save and --restore-backup')
+    ap.add_argument('--import-save', metavar='PATH', help="send a save folder or archive (an emulator's, a JKSV / EdiZon / Checkpoint backup, a PC port's) for --title to the phone, "
+                    'where DroidPlay asks before swapping it in')
+    ap.add_argument('--restore-backup', metavar='FOLDER', help="send a game's save (--title) or every game's from a backup Back up saves pulled to this computer, to put back on the phone")
     ap.add_argument('--check', action='store_true', help='print the requirements as JSON and stop')
     ap.add_argument('--info', action='store_true', help="print the NSP folder's game details as JSON and stop")
     ap.add_argument('--progress', choices=('auto', 'bar', 'lines', 'json', 'off'), default='auto', help='stage lines on the console; json = newline-delimited JSON events')
@@ -1032,9 +1130,19 @@ def main(argv):
         with contextlib.redirect_stdout(sys.stderr): out = check(a.sdk) if a.check else info(Path(a.nsp_dir).expanduser().resolve(), Path(a.keys).expanduser().resolve() if a.keys else None)
         print(json.dumps(out, indent=1)); return
     if a.setup: setup(a.sdk, a.accept_android_licenses); return
-    if a.apk_only or a.migrate:
+    if a.apk_only or a.migrate or a.import_save or a.restore_backup:
         logs = data_dir() / 'logs'; logs.mkdir(parents=True, exist_ok=True)
         serial = a.serial or os.environ.get('ANDROID_SERIAL') or pick_device()
+        if a.import_save or a.restore_backup:
+            if a.import_save and a.restore_backup: raise BuildError('--import-save and --restore-backup go one at a time')
+            if a.title and not re.fullmatch(r'[0-9A-Fa-f]{16}', a.title) or a.import_save and not a.title:
+                raise BuildError(f'{"--import-save" if a.import_save else "--restore-backup"} needs --title <the game\'s 16-digit title ID>' + ('' if a.import_save else ' (or none: every game)'))
+            work = data_dir() / 'saves_sent'; work.mkdir(parents=True, exist_ok=True)
+            bi.PROG.plan(1); bi.PROG.stage('send the save')
+            with phone(serial, 'build_android_from_nsp.py: sending a save'):
+                if a.import_save: import_save(serial, a.title, a.import_save, work, logs)
+                else: restore_backup(serial, a.restore_backup, a.title, work, logs)
+            shutil.rmtree(work, ignore_errors=True); bi.PROG.end(); return
         if a.migrate:
             if not a.title or not re.fullmatch(r'[0-9A-Fa-f]{16}', a.title): raise BuildError('--migrate needs --title <the game\'s 16-digit title ID>')
             bi.PROG.plan(1); bi.PROG.stage('move the one-game install')
@@ -1047,7 +1155,7 @@ def main(argv):
         with phone(serial, 'build_android_from_nsp.py: installing the app'): install(serial, apk, logs)
         bi.PROG.end(serial)
         return
-    if not a.nsp_dir: raise BuildError('give the NSP folder (or the .nup file) and -k <prod.keys> (or --check / --apk-only / --migrate)')
+    if not a.nsp_dir: raise BuildError('give the NSP folder (or the .nup file) and -k <prod.keys> (or --check / --apk-only / --migrate / --import-save / --restore-backup)')
     src, keys = Path(a.nsp_dir).expanduser().resolve(), Path(a.keys).expanduser().resolve() if a.keys else None
     if not src.exists(): raise BuildError(f'not a folder: {src}')
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')

@@ -62,14 +62,14 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 
 - **Library:** the games you added (**+ Build game** picks a folder with a game's NSP files), each with its box art, version and status on the phone picked at the top.
   The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
-  build only, update the app on the phone, remove the game. A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
+  build only, update the app on the phone, remove the game, import a save to the phone, restore its save from a backup ([Saves](#saves)). A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
   provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.
 - **Builds:** the running build's stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console shows here too.
   When a build fails, a banner says what went wrong in plain words, with the button that fixes it where there is one (**Install again** once the phone has room,
   **Choose prod.keys** for keys older than the game). Otherwise it is likely a bug: **Copy report** copies a short report to paste in #help on the Discord, and
   **Save full report** saves the whole log; both leave out your user folder, the phone's serial and anything that looks like a key.
 - **Phones:** adb devices over USB and Wi-Fi (pair, connect, discover), each one's battery and free space, the app version and the games on each phone, saves
-  backed up to the computer. **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
+  backed up to the computer and put back (**Restore a backup…**). **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
   (Samsung's Auto Blocker, Xiaomi's Install via USB, a Pixel's driver) and what to try when the phone doesn't show up; a phone below 20% battery gets a warning,
   since a PC's USB port charges slowly and an install takes minutes.
 - **Performance:** the game's log from `adb logcat`, with the frame time, GPU and CPU figures the host prints, and a frame's GPU time per pass.
@@ -130,6 +130,16 @@ At the bottom of a game's screen in the app, under **Save**:
   RAR and 7z archives, and zips that Windows packed with Deflate64 (it does for big ones), can't be opened on a phone: unpack them with a file manager app or on a
   computer, then import the folder.
 - **Earlier saves** puts back a save kept before an import, or one from **Back up saves** on the games list.
+
+From a computer, **DroidPlay for Windows** does the same over adb, for a phone that's connected:
+- **Library › Manage › Import a save to the phone…** sends a save folder or archive for that game. Unlike the phone, the computer unpacks RAR and 7z archives too
+  (with Windows' own `tar`); a Deflate64 zip still needs unpacking first (Explorer's **Extract all** reads it).
+- **Manage › Restore its save from a backup…**, and **Phones › Restore a backup…** for every game in one, send saves back from what **Back up saves to this computer**
+  copied (pick its folder, or one of the dated folders inside it; the newest backup of each game is taken).
+- The command line's `--import-save` and `--restore-backup` do the same ([Packing from the command line](#packing-from-the-command-line)).
+
+The save goes to `files/import/<title ID>/` on the phone, which adb can write; the app's own save folder it can't. DroidPlay on the phone then shows what it found and
+asks, as for an import from the phone: at once when the app is open or opens, or after the game, when it's being played.
 
 Before an import or a restore, the game's save is kept in `Android/data/org.nxnative.android/files/backups/<time>-<title ID>/`, which DroidPlay for Windows' **Back up
 saves to this computer** copies too. The game must not be running; the app offers to close it, and progress it hasn't saved is lost. Uninstalling the app deletes
@@ -199,6 +209,8 @@ python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k
     --no-push            build the APK only (a game without a profile is first built this way)
     --push-only          install the app and copy a game built before, without building
 python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
+python scripts/build_android_from_nsp.py --import-save "<save folder or archive>" --title <title ID>    send a save to the phone (Saves)
+python scripts/build_android_from_nsp.py --restore-backup "<backup folder>" [--title <title ID>]       send a game's save, or every game's, from a backup
 python scripts/build_android_from_nsp.py --check       what the build needs on this computer, as JSON
 ```
 
