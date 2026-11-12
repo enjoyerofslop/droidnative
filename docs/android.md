@@ -140,8 +140,8 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   Galaxy S25 Edge, 39 on a OnePlus Pad 3. Desktop DroidPlay says so the first time **Play** is pressed after an install, and the app says so when the game has no
   pipelines saved yet. Later starts take a few seconds.
 - **In the game.** Touch controls are drawn over the picture in three layouts (2D, 3D and Tap, switched with the round button at the top); touches no control takes go
-  to the game's touch screen. Their size and how far in from the sides they sit are the settings screen's choices; a game app, which has none, takes `DM_PAD_SCALE` and
-  `DM_PAD_INSET` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
+  to the game's touch screen. Their size, how far in from the sides they sit and how high from the bottom are the settings screen's choices; a game app, which has none, takes `DM_PAD_SCALE`,
+  `DM_PAD_INSET` and `DM_PAD_RAISE` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
   shakes the controller. The **≡** button at the top (left of −; with a controller connected it hides, and a tap on the screen shows it for a few seconds), or a controller's Mode or Menu key where Android passes it on, opens the pause menu: the game is held
   under it (its clock, sound and vibration stop, and no input reaches it) until **Resume**, ≡ again, B or the phone's Back. Its rows change the touch layout and turn the frame-rate
   counter on or off for this run (the settings screen's choice is the one that is kept), **Export or import the save…** opens the game's screen in the launcher,

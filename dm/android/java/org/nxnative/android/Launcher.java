@@ -243,10 +243,13 @@ public class Launcher extends Activity {
         s.values = new String[] {"position", "label"}; s.labels = new String[] {"By position", "By label"}; s.def = "position"; settings.add(s);   // front_android.c face_button
         s = new Setting("DM_RUMBLE", "toggle", "Controls", "Game rumble", null); s.def = "1"; settings.add(s);
         s = new Setting("DM_RUMBLE_GAIN", "range", "Controls", "Rumble strength", null); s.lo = 0; s.hi = 3; s.step = 0.1f; s.def = "1.0"; settings.add(s);
-        // the touch controls' size and how far in from the sides they sit (Gamepad.java padScale, insetPx)
+        // the touch controls' size and how far in from the sides they sit (Gamepad.java padScale, insetPx, raisePx)
         s = new Setting("DM_PAD_SCALE", "range", "Controls", "Touch control size", "Stops growing where the controls would meet."); s.lo = 0.6f; s.hi = 1.4f; s.step = 0.05f; s.def = "1.0"; settings.add(s);
         s = new Setting("DM_PAD_INSET", "range", "Controls", "Touch control inset",
             "Moves the stick, the D-pad and the buttons in from the sides. 0% is the standard layout, 100% brings them together in the middle.");
+        s.lo = 0; s.hi = 1; s.step = 0.05f; s.def = "0"; settings.add(s);
+        s = new Setting("DM_PAD_RAISE", "range", "Controls", "Touch control height",
+            "Moves the stick, the D-pad and the buttons up from the bottom. 0% is the standard layout; 100% stops just below the shoulder buttons.");
         s.lo = 0; s.hi = 1; s.step = 0.05f; s.def = "0"; settings.add(s);
         for (Setting t : settings) if (defaults.containsKey(t.key)) t.def = defaults.get(t.key);
     }

@@ -298,6 +298,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 | Touch control size (Android) | `DM_PAD_SCALE` | `0.6` to `1.4` (default `1`) |
 | Touch control inset (Android) | `DM_PAD_INSET` | `0` to `1` (default `0`) |
+| Touch control height (Android) | `DM_PAD_RAISE` | `0` to `1` (default `0`) |
 | Controller face buttons (Android) | `DM_PAD_ABXY` | `position` (default), `label` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |

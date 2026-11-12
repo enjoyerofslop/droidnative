@@ -99,22 +99,24 @@ public final class Gamepad extends View {
         invalidate(); return in;
     }
     // The player's size and inset (droidplay-core#222: a stick too close to the left edge of a Poco F7): DM_PAD_SCALE multiplies u, and DM_PAD_INSET (0 to 1) moves the
-    // stick, the D-pad and the face buttons in from the sides by that share of the room between their touch areas. Set per game in the launcher (launcher.txt) or in env.txt;
+    // stick, the D-pad and the face buttons in from the sides by that share of the room between their touch areas, and DM_PAD_RAISE (0 to 1) moves them up from the bottom
+    // by that share of the room between their touch areas and the shoulder buttons' (the tester's "a bit higher"). Set per game in the launcher (launcher.txt) or in env.txt;
     // 1 and 0 are the standard layout. A size over 1 grows only while the corner groups stay clear of the shoulder buttons and of each other; both are measured with the 3D
     // layout's reach, so switching layouts neither resizes nor moves them
-    float scaleSet = 1, insetSet = 0;
+    float scaleSet = 1, insetSet = 0, raiseSet = 0;
     static final float SCALE_MIN = 0.6f, SCALE_MAX = 1.4f, K_GAP = 12,
         K_LEFT_REACH = K_LOW_X + K_DPAD_R * K_DPAD_GRAB, K_FACE_REACH = K_FACE_X + K_FACE_GAP + K_FACE_R * 1.25f,   // the corner groups' touch areas from their corners (faceAt, dpadAt)
         K_UP_REACH = K_PAD_Y + K_STICK_R * K_STICK_GRAB, K_DROP_REACH = K_L_Y + K_L_R * 1.35f;   // a bottom group's up from the bottom, and a shoulder button's down from the top (btnAt)
-    void setPadSize(String scale, String inset) {
+    void setPadSize(String scale, String inset, String raise) {
         try { if (scale != null) scaleSet = Math.max(SCALE_MIN, Math.min(SCALE_MAX, Float.parseFloat(scale))); } catch (NumberFormatException e) {}
         try { if (inset != null) insetSet = Math.max(0f, Math.min(1f, Float.parseFloat(inset))); } catch (NumberFormatException e) {}
+        try { if (raise != null) raiseSet = Math.max(0f, Math.min(1f, Float.parseFloat(raise))); } catch (NumberFormatException e) {}
     }
     float baseU() { return dp * Math.min(getHeight() / dp / 430f, 1.3f); }
     float padScale() {   // scaleSet, a size over 1 held where the corner groups would meet the shoulder buttons or each other
         if (scaleSet <= 1) return scaleSet;
         float b = baseU(); if (b <= 0) return 1;
-        float fit = Math.min((cornerB() - safeT()) / ((K_UP_REACH + K_DROP_REACH + K_GAP) * b), (cornerR0() - cornerL0()) / ((K_LEFT_REACH + K_FACE_REACH + K_GAP) * b));
+        float fit = Math.min((cornerB0() - safeT()) / ((K_UP_REACH + K_DROP_REACH + K_GAP) * b), (cornerR0() - cornerL0()) / ((K_LEFT_REACH + K_FACE_REACH + K_GAP) * b));
         return Math.max(1f, Math.min(scaleSet, fit));
     }
     float u() { return baseU() * padScale(); }
@@ -123,9 +125,14 @@ public final class Gamepad extends View {
         float free = (cornerR0() - cornerL0()) - (K_LEFT_REACH + K_FACE_REACH + K_GAP) * u();
         return free > 0 ? insetSet * free / 2 : 0;
     }
+    float raisePx() {   // the share of the room between the bottom groups' touch areas and the shoulder buttons' (the 3D reach, as padScale measures it) they move up by
+        if (raiseSet <= 0) return 0;
+        float free = (cornerB0() - safeT()) - (K_UP_REACH + K_DROP_REACH + K_GAP) * u();
+        return free > 0 ? raiseSet * free : 0;
+    }
     float safeL() { return insL; } float safeR() { return getWidth() - insR; } float safeT() { return insT; }
     float cornerL0() { return insL * K_CORNER_IN; } float cornerR0() { return getWidth() - insR * K_CORNER_IN; }
-    float cornerL() { return cornerL0() + insetPx(); } float cornerR() { return cornerR0() - insetPx(); } float cornerB() { return getHeight() - insB; }
+    float cornerL() { return cornerL0() + insetPx(); } float cornerR() { return cornerR0() - insetPx(); } float cornerB0() { return getHeight() - insB; } float cornerB() { return cornerB0() - raisePx(); }
     float faceCx() { return cornerR() - K_FACE_X * u(); } float faceCy() { return cornerB() - K_PAD_Y * u(); }
     float faceGap() { return K_FACE_GAP * u(); } float faceR() { return K_FACE_R * u(); }
     float faceX(int b) { return b == B_A ? faceCx() + faceGap() : b == B_Y ? faceCx() - faceGap() : faceCx(); }
@@ -516,7 +523,7 @@ public final class Gamepad extends View {
         check("first finger up: the stick stays, A released", lastBtn == 0 && lastAx[0] == 32767);
         send(ev(MotionEvent.ACTION_UP, new int[]{1}, new float[][]{{homeX() + stickR(0), homeY()}}));
         // where the layout put them, at this size and inset: inside the screen, the corner groups below the shoulder buttons and clear of each other (in 3D, the widest layout)
-        check(String.format(java.util.Locale.ROOT, "size %.2f (set %.2f), inset %.0f px (set %.2f): every control inside the screen", padScale(), scaleSet, insetPx(), insetSet),
+        check(String.format(java.util.Locale.ROOT, "size %.2f (set %.2f), inset %.0f px (set %.2f), raise %.0f px (set %.2f): every control inside the screen", padScale(), scaleSet, insetPx(), insetSet, raisePx(), raiseSet),
               homeX() - stickR(0) >= 0 && faceX(B_A) + faceR() <= getWidth() && homeY() + stickR(0) <= getHeight() && faceY(B_B) + faceR() <= getHeight()
               && dropCy(B_ZL) - dropR(B_ZL) >= 0 && dropCx(B_ZL) - dropR(B_ZL) >= 0 && dropCx(B_ZR) + dropR(B_ZR) <= getWidth());
         check("the left stick's touch area below the shoulder buttons'", homeY() - stickR(0) * K_STICK_GRAB > dropCy(B_L) + dropR(B_L) * 1.35f);
@@ -563,7 +570,7 @@ public final class Gamepad extends View {
             final View decor = a.getWindow().getDecorView();
             if (decor.getWindowToken() == null) { h.postDelayed(this, 100); return; }   // the activity's window is not attached yet
             ctx = a.getApplicationContext(); view = new Gamepad(a);
-            view.setPadSize(nativeEnv("DM_PAD_SCALE"), nativeEnv("DM_PAD_INSET"));   // the launcher's choices (launcher.txt) or env.txt
+            view.setPadSize(nativeEnv("DM_PAD_SCALE"), nativeEnv("DM_PAD_INSET"), nativeEnv("DM_PAD_RAISE"));   // the launcher's choices (launcher.txt) or env.txt
             popup = new PopupWindow(view, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, false);
             popup.setTouchable(true); popup.setFocusable(false); popup.setClippingEnabled(false);
             if (android.os.Build.VERSION.SDK_INT >= 22) popup.setAttachedInDecor(false);
@@ -576,8 +583,8 @@ public final class Gamepad extends View {
             }, h);
             view.padsChanged();
             shakeStart(a);
-            nativeLog("gamepad: touch controls shown (" + (view.tap ? "Tap" : view.full ? "3D" : "2D") + (view.scaleSet != 1 || view.insetSet != 0 ?
-                String.format(java.util.Locale.ROOT, ", size %.0f%%, inset %.0f%%", view.scaleSet * 100, view.insetSet * 100) : "") + ")");
+            nativeLog("gamepad: touch controls shown (" + (view.tap ? "Tap" : view.full ? "3D" : "2D") + (view.scaleSet != 1 || view.insetSet != 0 || view.raiseSet != 0 ?
+                String.format(java.util.Locale.ROOT, ", size %.0f%%, inset %.0f%%, height %.0f%%", view.scaleSet * 100, view.insetSet * 100, view.raiseSet * 100) : "") + ")");
             if ("1".equals(nativeEnv("DM_SHOW_FPS"))) view.fpsSet(true);
             String t = nativeEnv("DM_PAD_TEST"); if (t != null && !t.equals("0")) h.postDelayed(new Runnable() { public void run() { view.selfCheck(); } }, 1500);
         } });
