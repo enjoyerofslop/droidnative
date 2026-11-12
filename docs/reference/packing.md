@@ -140,6 +140,18 @@
 - **Check:** `dm/tools/tests/test_spv_build.py` runs `spv_build.py` over synthetic pixel shader records with a stand-in translator and the real post-pass: the folder is under `WORK` and gone after a run that finished, a post-pass that stopped, and a full disk while the code areas are written (`OSError` with `ENOSPC`); a folder a killed run left is removed by the next run.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) on Windows 11 ([droidplay-core#307](https://github.com/enjoyerofslop/droidplay-core/issues/307)): three runs, each starting with about 70 GB free, filled the SSD during the translation. Not rebuilt here (no game files).
 
+### A full disk ends an Android build in a traceback, or in an IndexError from the post-pass
+
+- **Symptom:** an Android build on a computer whose drive filled up ends in `OSError: [Errno 28] No space left on device` with a Python traceback (Windows' "There is not enough space on the disk" is the same error), for example at `piece.write_bytes(data)` in `push_resumable`. Or `spv_build.log` ends in `IndexError: list index out of range` at `w[0]` in `spv_android.py` `parse`, after the translator's `[RED] <key>: IOException: …` lines, which the log printed only after the post-pass and so lost.
+- **Cause:** nothing in the build looked for a full disk. The translator (`dmsh_xlate`) writes each shader's `.spv` with `File.WriteAllBytes`, which creates the file before writing it; on a full disk it leaves an empty or cut-short file, prints the shader's `IOException` and goes on to the next one, so `spv_build.py` went on to the integer-input pass (which rewrites good files in place) and the post-pass, which stopped at the first empty file. An `OSError` isn't a `BuildError`, so the command line's exit printed it as a traceback, naming neither the drive nor what filled it.
+- **Fix:**
+  - `spv_build.py` looks for a full disk in the translator's `[RED]` lines after each translation pass (`DISK_FULL`: POSIX's and Windows' wordings) and in its own writes (`ENOSPC`). It stops there with `[RED] spv_build: the disk is full: …`, naming what couldn't be written and the drive's free space, and prints the translator's other failures first. The post-pass doesn't run, and the run's temporary folder is removed.
+  - `build_shaders` adds that line, and a full disk's message when the log names one or the drive has less than 1 GiB free, to its "Shader translation failed" error.
+  - The command line's exit takes any `OSError` with `ENOSPC` as a full disk: `[RED] This computer ran out of disk space: the drive … has … free (writing …)`, then what to free: the space a game's `<title ID>_build` folder holds, and any `spv_…` folders that failed translations of earlier versions left in the system's temp folder.
+  - The translator itself is left as it is: it is part of the shader chain lock, and a change to it translates every game again.
+- **Check:** `dm/tools/tests/test_spv_build.py`: a stand-in translator that leaves empty files and prints POSIX's or Windows' disk-full line stops the run before the post-pass, with the line; a shader it can't translate doesn't; a full disk while the code areas are written stops with the line too. `test_android_shaders.py`: a full disk in `spv_build.log` (its own line or a traceback) or a drive with 100 MB left gets the message, another stop doesn't; the command line run with a stand-in that raises `ENOSPC` exits 1 with the message and no traceback.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) on Windows 11 ([droidplay-core#307](https://github.com/enjoyerofslop/droidplay-core/issues/307)). Not rebuilt here (no game files).
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

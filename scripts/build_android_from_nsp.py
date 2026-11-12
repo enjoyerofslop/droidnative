@@ -30,7 +30,7 @@
 #      A one-game install of the same game (files/game, the layout before the launcher) is moved there instead of copied again, and its save is copied by the app
 # The picture comes from the Vulkan replay of NVN (dm/android/gfx_vk.c).
 # Needs: Python with lz4, capstone, fonttools and backports.zstd (not on Python 3.14), the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
-import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, platform, re, shutil, struct, subprocess, sys, tarfile, tempfile, threading, time
+import argparse, atexit, contextlib, datetime, errno, functools, hashlib, json, os, platform, re, shutil, struct, subprocess, sys, tarfile, tempfile, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -245,6 +245,51 @@ def standard_font(font):   # <font>/standard.ttf: a hinted TrueType font; withou
     if not dst.is_file() or dst.stat().st_size != Path(src).stat().st_size: shutil.copyfile(src, dst)
 
 
+# A full disk as a tool's log shows it: POSIX's strerror, and Windows' ERROR_DISK_FULL and ERROR_HANDLE_DISK_FULL as .NET (the translator) and Python print them
+DISK_FULL = re.compile(r'No space left on device|not enough space on the disk|The disk is full|\[Errno 28\]|ENOSPC', re.I)
+LOW_DISK = 1 << 30   # a step that failed with less than this free on its drive is taken for one that ran out of space
+_work = None   # the game's <id>_build once main knows it: the folder a full disk's message names when the error names no file (a write to an open file names none)
+
+
+def drive_of(p):   # the drive a path is on, as a player names it: C:\ on Windows, the volume's mount point elsewhere
+    p = Path(os.path.abspath(p))
+    if os.name == 'nt': return p.anchor or str(p)
+    while not os.path.ismount(p) and p != p.parent: p = p.parent
+    return str(p)
+
+
+def free_on(p):   # bytes free on the drive of path p (its nearest existing folder), or None
+    p = Path(os.path.abspath(p))
+    while not p.exists() and p != p.parent: p = p.parent
+    try: return shutil.disk_usage(p).free
+    except OSError: return None
+
+
+def disk_full(path):
+    """What to say when this computer ran out of space writing under path (a file or folder; None: unknown): the drive, what it has free, what to free. Pokémon Pokopia's
+    build on Windows ended in a traceback, OSError: [Errno 28] (droidplay-core#307), which named neither the drive nor what had filled it"""
+    where = f'{drive_of(path)} ' if path else ''
+    free = free_on(path) if path else None
+    text = (f'This computer ran out of disk space: the drive {where}' + (f'has {size_text(free)} free' if free is not None else 'is full') +
+            (f' (writing {path})' if path else '') + '. Free some space on it, or move the game\'s folder to a drive with more room, then build again: the steps already '
+            'done are kept. A game\'s <title ID>_build folder beside its files holds its extracted files and translated shaders, so deleting the folder of a game you no '
+            'longer build frees that much.')
+    try: old = [d for d in Path(tempfile.gettempdir()).glob('spv_*') if d.is_dir()]
+    except OSError: old = []
+    if old:   # before spv_build.py kept them under WORK, every failed translation left one in the system's temp folder, tens of GB for a big game
+        text += f' {len(old)} spv_… folder{"s" if len(old) > 1 else ""} in {tempfile.gettempdir()} {"were" if len(old) > 1 else "was"} left by failed shader translations of earlier versions: nothing uses them, so delete them.'
+    return text
+
+
+def translation_stopped(work, log):   # what build_shaders adds when spv_build.py stopped: its own reason (a [RED] spv_build: line), and a full disk's message when the disk filled
+    try: text = log.read_text(errors='replace')
+    except OSError: text = ''
+    own = [l[6:] for l in text.splitlines() if l.startswith('[RED] spv_build: ')]
+    free = free_on(work)
+    full = DISK_FULL.search(text) or (free is not None and free < LOW_DISK)
+    return ''.join(f'{l}\n' for l in own[-1:]) + (f'{disk_full(work)}\n' if full else '')
+
+
 def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derived='', oodle=None):
     """The game's NVN shaders for the Vulkan replay: the split (build_ipa_from_nsp.py split_shaders, checked against the profile's tables), then
     dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. Returns that folder (None when there are none) and the profile.
@@ -282,7 +327,7 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
     try: bi.run([sys.executable, REPO / 'dm/android/tools/spv_build.py', sh / 'pkg', out, '--xlate', REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.dll',
                  '--facts', g.table('shader_facts.tsv')], logs / 'spv_build.log', env=env)
     except BuildError as e:
-        raise BuildError(f'{e}\nShader translation failed, so the game is not packed: with only the shaders translated so far, some of its scenes would draw nothing. '
+        raise BuildError(f'{e}\n{translation_stopped(work, logs / "spv_build.log")}Shader translation failed, so the game is not packed: with only the shaders translated so far, some of its scenes would draw nothing. '
                          f'The shaders that were translated are kept for the next build. Report this build with {logs / "spv_build.log"}') from e
     last = [l for l in (logs / 'spv_build.log').read_text(errors='replace').splitlines() if l.startswith('spv_build:')]
     bi.PROG.end(last[-1][11:] if last else str(out))
@@ -1471,6 +1516,7 @@ def main(argv):
         elif not all(v in have for v in need): derived = f'the folder has no {", ".join(v for v in need if v not in have)}, whose files game profile {g.id}\'s shader tables were made from'
         if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
     work = nsp_dir / f'{g.id}_build'; logs = work / 'logs'; ex = work / 'extract'
+    global _work; _work = work
     ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'), DM_TARGET='android', PYTHONUTF8='1')   # the tools' text files in UTF-8 on Windows too (its default is the ANSI code page)
     patched = work / f'patched_android_{pkg_ver}'
@@ -1594,6 +1640,9 @@ if __name__ == '__main__':
     try: main(sys.argv[1:]); code = 0
     except BuildError as e:
         bi.PROG.close(ok=False); bi.PROG.say(f'[RED] {e}'); sys.exit(1)
+    except OSError as e:   # a full disk anywhere (Windows' ERROR_DISK_FULL is ENOSPC too): said plainly, not as a traceback
+        if e.errno != errno.ENOSPC: raise
+        bi.PROG.close(ok=False); bi.PROG.say(f'[RED] {disk_full(e.filename or _work)}'); sys.exit(1)
     except SystemExit as e: code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1); raise
     except KeyboardInterrupt: code = 130; raise
     finally:

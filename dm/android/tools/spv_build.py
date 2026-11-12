@@ -13,7 +13,7 @@
 # removes however it ends: for a big game it holds tens of GB, so it stays on the game's drive, beside its other files, and a failed run leaves nothing behind.
 # Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N]
 import spv_android as sa   # beside this file
-import argparse, concurrent.futures as cf, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile
+import argparse, concurrent.futures as cf, errno, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -149,6 +149,28 @@ def int_input_jobs(keys, jobs, tout, j):
     if ex: ex.shutdown()
     return again
 
+# A full disk in a translator [RED] line (dmsh_xlate prints each shader's IOException and goes on to the next): POSIX's strerror, and Windows' ERROR_DISK_FULL and
+# ERROR_HANDLE_DISK_FULL as .NET words them
+DISK_FULL = re.compile(r'No space left on device|not enough space on the disk|The disk is full|\[Errno 28\]|ENOSPC', re.I)
+
+def disk_full(path, why):
+    """Stop on a full disk with a line build_android_from_nsp.py shows the player: what could not be written, the drive's free space, what to do. Going on reached the
+    post-pass, which stopped at the first empty .spv the translator left (IndexError in spv_android.py parse, droidplay-core#307), and the log said nothing of the disk"""
+    d = Path(os.path.abspath(path))
+    while not d.is_dir() and d != d.parent: d = d.parent   # a file that could not be written may not be there
+    try: free = f'{shutil.disk_usage(d).free / 1e9:.1f} GB free'
+    except OSError: free = 'no free space it could read'
+    print(f'[RED] spv_build: the disk is full: {why}. The drive with {d} has {free}, before this run\'s temporary files are removed. Nothing more is translated: '
+          'free some space and build again (the shaders translated already are kept)', flush=True)
+    raise SystemExit(1)
+
+def stop_if_full(failed, tout, step):   # after a translation pass: the translator's failures, and a stop when any was a full disk
+    full = sorted(k for k, why in failed.items() if DISK_FULL.search(why))
+    if not full: return
+    for k, why in sorted(failed.items()):
+        if k not in full: print(f'[RED] {k}: {why}')   # its other failures, lost otherwise
+    disk_full(tout, f"the translator could not write {len(full):,} shaders' output in its {step} ({full[0]}: {failed[full[0]]})")
+
 def work_dir():
     """Where the run's temporary folder goes: WORK, which build_android_from_nsp.py sets to <id>_build/tmp, else the system's temp folder (a run by hand). On Windows
     that one is on C: whatever drive the game is on, and out of sight: droidplay-core#307's three failed Pokémon Pokopia runs each left tens of GB in %TEMP%.
@@ -162,6 +184,9 @@ def work_dir():
 def main():
     w = tempfile.mkdtemp(prefix='spv_', dir=work_dir())
     try: translate(w)
+    except OSError as e:   # this script's own writes (the code areas, the job lists, reflections) on a full disk
+        if e.errno != errno.ENOSPC: raise
+        disk_full(e.filename or w, f'{e.filename or "a file"} could not be written')
     finally: shutil.rmtree(w, ignore_errors=True)   # the code areas and the translator's output: as large as the shaders made, whether the run finished or not
 
 def translate(w):
@@ -205,6 +230,7 @@ def translate(w):
             for ln in r.stderr.splitlines() + r.stdout.splitlines():
                 m = re.match(r'\[RED\] (\w+): (.*)', ln)
                 if m: failed[m.group(1)] = m.group(2)[:160]
+    stop_if_full(failed, tout, 'first pass')
     again = int_input_jobs(keys, jobs, tout, a.j)
     if again:
         with cf.ThreadPoolExecutor(a.j) as ex:
@@ -213,6 +239,7 @@ def translate(w):
                     m = re.match(r'\[RED\] (\w+): (.*)', ln)
                     if m: failed[m.group(1)] = 'integer-input retranslation: ' + m.group(2)[:130]
         print(f'spv_build: {len(again)} vertex shaders translated again with integer inputs')
+        stop_if_full(failed, tout, 'integer-input pass')   # it rewrites good .spv files in place, so a disk that fills here cuts them short
     done = sorted(p.name[:-4] for p in tout.glob('*.spv') if not p.name.endswith('.reader.spv'))
     for k in done:   # the feedback layout and a task / mesh shader's facts go with the shader's reflection: spv_android.py makes the capture variant and the stage modules from them
         if k in tfs or 'mesh_stage' in jobs[k]:

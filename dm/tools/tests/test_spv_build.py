@@ -1,7 +1,8 @@
 """dm/android/tools/spv_build.py's run around the translator, over a package of synthetic pixel shader records, with a stand-in for dmsh_xlate (it writes each job's
 .spv and .res.json, or what a test asks for); spv_android.py's post-pass runs as it does in a build, on a minimal fragment shader. Checked: the temporary folder (the code
 areas, the job lists and the translator's output) is made under WORK, the build's <id>_build/tmp, and removed however the run ends, a full disk included
-(droidplay-core#307: three failed Pokémon Pokopia runs each left tens of GB in the system's temp folder). No game files, no translator, no spirv-as."""
+(droidplay-core#307: three failed Pokémon Pokopia runs each left tens of GB in the system's temp folder); a full disk, in the translator's lines or in this script's own
+writes, stops the run with a plain line before the post-pass, which stopped at the first empty .spv. No game files, no translator, no spirv-as."""
 import contextlib
 import errno
 import io
@@ -70,10 +71,12 @@ class Harness(unittest.TestCase):
         env = {'WORK': str(self.work)} if env is None else env
         argv = ['spv_build.py', str(self.pkg), str(self.out), '--xlate', 'dmsh_xlate', '-j', '2']
         buf = io.StringIO()
-        with mock.patch.object(sys, 'argv', argv), mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf):
-            if 'WORK' not in env: os.environ.pop('WORK', None)
-            sb.main()
-        return buf.getvalue()
+        try:
+            with mock.patch.object(sys, 'argv', argv), mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf):
+                if 'WORK' not in env: os.environ.pop('WORK', None)
+                sb.main()
+        finally: self.text = buf.getvalue()
+        return self.text
 
     def left(self):   # temporary folders under WORK or in the system's temp folder after the run
         return sorted(str(p) for d in (self.work, self.sysdir) if d.exists() for p in d.glob('spv_*'))
@@ -100,8 +103,10 @@ class TemporaryFolder(Harness):
                 n[0] += 1
                 if n[0] == 3: raise OSError(errno.ENOSPC, 'No space left on device', str(p))
             return real(p, data)
-        with mock.patch.object(Path, 'write_bytes', write), self.assertRaises(OSError) as e: self.build()
-        self.assertEqual(e.exception.errno, errno.ENOSPC)
+        with mock.patch.object(Path, 'write_bytes', write), self.assertRaises(SystemExit) as e: self.build()
+        self.assertEqual(e.exception.code, 1)
+        self.assertRegex(self.text, r'\[RED\] spv_build: the disk is full: .*\.bin could not be written\. The drive with .* has [\d.]+ GB free')
+        self.assertEqual(self.touts, [])   # nothing was translated
         self.assertEqual(self.left(), [])
 
     def test_a_folder_a_killed_run_left_goes_at_the_next_run(self):   # a closed window or a killed process runs no finally
@@ -115,6 +120,41 @@ class TemporaryFolder(Harness):
         self.assertTrue(self.touts and all(t.parent.parent == self.sysdir for t in self.touts), self.touts)
         self.assertEqual(list(self.sysdir.iterdir()), [])
         self.assertFalse(self.work.exists())
+
+
+class DiskFull(Harness):
+    """The translator writes each output with File.WriteAllBytes and catches each shader's exception: on a full disk it leaves an empty or cut-short .spv and prints
+    `[RED] <key>: IOException: …`, then goes on to the next shader"""
+    def setUp(self):
+        super().setUp(); self.good, self.message = 2, "IOException: No space left on device : '{path}'"
+
+    def translate(self, job, tout):
+        if self.good: self.good -= 1; return super().translate(job, tout)
+        p = tout / f"{job['key']}.spv"
+        if 'IOException' in self.message: p.write_bytes(b'')   # created, then the write failed; a shader it can't translate gets no file
+        return f"[RED] {job['key']}: {self.message.format(path=p)}\n"
+
+    def test_the_translator_finding_the_disk_full_stops_the_run_before_the_post_pass(self):
+        for name, message in (('POSIX', "IOException: No space left on device : '{path}'"), ('Windows', "IOException: There is not enough space on the disk. : '{path}'")):
+            with self.subTest(message=name):
+                self.good, self.message, self.lines = 2, message, ''
+                with self.assertRaises(SystemExit) as e: self.build()
+                self.assertEqual(e.exception.code, 1)
+                self.assertRegex(self.text, r"\[RED\] spv_build: the disk is full: the translator could not write 3 shaders' output in its first pass \(\w{16}: IOException: ")
+                self.assertIn('Nothing more is translated', self.text)
+                self.assertEqual(self.lines, ''); self.assertFalse(self.out.exists() and any(self.out.iterdir()))   # no post-pass: it stopped at the first empty .spv
+                self.assertEqual(self.left(), [])
+
+    def test_a_shader_the_translator_cannot_handle_is_no_stop(self):
+        self.good, self.message = 2, 'NotImplementedException: LDC with a bindless bank or an address mode'
+        text = self.build()
+        self.assertEqual(len(list(self.out.glob('*.res.json'))), 2)
+        self.assertEqual(text.count('LDC with a bindless bank'), 3); self.assertNotIn('disk is full', text)
+
+    def test_the_line_says_what_build_android_from_nsp_looks_for(self):   # its DISK_FULL, the same pattern: the player's message adds what to free
+        self.assertTrue(sb.DISK_FULL.search('[RED] spv_build: the disk is full: a file could not be written'))
+        self.assertTrue(sb.DISK_FULL.search('OSError: [Errno 28] No space left on device'))
+        self.assertFalse(sb.DISK_FULL.search('[RED] 0123456789abcdef: IndexOutOfRangeException: Index was outside the bounds of the array.'))
 
 
 if __name__ == '__main__':
