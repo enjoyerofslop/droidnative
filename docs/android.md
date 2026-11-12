@@ -62,14 +62,14 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 
 - **Library:** the games you added (**+ Build game** picks a folder with a game's NSP files), each with its box art, version and status on the phone picked at the top.
   The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
-  build only, update the app on the phone, remove the game. A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
+  build only, update the app on the phone, remove the game, import a save to the phone, restore its save from a backup ([Saves](#saves)). A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
   provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.
 - **Builds:** the running build's stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console shows here too.
   When a build fails, a banner says what went wrong in plain words, with the button that fixes it where there is one (**Install again** once the phone has room,
   **Choose prod.keys** for keys older than the game). Otherwise it is likely a bug: **Copy report** copies a short report to paste in #help on the Discord, and
   **Save full report** saves the whole log; both leave out your user folder, the phone's serial and anything that looks like a key.
 - **Phones:** adb devices over USB and Wi-Fi (pair, connect, discover), each one's battery and free space, the app version and the games on each phone, saves
-  backed up to the computer. **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
+  backed up to the computer and put back (**Restore a backup…**). **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
   (Samsung's Auto Blocker, Xiaomi's Install via USB, a Pixel's driver) and what to try when the phone doesn't show up; a phone below 20% battery gets a warning,
   since a PC's USB port charges slowly and an install takes minutes. A phone on a cable and on Wi-Fi at once is one phone: the list at the top shows it once, over
   the cable. What DroidPlay keeps for a phone (the one you picked, its backups) follows the phone itself, not its Wi-Fi address, which changes each time wireless
@@ -129,9 +129,47 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   `DM_PAD_INSET` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
   shakes the controller. The **≡** button at the top (left of −) goes back to the launcher while the game keeps running behind it: **Play** on the same game resumes
   it, and picking another game asks before closing the running one.
-- **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; the desktop app backs them up to the computer. The log is
+- **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; each game's screen exports, imports and puts back its save
+  ([Saves](#saves)), and the desktop app backs them all up to the computer. The log is
   `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`). The start before's is kept as `log.prev.txt`, so a game the system closed
   for memory and that opened again still leaves its last log.
+
+## Saves
+
+At the bottom of a game's screen in the app, under **Save**:
+
+- **Export save** writes the game's save as a zip wherever you pick: Downloads, a cloud drive, an SD card. Inside, `saves/<title ID>/` is the save as the game
+  sees it (with `saves/<title ID>_device/` beside it for a game that also keeps a device save). For an emulator, copy the files inside that folder into its save folder for the game.
+- **Import save** takes a save from a zip or a folder you pick and puts it in place of the game's save. It recognises:
+  - an export or backup from DroidPlay;
+  - a yuzu-family emulator's save folder (yuzu, Citron, Eden, Sudachi…: `nand/user/save/0000000000000000/<user>/<title ID>/`) and Ryujinx's (`bis/user/save/<number>/`);
+    pick the game's folder, or one higher up: when it holds several users' saves, you pick one;
+  - JKSV, EdiZon and Checkpoint backups;
+  - any folder that is the save itself, such as UltraTears' `userdata/save/<user ID>/`, or a save site's zip.
+
+  It shows what it found and asks first. It warns when the files say they're another game's, or share no file names with the save the game has on the phone.
+  RAR and 7z archives, and zips that Windows packed with Deflate64 (it does for big ones), can't be opened on a phone: unpack them with a file manager app or on a
+  computer, then import the folder.
+- **Earlier saves** puts back a save kept before an import, or one from **Back up saves** on the games list.
+
+From a computer, **DroidPlay for Windows** does the same over adb, for a phone that's connected:
+- **Library › Manage › Import a save to the phone…** sends a save folder or archive for that game. Unlike the phone, the computer unpacks RAR and 7z archives too
+  (with Windows' own `tar`); a Deflate64 zip still needs unpacking first (Explorer's **Extract all** reads it).
+- **Manage › Restore its save from a backup…**, and **Phones › Restore a backup…** for every game in one, send saves back from what **Back up saves to this computer**
+  copied (pick its folder, or one of the dated folders inside it; the newest backup of each game is taken).
+- The command line's `--import-save` and `--restore-backup` do the same ([Packing from the command line](#packing-from-the-command-line)).
+
+The save goes to `files/import/<title ID>/` on the phone, which adb can write; the app's own save folder it can't. DroidPlay on the phone then shows what it found and
+asks, as for an import from the phone: at once when the app is open or opens, or after the game, when it's being played.
+
+Before an import or a restore, the game's save is kept in `Android/data/org.nxnative.android/files/backups/<time>-<title ID>/`, which DroidPlay for Windows' **Back up
+saves to this computer** copies too. The game must not be running; the app offers to close it, and progress it hasn't saved is lost. Uninstalling the app deletes
+those backups along with the saves, so export the saves you care about first.
+
+- **Play the game once before importing**, until it saves. The import then checks the new files against that save, and finds the save's folder by its file names
+  when a zip holds it deeper down or inside a folder of its own. Without a save to compare with, it goes down through folders that hold nothing but one folder, and takes the first that holds more.
+- **A save from a later update of the game** than the one on the phone may not load (the game may say it's damaged, or start afresh). Your previous save is kept.
+- **A game with several save slots** keeps them all in its one save, so an import replaces every slot at once.
 
 ## Game apps
 
@@ -192,6 +230,8 @@ python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k
     --no-push            build the APK only (a game without a profile is first built this way)
     --push-only          install the app and copy a game built before, without building
 python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
+python scripts/build_android_from_nsp.py --import-save "<save folder or archive>" --title <title ID>    send a save to the phone (Saves)
+python scripts/build_android_from_nsp.py --restore-backup "<backup folder>" [--title <title ID>]       send a game's save, or every game's, from a backup
 python scripts/build_android_from_nsp.py --check       what the build needs on this computer, as JSON
 ```
 

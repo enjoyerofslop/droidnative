@@ -63,6 +63,20 @@ class Json(unittest.TestCase):
         t = ba.games_table()   # no game played on Android is one the table lists as drawing without NVN
         self.assertEqual([g for g in ba.ANDROID_TESTED if g in t and 'NVN' not in t[g]['graphics']], [])
 
+    def test_oodle_packs_stop_early_without_a_decoder(self):   # issue #310: Pokémon Legends: Arceus's split failed on its 678 GFPAKs after about 220 s, with no decoder for the game's Oodle
+        sys.path.insert(0, str(REPO / 'dm/games')); import profile_guess as pg   # noqa: E401
+        src = pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_gfpak=678)
+        why = ba.undecodable_packs(src['oodle_packs'], 'Pokémon Legends: Arceus', None)
+        self.assertIn("Arceus keeps its shaders in files compressed with the game's own Oodle (678 Game Freak GFPAK archive(s) with Oodle Kraken entries "
+                      "(Pokémon Legends: Arceus)), which only the game's own decoder reads", why)
+        self.assertIn('connect one', why); self.assertIn('DroidPlay for Mac', why); self.assertNotIn('DM_OODLE', why)
+        self.assertIsNone(ba.undecodable_packs(pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0)['oodle_packs'], 'Odyssey', None))
+        for decoder in ('SERIAL', {'DM_OODLE_HOST': 'dmhost', 'DM_OODLE_MODULES': 'patched_v262144'}, True):   # a phone, a Mac host, what an earlier build decoded
+            self.assertIsNone(ba.undecodable_packs(src['oodle_packs'], 'Arceus', decoder))
+        for s in (pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, trinity_packs=1), pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_pkz=1),
+                  pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_ue3=1)):   # Legends: Z-A, Bayonetta 3, Batman: Arkham Knight
+            self.assertIn('connect one', ba.undecodable_packs(s['oodle_packs'], 'x', None))
+
     def test_games_played_on_android_have_profiles(self):   # a mistyped title ID would leave its game shown as not played on Android
         t = ba.games_table()
         self.assertTrue(ba.ANDROID_TESTED)
