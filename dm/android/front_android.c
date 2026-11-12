@@ -733,6 +733,7 @@ void android_main(struct android_app *app) {
     }
     vk_driver_dirs(g_ext, g_int);   // DM_VK_DRIVER: a driver beside env.txt, run from a copy in the internal files
     vk_driver_game(g_game, DM_GAME_ID);   // and its start records: games/<title ID>/vk_driver_result.txt
+    vk_start_game(g_game);   // and vk_start.txt, whatever driver runs
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &g_env, NULL);
     app->onAppCmd = on_cmd; app->onInputEvent = on_input;
     // The screen stays on while the game's window is up, as the launcher's does: Android counts only its own input events as activity, so a cutscene, a game
@@ -747,6 +748,6 @@ void android_main(struct android_app *app) {
             if (g_sc) break;
         }
         if (!frame_draw()) status_draw();
-        driver_proven();
+        driver_proven(); vk_start_tick();
     }
 }
