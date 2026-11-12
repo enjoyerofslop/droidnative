@@ -13,13 +13,14 @@
 //   - vkEndCommandBuffer waits until the recorder has made every call before it (rec_drain), so a command buffer is whole before chunk_submit hands it to the queue, and the
 //     completion thread's vkResetCommandPool (after the chunk's fence) never meets a recording in progress. Only the recorder touches a command buffer while the recorder is on
 //   - what a call reads through its pointers is copied at the call; handles stay valid until the chunk completes (dead_add), long after the call is made. A descriptor set is
-//     written (vkUpdateDescriptorSets, on the replay thread) before its bind is queued, and never again in that recording
+//     written before its bind is queued, and never again in that recording: by the recorder too, as a record ahead of the bind's (R_UPDDS, below), or on the replay
+//     thread with DM_VK_REC_DESC=0
 //   - a call with a pNext chain this file cannot copy is made directly, after a drain
 // DM_VK_RECORDER=1 (env.txt, or a game's android_defaults.txt): on. Off by default (the calls are made on the replay thread, as before) until more games and devices have run it
 #include <sched.h>
 enum { RQ_SIZE = 8u << 20 };   // about 25,000 records a frame of 30 to 200 bytes: several frames' worth
 enum { R_BEGINQ = 1, R_BEGINRP, R_BINDDS, R_BINDIB, R_BINDP, R_BINDVB, R_BLIT, R_CLRATT, R_CLRCOL, R_CLRDS, R_CPB2I, R_CPI, R_CPI2B, R_DISPATCH, R_DRAW, R_DRAWIDX, R_ENDQ, R_ENDRP,
-       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB };
+       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB, R_UPDDS };
 typedef struct { uint32_t fn, n; VkCommandBuffer cb; } rq_hdr;   // n: the record's bytes, header included, a multiple of 16
 static uint8_t *g_rq;
 static _Atomic uint64_t g_rq_w, g_rq_r;   // bytes written / made since the start (the ring offset is the count modulo RQ_SIZE)
@@ -261,6 +262,29 @@ static VkResult rec_vkEndCommandBuffer(VkCommandBuffer cb) {   // the command bu
     return g_rq_end;
 }
 
+// A descriptor set's writes are made by the recorder as well: vkUpdateDescriptorSets was the replay thread's largest call into the driver once its copies were gone (Mario
+// Kart World's race: 10.4 of the replay's 40 ms a frame on a OnePlus Pad 3 with raw global memory; 5.3 ms on a Galaxy S25 Edge with the recorder on, about 5,000 sets, 0.6
+// packed and queued). The writes go into the ring packed (rec_desc.h), ahead of
+// the set's bind, so the recorder writes a set before it binds it, as the replay did; every other write of the replay (transform feedback's bindings, the texture pool's
+// set, the copies' and decodes' sets) takes the same road, so two writes of one set keep their order and never meet on two threads.
+//   - A set's pool is reset or the set handed out again only once its chunk completed (ds_chunk_done), after the recorder submitted it, so after every write queued for it.
+//   - The views, samplers and buffers a write names stay until their chunk completes, as for every queued call.
+//   - The replay may take sets from a pool (vkAllocateDescriptorSets) while the recorder writes others of it: Vulkan asks for one thread at a time per set written and per
+//     pool allocated from, not across the two.
+//   - Writes this cannot pack (a pNext chain, copies between sets, more than a block holds) are made directly after a drain.
+// DM_VK_REC_DESC=0 (env.txt): the writes stay on the replay thread, as before
+static int rec_desc(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_REC_DESC"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_REC_DESC=0: descriptor sets are written on the replay thread"); } return v; }
+static uint64_t g_rq_desc, g_rq_desc_direct;   // descriptor set writes queued / made directly after a drain
+typedef struct { uint32_t n, pad; } a_updds;
+static void rec_vkUpdateDescriptorSets(VkDevice dev, uint32_t nw, const VkWriteDescriptorSet *w, uint32_t nc, const VkCopyDescriptorSet *c) {
+    if (!nw && !nc) return;
+    if (!rec_on() || !rec_desc()) { vkUpdateDescriptorSets(dev, nw, w, nc, c); return; }
+    size_t b = nc ? 0 : rd_size(nw, w);
+    if (!b) { rec_drain(); g_rq_desc_direct++; vkUpdateDescriptorSets(dev, nw, w, nc, c); return; }
+    uint8_t *r = rq_take(R_UPDDS, VK_NULL_HANDLE, sizeof(rq_hdr) + sizeof(a_updds) + b);
+    *(a_updds *)(void *)(r + sizeof(rq_hdr)) = (a_updds){nw, 0}; rd_pack(r + sizeof(rq_hdr) + sizeof(a_updds), nw, w); rq_push(r); g_rq_desc++;
+}
+
 // ---- The recorder thread ----
 static void rq_make(const uint8_t *rec) {   // one record's call
     const rq_hdr *h = (const rq_hdr *)(const void *)rec; const uint8_t *s = rec + sizeof(rq_hdr); VkCommandBuffer cb = h->cb;
@@ -301,6 +325,7 @@ static void rq_make(const uint8_t *rec) {   // one record's call
         case R_SREF: { const a_stencil *a = (const void *)s; vkCmdSetStencilReference(cb, a->f, a->v); break; }
         case R_SWMASK: { const a_stencil *a = (const void *)s; vkCmdSetStencilWriteMask(cb, a->f, a->v); break; }
         case R_TS: { const a_ts *a = (const void *)s; vkCmdWriteTimestamp(cb, a->st, a->p, a->q); break; }
+        case R_UPDDS: { const a_updds *a = (const void *)s; VkWriteDescriptorSet w[RD_MAX]; rd_unpack(s + sizeof *a, a->n, w); vkUpdateDescriptorSets(g_vk.dev, a->n, w, 0, NULL); break; }
         case R_BEGINCB: vkBeginCommandBuffer(cb, (const VkCommandBufferBeginInfo *)(const void *)s); break;
         case R_ENDCB: g_rq_end = vkEndCommandBuffer(cb); break;
         case R_SUBMIT: { const a_submit *a = (const void *)s;
@@ -365,5 +390,6 @@ static void *rq_thread(void *arg) {
 #define vkCmdSetStencilWriteMask rec_vkCmdSetStencilWriteMask
 #define vkCmdSetViewport rec_vkCmdSetViewport
 #define vkCmdWriteTimestamp rec_vkCmdWriteTimestamp
+#define vkUpdateDescriptorSets rec_vkUpdateDescriptorSets
 #define vkBeginCommandBuffer rec_vkBeginCommandBuffer
 #define vkEndCommandBuffer rec_vkEndCommandBuffer

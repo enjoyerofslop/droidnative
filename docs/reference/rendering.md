@@ -1400,6 +1400,7 @@ The Vulkan replay has no side libraries: `dm/android/spv_alpha.h` rewrites the f
 - **Cause:** every address a samples-passed report ever wrote counted as unknown at replay, landed or not (`rc_occ_has`, later the report's `conservative` mark), so every draw under an occlusion condition was made. The report table already knows when a report has landed: its submission's fence against `g_rc_complete`, with later buffer writes and GPU writes tracked.
 - **Fix:** only counter kinds the host does not implement stay conservative (`rc_note`); a landed samples-passed result is read like a landed timestamp one (`rc_value`), and a report still in flight keeps the block drawing.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): it reports its queries a submission ahead of the conditional draws, so all of them had landed at replay (1.48 million conditions on the Kokiri Forest route, 0 in flight, 42% false). GPU p50 17.06 → 16.44 ms and p95 18.74 → 18.01 ms a frame on a 20-core M4 Pro (two runs each), picture unchanged. Skipping every unknown block instead (the visible ones too) whitened the scene for good: only the evaluated condition is a valid skip.
+  - **Android** (`gfx_vk.c` `rc_note`, `rc_value`): the counter report address set keeps the NVN fence of each address's latest samples-passed report. A condition on it reads memory once that fence has completed (the completion thread writes the result before the fence), and keeps drawing while it is in flight; other counter kinds stay unknown, and a report of the submission being replayed is looked up first. `DM_VK_RC_LANDED=0` draws every such block, as before. Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8 against main (two runs each, alternated): 2.3 → 2.6 fps, frame p50 445 → 394-400 ms, submit CPU p50 335-338 → 281-286 ms, GPU p50 160-164 → 156-159 ms, about 100 fewer draws a frame. In one Kokiri run (with #150, #83 and #173 merged), 480,916 conditions were read once landed, none was in flight, and 184,064 draws and clears were dropped. On main of 2026-11-11, where the storage buffer copies no longer hide the replay's own cost, Kokiri Forest on an AYN Odin 2 (Adreno 740; a build with this and the recorder's descriptor writes, the recorder off): the replay thread's CPU 40.1 → 30.2 ms a frame, 2,101 → 2,025 draws, 13.2 → 14.5 fps with the GPU at 50 ms a frame either way, the picture the same; 739,704 conditions read once landed, none in flight, 342,349 clears and draws dropped. Animal Crossing: New Horizons, whose conditions are all on timestamp reports, draws as before (no address in the set, 30 fps either way).
 
 ### Report tables that dropped entries
 
@@ -1407,6 +1408,7 @@ The Vulkan replay has no side libraries: `dm/android/spv_alpha.h` rewrites the f
 - **Cause:** the reports of a submission were kept in a table of 256, queries and timestamps alike. Once full, a timestamp report was forgotten, its condition read the 1 the CPU wrote, and the clear ran ([Conditional rendering evaluated at replay](#conditional-rendering-evaluated-at-replay)).
 - **Fix:** only timestamp reports are kept per submission, and the query addresses, which are kept apart, are enough for those; both tables grow (`rc_note`, `rc_occ_add`).
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 285 ink queries a frame in its dialogue scene came before the conditional clears, and the lit scene was wiped: a black screen with only the text on it. The opening cutscene has no such queries, and the pier about 160.
+  - **Android** (`gfx_vk.c`, its own copy of the tables): the query address set was still a fixed 4,096 slots. [Ocarina of Time](../../dm/games/0400486024DEC000/README.md)'s Kokiri Forest filled it, and from then on every report and every condition probed all 4,096 slots without finding room or the address: 37% of the replay thread on a Galaxy Z Fold 8 (simpleperf: `rc_occ_add` and `rc_occ_has` inlined in `mtl_exec`). It now doubles at half full, up to 2M slots, past which it is emptied and filled again with a log line. Kokiri Forest kept more than 32,768 addresses in its first two minutes. Grown alone, it lost the culling the full table had made by accident (a condition on an address dropped from the table read memory): every occlusion-conditioned block drew, so it goes with [Occlusion conditions read once landed](#occlusion-conditions-read-once-landed) on Android. Measured again on main of 2026-11-11 on the Fold: the walks were 19.9 of the replay thread's 35.2 ms a frame, and the set grown alone drew 2,479 draws a frame against 2,122, at 15.7 against 17.8 fps (GPU p50 49.9 against 43.2 ms).
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sbw`.
 
 ### Query slots running out inside a pass
@@ -2088,7 +2090,7 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 
 - **Symptom:** a game with thousands of draws a frame is held by the replay thread's CPU time. In a profile of that thread the driver's recording calls are a large share: Breath of the Wild on a OnePlus Pad 3, `vkCmdDrawIndexed` 9.9%, `vkCmdBindDescriptorSets` 8.2%, `vkCmdBeginRenderPass` 1.4%, and binds, copies and dynamic state besides. Meanwhile the phone's other cores are idle.
 - **Cause:** the replay made every `vkCmd*` call itself, and ended and submitted each chunk, on its one thread.
-- **Fix:** `DM_VK_RECORDER=1` (off by default) (`dm/android/gfx_vk_rec.inc`).
+- **Fix:** `DM_VK_RECORDER=1` (`dm/android/gfx_vk_rec.inc`): off by default, and on for Breath of the Wild and Ocarina of Time through their `android_defaults.txt`.
   - Each wrapper copies its call's arguments (arrays and structures included) into a ring, and a recorder thread (`vk-record`) makes the calls in order. It also ends each chunk's command buffer and submits it with its fence (`rec_submit`). A command buffer that fails to end is not submitted: its fence goes alone, so the chunk still completes.
   - The replay waits for it only in `mtl_present`, before the frame goes to the front end, whose blit uses the same queue.
   - The completion thread waits for a chunk's submission before its fence (`rec_wait_submitted`), and before it starts timing the chunk for the hang report.
@@ -2099,6 +2101,38 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - replay CPU 30.7 → 24.2 ms a frame;
   - with `DM_FPS_TARGET=30`, 30.0 fps (frame p95 38.4–38.9 ms, replay 17.3–17.5 ms) against 29.2–29.6 fps without it;
   - at the 60 fps target it stayed at 20 fps in four runs of five.
+- **Check, Ocarina of Time** (its default since 2026-11-11), Kokiri Forest, about 2,100 draws a frame, bench route `kokiri`, with the recorder's descriptor writes ([below](#descriptor-set-writes-on-the-replay-thread-with-the-recorder-on-android)):
+  - Ayn Odin 2 (Adreno 740), one run each from thermal status 0, recorder off → on: the replay thread 30.2 → 18.8 ms of CPU a frame, 14.5 → 14.9 fps (the GPU is busy 50 ms a frame either way), the same picture, 6.2 GB of PSS either way. The whole process used 106 → 120 ms of CPU a frame: the recorder thread's work is new.
+  - OnePlus Pad 3 (Adreno 830), the recorder together with the growing report address set ([Report tables that dropped entries](#report-tables-that-dropped-entries)), against main before both: the replay 34 → 14 ms, the GPU 34.9 → 21.4 ms as its clock went from about 650 to 1,100 MHz, and 19.5 → 19.9 fps, because the frame step still holds 3 vsyncs. With 2 held by hand (`DM_FPS_TARGET=30 DM_FPS_HOLD=off`): 27.5 fps.
+  - Galaxy S25 Edge (Adreno 830), the same comparison: the replay 38 → 17 ms, 17.6 → 19.0 fps; the GPU stays at 41 ms a frame, its clock at 525 MHz.
+
+### Descriptor set writes on the replay thread with the recorder on (Android)
+
+- **Symptom:** with `DM_VK_RECORDER=1`, `vkUpdateDescriptorSets` is still in the replay thread's profile, as its largest call into the driver: 5.3 ms a frame of Mario
+  Kart World's race on a Galaxy S25 Edge (about 2,400 draws, 5,000 sets), 2.1 of Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8, 10.4 of the race on a OnePlus Pad 3 with raw global
+  memory.
+- **Cause:** the recorder took the `vkCmd*` calls and the submissions, and a set was written on the replay thread before its bind was queued.
+- **Fix:** the writes go through the ring too (`gfx_vk_rec.inc` `rec_vkUpdateDescriptorSets`, record `R_UPDDS`), packed by `rec_desc.h` (each write with its image
+  infos, buffer infos or buffer views), ahead of the set's bind, so the recorder writes a set before it binds it, as the replay did.
+  - Every write of the replay takes the same road (transform feedback's bindings, the texture pool's set, the copies' and decodes' sets), so two writes of one set
+    keep their order and never run on two threads.
+  - A set's pool is reset, or the set handed out again, only once its chunk completed, after the recorder submitted it and so after every write queued for it.
+  - The replay may take sets from a pool while the recorder writes others of it: Vulkan asks for one thread at a time per set written and per pool allocated from.
+  - A call this cannot pack (a `pNext` chain, copies between sets, more than 128 writes or 256 KB: the texture pool's first whole write) is made directly after a drain.
+  - `DM_VK_REC_DESC=0` (env.txt): the writes stay on the replay thread, as before. Without the recorder nothing changes.
+- **Check:**
+  - `dm/tools/tests/test_rec_desc.py`: a set with every kind of descriptor comes back whole from its packed block after the caller's arrays are reused; chains, unknown
+    types and oversized calls are left to a direct call.
+  - Mario Kart World's race on a Galaxy S25 Edge (Adreno 830), recorder on, in the replay thread's profile: `vkUpdateDescriptorSets` 5.3 ms a frame with
+    `DM_VK_REC_DESC=0`, the packing and queuing 0.6 ms with it, and no driver code left on the thread; the recorder thread used 41% of a core. The race's picture was
+    right, and 4.2 million writes were queued with none made directly.
+  - Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8 (Adreno 840), main's defaults: the replay 30.7 ms a frame with the recorder against 35.2 without, of which the
+    report-address set's walks (`rc_occ_has`, `rc_occ_add`) are 21.0 and 19.9; so everything else is 9.7 ms against 15.3. 17.4 against 17.8 fps: the GPU holds the frame
+    there, at 43 ms. The forest was lit as before. With `DM_VK_MID_DRAWS=512` as well it fell to 10.2 fps (the GPU 64 ms a frame), and with set reuse it stayed at 17.1.
+  - Breath of the Wild's `outdoors` route there (the recorder and set reuse are its defaults; a host on the phone's installed base with this change): the replay 16.4–16.9 ms
+    a frame against 18.5–18.6 with `DM_VK_REC_DESC=0` at 3,630 draws, 29.8 fps and the same picture both ways.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) and
+  [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
 ### Descriptor sets bound again within a chunk (Android)
 
