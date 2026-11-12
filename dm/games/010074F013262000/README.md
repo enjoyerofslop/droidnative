@@ -12,7 +12,7 @@ opening movies, the first enemy defeat, destination tutorials, walking and the
 engagement-area collision boundary work. All 27,055 base/update shaders compile
 for Mac and iOS. The unsigned IPA is built and its archive checks pass.
 
-On Android, the cartridge's base game 1.0.0 reaches the first battle without losing the device, but draws its characters only in cutscenes; its world, once striped, is drawn with its textures since the replay reads stencil-mode texture slots' stencil ([Android](#android)).
+On Android, the cartridge's base game 1.0.0 reaches the first battle without losing the device, with its world and its characters drawn (stencil-mode texture slots and draws under rasterizer discard), but its gameplay runs at 5.6–7 fps, bound by the replay's handling of the skinning draws ([Android](#android)).
 
 iOS runtime testing, DLC gameplay and later-game allocation peaks remain open.
 The supplied four DLC packs are included; their additional shaders have not been
@@ -209,8 +209,8 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - **No lost device:** the triage expected the Adreno to lose the device a few seconds into the title until #203 lands. On this `main` it didn't: the S25 Edge ran the title, the opening and the first battle for about 11 minutes without it.
 - **What was played on both phones:** the auto-save notice, the title, New Game, Normal, the opening's cutscenes, the first battle against the Agnus Attacker (the auto-attack tutorial, won with auto-attacks and arts), the Destinations and Tips tutorials, and walking on the Everblight Plain.
 - **The picture, both phones:**
-  - **Characters drawn only in cutscenes:** in the opening's cutscenes Noah, Eunie, Lanz and the soldiers draw. In battle and in the field the party doesn't: no Noah behind the camera, only the effects of his arts.
-    - Both phones log one `[RED] transform feedback with vertex shader 0b8bcbe86791ef65, which has no capture variant: nothing captured`. Gameplay skins the characters through transform feedback, and this vertex shader's capture variant is missing.
+  - **Resolved, characters drawn only in cutscenes:** in the opening's cutscenes Noah, Eunie, Lanz and the soldiers drew; in battle and in the field the party didn't, only the effects of his arts. Gameplay skins the characters with vertex-only draws under rasterizer discard outside transform feedback, which the replay left out; they draw since those run as dispatches ([Draws under rasterizer discard that write memory](../../../docs/reference/rendering.md#draws-under-rasterizer-discard-that-write-memory-android)).
+    - Both phones log one `[RED] transform feedback with vertex shader 0b8bcbe86791ef65, which has no capture variant: nothing captured`. It wasn't the characters' skinning; it stays.
   - **Resolved, the world striped:** the titans on the title screen, the plain's ground, its rocks and the wreckage were drawn as black-and-white zebra stripes instead of their textures; the sky, the UI, the fire and the arts' effects looked right. The lighting reads a depth-stencil buffer in stencil mode, and the Vulkan replay read its depth there ([Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android), found on Xenoblade Chronicles 2). With the fix (2026-11-12, the S25 Edge, this game app with only the host swapped), the title's titans and the plain are drawn with their textures.
   - The Mac's 2.2.1 runs drew the terrain and the characters; 1.0.0 wasn't run on the Mac.
   - On the S25 Edge, Qualcomm's driver also logged 842 "Failed to link shaders" lines with no `[RED]` from the host; the Z Flip 7's driver logged none.
@@ -222,6 +222,11 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - **Memory:** 3.56 GB PSS on the S25 Edge (1.03 GB graphics) and 4.20 GB on the Z Flip 7 (1.92 GB graphics). Neither was killed.
 - **Save:** no save commit within the stretch (the game saves automatically, but not before this point), so saving and Continue are untested.
 - **Not tried:** past the first walk on the Everblight Plain, and the other devices.
+- **2026-11-12, both fixes, on the Galaxy S25 Edge:** the sprint's game app with a host from the stencil-mode fix's head (which has the rasterizer-discard dispatches), a new game on Easy (so auto-attacks carry the battles over adb) in an empty private save.
+  - **Played:** the title, the opening's cutscenes, the first battle on the Everblight Plain (the auto-attack tutorial, won), the Destinations and Tips boxes, the walk toward the next marker, and the second battle up to its arts tutorial. Arts presses reached the host but didn't register (the tutorial's count stayed 0/5) at that frame rate, so the run stopped there.
+  - **Picture:** the titans, the plain's ground and rocks, the spires and the Levnis are drawn with their textures, and the party, the soldiers and the enemies are drawn in battle and on the field. The log names the stencil-mode slot once (`531d637463e53486`, format 130).
+  - **Frame rate:** the title and the opening's cutscenes 27–30 fps (GPU 17–24 ms). The first battle 5.6–5.8 fps (frames of 179–193 ms, GPU 63–66 ms, about 1,430 draws), the plain 6.4–7.1, the second battle 5.9–6.9. The GPU's clock was at its lowest step, 160 MHz, in 78% of the samples: it is busy for about a third of each frame, and the frame is bound by the replay's CPU side. Per gameplay frame: 117 discarded-draw dispatches, 76 writes through scratch copies, 45 home copies made, 45 waits on the current submission, 45 write-backs (about 45 MB) that take the completion thread about 16 ms, and 4 ms waiting for a free command buffer. The rasterizer-discard fix's first XC3 run measured the same battle at about 5 fps without the stencil-mode fix, so the stencil-mode fix doesn't change the speed.
+  - **Red lines, memory:** the transform-feedback line above, once; PSS 3.44–3.51 GB with about 0.55 GB swapped; no crash or kill in 27 minutes.
 
 ## Found on this game
 

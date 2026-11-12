@@ -21,7 +21,7 @@ System → Save and a restart into Argentum were exercised during bring-up;
 the save was created with the isolated winding diagnostic and reloaded with
 the production path. The final fixed host also loads it and walks in Argentum.
 
-On Android, 2.1.0 is Playable – major issues on the Galaxy S25 Edge, from a new game through King Crustip's battle and Argentum to a save and Continue (2026-11-12): 30 fps through the opening and the battle, 10–30 fps in Argentum, and a dark stipple pattern over the characters and much of the world, still open ([Android](#android)).
+On Android, 2.1.0 is Playable – major issues on the Galaxy S25 Edge, from a new game through King Crustip's battle and Argentum to a save and Continue (2026-11-12): 30 fps through the opening and the battle, 10–30 fps in Argentum; the dark stipple pattern over the characters and much of the world it had then is fixed ([Android](#android)).
 
 ## Profile and memory
 
@@ -292,7 +292,9 @@ Both in handheld mode, driven over adb with `DM_CTL`.
   and much of the world (crates, walls, the rock spires on the deck) carried the same pattern; the Mac's frames are clean. The deferred lighting classifies
   pixels by stencil bits 3 and 4 (`3a65a75970c5ac32`, `68bd4ad78d01642b`), read through a stencil-mode view of the depth-stencil buffer, and the Vulkan replay
   read its depth there ([Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android)).
-  It wasn't Adreno-only: the Pixel 9 Pro XL's Mali-G715 drew the same. With the fix, the S25 Edge's battle frames and the Pixel's rock spires are clean, 30 fps.
+  It wasn't Adreno-only: the Pixel 9 Pro XL's Mali-G715 drew the same. With the fix, the S25 Edge's battle frames and the Pixel's rock spires are clean, 30 fps. The Galaxy Z Flip 7 (Xclipse 950) too: the game app at v0.8.2, then with the fix's host, each from a new game to King Crustip, has the stipple, then is clean in the same frames, median 30.1 fps both (q255).
+  ![Xenoblade Chronicles 2 on a Galaxy S25 Edge at v0.8.2, before the fix: Rex at Goldmouth Return Port, a stipple pattern over the walls and crates](../../../docs/images/android/xenoblade-chronicles-2-galaxy-s25-edge.jpg)
+  ![Xenoblade Chronicles 2 on a Galaxy Z Flip 7 with the fix: King Crustip on the ship's deck, drawn clean](../../../docs/images/android/xenoblade-chronicles-2-galaxy-z-flip-7.jpg)
   The Pixel draws no characters either way (no `vertexPipelineStoresAndAtomics` on the Mali, so the skinning draws are left out).
 - **Frame rate:** 30 fps (the target), every 60 s window 29.6–30.1 on the S25 Edge over 12.5 minutes, frame p50 33.2 ms; GPU 18–23 ms on the S25 Edge, 12.5–13 ms on the Z Flip 7.
 - **Sound:** a stereo `AudioOut`, no underrun on either phone. The `DM_AUDIO_DUMP` has signal (RMS about 640–1,360). Not listened to by a person.

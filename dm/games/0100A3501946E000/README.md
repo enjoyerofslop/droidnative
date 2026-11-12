@@ -73,7 +73,9 @@ Both in handheld mode, driven over adb with `DM_CTL`.
     - Over the 17-minute run: frame p50 16.96 ms, 35 windows from 43.2 to 59.8 fps, median 59.1.
   - **Z Flip 7:** the same shape, battlefield 42–50 fps and battles 55–60 (GPU p50 12.9 ms). Its long run spent most of its 39 minutes on the battlefield, so its window median is 44.6.
 - **Sound:** CRIWARE's 6-channel `AudioOut`, with no underrun on either phone. The `DM_AUDIO_DUMP` has the music and effects (RMS about 800–1,650 in play). Not listened to by a person.
-- **Picture:** the battlefield's ground, seen from above, is drawn as horizontal streaks, the texture smeared along the rows. The rocks and the camp's ground show it too.
+- **Resolved, the battlefield streaked (2026-11-12):** the battlefield's ground, seen from above, was drawn as horizontal streaks, the texture smeared along the rows; the rocks and the camp's ground showed it too. A texture slot reads the depth-stencil buffer in stencil mode there (shader `189c22492568d06e`, format 130), and the Vulkan replay read its depth ([Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android)). With that fix the S25 Edge draws the ground as sand and dunes (q256: OT2's game app with v0.8.2's host, then with the fix's, each from a new game to Hikari standing on the battlefield). An alternating A/B of ten blocks on the battlefield (q257) found no cost: at the same GPU clock, GPU time 14.9 against 14.9 ms a frame and about 52 fps both. The S25's governor holds the battlefield at either 389 or 342 MHz, and the slower state, which gives 44–49 fps, came on both hosts.
+  ![The Hinoeuma battlefield on a Galaxy S25 Edge: streaked with v0.8.2's host (above), sand and dunes with the stencil-mode fix (below)](../../../docs/images/android/octopath-traveler-ii-battlefield-before-after.jpg)
+- **Picture, otherwise:**
   - It's the same on both phones, and the Adreno reads BC textures natively, so it isn't the Xclipse's CPU BC decode.
   - The battle scenes, the cutscene views of the desert, the menus and the traveler selection's map look right.
   - Not compared with the Mac. No `[RED]` line on either phone.
@@ -82,7 +84,7 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - **Driving it over adb:** `env.txt` with `DM_CTL`, `DM_NVN_TSV` and `DM_AUDIO_DUMP` in the game app's external files.
   - Make the run folder `chmod 2777`, or the shell can't read the dumps the app writes.
   - From the battlefield's start: walk up, press A at the soldiers and through the dialogue, B to close each tutorial, and A on Attack and the target in battle. The X menu's Miscellaneous holds Settings, Tutorial and Return to Title.
-- **Not Playable – minor issues:** the battlefield's windows fall to 43 fps (under 90% of 60), and the streaks aren't compared with the Mac.
+- **Not Playable – minor issues:** the battlefield's windows fall to 43 fps (under 90% of 60), and nothing is compared with the Mac.
 - **Not tried:** past Rai Mei's story battle, and the other devices.
 
 ## Found on this game
