@@ -16,8 +16,11 @@
 #   for a vertex shader, the constant buffer reads its position is made of can read their row through a value known only at run time (pos_rows), after cb_extents,
 #     which these reads would otherwise make the whole buffer: Qualcomm's Adreno 740 driver lost those rows in the position-only copy of a shader it bins with.
 #     A specialization constant the host sets only where it is needed turns them on; off, the rows are the constant ones.
-# Usage: spv_android.py <dmsh_xlate output dir> <out dir> [key ...]   (all keys of the input dir by default); prints one line per shader and a summary
-import itertools, json, struct, sys
+# Usage: spv_android.py [-j N] <dmsh_xlate output dir> <out dir> [key ...]   (all keys of the input dir by default); prints a line for each shader with a problem, and a summary
+#   The shaders are done in N processes (default: one per CPU), each writing its own shaders' files: a shader's files depend only on its own inputs, so they are the same as one
+#   process makes, and the lines come out in key order. This is pure Python, about 20 shaders a second on one core (most of it cb_extents), so in one process it was most of a
+#   big game's translation time: Ocarina of Time's 42,328 shaders took about 33 minutes after 3 of translating.
+import concurrent.futures as cf, functools, itertools, json, multiprocessing, os, struct, sys
 from pathlib import Path
 
 ANDROID_CHAIN = 6   # res.json 'android': bumped when this post-pass or spv_build.py's translation changes what they make (spv_build.py translates older outputs again).
@@ -864,34 +867,63 @@ def upgrade(out, key):
     add_ext(res, parse((out / f'{key}.spv').read_bytes())[1]); res['android'] = EXT_FROM + 1   # the chain this makes, not ANDROID_CHAIN: after a later bump, retranslated
     rp.write_text(json.dumps(res), encoding='utf-8')
 
+def post(src, dst, k):
+    """Shader k of folder src made ready, its files written into dst → (its counts for main's summary: depth variant, without one, extents known, read whole, size table
+    taken out, run-time row reads; the lines it prints). A pool job's result is these few numbers and lines, never the shader's bytes"""
+    try: return post_one(src, dst, k)
+    except Exception as e: e.add_note(f'shader {k} in {src}'); raise   # the pool runs shaders out of order: the traceback names the one that stopped it
+
+def post_one(src, dst, k):
+    res = json.loads((src / f'{k}.res.json').read_text(encoding='utf-8'))
+    stage = res.get('stage', 'vs'); lines = []; nz = bad = ncs = nrows = 0
+    cs = next((c['binding'] for c in res.get('cbufs') or [] if c.get('slot') == CBSIZE_BANK), None)
+    hdr, ins, interlock, stripped = process((src / f'{k}.spv').read_bytes(), stage, cs)
+    if interlock: res.setdefault('notes', []).append('android: fragment shader interlock removed (no ordering of overlapping fragments)')
+    if stripped: res['cbufs'] = [c for c in res['cbufs'] if c.get('slot') != CBSIZE_BANK]; ncs = 1
+    elif stripped is False: lines.append(f'[RED] {k}: the uniform slots\' size table (c{CBSIZE_BANK}) is used other than the translator\'s bound tests use it: left in (it loses the device on Adreno 830)')
+    res['set'] = SET_OF.get(stage, 0); res['android'] = ANDROID_CHAIN
+    eb, ew = add_ext(res, ins)
+    if stage == 'vs':   # after add_ext: a run-time row would keep the whole buffer, and it reads the rows the constant one did
+        hdr, ins, nrows = pos_rows(hdr, ins)
+        res['vin'] = vin_types(ins)
+    (dst / f'{k}.spv').write_bytes(emit(hdr, ins))
+    (dst / f'{k}.res.json').write_text(json.dumps(res), encoding='utf-8')
+    if stage == 'vs' and res.get('tf'):
+        (dst / f'{k}.tf.spv').write_bytes(tf_variant(hdr, ins, res['tf']))
+    if stage == 'vs':
+        z = z_variant(hdr, ins)
+        if z: (dst / f'{k}.z.spv').write_bytes(z); nz = 1
+        else: bad = 1; lines.append(f'[RED] {k}: no position output found, no depth -1..1 variant')
+    return (nz, bad, eb, ew, ncs, nrows), lines
+
+CHUNK = 16   # shaders per pool job: ~0.8 s of work on average, so the pipe's round trips cost nothing and the last jobs still spread over the processes
+
+def jobs_default():
+    return (getattr(os, 'process_cpu_count', None) or os.cpu_count)() or 4   # the CPUs this process may use (3.13+), else the machine's
+
+def pool_size(j, n):   # processes for n shaders with -j j: 1 means none started
+    if sys.platform == 'win32': j = min(j, 61)   # ProcessPoolExecutor's limit on Windows (WaitForMultipleObjects); spv_build.py passes os.cpu_count()
+    return max(1, min(j, -(-n // CHUNK)))   # no more processes than jobs: a few shaders (an update's) are done here, with no pool to start
+
 def main():
-    src, dst = Path(sys.argv[1]), Path(sys.argv[2]); dst.mkdir(parents=True, exist_ok=True)
-    keys = sys.argv[3:] or sorted(p.stem for p in src.glob('*.spv') if not p.name.endswith('.reader.spv'))
-    n = nz = bad = eb = ew = ncs = npr = nrows = 0
-    for k in keys:
-        res = json.loads((src / f'{k}.res.json').read_text(encoding='utf-8'))
-        stage = res.get('stage', 'vs')
-        cs = next((c['binding'] for c in res.get('cbufs') or [] if c.get('slot') == CBSIZE_BANK), None)
-        hdr, ins, interlock, stripped = process((src / f'{k}.spv').read_bytes(), stage, cs)
-        n += 1
-        if interlock: res.setdefault('notes', []).append('android: fragment shader interlock removed (no ordering of overlapping fragments)')
-        if stripped: res['cbufs'] = [c for c in res['cbufs'] if c.get('slot') != CBSIZE_BANK]; ncs += 1
-        elif stripped is False: print(f'[RED] {k}: the uniform slots\' size table (c{CBSIZE_BANK}) is used other than the translator\'s bound tests use it: left in (it loses the device on Adreno 830)')
-        res['set'] = SET_OF.get(stage, 0); res['android'] = ANDROID_CHAIN
-        b, w = add_ext(res, ins); eb += b; ew += w
-        if stage == 'vs':   # after add_ext: a run-time row would keep the whole buffer, and it reads the rows the constant one did
-            hdr, ins, pr = pos_rows(hdr, ins)
-            if pr: npr += 1; nrows += pr
-            res['vin'] = vin_types(ins)
-        (dst / f'{k}.spv').write_bytes(emit(hdr, ins))
-        (dst / f'{k}.res.json').write_text(json.dumps(res), encoding='utf-8')
-        if stage == 'vs' and res.get('tf'):
-            (dst / f'{k}.tf.spv').write_bytes(tf_variant(hdr, ins, res['tf']))
-        if stage == 'vs':
-            z = z_variant(hdr, ins)
-            if z: (dst / f'{k}.z.spv').write_bytes(z); nz += 1
-            else: bad += 1; print(f'[RED] {k}: no position output found, no depth -1..1 variant')
-    print(f'spv_android: {n} shaders, {nz} depth variants, {bad} without one; constant buffers: {eb} with a known extent, {ew} read whole; the size table taken out of {ncs}; position rows read at run time in {npr} vertex shaders ({nrows} reads)')
+    a = sys.argv[1:]; j = jobs_default()
+    if a[:1] == ['-j']: j = int(a[1]); a = a[2:]
+    src, dst = Path(a[0]), Path(a[1]); dst.mkdir(parents=True, exist_ok=True)
+    keys = a[2:] or sorted(p.stem for p in src.glob('*.spv') if not p.name.endswith('.reader.spv'))
+    one = functools.partial(post, src, dst)
+    nz = bad = eb = ew = ncs = npr = nrows = 0
+    ex = None
+    if (n := pool_size(j, len(keys))) > 1:   # spawn on every host, as Windows has only spawn: the Mac's runs and tests cover what Windows runs
+        ex = cf.ProcessPoolExecutor(n, mp_context=multiprocessing.get_context('spawn'))
+    try:
+        for (z, b, e, w, c, r), lines in (ex.map(one, keys, chunksize=CHUNK) if ex else map(one, keys)):   # in key order, as one process prints them
+            for ln in lines: print(ln)
+            nz += z; bad += b; eb += e; ew += w; ncs += c; nrows += r; npr += r > 0
+    except BaseException:
+        if ex: ex.shutdown(cancel_futures=True)   # a shader that stops the post-pass stops it at once, not after every other job
+        raise
+    if ex: ex.shutdown()
+    print(f'spv_android: {len(keys)} shaders, {nz} depth variants, {bad} without one; constant buffers: {eb} with a known extent, {ew} read whole; the size table taken out of {ncs}; position rows read at run time in {npr} vertex shaders ({nrows} reads)')
 
 if __name__ == '__main__':
     main()

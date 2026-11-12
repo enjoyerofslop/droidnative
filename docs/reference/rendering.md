@@ -2090,7 +2090,7 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 
 - **Symptom:** a game with thousands of draws a frame is held by the replay thread's CPU time. In a profile of that thread the driver's recording calls are a large share: Breath of the Wild on a OnePlus Pad 3, `vkCmdDrawIndexed` 9.9%, `vkCmdBindDescriptorSets` 8.2%, `vkCmdBeginRenderPass` 1.4%, and binds, copies and dynamic state besides. Meanwhile the phone's other cores are idle.
 - **Cause:** the replay made every `vkCmd*` call itself, and ended and submitted each chunk, on its one thread.
-- **Fix:** `DM_VK_RECORDER=1` (off by default) (`dm/android/gfx_vk_rec.inc`).
+- **Fix:** `DM_VK_RECORDER=1` (`dm/android/gfx_vk_rec.inc`): off by default, and on for Breath of the Wild and Ocarina of Time through their `android_defaults.txt`.
   - Each wrapper copies its call's arguments (arrays and structures included) into a ring, and a recorder thread (`vk-record`) makes the calls in order. It also ends each chunk's command buffer and submits it with its fence (`rec_submit`). A command buffer that fails to end is not submitted: its fence goes alone, so the chunk still completes.
   - The replay waits for it only in `mtl_present`, before the frame goes to the front end, whose blit uses the same queue.
   - The completion thread waits for a chunk's submission before its fence (`rec_wait_submitted`), and before it starts timing the chunk for the hang report.
@@ -2101,6 +2101,10 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - replay CPU 30.7 → 24.2 ms a frame;
   - with `DM_FPS_TARGET=30`, 30.0 fps (frame p95 38.4–38.9 ms, replay 17.3–17.5 ms) against 29.2–29.6 fps without it;
   - at the 60 fps target it stayed at 20 fps in four runs of five.
+- **Check, Ocarina of Time** (its default since 2026-11-11), Kokiri Forest, about 2,100 draws a frame, bench route `kokiri`, with the recorder's descriptor writes ([below](#descriptor-set-writes-on-the-replay-thread-with-the-recorder-on-android)):
+  - Ayn Odin 2 (Adreno 740), one run each from thermal status 0, recorder off → on: the replay thread 30.2 → 18.8 ms of CPU a frame, 14.5 → 14.9 fps (the GPU is busy 50 ms a frame either way), the same picture, 6.2 GB of PSS either way. The whole process used 106 → 120 ms of CPU a frame: the recorder thread's work is new.
+  - OnePlus Pad 3 (Adreno 830), the recorder together with the growing report address set ([Report tables that dropped entries](#report-tables-that-dropped-entries)), against main before both: the replay 34 → 14 ms, the GPU 34.9 → 21.4 ms as its clock went from about 650 to 1,100 MHz, and 19.5 → 19.9 fps, because the frame step still holds 3 vsyncs. With 2 held by hand (`DM_FPS_TARGET=30 DM_FPS_HOLD=off`): 27.5 fps.
+  - Galaxy S25 Edge (Adreno 830), the same comparison: the replay 38 → 17 ms, 17.6 → 19.0 fps; the GPU stays at 41 ms a frame, its clock at 525 MHz.
 
 ### Descriptor set writes on the replay thread with the recorder on (Android)
 
