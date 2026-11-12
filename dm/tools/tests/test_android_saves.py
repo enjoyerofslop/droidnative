@@ -305,7 +305,7 @@ class SendSave(unittest.TestCase):
         self.assertIn(f"shell rm -rf '{dst}' && mkdir -p '{dst}'", flat)   # an earlier one, gone first
         self.assertEqual(self.pushed, {f'{dst}/{src.name}': {'data0006.bin': b'save', 'sub/b.bin': b'b'}})
         self.assertTrue(any(f"chmod -R a+rwX '{dst}' 2>&1; chmod a+rwx '{IMPORT}' 2>&1" in c for c in flat), flat)
-        self.assertIn(f'shell am start -n {ba.PKG}/.Launcher', flat)   # the launcher takes it now
+        self.assertIn(f'shell am start -f 0x20000000 -n {ba.PKG}/.Launcher', flat)   # the launcher takes it now, single-top: one in front already gets it too
         self.assertFalse([x for x in self.said if '[RED]' in x])
 
     def test_a_game_being_played_isnt_interrupted(self):

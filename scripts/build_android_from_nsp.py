@@ -862,8 +862,9 @@ def send_save(serial, gid, local, parent, name, logs):
     push_dir(serial, local, parent, name, logs / 'adb_push_save.log')
     adb(serial, 'shell', f'find {sh_quote(dst)} -name {MANIFEST} -delete', check=False)   # a copy as a tar leaves its manifest, which isn't the save's
     open_tree(serial, dst)
-    # the launcher takes it when it comes to the front: brought there now, unless a game is being played (a jump to the launcher would interrupt it)
-    if not adb(serial, 'shell', f'pidof {PKG}:game', check=False).strip(): adb(serial, 'shell', 'am', 'start', '-n', f'{PKG}/.Launcher', check=False)
+    # the launcher takes it when it comes to the front: brought there now, unless a game is being played (a jump to the launcher would interrupt it). Single-top
+    # (0x20000000), so a launcher in front already gets the intent (onNewIntent): a plain am start only brings its task forward, and it never looked
+    if not adb(serial, 'shell', f'pidof {PKG}:game', check=False).strip(): adb(serial, 'shell', 'am', 'start', '-f', '0x20000000', '-n', f'{PKG}/.Launcher', check=False)
 
 
 @says_when_phone_full

@@ -105,7 +105,7 @@ public class Launcher extends Activity {
     }
 
     // The desktop app's Play (scripts/nxnative_android.py: am start ... --es game <title ID> [--ez play true]): that game's settings, or the game itself
-    @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); setIntent(i); opened(i); }
+    @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); setIntent(i); opened(i); saves.incoming(); }   // the computer's am start when the launcher is in front already
     void opened(Intent i) {
         String id = i != null ? i.getStringExtra("game") : null; if (id == null) return;
         for (Game g : scan()) if (g.id.equalsIgnoreCase(id) && g.hosted) { showSettings(g); if (i.getBooleanExtra("play", false)) play(true); return; }
