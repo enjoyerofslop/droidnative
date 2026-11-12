@@ -12,6 +12,8 @@ opening movies, the first enemy defeat, destination tutorials, walking and the
 engagement-area collision boundary work. All 27,055 base/update shaders compile
 for Mac and iOS. The unsigned IPA is built and its archive checks pass.
 
+On Android, the cartridge's base game 1.0.0 reaches the first battle without losing the device, but draws its world striped and its characters only in cutscenes ([Android](#android)).
+
 iOS runtime testing, DLC gameplay and later-game allocation peaks remain open.
 The supplied four DLC packs are included; their additional shaders have not been
 integrated into the base/update shader census, so DLC rendering is unvalidated.
@@ -193,6 +195,33 @@ On the title/new-game screens press A. The auto-attack tip advances with R and
 closes with A; stand near an enemy to auto-attack and use the left stick to walk.
 During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 `DM_WATCH` is absent; setting it to `0` still enables its default stall threshold.
+
+## Android
+
+First run on Android, 2026-11-11. The cartridge's base game 1.0.0 (v0), packed as a game app (`build_android_from_nsp.py --game-apk`, a 422 MB APK with the 14.8 GB RomFS as its OBB) from DroidPlay Core `main` at `1c06a5c4`, without draft #203 (the cloud shaders' else-if). Two phones:
+- a Galaxy S25 Edge: SM8750, Adreno 830 with Qualcomm's driver 0x80320001, Android 16;
+- a Galaxy Z Flip 7: Exynos 2500, Xclipse 950 with Samsung's driver 0x6000215, Android 16, unfolded.
+
+Both in handheld mode, driven over adb with `DM_CTL`.
+
+- **The build:** a profile derived from 2.2.1's. The split found 26,907 shaders (2.2.1 has 27,055), all translated to SPIR-V, none failed.
+  - 1.0.0's 60 GB allocator reservation fits Android's 64 GB alias region as it is (`[mem] address region 60.00 GB at alias +0.06 GB`), without 2.2.x's cuts.
+- **No lost device:** the triage expected the Adreno to lose the device a few seconds into the title until #203 lands. On this `main` it didn't: the S25 Edge ran the title, the opening and the first battle for about 11 minutes without it.
+- **What was played on both phones:** the auto-save notice, the title, New Game, Normal, the opening's cutscenes, the first battle against the Agnus Attacker (the auto-attack tutorial, won with auto-attacks and arts), the Destinations and Tips tutorials, and walking on the Everblight Plain.
+- **The picture, both phones:**
+  - **Characters drawn only in cutscenes:** in the opening's cutscenes Noah, Eunie, Lanz and the soldiers draw. In battle and in the field the party doesn't: no Noah behind the camera, only the effects of his arts.
+    - Both phones log one `[RED] transform feedback with vertex shader 0b8bcbe86791ef65, which has no capture variant: nothing captured`. Gameplay skins the characters through transform feedback, and this vertex shader's capture variant is missing.
+  - **The world striped:** the titans on the title screen, the plain's ground, its rocks and the wreckage are drawn as black-and-white zebra stripes instead of their textures. The sky, the UI, the fire and the arts' effects look right.
+  - The Mac's 2.2.1 runs drew the terrain and the characters; 1.0.0 wasn't run on the Mac.
+  - On the S25 Edge, Qualcomm's driver also logged 842 "Failed to link shaders" lines with no `[RED]` from the host; the Z Flip 7's driver logged none.
+- **Frame rate:** the target is 30 (the Switch's rate).
+  - **S25 Edge:** 30 s windows from 24.5 to 30.1, median 30.0, GPU 18–21 ms.
+  - **Z Flip 7:** 21.4 to 30.1, median 30.1, GPU 15–20 ms.
+  - The dips come from loads and the first battle's first pipeline builds: 1,349 pipelines in 13.9 s on the S25 Edge, 1,463 in 37.7 s on the Z Flip 7.
+- **Sound:** a stereo `AudioOut`, no underrun on either phone. The `DM_AUDIO_DUMP` has signal (RMS about 550–2,000). Not listened to by a person.
+- **Memory:** 3.56 GB PSS on the S25 Edge (1.03 GB graphics) and 4.20 GB on the Z Flip 7 (1.92 GB graphics). Neither was killed.
+- **Save:** no save commit within the stretch (the game saves automatically, but not before this point), so saving and Continue are untested.
+- **Not tried:** past the first walk on the Everblight Plain, and the other devices.
 
 ## Found on this game
 

@@ -94,6 +94,13 @@ class BuildShaders(unittest.TestCase):
         _, sp = self.build(self.provisional, lambda *a, **k: None, lambda r: self.fail('derived a provisional profile'))
         self.assertIsNone(sp.call_args.kwargs['derive_compute']); self.assertIsNone(sp.call_args.kwargs['derive_dlc'])
 
+    def test_only_a_profile_that_registers_the_version_splits_from_its_map(self):   # split_shaders' targeted split (docs/reference/packing.md)
+        derived = Profile(self.work / 'profile' / GID)
+        for g, why, want in ((self.registered, '', True), (self.provisional, '', False), (derived, f'v65536 is not a version game profile {GID} registers', False)):
+            with self.subTest(g='derived' if g is derived else g.dir.parent.name):
+                _, sp = self.build(g, lambda *a, **k: None, derived=why)
+                self.assertIs(sp.call_args.kwargs['targeted'], want)
+
     def test_no_versions_no_split(self):
         with mock.patch.object(ba.bi, 'split_shaders') as sp:
             self.assertEqual(ba.build_shaders([], {}, self.work, self.logs, {}, self.registered), (None, self.registered))

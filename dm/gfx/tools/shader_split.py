@@ -55,7 +55,7 @@
 # Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x08 the key's 8 bytes, +0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key
 #   (dmsh_build.py finds a map row's record by that key, not by the row's index: a package from another split than the map stops it instead of translating a neighbour's bytes, issue #1841);
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 records where the key first appeared); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
-# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
+# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8), DM_SPLIT_FROM_MAP=<shader_map.tsv> (read only the files it names: from_map)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
@@ -2198,7 +2198,14 @@ def oodle(comp, n):
 
 def oodle_supposed(comp, n):
     """A stream a blind scan only supposes (uepak.shader_map_entries): None when the decoder refuses it, or main has no decoder to refuse it (hle_oodle.c lzd_find: OCTOPATH TRAVELER's Unreal 4.18 links no
-    Oodle). A host that is gone for any other reason is red, as it says nothing about the stream"""
+    Oodle). A host that is gone for any other reason is red, as it says nothing about the stream.
+    With no decoder here at all (no DM_OODLE_HOST, no DM_OODLE_CACHE: the Android build gives one only to games with Oodle archives or Unreal shader code archives), nothing can prove the
+    table, so it is taken as no table and the package's other shaders are read. Red there, it cost the whole package: OCTOPATH TRAVELER II 1.0.0's Android build left out six packages
+    whose export lists only look like tables, which the Mac host's decoder refuses. A real table's shaders are left out then, as they were with the rest of its package; the log names
+    each stream left unchecked"""
+    if not os.environ.get('DM_OODLE_CACHE') and not (os.environ.get('DM_OODLE_HOST') and os.environ.get('DM_OODLE_MODULES')):
+        print(f'shader_split: a supposed {len(comp)} → {n} byte Oodle stream left unchecked (no decoder here): taken as no shader table', file=sys.stderr)
+        return None
     s, gone = oodle_ask(comp, n)
     if gone and 'no streaming decoder to find' not in oodle_said(): oodle_red(comp, n)
     return s
@@ -3241,6 +3248,27 @@ def unspill(result):   # a scan_batch result as its list, read back from its fil
     finally: os.unlink(result)
 
 
+def from_map(files, mp):
+    """DM_SPLIT_FROM_MAP=<shader_map.tsv>: only the RomFS files the map's source column names, as main lists them (a later version's under its tag), with the folders and
+    archives above a member, and the files beside one under the same name with another extension (a .bdt's .bhd5 index, a Liquid archive's .idx / .str, a Trinity pack's
+    .trpfd). DLC files are all read. The Android build sets it for a profile that registers the version (build_ipa_from_nsp.py split_shaders), whose split is then checked
+    against that profile's tables and done again in full if they differ: Ocarina of Time's split read 1,124 of its 186,583 files, in 11 s instead of 128. → files, in their order"""
+    named = set()
+    for ln in open(mp, encoding='utf-8', errors='replace'):
+        c = ln.rstrip('\n').split('\t')
+        if len(c) > 4 and c[4].startswith('/'):
+            parts = c[4].split('#', 1)[0].strip('/').split('/')
+            named.update('/'.join(parts[:i]) for i in range(1, len(parts) + 1))
+    def stem(r):   # the path without the file name's last extension; None without one
+        d, _, f = r.rpartition('/')
+        return (d + '/' if d else '') + f.rsplit('.', 1)[0] if '.' in f else None
+    stems = {stem(r) for _, r in files if r in named} - {None}   # of named files, not of the folders above them
+    dlc = lambda r: r.startswith('aoc/')
+    kept = [(p, r) for p, r in files if dlc(r) or r in named or stem(r) in stems]
+    print(f'files the shader map names: {sum(not dlc(r) for _, r in kept):,} of {sum(not dlc(r) for _, r in files):,} RomFS files ({mp})', flush=True)
+    return kept
+
+
 def pooled(ex, jobs, total, start=0, chunk=1):
     """scan_file over jobs in the pool, the results in job order, with a 'progress: <done>/<total>' line at most twice a second (the NSP script shows it as
     the stage's count). The count is of the jobs finished in any order: counted in order it would stall behind one slow archive range while the others finish"""
@@ -3299,6 +3327,7 @@ def main():
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
         files += sorted((os.path.join(dp, f), tag + '/' + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+    if os.environ.get('DM_SPLIT_FROM_MAP'): files = from_map(files, os.environ['DM_SPLIT_FROM_MAP'])   # before the archives' jobs, which are made from this list
     zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees

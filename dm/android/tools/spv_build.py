@@ -6,15 +6,16 @@
 # The key is the host's (hle_nvn.c keys_hash): sha256 of the control section (its own length when +0x20 gives one under 0x880) and the code area, 16 hex digits.
 # NVN2 (Switch 2) records are Ampere code, as dmsh_build.py job_for takes them (dm/gfx/tools/dmsh_ampere.py): the first 0x48 control bytes with +0x30 as zero in the key,
 # the instructions (the 0x80-byte SPH included) as the job's code, c1 between control +0x40 and +0x44, job arch sm86, and compute's c0 layout (nvn2_cs). Task and mesh
-# shaders are skipped: the Vulkan replay has no mesh stage (gfx_vk.c skips their draws).
+# shaders are translated as compute with their stage memory in shared memory, as dmsh_build.py job_for does, and spv_android.py makes them Vulkan task and mesh modules
+# (spv_mesh.py; the replay draws them on VK_EXT_mesh_shader, gfx_vk_mesh.inc).
 # Vertex shaders in two parts (VertexA + VertexB, Catherine: Full Body's GLSLC) are merged into one program first, as dmsh_build.py vertex_ab does.
 # Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N]
 import spv_android as sa   # beside this file
-import argparse, concurrent.futures as cf, hashlib, json, os, re, shutil, struct, subprocess, sys, tempfile
+import argparse, concurrent.futures as cf, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parents[1] / 'gfx/tools')); import dmsh_ampere   # noqa: E402  NVN2 control sections, as dmsh_build.py reads them
+sys.path.insert(0, str(HERE.parents[1] / 'gfx/tools')); import dmsh_ampere, dmsh_meshstage   # noqa: E402  NVN2 control sections and task / mesh facts, as dmsh_build.py reads them
 GFX_MAGIC, CS_MAGIC, CTL_MAGIC = bytes.fromhex('78563412'), bytes.fromhex('79563412'), bytes.fromhex('34127698')
 
 def records(d):
@@ -89,6 +90,10 @@ def job(key, stage, code, ctl, w, facts):
     if dmsh_ampere.is_nvn2(ctl):   # dmsh_build.py job_for's NVN2 branch: the Ampere instructions as they are (a graphics stage's 0x80-byte SPH included)
         c1 = dmsh_ampere.c1_segment(ctl, code); body = code[:dmsh_ampere.inst_len(ctl)]; extra['arch'] = 'sm86'
         if stage == 'cs': extra['nvn2_cs'] = [ctl[0xb1], ctl[0xb2], ctl[0xb3], struct.unpack_from('<H', ctl, 0xba)[0], ctl[0xa9] * 4, ctl[0xb4], ctl[0xb5]]   # compute's c0 layout
+        if stage in ('ts', 'ms'):   # dmsh_build.py job_for: compute without the SPH, the stage memory in shared memory (dmsh_meshstage.memory); graphics' c[0] and c[2] tables stay
+            mesh = dmsh_meshstage.info(ctl, code); lay, size = dmsh_meshstage.memory(mesh)
+            if dmsh_meshstage.own_shared(body[0x80:]): return None, 'a task / mesh shader with shared memory of its own: it would lie over the stage memory'
+            extra.update(mesh_stage=mesh, stage_memory=lay, local=[mesh['threads'], 1, 1], shared=size); body = body[0x80:]
     else:
         c1o, c1t = struct.unpack_from('<2I', ctl, 0x700)
         c1 = code[c1o:c1t] if c1o <= c1t <= len(code) else b''
@@ -102,7 +107,7 @@ def job(key, stage, code, ctl, w, facts):
             body = code[0x100:]
         else: body = code
     p = Path(w) / f'{key}.bin'; p.write_bytes(body)
-    j = {'key': key, 'stage': stage, 'code': str(p), 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), 'softfloat64': True, **extra,
+    j = {'key': key, 'stage': 'cs' if stage in ('ts', 'ms') else stage, 'code': str(p), 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), 'softfloat64': True, **extra,
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # dmsh_build.py's options and defaults: the chain is tested with them
     if key in facts: j.update(facts[key])
     else: j['no_facts'] = True
@@ -111,6 +116,31 @@ def job(key, stage, code, ctl, w, facts):
         if x and y and z: j['local'] = [x, y, z]
         if sh and 'shared' not in j: j['shared'] = sh
     return j, None
+
+def int_inputs_of(path):   # a pool job: one translated vertex shader's inputs that it only uses as integers, {location: type}, a few entries
+    return sa.int_inputs(sa.parse(Path(path).read_bytes())[1])
+
+CHUNK = 16   # vertex shaders per pool job
+
+def int_input_jobs(keys, jobs, tout, j):
+    """The second pass for vertex shaders (dmsh_build.py's): inputs a translated shader only uses as integers are added to its job's attr as uint (spv_android.py int_inputs),
+    and → those shaders' keys, in key order, to translate again. Reading each shader's SPIR-V is pure Python, and in one process it was most of the translation step: Super Mario
+    Odyssey's 7,418 vertex shaders took 114 of its 151 s, Ocarina of Time's 15,851 about 118 s, while the translator had finished in 14 and 70. So j processes read them (spawn
+    on every host, as Windows has only spawn), and each job returns only the few locations it found; the jobs are changed here, in key order, as one process changes them"""
+    vs = [k for k in keys if jobs[k]['stage'] == 'vs' and (tout / f'{k}.spv').exists()]
+    if sys.platform == 'win32': j = min(j, 61)   # ProcessPoolExecutor's limit on Windows (WaitForMultipleObjects); -j defaults to os.cpu_count()
+    n = max(1, min(j, -(-len(vs) // CHUNK)))
+    ex = cf.ProcessPoolExecutor(n, mp_context=multiprocessing.get_context('spawn')) if n > 1 else None
+    paths, again = [str(tout / f'{k}.spv') for k in vs], []
+    try:
+        for k, found in zip(vs, ex.map(int_inputs_of, paths, chunksize=CHUNK) if ex else map(int_inputs_of, paths)):
+            extra = {l: t for l, t in found.items() if l not in jobs[k]['attr']}
+            if extra: jobs[k]['attr'].update(extra); again.append(k)
+    except BaseException:
+        if ex: ex.shutdown(cancel_futures=True)   # a shader that stops it stops it at once, not after every other job
+        raise
+    if ex: ex.shutdown()
+    return again
 
 def main():
     ap = argparse.ArgumentParser(description='translate a shader_split package for the Android Vulkan replay')
@@ -125,8 +155,7 @@ def main():
     jobs, skipped, have, tfs, upg = {}, {}, 0, {}, 0
     for f in sorted(Path(a.package).glob('*.bin')):
         stage = f.name[:2]
-        if stage in ('ts', 'ms'): skipped[f'{f.name} ({len(records(f.read_bytes()))})'] = 'task / mesh shaders: the Vulkan replay has no mesh stage'; continue
-        if stage not in ('vs', 'ps', 'gs', 'tc', 'te', 'cs'): continue
+        if stage not in ('vs', 'ps', 'gs', 'tc', 'te', 'cs', 'ts', 'ms'): continue
         for rec in records(f.read_bytes()):
             code, ctl = split(rec)
             if ctl[:4] != CTL_MAGIC: skipped[f'{f.name}?'] = 'no control section magic'; continue
@@ -153,13 +182,7 @@ def main():
             for ln in r.stderr.splitlines() + r.stdout.splitlines():
                 m = re.match(r'\[RED\] (\w+): (.*)', ln)
                 if m: failed[m.group(1)] = m.group(2)[:160]
-    # second pass for vertex shaders (dmsh_build.py's): inputs the shader only uses as integers are declared uint and the shader translated again (spv_android.py int_inputs)
-    again = []
-    for k in keys:
-        sp = tout / f'{k}.spv'
-        if jobs[k]['stage'] != 'vs' or not sp.exists(): continue
-        extra = {l: t for l, t in sa.int_inputs(sa.parse(sp.read_bytes())[1]).items() if l not in jobs[k]['attr']}
-        if extra: jobs[k]['attr'].update(extra); again.append(k)
+    again = int_input_jobs(keys, jobs, tout, a.j)
     if again:
         with cf.ThreadPoolExecutor(a.j) as ex:
             for r in ex.map(run, [c for c in [again[i::a.j] for i in range(a.j)] if c]):
@@ -168,8 +191,12 @@ def main():
                     if m: failed[m.group(1)] = 'integer-input retranslation: ' + m.group(2)[:130]
         print(f'spv_build: {len(again)} vertex shaders translated again with integer inputs')
     done = sorted(p.name[:-4] for p in tout.glob('*.spv') if not p.name.endswith('.reader.spv'))
-    for k in done:   # the feedback layout goes with the shader's reflection: spv_android.py makes the capture variant from it
-        if k in tfs: rp = tout / f'{k}.res.json'; r = json.loads(rp.read_text(encoding='utf-8')); r['tf'] = tfs[k]; rp.write_text(json.dumps(r), encoding='utf-8')
+    for k in done:   # the feedback layout and a task / mesh shader's facts go with the shader's reflection: spv_android.py makes the capture variant and the stage modules from them
+        if k in tfs or 'mesh_stage' in jobs[k]:
+            rp = tout / f'{k}.res.json'; r = json.loads(rp.read_text(encoding='utf-8'))
+            if k in tfs: r['tf'] = tfs[k]
+            if 'mesh_stage' in jobs[k]: r['mesh'] = {'info': jobs[k]['mesh_stage'], 'lay': jobs[k]['stage_memory']}
+            rp.write_text(json.dumps(r), encoding='utf-8')
     if done: subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
     for k in keys:
         if k not in done and k not in failed: failed[k] = 'no output from the translator'
