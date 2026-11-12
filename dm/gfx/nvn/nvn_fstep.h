@@ -74,7 +74,7 @@ typedef struct {
     double kheld[FSTEP_MAX + 1];     // the cost of the frames on time at each hold above kmin, once FSTEP_RUN of them held it (0 = none or forgotten)
     int mtrial, mfail;        // the trial in progress is one by kheld; such trials failed in a row
     double gpu;               // set by the caller before each call: the frame's GPU time in vsyncs (0 = not known), for the soft-late rule and the GPU-fit trial
-    int gfit_run, gtrial, gfail;   // frames in a row whose GPU time fits k − 1; the trial in progress is one by the GPU fit; such trials failed in a row
+    int gfit_run, gfit_miss, gtrial, gfail;   // frames whose GPU time fits k − 1 (a run; late frames in it, at most FSTEP_MISS, as a fit run tolerates heavier frames); the trial in progress is one by the GPU fit; such trials failed in a row
     int fit_miss, settle;     // frames of the current fit run that fit k but not k − 1; frames left of a trial's settling (FSTEP_SETTLE)
     uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
 } nvn_fstep;
@@ -120,7 +120,9 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     }
     int settling = s->settle > 0; if (settling) s->settle--;
     if (late) { s->late++; s->late_run = grace || settling || soft ? 0 : s->late_run + 1; s->fit_run = s->fit_miss = 0; } else s->late_run = 0;
-    if (s->k > kmin && s->gpu > 0 && s->gpu <= FSTEP_FIT * (s->k - 1) && (!late || soft)) s->gfit_run++; else s->gfit_run = 0;   // the GPU fits the shorter hold
+    if (!(s->k > kmin && s->gpu > 0 && s->gpu <= FSTEP_FIT * (s->k - 1))) s->gfit_run = s->gfit_miss = 0;   // the GPU does not fit the shorter hold (or none known): no run
+    else if (!late || soft) s->gfit_run++;
+    else if (++s->gfit_miss > FSTEP_MISS) s->gfit_run = s->gfit_miss = 0;   // a hitch: a few are tolerated (Ocarina of Time's Kokiri Forest has one in about 20 frames, which ended every run of 30)
     // The cost of the frames on time (a hitch is not what the scene costs): at kmin, and at the longer hold
     if (kmin != s->ckmin) {   // another cap: its run starts over, and what held it before comes back
         if (s->ckmin >= 1 && s->ckmin <= FSTEP_MAX) {
@@ -147,18 +149,18 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
             if (s->gtrial) s->gfail++; }
         else if (s->probe == 2) s->hold = hold0;   // the probe's run at kmin lasted
         if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
-        s->k = want; s->ups++; s->late_run = s->fit_run = s->gfit_run = 0; s->since = 0; s->probe = 0; s->mtrial = s->gtrial = 0;
+        s->k = want; s->ups++; s->late_run = s->fit_run = s->gfit_run = s->gfit_miss = 0; s->since = 0; s->probe = 0; s->mtrial = s->gtrial = 0;
     } else if (s->trial && !grace && !--s->trial) { if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = hold0; s->mtrial = s->mfail = s->gtrial = s->gfail = 0; }   // the trial held (a probe's run at kmin is judged at the next step up)
     if (!late) {
         if (s->k <= kmin) s->fit_run = s->fit_miss = 0;
         else if (cost <= FSTEP_FIT * (s->k - 1)) s->fit_run++;
         else if (++s->fit_miss > FSTEP_MISS) s->fit_run = s->fit_miss = 0;
     }
-    if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = s->fit_miss = s->gfit_run = 0; s->settle = FSTEP_SETTLE; }
+    if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = s->fit_miss = s->gfit_run = s->gfit_miss = 0; s->settle = FSTEP_SETTLE; }
     else if (s->k - 1 > kmin && s->k - 1 <= FSTEP_MAX && s->kheld[s->k - 1] > 0 && s->kheld[s->k - 1] <= FSTEP_FIT * (s->k - 1) && s->since >= s->hold && !s->trial && !s->probe) {
         s->k--; s->downs++; s->trial = FSTEP_RUN; s->mtrial = 1; s->grace = FSTEP_GRACE; s->fit_run = s->fit_miss = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;   // back to a hold that held
     } else if (s->gfit_run >= FSTEP_RUN && s->k > kmin && s->gfail < 3 && s->since >= s->hold && !s->trial && !s->probe) {   // the GPU has fitted the shorter hold: try it, with a probe's grace
-        s->k--; s->downs++; s->trial = FSTEP_RUN; s->gtrial = 1; s->grace = FSTEP_GRACE; s->fit_run = s->fit_miss = s->late_run = s->gfit_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
+        s->k--; s->downs++; s->trial = FSTEP_RUN; s->gtrial = 1; s->grace = FSTEP_GRACE; s->fit_run = s->fit_miss = s->late_run = s->gfit_run = s->gfit_miss = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     } else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     }

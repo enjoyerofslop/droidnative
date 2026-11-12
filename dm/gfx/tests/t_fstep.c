@@ -422,6 +422,9 @@ int main(void) {
         sim m = {0}; m.gpu = 1.3; run(&m, 120, 0.5, 1, 3, 0); run(&m, 10, 2.5, 1, 3, 0); check(m.s.k == 3, "GPU-fit trial: frames of 2.5 step to hold 3");
         run(&m, 100, 2.15, 1, 3, 0); check(m.s.k == 2 && m.s.downs == 1, "  after the hold-off, a GPU of 1.3 tries hold 2 although the cost at 3 was 2.15");
         run(&m, 600, 2.15, 1, 3, 0); check(m.s.k == 2 && m.s.ups == 1 && m.s.failed == 0, "  frames of 2.15 at hold 2 hold it (soft late)");
+        sim h = {0}; h.gpu = 1.3; run(&h, 120, 0.5, 1, 3, 0); run(&h, 10, 2.5, 1, 3, 0);   // at hold 3 with a hitch (3.4) every 12 frames, as Kokiri Forest has: the GPU-fit run tolerates them
+        for (int i = 0; i < 20; i++) { run(&h, 11, 2.15, 1, 3, 0); run(&h, 1, 3.4, 1, 3, 0); }
+        check(h.s.downs >= 1 && h.s.k == 2, "  a hitch every 12 frames at hold 3 does not stop the GPU-fit trial to 2");
         sim f = {0}; f.gpu = 1.3; run(&f, 120, 0.5, 1, 3, 0); run(&f, 3000, 2.5, 1, 3, 0);
         snprintf(b, sizeof b, "  frames of 2.5 with a GPU of 1.3: three GPU-fit trials fail, then no more (downs %llu, failed %llu, k %d)", (unsigned long long)f.s.downs, (unsigned long long)f.s.failed, f.s.k);
         check(f.s.k == 3 && f.s.downs == 3 && f.s.failed == 3 && f.s.gfail == 3, b);
