@@ -21,7 +21,7 @@ System → Save and a restart into Argentum were exercised during bring-up;
 the save was created with the isolated winding diagnostic and reloaded with
 the production path. The final fixed host also loads it and walks in Argentum.
 
-On Android, 2.1.0 plays the opening and King Crustip at 30 fps; its characters are drawn since the replay runs draws under rasterizer discard that write memory, with dark speckles on them in close-ups still open ([Android](#android)).
+On Android, 2.1.0 is Playable – major issues on the Galaxy S25 Edge, from a new game through King Crustip's battle and Argentum to a save and Continue (2026-11-12): 30 fps through the opening and the battle, 10–30 fps in Argentum, and a dark stipple pattern over the characters and much of the world, still open ([Android](#android)).
 
 ## Profile and memory
 
@@ -293,8 +293,15 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - **Frame rate:** 30 fps (the target), every 60 s window 29.6–30.1 on the S25 Edge over 12.5 minutes, frame p50 33.2 ms; GPU 18–23 ms on the S25 Edge, 12.5–13 ms on the Z Flip 7.
 - **Sound:** a stereo `AudioOut`, no underrun on either phone. The `DM_AUDIO_DUMP` has signal (RMS about 640–1,360). Not listened to by a person.
 - **Memory:** 2.38 GB PSS on the S25 Edge (0.77 GB graphics) and 2.31 GB on the Z Flip 7. Neither was killed.
-- **Save:** not tried (System → Save comes later in the chapter).
+- **Save:** not tried in that run (System → Save opens in Argentum: see the run of 2026-11-12 below).
 - **Not tried:** past King Crustip, and the other devices.
+- **2026-11-12, Playable – major issues from a new game on the Galaxy S25 Edge, at v0.8.2.** The game app rebuilt at v0.8.2 (shaders as before, the host new), played by hand over adb with `DM_CTL` presses, each batch after a check that the game ran and held the focus.
+  - **Played:** New Game on Normal; the opening (the Cloud Sea, the salvage dive, Rex and Gramps); King Crustip's tutorial battle (drawing the weapon, auto-attacks, the arts tutorial, Anchor Shot on X), won; the scenes after it; the arrival at the Argentum Trade Guild, its landmark and controls tutorials, and walking at Goldmouth Return Port; System → Save (Rex Lv 2, Chapter 1, 0:17:34, Argentum Trade Guild); a cold start, the title now with Continue, and Continue back at the same spot, walking on.
+  - **Frame rate:** 30 fps (the target) through the opening, the battle and the scenes after it, 29.9 over 15.5 minutes with the worst 30 s window 28.9, GPU 21.8 ms. Argentum depends on the view: looking into the town (2,200–2,800 draws a frame) 10–16 fps with GPU 38–62 ms a frame; looking out over the docks (500–700 draws) 30 fps at GPU 20–24 ms; about 20 fps over its 6.5 minutes in the two sessions. There the replay makes about 54 skinning dispatches a frame, with 16 scratch copies, 13 home copies, 4 waits on submissions in flight and 19 write-backs (7 MB); which of these costs the GPU time isn't measured.
+  - **Picture:** a dark stipple and stripe pattern over the characters' skin, hair and clothes in close-ups and over much of the world (crates, walls, Gramps's scales, the rocks on the deck); the Mac's frame of the same spot in Argentum has none. The xc2 session's S25 frames from before v0.8.2 show it too. 919 draws were skipped while their pipelines were first built; no `[RED]` line.
+  - **Sound, memory:** sound running, no underrun (not listened to); PSS 1.8 GB at the title, 2.4 GB in the opening, up to 3.3 GB in Argentum; no crash, no kill.
+  - **Not tried:** battles after the first, Argentum's shops and the rest of the chapter, the other devices.
+  ![Xenoblade Chronicles 2 on a Galaxy S25 Edge: Rex sitting by the cabin after King Crustip's battle, the stipple pattern over his face, arms and clothes](../../../docs/images/android/xenoblade-chronicles-2-galaxy-s25-edge-close-up.jpg)
 
 ## Found on this game
 
