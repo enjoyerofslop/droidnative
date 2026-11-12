@@ -128,7 +128,11 @@ Packed for Android as its own game app (`--game-apk`, the 21.9 GB RomFS as the d
 
   - With the replay this fast, the real title ("Press L + R to start") shows; the slow replay ran the attract demo first, which takes no input until it hands back to the title (about frame 1,600).
   - `DM_VK_SB_CHECK=1` over the attract drive, the menus and a race: 1,840,757 binds compared with the shadow, none different; 218 copies were made again after a write the tracker saw.
-  - Memory is tight in the fast runs: 0.5–0.7 GB available in the race, 4 GB of the game swapped. One of the two dirty-tracker runs crashed in the menus, in Qualcomm's driver at a chunk's submit (SIGSEGV in `vulkan.adreno.so`, `mtl_sub_commit`) right after the driver failed to link a pipeline being built on another thread; the next run and the check run went on into the race.
+  - Memory is tight in the fast runs: 0.5–0.7 GB available in the race, 4 GB of the game swapped.
+- **Crashes in the menus and races, 2026-11-11** ([A refused virtual pool mapping left a hole in the pool's reservation on Android](../../../docs/reference/nvn-objects.md#a-refused-virtual-pool-mapping-left-a-hole-in-the-pools-reservation-on-android)):
+  - A SIGSEGV in Qualcomm's driver at a chunk's submit on the Pad 3, and one in the replay's copy into an arena block on a Galaxy S25 Edge, both right after `virtual pool remap … failed` lines.
+  - Every such request left a hole in the virtual pool's reservation, where later mappings landed and were then unmapped by the next request. The S25's log shows the faulting block inside a failed request's destination.
+  - With requests that fail leaving the reservation whole, two more races on the S25 ran without a fault. On a Pixel 9 Pro XL (Mali-G715) 4 of 4 runs into a race failed without the change (three faults in Mali's driver and a freeze) and 4 of 4 ran the race out with it.
 - **Frame times on Turnip:** menus and the movie 28–41 ms a frame; 3D scenes, the race included, 300–500 ms, of which the GPU is 21–45 ms and the replay's submit and present the rest. The track's surface is untextured (15 sparse images over the image limit), roadside bushes are missing (mesh draws skipped), and "virtual pool remap … failed" is logged several thousand times a run (Android cannot alias the private memory a virtual pool maps).
 
 ## Open

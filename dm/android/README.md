@@ -43,7 +43,18 @@ cream on ink, with a monochrome layer), which `tools/build_apk.py` links unless 
   folder to `files/games/<id>/` when it packs the same game (the same `control.nacp`), or with `--migrate --title <id>`, and leaves a `legacy_save` marker there. At its next start
   the launcher backs every internal save up to `files/backups/<time>/` and copies `files/save` (and `save_device`) into `saves/<id>`, through a temporary folder; `files/save`
   itself is left as it was. **Back up saves** in the game list makes the same backup on demand (xattrs, the guest names of case collisions, go to its `xattrs.tsv`: external
-  storage does not keep them); a backup pushed to `files/backups/restore/` is copied back into internal storage at the next start, after a backup of what is there.
+  storage does not keep them); a backup pushed to `files/backups/restore/` is copied back into internal storage at the next start, after a backup of what is there,
+  a game at a time (a game the backup has no save of keeps its own).
+- **A game's save in and out** (the settings screen's Save rows, `LauncherSaves.java`; the logic, plain Java that `dm/tools/tests/test_android_saves.py` runs on a JVM, in
+  `Saves.java`). Export writes `saves/<id>/` (and `saves/<id>_device/`) as a ZIP laid out as a backup, through Android's file picker. Import takes a ZIP or a folder from the
+  picker, staged in internal `files/import-staging/`, and finds the save in the layouts other tools write (a DroidPlay export or backup; yuzu and its successors,
+  `nand/user/save/0000000000000000/<user>/<title ID>/`; Ryujinx, `bis/user/save/<save ID>/0/` with the title ID in `ExtraData0`; JKSV with `.nx_save_meta.bin`; EdiZon
+  with `edizon_save_metadata.json`; Checkpoint's `0x<title ID> <name>/`), else takes the folder as the save itself, matched by file names against the game's save on the
+  phone when there is one. It keeps the game's save as a backup (`files/backups/<time>-<id>/`) before swapping the new one in by renames through `<save>.swap`, the
+  host's own convention (`plat_android.c`), and never while the game runs. Earlier saves lists the backups that hold the game's save, and puts one back the same way.
+  A save from the computer (`build_android_from_nsp.py --import-save` / `--restore-backup`, the desktop app's Import a save and Restore a backup) is pushed to
+  `files/import/<id>/`, opened to the app, and taken by the launcher when it comes to the front, through the same find, dialogs and swap (`LauncherSaves.incoming`).
+  Only `user.*` extended attributes travel with a save: a backup's `security.selinux` rows name its own phone's labels.
 - **Updates keep the saves.** Every APK is signed with `~/.android/nxnative-debug.jks` and installed with `adb install -r`; the scripts never uninstall.
 
 ## Settings screen
@@ -91,6 +102,19 @@ the library, then installs it and copies the modules, the RomFS, the DLC, the bu
 adbd may not create folders there, so the folder tree is made first by a mkdir script run in the shell. The shell makes them `drwxrws---` for itself, which an Android 15 phone (a Galaxy S21 Ultra) kept the app out of (it found no game and ran the self test, logging `[RED] the game in … cannot be read`), so the script opens the copied tree to everyone at the end (`chmod 0777` folders, `0666` files; `Android/data/<package>` is reachable only by the app and the shell). Every build is signed with
 `~/.android/nxnative-debug.jks`: an app signed with another key cannot be updated, and uninstalling it deletes its saves and game files.
 
+A phone adb loses on the way (a Wi-Fi phone that slept, roamed or restarted wireless debugging, a cable pulled) stops the step it was on with `PhoneLost`: adb's
+own words (`device '…' not found`, `device offline`, `error: closed`, exit status 255 with no output), a call past its wait (`adb_timeout`: 120 s for a shell step,
+60 s plus the bytes at 0.5 MB/s for a copy) or a copy whose byte count stood still for 90 s (`counting`). The install, the folder copies, the RomFS copy and the
+game's copy as a whole then wait up to `--reconnect-wait` seconds (180) for the phone by its ID (`reacquire`): its serial again, or another serial with its ID,
+connecting over Wi-Fi to its old address and to the address `adb mdns services` gives for its serial number; every later call goes to the serial it came back
+as. Each step can run again, and the large copies go on from what the phone holds: the RomFS image from `RomFS.img.partial` (256 MiB pieces appended, the last
+MiB hashed on both sides), a DLC image over 256 MiB the same way, and a shader folder of more than 200 files in tar archives of about 256 MiB, each named in the
+folder's `.nxnative_manifest` once the phone has unpacked it (one archive of every file was 8.4 GB for Final Fantasy Resonance, and needed twice that free on the
+phone). More than five losses in a row with no piece or archive copied between them stop it. The desktop app passes `--phone-id <id>` with `--serial`, so a build whose serial is gone before it starts (a
+new Wi-Fi port since the phone was picked) still knows whom to wait for, and its **Install again** runs on the serial the phone has now; a serial whose phone now
+gives another ID (an address lent to another phone) is refused. The app's failure help says what to do over Wi-Fi for a Wi-Fi phone (`explain.py`), and reports
+leave out a Wi-Fi phone's mDNS name, which carries its serial number.
+
 ### A game app
 
 `--game-apk` builds one game as an app of its own, to install on any device without this computer or the launcher: package `org.nxnative.game.t<title ID>`
@@ -130,7 +154,11 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   on phone* (no build) and *Play*. A game without a profile gets *Experimental build* (`--no-push`: the survey, a provisional profile in `<NSP folder>/<id>_build/profile`,
   found through `DM_GAMES_DIR`); once built it is marked *Experimental* and installs like the others.
 - **Phones**: the adb devices over USB and Wi-Fi (*Pair over Wi-Fi*, *Connect*, *Discover*, *Disconnect*); for the phone picked at the top, the app version and the games
-  on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`) and *Remove game from phone* (its save stays).
+  on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`), *Restore a backup* and *Remove game from
+  phone* (its save stays); a game's *Manage* menu has *Import a save to the phone* and *Restore its save from a backup*.
+  A phone is known by its ID (`dm/android/tools/phone_id.py`: `ro.serialno`, or the shell's Android ID where that is empty or a placeholder), asked once per adb
+  serial: the picker shows a phone on USB and Wi-Fi once, over USB; the picked phone, its backups (`<data>/backups/<id>`) and the first-start notice are kept by ID, as
+  are the script's device lock and `logs/push_<id>`, so a Wi-Fi port that changes loses nothing and one phone's two serials can't run two installs at once.
 - **Builds**: the running build's stages, progress bars and messages, from `--progress json` (or a console build's journal); *Stop* ends it and its tools.
 - **Performance**: `adb logcat -s DroidPlay` with tiles for the figures the host prints (frame time, GPU busy, replay CPU and draws, game speed, the wait for the GPU) and a frame-time
   chart; *Profile a frame* asks for a frame's GPU times per pass (`files/prof_now`) and groups them; *Thermal* shows the phone's cooling state.
