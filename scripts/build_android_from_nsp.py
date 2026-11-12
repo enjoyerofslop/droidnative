@@ -72,14 +72,19 @@ ANDROID_TESTED = {
     '01006F8002326000',   # Animal Crossing: New Horizons (Playable – major issues through the first night)
     '0100ECD018EBE000',   # Paper Mario: The Thousand-Year Door (Playable – minor issues through the first battle; 1.0.0 from a derived profile)
     '0100000000010000',   # Super Mario Odyssey
+    '01004AB00A260000',   # DARK SOULS: REMASTERED (In-game into the Asylum cell at 30 fps; Playable needs a person; 1.0.0 from a derived profile)
     '0100B1C0249B4000',   # Frostpunk (Playable – major issues through day 1 into the first night)
     '0100152000022000',   # Mario Kart 8 Deluxe (Playable – minor issues through the first 50cc race)
     '01006A800016E000',   # Super Smash Bros. Ultimate
+    '0100E95004038000',   # Xenoblade Chronicles 2 (In-game, blocked: no characters drawn)
     '01006BB00C6F0000',   # The Legend of Zelda: Link's Awakening
+    '010040801A4C8000',   # Blasphemous 2 (In-game into the weapon room at 60 fps; Playable needs a person; 1.0.1 from a derived profile)
     '01002DA013484000',   # The Legend of Zelda: Skyward Sword HD
     '01007EF00011E000',   # The Legend of Zelda: Breath of the Wild (Playable – major issues through the Shrine of Resurrection onto the Great Plateau)
     '010057D006492000',   # OCTOPATH TRAVELER (Playable – major issues through H'aanit's first battles)
+    '0100A3501946E000',   # OCTOPATH TRAVELER II (Playable – major issues through Hikari's first battle; 1.0.0 from a derived profile)
     '0100606026F12000',   # Final Fantasy Resonance
+    '01009D901BC56000',   # Donkey Kong Country Returns HD (In-game into 1-1 at 60 fps; Playable needs a person; 1.0.0 from a derived profile)
     '010069C01AB82000',   # SHIN MEGAMI TENSEI V: Vengeance (a contributor's report)
     '01001F5010DFA000',   # Pokémon Legends: Arceus (In-game; washed-out picture, no characters on Mali)
 }
@@ -258,7 +263,8 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
     dd = (lambda: promote('the installed DLC shader content differs from the registered tables')) if derive and not own else None
     dc = (lambda: promote('the reader decoded additional compute kernels from this registered build')) if derive and not own else None
     try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own,   # its own stage (a DLC's shaders too)
-                          oodle=oodle, dlc_roms=dlc_roms, derive_dlc=dd, derive_compute=dc)
+                          oodle=oodle, dlc_roms=dlc_roms, derive_dlc=dd, derive_compute=dc,
+                          targeted=not own and not derived)   # a profile that registers this version: first only the files its shader map names (docs/reference/packing.md)
     except BuildError as e:
         if not own: raise BuildError(f'{e}\nThe game is not packed: without its shaders it would play its sound over a black screen. Check that the folder holds the versions game profile '
                                      f'{g.id} registers (its game.tsv); if it does, report this build with {logs / "shader_split.log"}') from e

@@ -66,10 +66,11 @@ jobs:
         # test_spv_tffrag builds dm/android/spv_tffrag.h, transform feedback captured in the fragment stage (the vertex shader's wrapper and the fragment shader made from the layout);
         # test_android_saves runs the launcher's save import and export (dm/android/java Saves.java) on the runner's JDK over the SDK's android.jar;
         # test_spv_parallel runs the shader post-pass (spv_android.py) in several processes and checks its files and lines against one process's;
-        # test_spv_int_inputs runs the translation's second pass for vertex shaders (spv_build.py int_input_jobs) in several processes and checks it against one process
+        # test_spv_int_inputs runs the translation's second pass for vertex shaders (spv_build.py int_input_jobs) in several processes and checks it against one process;
+        # test_split_targeted runs the shader split of only the files a registered profile's shader map names, and its fallback to every file
         run: |
           mkdir -p "$RUNNER_TEMP/cc" && ln -sf "$(command -v clang)" "$RUNNER_TEMP/cc/cc"
-          PATH="$RUNNER_TEMP/cc:$PATH" python -m unittest -v test_android_cli test_android_saves test_android_shaders test_android_oodle test_android_desktop test_device_lock test_romfs_image test_spv_alpha test_spv_bind test_spv_cbsize test_spv_parallel test_spv_int_inputs test_spv_layer test_spv_precise test_spv_limits test_spv_narrow test_spv_pool test_spv_wide test_spv_xor test_spv_tgspill test_spv_mesh test_spv_meshemu test_spv_tffrag test_wb_alias test_gmem_table test_ds_texels test_prev_file test_pk_guard test_img_evict test_sb_reuse test_img_spare test_pool_fileback test_rec_desc
+          PATH="$RUNNER_TEMP/cc:$PATH" python -m unittest -v test_android_cli test_android_saves test_android_shaders test_android_oodle test_android_desktop test_device_lock test_romfs_image test_spv_alpha test_spv_bind test_spv_cbsize test_spv_parallel test_spv_int_inputs test_split_targeted test_spv_layer test_spv_precise test_spv_limits test_spv_narrow test_spv_pool test_spv_wide test_spv_xor test_spv_tgspill test_spv_mesh test_spv_meshemu test_spv_tffrag test_wb_alias test_gmem_table test_ds_texels test_prev_file test_pk_guard test_img_evict test_sb_reuse test_img_spare test_pool_fileback test_rec_desc
 
   # The same host build and packing tests on Windows, set up as a player's PC is (docs/android.md, What the command line needs): Python 3.14, since lz4 has no Windows wheel for 3.15 and a
   # player's PC has no compiler to build it, with UTF-8 mode on, since nxnative's scripts read and write text without naming UTF-8, which Python on Windows otherwise
@@ -112,5 +113,6 @@ jobs:
       - name: Packing tests
         working-directory: dm/tools/tests
         # test_spv_parallel: the shader post-pass's process pool, which on Windows can only spawn (modules assembled with the NDK's spirv-as);
-        # test_spv_int_inputs: the translation's process pool, likewise
-        run: python -m unittest -v test_android_cli test_android_saves test_android_shaders test_android_oodle test_android_desktop test_device_lock test_spv_parallel test_spv_int_inputs
+        # test_spv_int_inputs: the translation's process pool, likewise;
+        # test_split_targeted: the shader split of a registered profile's named files, whose paths a Windows split lists with '/' as well
+        run: python -m unittest -v test_android_cli test_android_saves test_android_shaders test_android_oodle test_android_desktop test_device_lock test_spv_parallel test_spv_int_inputs test_split_targeted
