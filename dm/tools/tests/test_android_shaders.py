@@ -1,12 +1,14 @@
 """The Android packing script's shader stage (scripts/build_android_from_nsp.py build_shaders) around the shader split (build_ipa_from_nsp.py split_shaders, stubbed here):
 a registered profile's split error stops the build instead of packing the game without shaders, as a profile derived from a registered one's does (droidplay-core#307), a
 provisional profile's still packs without them, and compute kernels a newer reader decodes, or DLC-only shaders, take the shader-only derived profile the iPhone build takes,
-whose shader facts the translation then reads (droidplay-core#218)."""
+whose shader facts the translation then reads (droidplay-core#218). A translation that stops (spv_build.py, stubbed too) stops the build for every profile, instead of packing
+the shaders translated so far, and a full disk is said plainly there and at the command line's exit, naming the drive and what to free (droidplay-core#307)."""
 import contextlib
 import hashlib
 from pathlib import Path
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -32,9 +34,13 @@ class BuildShaders(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()); self.work = self.tmp / 'work'; self.logs = self.work / 'logs'; self.logs.mkdir(parents=True)
         self.registered = Profile(REPO / 'dm/games' / GID)
         self.provisional = Profile(self.tmp / 'profile' / GID)
-        self.ran = []
-        def run(cmd, log, env=None):   # spv_build.py: its output folder and its last line
-            self.ran.append([str(c) for c in cmd]); (self.work / 'spv').mkdir(exist_ok=True); Path(log).write_text('spv_build: 3 translated\n')
+        self.ran = []; self.translation_stops = False; self.log_text = 'IndexError: list index out of range\n'
+        def run(cmd, log, env=None):   # spv_build.py: its output folder and its last line, or what bi.run raises for its exit code
+            self.ran.append([str(c) for c in cmd]); (self.work / 'spv').mkdir(exist_ok=True)
+            if self.translation_stops:   # the post-pass stopped at an empty .spv after a few shaders were done (Pokopia's log)
+                (self.work / 'spv' / '0123456789abcdef.spv').write_bytes(b'\3\2\x23\7'); Path(log).write_text(self.log_text)
+                raise ba.BuildError(f'spv_build.py exit code 1 (full output: {log})')
+            Path(log).write_text('spv_build: 3 translated\n')
         for p in (mock.patch.object(ba.bi, 'run', side_effect=run), mock.patch.object(ba.bi, 'PROG', mock.MagicMock()),
                   mock.patch.object(ba.bi.rfs, 'source', side_effect=lambda p: p), mock.patch.object(ba, 'say')):
             p.start(); self.addCleanup(p.stop)
@@ -69,6 +75,58 @@ class BuildShaders(unittest.TestCase):
         self.assertIn('WinError 87', msg); self.assertIn('not packed', msg); self.assertIn(why, msg); self.assertIn('--package', msg); self.assertIn('shader_split.log', msg)
         self.assertEqual(self.ran, [])   # no translation, and no shaderless pack
         self.assertFalse(any('packed without shaders' in str(c) for c in ba.say.call_args_list))
+
+    def test_a_translation_that_stops_stops_the_build_for_every_profile(self):   # #307: Pokopia's derived build packed "the shaders translated so far" and went on to the install
+        derived = Profile(self.work / 'profile' / GID)
+        self.translation_stops = True
+        for name, g, why in (('registered', self.registered, ''), ('derived', derived, f'v65536 is not a version game profile {GID} registers'), ('provisional', self.provisional, '')):
+            with self.subTest(profile=name):
+                ba.say.reset_mock()
+                with self.assertRaises(ba.BuildError) as cm: self.build(g, lambda *a, **k: None, derived=why)
+                msg = str(cm.exception)
+                self.assertIn('spv_build.py exit code 1', msg); self.assertIn('Shader translation failed, so the game is not packed', msg)
+                self.assertIn(str(self.logs / 'spv_build.log'), msg)
+                self.assertFalse(any('translated so far' in str(c) and 'packed with' in str(c) for c in ba.say.call_args_list), ba.say.call_args_list)
+                self.assertTrue((self.work / 'spv' / '0123456789abcdef.spv').exists())   # the shaders done are kept: the next build skips them
+
+    def test_a_full_disk_in_the_translation_is_said_plainly(self):   # spv_build.py's own line, or a tool's text, in its log: the drive, its free space, what to free
+        self.translation_stops = True
+        own = "[RED] spv_build: the disk is full: the translator could not write 3 shaders' output in its first pass (0123456789abcdef: IOException: There is not enough space on the disk. : 'C:\\x.spv'). The drive with C:\\g\\tmp has 0.0 GB free"
+        for name, text in (('spv_build line', f'spv_build: 2 vertex shaders\n{own}\n'), ('traceback', 'OSError: [Errno 28] No space left on device\n')):
+            with self.subTest(log=name):
+                self.log_text = text
+                with self.assertRaises(ba.BuildError) as cm: self.build(self.registered, lambda *a, **k: None)
+                msg = str(cm.exception)
+                self.assertIn('This computer ran out of disk space: the drive ', msg); self.assertIn(' free (writing ', msg); self.assertIn('_build folder', msg)
+                self.assertIn('Shader translation failed, so the game is not packed', msg)
+                if name == 'spv_build line': self.assertIn(own[6:], msg)   # its own reason, first
+
+    def test_a_nearly_full_drive_is_taken_for_a_full_disk(self):   # the log says nothing of the disk, but the drive has 100 MB left
+        self.translation_stops = True
+        with mock.patch.object(ba.shutil, 'disk_usage', return_value=SimpleNamespace(total=1 << 40, used=1 << 40, free=100_000_000)):
+            with self.assertRaises(ba.BuildError) as cm: self.build(self.registered, lambda *a, **k: None)
+        self.assertIn('has 100 MB free', str(cm.exception))
+
+    def test_another_stop_says_nothing_of_the_disk(self):
+        self.translation_stops = True
+        with mock.patch.object(ba.shutil, 'disk_usage', return_value=SimpleNamespace(total=1 << 40, used=0, free=500 << 30)):
+            with self.assertRaises(ba.BuildError) as cm: self.build(self.registered, lambda *a, **k: None)
+        self.assertNotIn('disk space', str(cm.exception)); self.assertIn('Shader translation failed', str(cm.exception))
+
+    def test_too_little_room_says_the_shaders_were_not_translated(self):   # spv_build.py's free-space check stopped it before it started
+        self.translation_stops = True
+        line = ("[RED] spv_build: not enough free space to translate 131,426 shaders (4,400 MB in the package): the drive with C:\\g\\0400A3A01EE4C000_build\\spv has 61.0 GB free, "
+                "and they need about 90.1 GB there")
+        self.log_text = line + '\n'
+        with mock.patch.object(ba.shutil, 'disk_usage', return_value=SimpleNamespace(total=1 << 40, used=0, free=61 << 30)):
+            with self.assertRaises(ba.BuildError) as cm: self.build(self.registered, lambda *a, **k: None)
+        msg = str(cm.exception)
+        self.assertIn(line[6:], msg); self.assertIn('The game is not packed: its shaders were not translated.', msg)
+        self.assertNotIn('Shader translation failed', msg); self.assertNotIn('ran out of disk space', msg)
+
+    def test_a_translation_with_red_lines_still_packs(self):   # a shader the translator can't handle is a line in the log, and spv_build.py exits 0
+        (out, g), _ = self.build(self.registered, lambda *a, **k: None)
+        self.assertEqual(out, self.work / 'spv'); self.assertIs(g, self.registered)
 
     def test_compute_kernels_a_newer_reader_decodes_take_the_derived_profile(self):
         derived = Profile(self.work / 'profile' / GID); reasons = []
@@ -105,6 +163,41 @@ class BuildShaders(unittest.TestCase):
         with mock.patch.object(ba.bi, 'split_shaders') as sp:
             self.assertEqual(ba.build_shaders([], {}, self.work, self.logs, {}, self.registered), (None, self.registered))
         sp.assert_not_called()
+
+
+class DiskFull(unittest.TestCase):   # the message a full disk gets anywhere in the build (build_android_from_nsp.py disk_full) and the command line's exit
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_it_names_the_drive_its_free_space_and_what_to_free(self):
+        f = self.tmp / 'logs/push_S/adb_push_romfs.piece'
+        msg = ba.disk_full(f)
+        self.assertIn(f'the drive {ba.drive_of(self.tmp)} has ', msg); self.assertIn(f'(writing {f})', msg)   # a file not there yet: its folder's drive
+        self.assertIn('move the game\'s folder to a drive with more room', msg)
+        self.assertIn('This computer ran out of disk space: the drive is full.', ba.disk_full(None))
+
+    def test_leftover_translation_folders_in_the_system_temp_folder_are_named(self):   # every failed translation before spv_build.py used WORK left one
+        (self.tmp / 'spv_a1').mkdir(); (self.tmp / 'spv_b2').mkdir(); (self.tmp / 'spv_note.txt').write_text('')
+        with mock.patch.object(ba.tempfile, 'gettempdir', return_value=str(self.tmp)):
+            self.assertIn(f'2 spv_… folders in {self.tmp} were left by failed shader translations of earlier versions', ba.disk_full(self.tmp))
+            shutil.rmtree(self.tmp / 'spv_a1'); shutil.rmtree(self.tmp / 'spv_b2')
+            self.assertNotIn('spv_…', ba.disk_full(self.tmp))
+
+    def test_the_command_line_says_a_full_disk_plainly(self):   # Pokopia's build ended in a traceback, OSError: [Errno 28], from push_resumable's piece.write_bytes
+        f = self.tmp / 'adb_push_romfs.piece'
+        code = '\n'.join([
+            'import argparse, errno, runpy, sys',
+            'def full(self, args=None, namespace=None):',
+            f'    raise OSError(errno.ENOSPC, "No space left on device", {str(f)!r})',
+            'argparse.ArgumentParser.parse_args = full',
+            "sys.argv = ['build_android_from_nsp.py', 'game']",
+            f'runpy.run_path({str(ba.__file__)!r}, run_name="__main__")',
+        ])
+        r = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, encoding='utf-8', timeout=120)
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 1, out)
+        self.assertIn('[RED] This computer ran out of disk space: the drive ', out); self.assertIn(f'(writing {f})', out)
+        self.assertNotIn('Traceback', out)
 
 
 class OodleDecode(unittest.TestCase):

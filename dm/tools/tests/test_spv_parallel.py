@@ -1,5 +1,6 @@
 """dm/android/tools/spv_android.py's post-pass in several processes (-j, a spawn pool, as Windows has): each shader's files and the lines printed are those of one process,
-in key order, over more shaders than one pool job takes; a shader that stops the post-pass stops the run. The modules are test_spv_cbsize's and test_spv_posrows', a vertex
+in key order, over more shaders than one pool job takes; a shader that stops the post-pass stops the run, while one whose translator output is empty or cut short is a
+[RED] line. The modules are test_spv_cbsize's and test_spv_posrows', a vertex
 shader with transform feedback, one without a position output (a [RED] line) and a fragment shader, assembled with spirv-as. Skipped without spirv-as."""
 import json
 from pathlib import Path
@@ -62,13 +63,13 @@ class Parallel(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def folder(self, name, n, broken=None):   # n shaders, the kinds in turn, so [RED] lines come from keys throughout the list
-        d = self.tmp / name; d.mkdir()
+    def folder(self, name, n, broken=None, cut=()):   # n shaders, the kinds in turn, so [RED] lines come from keys throughout the list; broken: a res.json the post-pass trips on;
+        d = self.tmp / name; d.mkdir()                 # cut: shaders whose .spv is empty or cut short
         for i in range(n):
             k = f'{i * 0x9e3779b97f4a7c15 % (1 << 64):016x}'   # keys out of order of i: main sorts them
             data, res = self.kinds[i % len(self.kinds)]
-            (d / f'{k}.spv').write_bytes(bytes(64) if i == broken else data)
-            (d / f'{k}.res.json').write_text(json.dumps({'key': k, **res}))
+            (d / f'{k}.spv').write_bytes((data[:len(data) // 8 * 4] if cut.index(i) else b'') if i in cut else data)   # the first cut empty, the next ones half their words
+            (d / f'{k}.res.json').write_text(json.dumps({'key': k, **res, **({'cbufs': 7} if i == broken else {})}))
         return d
 
     def run_post(self, src, name, j):
@@ -97,8 +98,20 @@ class Parallel(unittest.TestCase):
         src = self.folder('bad', 3 * sa.CHUNK, broken=sa.CHUNK + 1)
         r, _ = self.run_post(src, 'bad_out', 3)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn('not SPIR-V', r.stderr)
+        self.assertIn('TypeError', r.stderr)
         self.assertIn(f'shader {(sa.CHUNK + 1) * 0x9e3779b97f4a7c15 % (1 << 64):016x}', r.stderr)   # which one, though the processes take them out of order
+
+    def test_empty_or_cut_short_outputs_are_lines_not_a_stop(self):   # what the translator leaves when a write fails, as on a full disk (droidplay-core#307's IndexError)
+        n, cut = 3 * sa.CHUNK, (2, sa.CHUNK + 4)
+        src = self.folder('cut', n, cut=cut)
+        r, dst = self.run_post(src, 'cut_out', 3)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        keys = [f'{i * 0x9e3779b97f4a7c15 % (1 << 64):016x}' for i in cut]
+        for k, why in zip(keys, ('.spv empty (0 bytes)', '.spv cut short')):
+            self.assertIn(f"[RED] {k}: the translator's output can't be read: {why}", r.stdout)
+            self.assertFalse((dst / f'{k}.res.json').exists())
+        self.assertEqual(len(list(dst.glob('*.res.json'))), n - len(cut))
+        self.assertIn(f'spv_android: {n} shaders,', r.stdout)
 
     def test_few_shaders_take_no_pool(self):   # one job's worth or less: no processes started for it
         with mock.patch.object(sa.cf, 'ProcessPoolExecutor', side_effect=AssertionError('a pool for one job')):

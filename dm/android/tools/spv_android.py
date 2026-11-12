@@ -51,6 +51,22 @@ def parse(data):
         ins.append([op] + w[i + 1:i + n]); i += n
     return hdr, ins
 
+def unreadable(data):
+    """Why data isn't a whole SPIR-V module, or None. The translator writes each output with File.WriteAllBytes, which creates the file before it writes: a write that fails,
+    as on a full disk, leaves it empty or cut short, and parse stopped the post-pass at the first one (IndexError at w[0], droidplay-core#307). A module cut at an
+    instruction's end still parses, but no longer ends in OpFunctionEnd, as every module with a function does"""
+    if not data: return 'empty (0 bytes)'
+    if len(data) % 4 or len(data) < 24: return f'cut short ({len(data):,} bytes)'
+    w = struct.unpack('<%dI' % (len(data) // 4), data)
+    if w[0] != 0x07230203: return f'not SPIR-V ({len(data):,} bytes)'
+    i, last = 5, None
+    while i < len(w):
+        n = w[i] >> 16
+        if not n or i + n > len(w): return f'cut short ({len(data):,} bytes: an instruction runs past the end)'
+        last, i = w[i] & 0xffff, i + n
+    if last != OP_FUNCTIONEND: return f'cut short ({len(data):,} bytes: it does not end in OpFunctionEnd)'
+    return None
+
 def emit(hdr, ins):
     out = list(hdr)
     for x in ins: out.append((len(x) << 16) | x[0]); out.extend(x[1:])
@@ -876,11 +892,21 @@ def post(src, dst, k):
     try: return post_one(src, dst, k)
     except Exception as e: e.add_note(f'shader {k} in {src}'); raise   # the pool runs shaders out of order: the traceback names the one that stopped it
 
+def put(p, data):   # a file written whole or not at all: to a temporary name, then renamed (a full disk midway leaves no cut-short file under the real name)
+    t = p.with_name(p.name + '.tmp'); t.write_bytes(data); os.replace(t, p)
+
+def lost(dst, k, why):   # a shader whose translator output can't be read: its line, and no res.json of an older run left, so it counts as not translated and is translated again
+    (dst / f'{k}.res.json').unlink(missing_ok=True)
+    return (0, 0, 0, 0, 0, 0, 0), [f"[RED] {k}: the translator's output can't be read: {why} (a write that failed, as on a full disk): not translated"]
+
 def post_one(src, dst, k):
-    res = json.loads((src / f'{k}.res.json').read_text(encoding='utf-8'))
-    stage = res.get('stage', 'vs'); lines = []; nz = bad = ncs = nrows = nemu = 0
-    cs = next((c['binding'] for c in res.get('cbufs') or [] if c.get('slot') == CBSIZE_BANK), None)
+    try: res = json.loads((src / f'{k}.res.json').read_text(encoding='utf-8'))
+    except FileNotFoundError: return lost(dst, k, 'no .res.json')
+    except ValueError: return lost(dst, k, '.res.json empty or cut short')
     data = (src / f'{k}.spv').read_bytes()
+    if why := unreadable(data): return lost(dst, k, f'.spv {why}')
+    stage = res.get('stage', 'vs'); lines = []; nz = bad = ncs = nrows = nemu = 0; files = {}   # its files besides res.json, written before it (put): res.json makes it translated
+    cs = next((c['binding'] for c in res.get('cbufs') or [] if c.get('slot') == CBSIZE_BANK), None)
     if res.get('mesh'):   # a task or mesh shader translated as compute (spv_build.py): the stage module, and a mesh shader's depth -1..1 variant
         import spv_mesh
         mesh = res.pop('mesh'); stage = res['stage'] = mesh['info']['kind']
@@ -892,14 +918,14 @@ def post_one(src, dst, k):
             return (0, 1, 0, 0, 0, 0, 0), [f'[RED] {k}: {e}: no {"task" if stage == "ts" else "mesh"} module']
         data = plain
         if zdata:
-            zh, zi, _, _ = process(zdata, stage, cs); (dst / f'{k}.z.spv').write_bytes(emit(zh, zi)); nz = 1
+            zh, zi, _, _ = process(zdata, stage, cs); files['.z.spv'] = emit(zh, zi); nz = 1
         try:   # the emulation's forms (spv_meshemu.py): what a GPU without VK_EXT_mesh_shader runs instead (gfx_vk_meshemu.inc)
             import spv_meshemu
             cdata, keep = spv_meshemu.compute(kernel, mesh['info'], mesh['lay'])
-            ch, ci, _, _ = process(cdata, 'cs', cs, keep); (dst / f'{k}.cs.spv').write_bytes(emit(ch, ci))
+            ch, ci, _, _ = process(cdata, 'cs', cs, keep); files['.cs.spv'] = emit(ch, ci)
             if stage == 'ms':
-                (dst / f'{k}.pvs.spv').write_bytes(spv_meshemu.vertex(mesh['info']))
-                (dst / f'{k}.pvs.z.spv').write_bytes(spv_meshemu.vertex(mesh['info'], gl=True))
+                files['.pvs.spv'] = spv_meshemu.vertex(mesh['info'])
+                files['.pvs.z.spv'] = spv_meshemu.vertex(mesh['info'], gl=True)
             res['mesh_emu'] = spv_meshemu.facts(mesh['info']); nemu = 1
         except ValueError as e:
             lines.append(f'[RED] {k}: {e}: no compute form (a GPU without VK_EXT_mesh_shader skips its draws)'); res['mesh_emu'] = None
@@ -912,14 +938,15 @@ def post_one(src, dst, k):
     if stage == 'vs':   # after add_ext: a run-time row would keep the whole buffer, and it reads the rows the constant one did
         hdr, ins, nrows = pos_rows(hdr, ins)
         res['vin'] = vin_types(ins)
-    (dst / f'{k}.spv').write_bytes(emit(hdr, ins))
-    (dst / f'{k}.res.json').write_text(json.dumps(res), encoding='utf-8')
+    files['.spv'] = emit(hdr, ins)
     if stage == 'vs' and res.get('tf'):
-        (dst / f'{k}.tf.spv').write_bytes(tf_variant(hdr, ins, res['tf']))
+        files['.tf.spv'] = tf_variant(hdr, ins, res['tf'])
     if stage == 'vs':
         z = z_variant(hdr, ins)
-        if z: (dst / f'{k}.z.spv').write_bytes(z); nz = 1
+        if z: files['.z.spv'] = z; nz = 1
         else: bad = 1; lines.append(f'[RED] {k}: no position output found, no depth -1..1 variant')
+    for suffix, b in files.items(): put(dst / f'{k}{suffix}', b)
+    put(dst / f'{k}.res.json', json.dumps(res).encode())   # last: a shader whose res.json is there has all its files (spv_build.py skips it on the next run)
     return (nz, bad, eb, ew, ncs, nrows, nemu), lines
 
 CHUNK = 16   # shaders per pool job: ~0.8 s of work on average, so the pipe's round trips cost nothing and the last jobs still spread over the processes

@@ -15,6 +15,7 @@ The rewritten modules take 62.5 MB, so the default `mem_used` (64 MB) covers the
 
 - One [NUP container](../../../docs/development.md#the-packing-script-in-detail) of 47 GB: the base game and update v196608, whose RomFS (46 GB, 2,174 files) is whole; [`pack_nup.py`](../../../scripts/pack_nup.py) packs it without the base's. It carries no NACP or icon; its name record says "HWAoI", so the app takes the profile's name.
 - RomFS: KTGL's RDB under `b6e28c40` (`root.rdb`, `system.rdb`, 1,922 `.fdata` files, `data/*.file` and per-language `data/*.file`), and 129 `.bin` archives under `ebc8c781`.
+- An Android build needs the 46 GB RomFS image, the shader package and, while its 101,860 shaders translate, likely 70 GB or more free on the same drive: an estimate from [Pokémon Pokopia](../0400A3A01EE4C000/README.md)'s, whose shaders come from the same engine, scaled by the count; the package's size isn't measured here ([Free space](../../../docs/android.md#free-space)). The build checks the room before it translates. The phone needs the RomFS image and the translated shaders, likely 85 GB or more. No Android build has run here.
 
 ## Shaders
 

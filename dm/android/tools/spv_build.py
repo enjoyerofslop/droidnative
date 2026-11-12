@@ -9,9 +9,11 @@
 # shaders are translated as compute with their stage memory in shared memory, as dmsh_build.py job_for does, and spv_android.py makes them Vulkan task and mesh modules
 # (spv_mesh.py; the replay draws them on VK_EXT_mesh_shader, gfx_vk_mesh.inc).
 # Vertex shaders in two parts (VertexA + VertexB, Catherine: Full Body's GLSLC) are merged into one program first, as dmsh_build.py vertex_ab does.
+# The code areas, the job lists and the translator's output go in a temporary folder under WORK (build_android_from_nsp.py sets it to <id>_build/tmp), which the run
+# removes however it ends: for a big game it holds tens of GB, so it stays on the game's drive, beside its other files, and a failed run leaves nothing behind.
 # Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N]
 import spv_android as sa   # beside this file
-import argparse, concurrent.futures as cf, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile
+import argparse, concurrent.futures as cf, errno, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -123,7 +125,9 @@ def job(key, stage, code, ctl, w, facts):
     return j, None
 
 def int_inputs_of(path):   # a pool job: one translated vertex shader's inputs that it only uses as integers, {location: type}, a few entries
-    return sa.int_inputs(sa.parse(Path(path).read_bytes())[1])
+    data = Path(path).read_bytes()
+    if sa.unreadable(data): return {}   # empty or cut short (a write that failed): the post-pass gives it its [RED] line
+    return sa.int_inputs(sa.parse(data)[1])
 
 CHUNK = 16   # vertex shaders per pool job
 
@@ -147,7 +151,77 @@ def int_input_jobs(keys, jobs, tout, j):
     if ex: ex.shutdown()
     return again
 
+# A full disk in a translator [RED] line (dmsh_xlate prints each shader's IOException and goes on to the next): POSIX's strerror, and Windows' ERROR_DISK_FULL and
+# ERROR_HANDLE_DISK_FULL as .NET words them
+DISK_FULL = re.compile(r'No space left on device|not enough space on the disk|The disk is full|\[Errno 28\]|ENOSPC', re.I)
+
+def disk_full(path, why):
+    """Stop on a full disk with a line build_android_from_nsp.py shows the player: what could not be written, the drive's free space, what to do. Going on reached the
+    post-pass, which stopped at the first empty .spv the translator left (IndexError in spv_android.py parse, droidplay-core#307), and the log said nothing of the disk"""
+    d = Path(os.path.abspath(path))
+    while not d.is_dir() and d != d.parent: d = d.parent   # a file that could not be written may not be there
+    try: free = f'{shutil.disk_usage(d).free / 1e9:.1f} GB free'
+    except OSError: free = 'no free space it could read'
+    print(f'[RED] spv_build: the disk is full: {why}. The drive with {d} has {free}, before this run\'s temporary files are removed. Nothing more is translated: '
+          'free some space and build again (the shaders translated already are kept)', flush=True)
+    raise SystemExit(1)
+
+def stop_if_full(failed, tout, step):   # after a translation pass: the translator's failures, and a stop when any was a full disk
+    full = sorted(k for k, why in failed.items() if DISK_FULL.search(why))
+    if not full: return
+    for k, why in sorted(failed.items()):
+        if k not in full: print(f'[RED] {k}: {why}')   # its other failures, lost otherwise
+    disk_full(tout, f"the translator could not write {len(full):,} shaders' output in its {step} ({full[0]}: {failed[full[0]]})")
+
+# The room a run needs, per byte of the package records it translates (header, code area, control section), measured on the Mac from three games' finished
+# <id>_build/spv folders against their shader/pkg, as allocated on disk. Their translated files: Ocarina of Time 12.1 bytes per package byte (42,848 shaders, 149 KiB
+# each), Final Fantasy Resonance 13.9 (73,496, 125 KiB), Super Mario Odyssey 11.9 (27,984, 67 KiB). The translator's output, in the temporary folder until the run ends,
+# is about their .spv and .res.json files: 0.80, 0.80 and 0.70 of that, so the peak is 21.8, 25.0 and 20.2. Per shader it varies far more than per byte: Pokémon Pokopia's
+# records are 33 KiB each (4.4 GB for 131,426 shaders), 3 to 6 times theirs, and one of its runs on Windows had left a 45.7 GB temporary folder when the disk filled,
+# 10.4 per byte for that half alone (OoT's 9.7 plus its code areas) though unfinished (droidplay-core#307). The lowest peak is taken, rounded down: 20, so the check
+# stops a run that can't fit, as Pokopia's (88 GB and the spare) on the reporter's 70 GB, without stopping one that can
+OUT_PER_BYTE, TEMP_PER_BYTE = 12, 8
+ROOM_SPARE = 2 << 30   # left free besides: the log, the app, the copy to the phone's 256 MiB pieces
+
+def same_drive(a, b):
+    return os.stat(a).st_dev == os.stat(b).st_dev
+
+def room(out, tmp, n, nbytes, reused):
+    """Stop before translating n shaders (nbytes of records) when the drives can't hold what the run makes: their translated files beside out, less reused (the files of an
+    older chain they overwrite), and the translator's output in tmp until the run ends (the code areas are written already). Pokopia's disk filled about 12 minutes into
+    the translation, and with nothing checked the run went on for 20 more (droidplay-core#307). DM_SPV_SPACE_CHECK=0 skips it"""
+    if not n or os.environ.get('DM_SPV_SPACE_CHECK') == '0': return
+    need_out, need_tmp = max(0, nbytes * OUT_PER_BYTE - reused), nbytes * TEMP_PER_BYTE
+    gb = lambda b: f'{b / 1e9:.1f} GB'
+    parts = {'out': f'{gb(need_out)} for the translated shaders', 'tmp': f"{gb(need_tmp)} for the translator's temporary copy of them until the end"}
+    for d, need, what in ([(out, need_out + need_tmp, f"{parts['out']} and {parts['tmp']}")] if same_drive(out, tmp) else
+                          [(out, need_out, parts['out']), (tmp, need_tmp, parts['tmp'])]):
+        free = shutil.disk_usage(d).free
+        if free >= need + ROOM_SPARE: continue
+        print(f'[RED] spv_build: not enough free space to translate {n:,} shaders ({nbytes / 1e6:,.0f} MB in the package): the drive with {d} has {gb(free)} free, and they need '
+              f'about {gb(need + ROOM_SPARE)} there: {what}, and {gb(ROOM_SPARE)} to spare. Free {gb(need + ROOM_SPARE - free)} more there, or move the game\'s folder to a drive '
+              'with more room, then build again. Nothing was translated (DM_SPV_SPACE_CHECK=0 translates anyway)', flush=True)
+        raise SystemExit(1)
+
+def work_dir():
+    """Where the run's temporary folder goes: WORK, which build_android_from_nsp.py sets to <id>_build/tmp, else the system's temp folder (a run by hand). On Windows
+    that one is on C: whatever drive the game is on, and out of sight: droidplay-core#307's three failed Pokémon Pokopia runs each left tens of GB in %TEMP%.
+    Under WORK, a spv_* folder is one that a killed run left (a closed window runs no finally), so it is removed first"""
+    d = os.environ.get('WORK')
+    if not d: return None
+    os.makedirs(d, exist_ok=True)
+    for old in Path(d).glob('spv_*'): shutil.rmtree(old, ignore_errors=True)
+    return d
+
 def main():
+    w = tempfile.mkdtemp(prefix='spv_', dir=work_dir())
+    try: translate(w)
+    except OSError as e:   # this script's own writes (the code areas, the job lists, reflections) on a full disk
+        if e.errno != errno.ENOSPC: raise
+        disk_full(e.filename or w, f'{e.filename or "a file"} could not be written')
+    finally: shutil.rmtree(w, ignore_errors=True)   # the code areas and the translator's output: as large as the shaders made, whether the run finished or not
+
+def translate(w):
     ap = argparse.ArgumentParser(description='translate a shader_split package for the Android Vulkan replay')
     ap.add_argument('package'); ap.add_argument('out'); ap.add_argument('--xlate', required=True); ap.add_argument('--facts'); ap.add_argument('-j', type=int, default=os.cpu_count() or 4)
     a = ap.parse_args()
@@ -156,8 +230,7 @@ def main():
     if a.facts and os.path.exists(a.facts):
         for ln in open(a.facts, encoding='utf-8'):
             if ln.strip() and not ln.startswith('#'): k, v = ln.rstrip('\n').split('\t', 1); facts[k] = json.loads(v)
-    w = tempfile.mkdtemp(prefix='spv_')
-    jobs, skipped, have, tfs, upg = {}, {}, 0, {}, 0
+    jobs, skipped, have, tfs, upg, nbytes, reused = {}, {}, 0, {}, 0, 0, 0
     for f in sorted(Path(a.package).glob('*.bin')):
         stage = f.name[:2]
         if stage not in ('vs', 'ps', 'gs', 'tc', 'te', 'cs', 'ts', 'ms'): continue
@@ -167,16 +240,21 @@ def main():
             key = key_of(ctl, code)
             if key in jobs: continue
             rp = out / f'{key}.res.json'   # translated by an earlier run of this chain version (the key covers the shader's bytes)
-            if (out / f'{key}.spv').exists() and rp.exists():
-                rj = json.loads(rp.read_text(encoding='utf-8')); ch = rj.get('android')
+            prev = (out / f'{key}.spv').exists() and rp.exists()
+            if prev:
+                try: rj = json.loads(rp.read_text(encoding='utf-8'))
+                except ValueError: rj = {}   # empty or cut short, by a disk that filled while it was written: translated again
+                ch = rj.get('android')
                 if ch == sa.EXT_FROM and sa.ANDROID_CHAIN == sa.EXT_FROM + 1: sa.upgrade(out, key); ch = sa.EXT_FROM + 1; upg += 1   # (its .spv files are chain EXT_FROM + 1's: only res.json's extents were missing; after a later bump of ANDROID_CHAIN, translated again)
                 # a task or mesh shader made before spv_android.py wrote their compute form (res.json mesh_emu: its facts, or null when it could not be made) is translated
                 # again, alone: the other shaders keep their chain
                 if ch == sa.ANDROID_CHAIN and not (stage in ('ts', 'ms') and (rj.get('mesh_emu', {}) or {'v': 0}).get('v') != meshemu_v()): have += 1; continue
             j, why = job(key, stage, code, ctl, w, facts)
             if not j: skipped[key] = why; continue
-            jobs[key] = j
+            jobs[key] = j; nbytes += len(rec)
+            if prev: reused += sum(f.stat().st_size for f in (out / f'{key}.spv', out / f'{key}.z.spv', rp) if f.exists())   # an older chain's files, which this run overwrites
             if stage == 'vs' and not dmsh_ampere.is_nvn2(ctl) and (tf := tf_layout(key, ctl)): tfs[key] = tf
+    room(out, Path(w), len(jobs), nbytes, reused)
     keys = sorted(jobs); chunks = [keys[i::a.j] for i in range(a.j)]
     xl = [a.xlate] if not a.xlate.endswith('.dll') else ['dotnet', a.xlate]
     tout = Path(w) / 'out'; tout.mkdir()
@@ -189,6 +267,7 @@ def main():
             for ln in r.stderr.splitlines() + r.stdout.splitlines():
                 m = re.match(r'\[RED\] (\w+): (.*)', ln)
                 if m: failed[m.group(1)] = m.group(2)[:160]
+    stop_if_full(failed, tout, 'first pass')
     again = int_input_jobs(keys, jobs, tout, a.j)
     if again:
         with cf.ThreadPoolExecutor(a.j) as ex:
@@ -197,20 +276,25 @@ def main():
                     m = re.match(r'\[RED\] (\w+): (.*)', ln)
                     if m: failed[m.group(1)] = 'integer-input retranslation: ' + m.group(2)[:130]
         print(f'spv_build: {len(again)} vertex shaders translated again with integer inputs')
+        stop_if_full(failed, tout, 'integer-input pass')   # it rewrites good .spv files in place, so a disk that fills here cuts them short
     done = sorted(p.name[:-4] for p in tout.glob('*.spv') if not p.name.endswith('.reader.spv'))
     for k in done:   # the feedback layout and a task / mesh shader's facts go with the shader's reflection: spv_android.py makes the capture variant and the stage modules from them
         if k in tfs or 'mesh_stage' in jobs[k]:
-            rp = tout / f'{k}.res.json'; r = json.loads(rp.read_text(encoding='utf-8'))
+            rp = tout / f'{k}.res.json'
+            try: r = json.loads(rp.read_text(encoding='utf-8'))
+            except (FileNotFoundError, ValueError): continue   # none, or one cut short: the post-pass gives the shader its [RED] line
             if k in tfs: r['tf'] = tfs[k]
             if 'mesh_stage' in jobs[k]: r['mesh'] = {'info': jobs[k]['mesh_stage'], 'lay': jobs[k]['stage_memory']}
             rp.write_text(json.dumps(r), encoding='utf-8')
-    if done: subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
     for k in keys:
         if k not in done and k not in failed: failed[k] = 'no output from the translator'
     for k, why in sorted(skipped.items()): print(f'[RED] {k}: {why}')
-    for k, why in sorted(failed.items()): print(f'[RED] {k}: {why}')
-    print(f'spv_build: {len(done)} translated, {have} already there ({upg} given their constant buffer extents), {len(failed)} failed, {len(skipped)} skipped, {sum(1 for k in jobs if jobs[k].get("no_facts"))} without facts')
-    shutil.rmtree(w, ignore_errors=True)
+    for k, why in sorted(failed.items()): print(f'[RED] {k}: {why}')   # before the post-pass, so a post-pass that stops doesn't lose them (#307's log had none of them)
+    sys.stdout.flush()   # the post-pass writes to the same log
+    if done: subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
+    lost = [k for k in done if not (out / f'{k}.res.json').exists()]   # outputs the post-pass couldn't read (its [RED] lines): res.json, written last, makes a shader translated
+    for k in lost: failed.setdefault(k, "the post-pass couldn't read its output")
+    print(f'spv_build: {len(done) - len(lost)} translated, {have} already there ({upg} given their constant buffer extents), {len(failed)} failed, {len(skipped)} skipped, {sum(1 for k in jobs if jobs[k].get("no_facts"))} without facts')
 
 if __name__ == '__main__':
     main()
