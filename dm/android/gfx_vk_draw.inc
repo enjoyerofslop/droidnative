@@ -1470,6 +1470,7 @@ static vtex *slot0_scratch(uint32_t w, uint32_t h) {
     LOG("[vk] scratch target for an empty colour slot 0: %ux%u", v->w, v->h);
     return sv[n++] = v;
 }
+#include "gfx_vk_layerpad.inc"   // small layered passes padded past the tile memory (layer_pad_on)
 // One image in two colour slots of a pass: Breath of the Wild's 1280x720 G-buffer passes bind one target at slots 1 and 2 and another at 3 and 4, and write only the
 // first of each (channel mask 0xf0f0ff). Vulkan leaves attachments that alias in one subpass undefined: the OnePlus Pad 3's Adreno 830 stored the unwritten copy over
 // the written one, and the Shrine of Resurrection was drawn dark (Link unlit) and blurred (dm/android/baselines.md problem 15), where the Odin 2's Adreno 740 drew it
@@ -1561,6 +1562,7 @@ static int rp_prepare_(int layered) {
         VkImageView iv = sv ? view_get(sv, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, NULL) : VK_NULL_HANDLE;
         if (iv) { cvw[0] = iv; k.color[0] = sv->fmt; nv++; g_slot0_fills++; }
     }
+    layer_pad(&k, cvw, w, h, layers);   // after slot 0 is filled: the slots it adds come after the game's
     nv = 0; for (uint32_t i = 0; i < k.ncolor; i++) if (cvw[i]) views[nv++] = cvw[i];
     if (dvw) views[nv++] = dvw;
     VkRenderPass rp = rp_get(&k); if (!rp) { lsnap_drop_all(); return 0; }

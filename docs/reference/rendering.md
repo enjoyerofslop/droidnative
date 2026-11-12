@@ -2418,6 +2418,26 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check, Adreno 830:** Breath of the Wild on the Pad 3, the `outdoors` save. With the fix it runs into the field with no hang report. With `DM_VK_SLOT0_FILL=0` it hangs and loses the GPU as before. Filling every empty slot below a used one also stops it; filling only the slot 7 pass's slot 6, or zeroing the write masks of empty slots, doesn't.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (Adreno 830), [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (Adreno 730).
 
+### A small layered render pass crashes the Adreno 650's driver (Android)
+
+- **Symptom:** Android only, on a Retroid Pocket 5 (Adreno 650, Qualcomm's driver 0x802ea000 built 2023-09-27, Vulkan 1.1.128). OCTOPATH TRAVELER crashes about 3 s into every start, before its first frame is presented: `CRASH sig=11 addr=0x2f100000058 pc=…(vulkan.adreno.so+0x170020)`, thread `NVN queue repla`, right after its first colour targets are made. The address is the same in every run, so the driver reads a value it never set, not a pointer of ours. `DM_VK_UBWC=0`, `DM_VK_SAFE=1` and `DM_VK_RAST_DISCARD=0` change nothing.
+- **Cause:** `vkCreateFramebuffer` for a layered framebuffer whose texels fit in the GPU's tile memory. The faulting code is the driver's tiling setup, which `vkCreateFramebuffer` runs. It was found with a local trace of every render pass, framebuffer and pass begin (not in `main`).
+  - OCTOPATH TRAVELER draws its 32×32×32 A2B10G10R10 colour-grading LUT as 32 layers in its first frames: one target of 4 bytes a texel, 128 KB in all. The game's layered pass just before it, four RGBA16F volumes of the same size (1 MB), runs.
+  - With scratch slots added to the LUT's pass, framebuffers of 4, 8, 12 and 20 bytes a texel (128 to 640 KB) crashed, and of 28 and 36 bytes (896 KB, 1.1 MB) ran, with three attachments or four. So the size decides, not the attachment count or the format.
+  - Nor is it the 3D target's 2D-array view (`rp_prepare_`): the LUT drawn into a real 2D array, and into one in RGBA16F, crashed the same.
+  - With `DM_VK_LAYERED=0` (targets attached a layer at a time) the game runs, but a LUT drawn that way keeps only one slice ([Layered passes for vertex shaders that write the layer](#layered-passes-for-vertex-shaders-that-write-the-layer)).
+- **Fix:** on Qualcomm's own driver on an Adreno 6xx, a layered pass under 1 MB of texels gets scratch colour slots after the game's, RGBA32F 2D arrays, until its texels reach 1 MB (`gfx_vk_layerpad.inc` `layer_pad_on`, `layer_pad`). No fragment shader output reaches them, so their texels are left undefined. The LUT's pass takes two.
+  - Each slot keeps one image, made again larger when a pass is larger. The earlier ones are kept, since cached framebuffers name their views (4 sizes a slot).
+  - A pass that the 8 slots can't take to 1 MB (under 8,192 texels in all) is attached as it is, with red line 186.
+  - `DM_VK_LAYER_PAD=1` turns it on for any GPU, `0` off. The log counts the padded passes (`[vk] layered render passes padded past 1 MB of texels …`).
+  - The driver is told by its driver ID (`g_qcom_driver`, as for [the empty colour slot 0](#a-render-pass-with-colour-slot-0-empty-hangs-or-crashes-qualcomms-adreno-driver-android)) and the Adreno 6xx by its device ID (0x06xxxxxx; the Adreno 650's is 0x6050002). The Moto Razr Plus 2023's Adreno 730, also on a Vulkan 1.1 driver (0x80267062), ran about 330,000 of Xenoblade Chronicles 2's layered passes without it, so newer Adrenos are left as they are.
+- **Check:** OCTOPATH TRAVELER 1.0.3 on the Retroid Pocket 5, a game app from `main` a50dfcb0 with this change and no switches set.
+  - From a new game: the title, H'aanit's flashback, S'warkii, the radar tutorial and the walk toward the headman, at about 49 fps (frame p50 20.4 ms) and 2.16 GB PSS. The grading looks as on the Pixel 9 Pro XL: S'warkii's red-tinted edges and its bluish mist.
+  - About 300 passes are padded in each 5-second log window: the game draws its LUT again every frame.
+  - Without the change, every start crashed: 4 of 4 in the first test, and 3 of 3 here. The same build with `DM_VK_LAYER_PAD=0` crashes the same way.
+  - Not run with it: another game on the Retroid Pocket 5, or another Adreno 6xx.
+- **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md).
+
 ### One image in two colour slots of a pass is drawn wrong on the Adreno 830 (Android)
 
 - **Symptom:** Breath of the Wild's Shrine of Resurrection is drawn dark and blurred on a OnePlus Pad 3 (Adreno 830): Link unlit, the walls a blur. The Odin 2's Adreno 740 draws the same frames right.
