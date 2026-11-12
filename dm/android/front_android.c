@@ -76,15 +76,23 @@ static void log_start(void) {
 static int exists(const char *p) { struct stat st; return !stat(p, &st); }
 static void mkdirs(const char *p) { char b[600]; snprintf(b, sizeof b, "%s", p); for (char *s = b + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(b, 0755); *s = '/'; } mkdir(b, 0755); }
 // <external files>/env.txt: KEY=VALUE per line; # comments. Then the game's launcher.txt, the settings screen's choices (java Launcher.java), and its defaults.txt, the
-// language and the switches its profile asks for (build_android_from_nsp.py defaults_text), each without overriding what came before
+// language and the switches its profile asks for (build_android_from_nsp.py defaults_text), each without overriding what came before.
+// DM_VK_DRIVER_SHA256 belongs to the DM_VK_DRIVER of its own file (vk_driver.c checks the driver against it): a driver env.txt names wins, so a hash defaults.txt gives
+// for the driver the desktop app chose would refuse the player's and leave the game on neither. So a file whose DM_VK_DRIVER loses to an earlier one gives no hash, and
+// env.txt naming a driver without a hash drops one set before it (a game app's GameStart puts defaults.txt's into the environment first)
 static void env_file(const char *dir, const char *name, int over) {
     char path[700]; snprintf(path, sizeof path, "%s/%s", dir, name);
     FILE *f = fopen(path, "r"); if (!f) return;
-    char line[1024];
+    char line[1024]; int has_drv = 0, has_sha = 0;
+    while (fgets(line, sizeof line, f)) { has_drv |= !strncmp(line, "DM_VK_DRIVER=", 13); has_sha |= !strncmp(line, "DM_VK_DRIVER_SHA256=", 20); }
+    int drv_lost = has_drv && !over && getenv("DM_VK_DRIVER");
+    if (has_drv && over && !has_sha && getenv("DM_VK_DRIVER_SHA256")) { unsetenv("DM_VK_DRIVER_SHA256"); LOG("%s: names DM_VK_DRIVER without DM_VK_DRIVER_SHA256: the hash set before it is dropped", name); }
+    rewind(f);
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0; char *eq = strchr(line, '=');
         if (line[0] == '#' || !eq) continue;
         *eq = 0; if (!over && getenv(line)) continue;
+        if (drv_lost && !strcmp(line, "DM_VK_DRIVER_SHA256")) { LOG("%s: DM_VK_DRIVER_SHA256 left out: an earlier file's DM_VK_DRIVER wins", name); continue; }
         setenv(line, eq + 1, 1); LOG("%s: %s=%s", name, line, eq + 1);
     }
     fclose(f);

@@ -7,6 +7,7 @@
 //   A driver that cannot be copied or opened, or that offers no GPU, logs one [RED] line, and the system's driver runs. So does one that opens and then fails to make the
 //   instance, find the GPU's graphics queue or the window extensions, or make the device (gfx_vk.c vk_create, through vk_driver_fallback), or the first window's surface
 //   or swapchain (front_android.c vk_window_first): a player's choice of driver must never leave a game without a picture. On a phone without an Adreno GPU, DM_VK_DRIVER is not opened at all.
+#include <ctype.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <signal.h>
@@ -17,6 +18,7 @@
 #include <sys/sysmacros.h>
 #include "dm.h"
 #include "gfx_vk.h"
+#include <CommonCrypto/CommonDigest.h>   // SHA-256: the Android stand-in (plat_android.c)
 #include "../third_party/libadrenotools/include/adrenotools/driver.h"   // the type of adrenotools_open_libvulkan, opened with dlsym: the host does not link it
 
 #define VKB_DEF(f) PFN_##f f;
@@ -35,8 +37,28 @@ static void __attribute__((format(printf, 2, 3))) drv_red(const char *drv, const
 }
 #define DRV_RED(drv, fmt, ...) drv_red(drv, fmt, ##__VA_ARGS__)
 
+// A file's SHA-256 as 64 lowercase hex digits (→ 0 when it can't be read)
+static int file_sha256(const char *path, char hex[65]) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC); if (fd < 0) return 0;
+    static char buf[1 << 16]; ssize_t k; CC_SHA256_CTX c; unsigned char md[32]; CC_SHA256_Init(&c);
+    while ((k = read(fd, buf, sizeof buf)) > 0) CC_SHA256_Update(&c, buf, (CC_LONG)k);
+    close(fd); if (k < 0) return 0;
+    CC_SHA256_Final(md, &c); for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", md[i]);
+    return 1;
+}
+// The internal copy's SHA-256, kept beside it as <copy>.sha256 when it is made (internal storage, which only the app writes), so a start that copies nothing doesn't hash
+// 19 MB again; a copy made before there was one is hashed once and gets it
+static int copy_sha256(const char *dst, char hex[65]) {
+    char side[820]; snprintf(side, sizeof side, "%s.sha256", dst);
+    FILE *f = fopen(side, "re"); int ok = 0;
+    if (f) { ok = fscanf(f, "%64[0-9a-f]", hex) == 1 && strlen(hex) == 64; fclose(f); }
+    if (ok) return 1;
+    if (!file_sha256(dst, hex)) return 0;
+    if ((f = fopen(side, "we"))) { fprintf(f, "%s\n", hex); fclose(f); }
+    return 1;
+}
 // src → <dir><name> (dir: <internal>/vk_driver/), unless the copy there has src's size and time already. Read-only once written, as Android 14 asks of code an app loads
-// from its own files. → 0 with errno set
+// from its own files. Its SHA-256 goes beside it (copy_sha256), hashed as it is copied. → 0 with errno set
 static int copy_in(const char *src, const char *dir, const char *name) {
     struct stat s, d; char dst[800], tmp[810];
     if (stat(src, &s)) return 0;
@@ -47,12 +69,20 @@ static int copy_in(const char *src, const char *dir, const char *name) {
     int in = open(src, O_RDONLY | O_CLOEXEC); if (in < 0) return 0;
     unlink(tmp); int out = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (out < 0) { int e = errno; close(in); errno = e; return 0; }
-    static char buf[1 << 16]; ssize_t k = 0; int ok = 1;
-    while (ok && (k = read(in, buf, sizeof buf)) > 0) for (ssize_t w = 0, n; w < k; w += n) if ((n = write(out, buf + w, (size_t)(k - w))) <= 0) { ok = 0; break; }
+    static char buf[1 << 16]; ssize_t k = 0; int ok = 1; CC_SHA256_CTX c; CC_SHA256_Init(&c);
+    char side[820]; snprintf(side, sizeof side, "%s.sha256", dst); unlink(side);   // the old copy's, gone before the copy changes
+    while (ok && (k = read(in, buf, sizeof buf)) > 0) {
+        CC_SHA256_Update(&c, buf, (CC_LONG)k);
+        for (ssize_t w = 0, n; w < k; w += n) if ((n = write(out, buf + w, (size_t)(k - w))) <= 0) { ok = 0; break; }
+    }
     struct timespec ts[2] = {s.st_atim, s.st_mtim};
     ok = ok && k == 0 && !fchmod(out, 0500) && !futimens(out, ts);
     int e = errno; close(in); if (close(out)) ok = 0;
     if (ok) { unlink(dst); ok = !rename(tmp, dst); e = errno; }
+    if (ok) {
+        unsigned char md[32]; char hex[65]; CC_SHA256_Final(md, &c); for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", md[i]);
+        FILE *f = fopen(side, "we"); if (f) { fprintf(f, "%s\n", hex); fclose(f); }
+    }
     if (!ok) unlink(tmp);
     errno = e; return ok;
 }
@@ -103,6 +133,22 @@ static PFN_vkGetInstanceProcAddr open_custom(const char *drv) {
     } else {          // the command-line host (adb shell): loaded where it lies, which must be a folder that allows code (/data/local/tmp, not /sdcard)
         if (access(src, R_OK)) { DRV_RED(drv, "%s: %s; the system's driver instead", src, strerror(errno)); return NULL; }
         snprintf(dir, sizeof dir, "%.*s/", name > src ? (int)(name - src - 1) : 1, name > src ? src : ".");
+    }
+    // DM_VK_DRIVER_SHA256 (the packing script writes it into defaults.txt beside DM_VK_DRIVER): the driver runs only if the file loaded is that one. The file comes from shared
+    // storage, which on Android 10 any app with the storage permission could replace; checked on the internal copy, before anything of it is loaded
+    const char *want = getenv("DM_VK_DRIVER_SHA256");
+    if (want && *want) {
+        char w[65], have[65]; size_t n = 0; int bad = 0;
+        for (const char *p = want; *p && !bad; p++) {
+            if (isspace((unsigned char)*p)) continue;
+            if (n == 64 || !isxdigit((unsigned char)*p)) bad = 1; else w[n++] = (char)tolower((unsigned char)*p);
+        }
+        w[n] = 0;
+        if (bad || n != 64) { DRV_RED(drv, "DM_VK_DRIVER_SHA256 is not a SHA-256 (64 hex digits): %.80s; the system's driver instead", want); return NULL; }
+        char path[900]; snprintf(path, sizeof path, "%s%s", dir, name);
+        if (!(g_int[0] ? copy_sha256(path, have) : file_sha256(path, have))) { DRV_RED(drv, "%s could not be read to check its SHA-256; the system's driver instead", path); return NULL; }
+        if (strcmp(have, w)) { DRV_RED(drv, "its SHA-256 is %.16s…, not DM_VK_DRIVER_SHA256's %.16s… (a changed or replaced file); the system's driver instead", have, w); return NULL; }
+        LOG("[vk] DM_VK_DRIVER %s: its SHA-256 is DM_VK_DRIVER_SHA256's", name);
     }
     // adrenotools' hooks (libhook_impl.so, libmain_hook.so) are looked for where the host lies: the app's native library folder, extracted (AndroidManifest extractNativeLibs)
     Dl_info di; char libs[600] = "";
