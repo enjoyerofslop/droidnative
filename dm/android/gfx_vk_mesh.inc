@@ -53,7 +53,7 @@ static int vk_mesh_draw_(const p_draw *dw) {
     bf_pipeline(c, pp->p);
     for (int i = 0; i < 4; i++) if (k.sh[i]) vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, (uint32_t)(k.sh[i]->set & 3), 1, &sets[i], k.sh[i]->ndyn, dyn[i]);
     if (pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { g_drop[3]++; return 0; }
-    VkViewport v; VkRect2D sc; draw_dyn_state(c, &v, &sc); (void)v; (void)sc;
+    VkViewport v; VkRect2D sc; draw_dyn_state(c, &v, &sc, 0); (void)v; (void)sc;
     // a task shader's workgroups are the draw's; with none, the mesh shader's. Past the device's X limit (65,535 on the Adreno 840) the draw goes in parts, each with its own first
     uint32_t first = (uint32_t)dw->first, left = (uint32_t)dw->count, mx = g_mesh_max[k.sh[2] ? 0 : 1];
     while (left) {

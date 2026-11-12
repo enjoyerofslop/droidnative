@@ -44,6 +44,7 @@
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
 #include "rec_desc.h"   // a descriptor set's writes packed for the recorder (gfx_vk_rec.inc R_UPDDS)
 #include "sb_reuse.h"   // a read-only storage buffer's copy bound again while its pages are unwritten (gfx_vk_sbcopy.inc)
+#include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
 #include "nvn_queue.h"   // the queue scheduler (hle_nvn.c nvn_queue.inc): event publication and GPU progress
 #include <stdatomic.h>
@@ -318,7 +319,9 @@ typedef struct { int st; size_t off, row_bytes, rows, src_pitch, dst_pitch; uint
                  int lin; uint8_t *dsnap; size_t snap_cap; uint64_t ser, img; uint32_t fmt, bpb, w, h; uint64_t tsize; size_t rb; VkBuffer ipb; int inpl;
                  // a depth / stencil readback (ds_wb): rows of ds_n texels of NVN format ds_fmt rebuilt from the slice's planes at the source (ds_texels.h ds_slice: the depth
                  // plane of ds_dkind, then the stencil plane when ds_sten); ds_n 0: a plain write-back
-                 uint32_t ds_n, ds_fmt; int ds_dkind, ds_sten; } wb_t;
+                 uint32_t ds_n, ds_fmt; int ds_dkind, ds_sten;
+                 // vd: a draw under rasterizer discard wrote it, run as a dispatch (gfx_vk_draw.inc rd_bind_w): a read it overlaps but does not cover learns a home range (fwd_hit)
+                 int vd; } wb_t;
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize n, used; } arena_blk;
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; uint64_t q0, q1; } post_op;   // kind 1 event, 2 counter, 3 samples passed (occlusion queries q0..q1)
 typedef struct { int kind; uint64_t h; } dead_t;
@@ -2653,7 +2656,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         (unsigned long long)g_q_queries, (unsigned long long)g_q_reports, (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
         (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6,
         (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)g_bind_shaders, (unsigned long long)g_bind_entries);
-    LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig);
+    LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu; under rasterizer discard: made as dispatches %llu, left out (writing nothing) %llu, their storage buffer writes in place on a home copy %llu / through a scratch copy %llu, home copies made %llu (%llu from a chunk in flight on the GPU), home ranges learned %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig, (unsigned long long)g_rd_made, (unsigned long long)g_rd_none, (unsigned long long)g_rd_w[0], (unsigned long long)g_rd_w[1], (unsigned long long)g_rd_w[2], (unsigned long long)g_rd_w[3], (unsigned long long)g_rd_learned);
     pool_stats();
     shadow_line();
     LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu, other bindings %llu, written in place by a later dispatch %llu; bound on another binding's copy of the same shader %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd, own_alias)", (unsigned long long)g_fwd, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1], (unsigned long long)g_alias);

@@ -12,9 +12,10 @@
 // Transform feedback (the Adreno has no VK_EXT_transform_feedback): a vertex shader with a feedback layout has a <key>.tf.spv variant that stores its captured
 // outputs into storage buffers (set 0, binding 100 + buffer; tools/spv_android.py tf_variant); the capture draws it as points, rasterization off, in a pass
 // without attachments, vertex v of the draw at v × stride from the buffer's write offset, copied back to guest memory when the chunk completes (nvn_mtl.m tf_draw:
-// non-indexed, non-instanced, not fans / quads). Rasterizer discard draws nothing else. A GPU without vertex-stage storage writes (Mali) captures in the fragment stage
+// non-indexed, non-instanced, not fans / quads). A GPU without vertex-stage storage writes (Mali) captures in the fragment stage
 // instead (spv_tffrag.h, tf_frag): the shader wrapped to put vertex v on pixel v of a 1024-wide grid as a one-pixel point, and a fragment shader made at run time from
-// the feedback layout storing the outputs there.
+// the feedback layout storing the outputs there. Any other draw under rasterizer discard runs only when its vertex or geometry stage writes memory, as a dispatch
+// (rd_draw: storage buffers, images), its writes on a copy of their home range (rd_bind_w); one that writes nothing draws nothing.
 // Compute dispatches run the same way (set 0, the compute stage's banks, c0 + 0x200 the group counts). Buffer textures and buffer images are texel buffer views over
 // copies in the arena (written ones copied back); images are the textures' own images (storage usage), so what a shader writes stays on the GPU.
 // Coherence: submissions are synchronous and guest memory is copied at each draw, so a draw or dispatch after one that wrote guest memory (storage buffers, buffer
@@ -1692,7 +1693,7 @@ static VkBlendOp bop(unsigned v) { return v >= 1 && v <= 5 ? (VkBlendOp)(v - 1) 
 static VkCompareOp cmpop(unsigned v, VkCompareOp def) { return v >= 1 && v <= 8 ? (VkCompareOp)(v - 1) : def; }
 static VkStencilOp stop(unsigned v) { return v >= 1 && v <= 8 ? (VkStencilOp)(v - 1) : VK_STENCIL_OP_KEEP; }
 typedef struct {
-    vshader *sh[4]; int z, tf; VkRenderPass rp; rp_key rk; uint32_t ncolor;   // tf: the capture pipeline (the vertex shader's .tf.spv, no rasterization; or its wrapper and modtff, points rasterized); rk: the pass's formats and samples
+    vshader *sh[4]; int z, tf; VkRenderPass rp; rp_key rk; uint32_t ncolor;   // tf: 1 the capture pipeline (the vertex shader's .tf.spv, no rasterization; or its wrapper and modtff, points rasterized), 2 a discarded draw's that writes (its own modules, no rasterization: rd_key); rk: the pass's formats and samples
     uint32_t attr[16]; vs_st stream[16]; uint8_t topo, restart, depth_clamp, ll;
     color_st color; chmask_st chmask; blend_st blend[8]; ms_st ms; poly_st poly; ds_st ds;
 } pipe_key;
@@ -1936,8 +1937,8 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     VkPipelineShaderStageCreateInfo st[4]; lmod *lms[4]; uint32_t ns = 0; VkSpecializationInfo psi; memset(&psi, 0, sizeof psi);
     VkSpecializationMapEntry pme[1]; uint32_t psv = 0; const vshader *pspec = NULL;
     for (int i = 0; i < 4; i++) { vshader *s = k->sh[i]; if (!s) continue;
-        sets[s->set & 3] = k->tf ? s->dsl_tf : s->dsl; if ((uint32_t)(s->set & 3) + 1 > nset) nset = (uint32_t)(s->set & 3) + 1;
-        lmod *mod = k->tf ? s->modtf : (s->stage == SH_VS || s->stage == SH_MS) && k->z && s->modz ? s->modz : s->mod;
+        sets[s->set & 3] = k->tf == 1 ? s->dsl_tf : s->dsl; if ((uint32_t)(s->set & 3) + 1 > nset) nset = (uint32_t)(s->set & 3) + 1;
+        lmod *mod = k->tf == 1 ? s->modtf : (s->stage == SH_VS || s->stage == SH_MS) && k->z && s->modz ? s->modz : s->mod;
         if (s->stage == SH_PS) { int alpha = 0; mod = pipe_ps_mod(k, s, &alpha);   // the alpha test (spv_alpha.h) and unwritten inputs (spv_drop_inputs)
             if (alpha) {   // the variant's function, by SpecId (spv_alpha.h decorates it 0); the reference arrives in a push constant
                 pme[0] = (VkSpecializationMapEntry){0, 0, 4}; psv = k->color.alpha_func; psi = (VkSpecializationInfo){1, pme, 4, &psv}; pspec = s; } }
@@ -1947,7 +1948,7 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
         if (s->stage == SH_VS && pos_rows_for(s->key)) st[ns].pSpecializationInfo = &g_pr_spec;   // run-time rows in the position (gfx_vk_posrows.inc)
         ns++;
         if (s->pool) { sets[POOL_SET] = g_pool_dsl; nset = POOL_SET + 1; } }
-    if (k->tf && k->sh[0] && k->sh[0]->modtff) {   // the fragment-stage capture: its fragment shader takes the vertex shader's set (bindings 100 + buffer)
+    if (k->tf == 1 && k->sh[0] && k->sh[0]->modtff) {   // the fragment-stage capture: its fragment shader takes the vertex shader's set (bindings 100 + buffer)
         lms[ns] = k->sh[0]->modtff; st[ns++] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .pName = "main"}; }
     // a task / mesh pipeline (gfx_vk_mesh.inc): no vertex input, and the draw's first workgroup in a push constant at the bytes the alpha test's reference has in the others
     // (so pipe_ps_mod gives a mesh pipeline no alpha-test variant)
@@ -1989,7 +1990,7 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = tp, .primitiveRestartEnable = strip && k->restart};
     VkPipelineViewportStateCreateInfo vp = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     int front_ccw = k->poly.front == NVN_FRONT_FACE_CCW; if (k->ll) front_ccw = !front_ccw;   // see the file header: the queue's lower-left raster flip inverts the winding
-    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .rasterizerDiscardEnable = k->tf != 0 && !(k->sh[0] && k->sh[0]->modtff), .depthClampEnable = k->depth_clamp && g_vk_feat.depthClamp,
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .rasterizerDiscardEnable = k->tf == 2 || (k->tf == 1 && !(k->sh[0] && k->sh[0]->modtff)), .depthClampEnable = k->depth_clamp && g_vk_feat.depthClamp,
         .polygonMode = k->poly.mode == NVN_POLYGON_MODE_LINE && g_vk_feat.fillModeNonSolid ? VK_POLYGON_MODE_LINE : k->poly.mode == NVN_POLYGON_MODE_POINT && g_vk_feat.fillModeNonSolid ? VK_POLYGON_MODE_POINT : VK_POLYGON_MODE_FILL,
         .cullMode = (VkCullModeFlags)(k->poly.cull & 3), .frontFace = front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE, .depthBiasEnable = k->poly.offset_en != 0, .lineWidth = 1};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = (VkSampleCountFlagBits)(k->rk.samples ? k->rk.samples : 1), .alphaToCoverageEnable = k->ms.a2c != 0};
@@ -2316,6 +2317,12 @@ static VkBufferView dummy_tbuf(void) {
 static int fwd_find(uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o);
 static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o, int *res);
 static int g_fwd_nwb = -1; static uint64_t g_fwd;   // the chunk's write-backs counted when the draw began (its own come after); streams bound so
+// A draw under rasterizer discard whose vertex or geometry stage writes memory runs as a dispatch does (rd_writes, vk_draw_): outside the targets' pass, with a full barrier
+// before and after it, so it may write in place and its write-backs are read on the GPU by later shaders, as a dispatch's are. Set for the one draw (vk_draw__ clears it)
+static int g_vdisp;
+static int disp_like(const vshader *s) { return s->stage == SH_CS || g_vdisp; }
+static rd_homes g_rd_homes; static uint64_t g_rd_learned;   // (rd_home.h, rd_bind_w)
+enum { RD_HOME_MAX = 4 << 20 };   // a home range of more bytes is not learned: the copy is made for every chunk that writes it
 static int buf_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_BUF_FWD"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_BUF_FWD=0: a buffer a dispatch wrote syncs before a later shader reads it"); } return v; }
 static uint64_t g_buf_fwd[2];   // bindings read on the GPU from a pending write-back / written in place
 // al: the binding's offset alignment; write: the shader writes it too (a dispatch's only, in place on the current chunk's write-back)
@@ -2329,6 +2336,46 @@ static int buf_fwd(uint64_t addr, uint64_t n, int write, VkDeviceSize al, VkBuff
 }
 static int sb_fwd(uint64_t addr, uint64_t n, int write, VkBuffer *b, VkDeviceSize *o) { return buf_fwd(addr, n, write, g_vk.props.limits.minStorageBufferOffsetAlignment, b, o); }
 static int tb_fwd(uint64_t addr, uint64_t n, int write, VkBuffer *b, VkDeviceSize *o) { return buf_fwd(addr, n, write, g_vk.props.limits.minTexelBufferOffsetAlignment, b, o); }
+// A storage buffer a discarded draw writes (run as a dispatch: g_vdisp), bound on a copy of its whole home range (rd_home.h) that is a forwardable write-back of the chunk,
+// so the draws after it find every byte they bind in that one write-back (fwd_find) and read it on the GPU. The chunk's first such write makes the copy (rd_home_copy):
+// its bytes copied on the GPU from the newest copy of a chunk in flight (fwd_find holds that chunk until this one completes), else from guest memory, which draw_view
+// has made current (FWD: the home range landed unless found whole on the GPU); the writes after it go in place on it. A write whose place in the copy is not a multiple
+// of the storage buffer alignment (Xenoblade Chronicles 2's bone slots are 48 bytes, the Adreno's alignment 64) goes through a scratch copy: copied from the home copy
+// before the draw, back into it after the draw (rd_close), each side of a full barrier. The snapshot is guest memory's, older than a chunk in flight's copy: its
+// write-back lands every byte that differs from it, the in-flight chunk's own changes too, again and after them. DM_VK_RD_HOME=0 (env.txt): such writes take a copy
+// of their own range, as dispatches' do (reads they do not cover sync)
+static int rd_home_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RD_HOME"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RD_HOME=0: a discarded draw's storage buffer writes take a copy of their own range"); } return v; }
+enum { RD_BACK = 16 };
+static struct { VkBuffer sb, hb; VkDeviceSize so, ho, n; uint64_t seq; } g_rd_back[RD_BACK]; static int g_rd_nback;   // scratch copies to copy back after the draw (rd_close)
+static uint64_t g_rd_w[4];   // discarded draws' storage buffer writes: in place on a home copy, through a scratch copy; home copies made, of them copied on the GPU from a chunk in flight
+static int rd_home_copy(uintptr_t hl, uintptr_t hh, VkBuffer *hb, VkDeviceSize *ho) {   // the chunk's copy of home range [hl, hh), a forwardable write-back
+    size_t n = hh - hl; if (!n || !mtl_addr(hl, n, NULL, NULL)) return 0;
+    VkBuffer fb; VkDeviceSize fo; int gpu = fwd_find(hl, hh, &fb, &fo);
+    if (!gpu && wr_pending(hl, hh)) return 0;   // a write not landed that no copy holds whole: the range grew since draw_view landed it (a read learned more meanwhile)
+    uint8_t *d = ar_alloc((n + 15) & ~(size_t)15, hb, ho); if (!d) return 0;
+    int blk = C->ar_last; uint8_t *snap = malloc(n); if (!snap) return 0; memcpy(snap, (const void *)hl, n);
+    if (gpu) {   // the newest bytes are on the GPU still
+        VkCommandBuffer c = cb(); if (!c) { free(snap); return 0; }
+        VkBufferCopy cp = {fo, *ho, n}; vkCmdCopyBuffer(c, fb, *hb, 1, &cp); cb_barrier(); g_rd_w[3]++;
+    } else memcpy(d, snap, n);
+    wb_t *w = wb_add(); if (!w) { free(snap); return 0; }
+    *w = (wb_t){-1 - blk, (size_t)*ho, n, 1, n, n, (uint8_t *)hl, snap}; w->fwd = 1; w->vd = 1; C->nfwd++; g_rd_w[2]++;
+    return 1;
+}
+static int rd_bind_w(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *ao) {   // 0: not done (the caller takes a copy of the range alone)
+    if (!C || !n) return 0;
+    uintptr_t lo = (uintptr_t)addr, hi = lo + n, hl, hh; rd_home_find(&g_rd_homes, lo, hi, &hl, &hh);
+    int nw = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb, r = 0; VkBuffer hb; VkDeviceSize ho;
+    if (!(fwd_hit(C, nw, lo, hi, &hb, &ho, &r) && r)) { if (!rd_home_copy(hl, hh, &hb, &ho)) return 0; ho += lo - hl; }   // (draw_view made sure none of the chunk overlaps the home range then)
+    VkDeviceSize al = g_vk.props.limits.minStorageBufferOffsetAlignment;
+    if (!al || ho % al == 0) { *b = hb; *ao = ho; g_rd_w[0]++; return 1; }
+    if (g_rd_nback == RD_BACK) return 0;
+    VkBuffer sb; VkDeviceSize so; if (!ar_alloc((n + 15) & ~(size_t)15, &sb, &so)) return 0;
+    VkCommandBuffer c = cb(); if (!c) return 0;
+    VkBufferCopy in = {ho, so, n}; vkCmdCopyBuffer(c, hb, sb, 1, &in);   // before the draw: rd_open's barrier orders it
+    g_rd_back[g_rd_nback].sb = sb; g_rd_back[g_rd_nback].so = so; g_rd_back[g_rd_nback].hb = hb; g_rd_back[g_rd_nback].ho = ho; g_rd_back[g_rd_nback].n = n; g_rd_back[g_rd_nback++].seq = C->seq;
+    *b = sb; *ao = so; g_rd_w[1]++; return 1;
+}
 // A shader that binds the same guest memory twice (Final Fantasy Resonance's Niagara argument shader 544e80ec57b3a10b: one 8 KB buffer as an R32ui image it
 // reads and as a format-less one it clears): on the Switch the two views are one buffer. When the draw or dispatch is the first in its chunk to write it, buf_fwd
 // finds no write-back to bind in place (it looks only at those from before the draw, g_fwd_nwb), so each binding got an arena copy and a write-back of its own:
@@ -2721,19 +2768,20 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         if (s->gm && u && u->addr) gm_lazy_ptrs(u->addr, n);   // chunks its pointers reach, placed (gfx_vk_gmem_lazy.inc)
         VkDeviceSize ao, ipr;   // ao: the arena offset (off above is the c0 / uniform buffer word); ipr: the range bound in place
         int wr_ = (sb->flags & 1) != 0;   // written by the shader
-        if (u && u->addr && (!wr_ || s->stage == SH_CS) && sb_fwd(u->addr, n, wr_, &b, &ao)) g_buf_fwd[wr_]++;   // on the GPU from a dispatch's pending write (buf_fwd)
+        if (u && u->addr && (!wr_ || disp_like(s)) && sb_fwd(u->addr, n, wr_, &b, &ao)) g_buf_fwd[wr_]++;   // on the GPU from a dispatch's pending write (buf_fwd)
+        else if (u && u->addr && wr_ && g_vdisp && rd_home_on() && rd_bind_w(u->addr, n, &b, &ao)) {}   // a discarded draw's write: on its home range's copy (rd_bind_w)
         else if (u && u->addr && !wr_ && gm_inplace(u->addr, n, &b, &ao, &ipr)) {   // read only, in a placed pool: bound there (gfx_vk_gmem_inplace.inc)
             bi[nbi] = (VkDescriptorBufferInfo){b, ao, ipr}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
             continue; }
         else if (u && u->addr && own_alias(s->key, u->addr, n, g_vk.props.limits.minStorageBufferOffsetAlignment, &b, &ao)) {}   // a range another binding of this shader wrote
         else if (u && u->addr && !wr_) { if (!sb_keep(u->addr, n, &b, &ao) && !sb_copy((const void *)(uintptr_t)u->addr, n, (n + 15) & ~(size_t)15, &b, &ao)) return 0; }   // read only: kept between frames (sb_keep), or shared as uniforms are
-        else if (u && u->addr && gm_inplace_w(u->addr, n, s->stage == SH_CS, &b, &ao, &ipr)) {   // written, in a placed pool: bound there, its write-back only a note (gfx_vk_gmem_inplace.inc)
+        else if (u && u->addr && gm_inplace_w(u->addr, n, disp_like(s), &b, &ao, &ipr)) {   // written, in a placed pool: bound there, its write-back only a note (gfx_vk_gmem_inplace.inc)
             bi[nbi] = (VkDescriptorBufferInfo){b, ao, ipr}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
             continue; }
         else if (u && u->addr) { uint8_t *d = ar_alloc((n + 15) & ~(size_t)15, &b, &ao); if (!d) return 0; memcpy(d, (const void *)(uintptr_t)u->addr, n);
             if (sb->flags & 1) {   // written by the shader: what it changed is copied back when the chunk completes
                 wb_t *w = wb_add(); uint8_t *snap = malloc(n); if (snap) memcpy(snap, (const void *)(uintptr_t)u->addr, n);   // from guest memory, as d was: the arena may be write-combined (ar_mem_type)
-                if (w) { *w = (wb_t){-1 - C->ar_last, (size_t)ao, n, 1, n, n, (uint8_t *)(uintptr_t)u->addr, snap}; w->fwd = s->stage == SH_CS; if (w->fwd) C->nfwd++; } } }
+                if (w) { *w = (wb_t){-1 - C->ar_last, (size_t)ao, n, 1, n, n, (uint8_t *)(uintptr_t)u->addr, snap}; w->fwd = disp_like(s); w->vd = g_vdisp; if (w->fwd) C->nfwd++; } } }
         else if (!ucopy(NULL, 16, 16, &b, &ao)) return 0;
         bi[nbi] = (VkDescriptorBufferInfo){b, ao, (n + 15) & ~(size_t)15}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
     }
@@ -2766,7 +2814,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         if (tbuf) {   // a buffer texture: a uniform texel buffer
             for (int e = 0; e < cnt; e++) {
                 uint32_t hw = bank_word(nst, c2, t->cbuf_slot, (w0 + 2u * e) * 4); int tid = (int)(hw & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
-                VkBufferView v = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? tbuf_view(&g_treg[tid].t, 0, s->stage == SH_CS) : VK_NULL_HANDLE;
+                VkBufferView v = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? tbuf_view(&g_treg[tid].t, 0, disp_like(s)) : VK_NULL_HANDLE;
                 bvs[nbv + e] = v ? v : dummy_tbuf();
             }
             wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)t->binding, 0, (uint32_t)cnt, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NULL, NULL, &bvs[nbv]};
@@ -2818,7 +2866,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         for (int e = 0; e < cnt; e++) {
             uint32_t hw = bank_word(nst, c2, t->cbuf_slot, (w0 + 2u * e) * 4); int tid = (int)(hw & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
             treg_t *rg = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? &g_treg[tid] : NULL;
-            if (tbuf) { VkBufferView v = rg ? tbuf_view(&rg->t, 1, s->stage == SH_CS) : VK_NULL_HANDLE; bvs[nbv + e] = v ? v : dummy_tbuf(); continue; }
+            if (tbuf) { VkBufferView v = rg ? tbuf_view(&rg->t, 1, disp_like(s)) : VK_NULL_HANDLE; bvs[nbv + e] = v ? v : dummy_tbuf(); continue; }
             const tc_ent *ce = tex_once() ? tc_el(tc, ci++, tid) : NULL; const treg_t *ri = ce ? (ce->r.ok ? &ce->r : NULL) : rg;   // as the textures above
             VkImageView iv = VK_NULL_HANDLE; vtex *v = !ri ? NULL : ce ? ce->v : vt_get(&ri->t);
             if (v && !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !img_up(v, s->stage == SH_CS)) { g_bind_bad = 1; v = NULL; }   // made without storage use (vt_storage_up)
@@ -2865,6 +2913,10 @@ static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, V
     for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, hi)) continue;
         *res = w->fwd && (w->st < 0 || w->inpl) && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes;   // (in place: read where it was written)
         if (*res) { *b = w->inpl ? w->ipb : c->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); }
+        else if (w->vd && w->rows == 1) {   // a discarded draw's write that the read is not inside: the two as one home range (rd_home.h)
+            uintptr_t wl = (uintptr_t)w->dst, wh = wl + w->row_bytes, hl = lo < wl ? lo : wl, hh = hi > wh ? hi : wh;
+            if (rd_home_learn(&g_rd_homes, hl, hh, RD_HOME_MAX) && g_rd_learned++ < 8)
+                LOG("[vk] rasterizer discard: home range %#lx+%#lx learned (a read of %#lx+%#lx met a write of %#lx+%#lx)", (unsigned long)hl, (unsigned long)(hh - hl), (unsigned long)lo, (unsigned long)(hi - lo), (unsigned long)wl, (unsigned long)(wh - wl)); }
         return 1; }
     return 0;
 }
@@ -2892,12 +2944,30 @@ static int stream_direct(const vshader *vs, int s) {   // every attribute of str
 // draws), with about 16 forwarded streams a frame from its GPU particle dispatches. DM_VK_FWD_EARLY=0 (env.txt): every stream looked up, once per attribute, as before
 static int fwd_early(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FWD_EARLY"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_FWD_EARLY=0: every vertex stream is looked up among the forwardable write-backs"); } return v; }
 static uint64_t g_fwd_early, g_fwd_look;   // streams answered without a lookup (none pending) / looked up
-static int stream_fwd(const vshader *vs, int s, VkBuffer *b, VkDeviceSize *o) {
+// The bytes of stream s the draw being made fetches: from its first vertex to the end of its last one's attributes, when the vertices are known (a draw that is not
+// indexed: g_vr0, g_vr1, set by vk_draw_), else the whole bound range. Games bind a stream's whole buffer: Xenoblade Chronicles 2 binds each attribute of a buffer as a
+// stream of its own, 32 bytes on per attribute and as long as the buffer, so the bound ranges run past the buffer, over what a write-back covers and into the next buffer
+static int64_t g_vr0, g_vr1;
+static void stream_rng(int s, uintptr_t *lo, uintptr_t *hi) {
+    const NVNbufferRange *r = &D.vbuf[s]; uint32_t st = D.stream[s].stride; *lo = (uintptr_t)r->address; *hi = (uintptr_t)(r->address + r->size);
+    if (g_vr1 <= g_vr0 || g_vr0 < 0 || !st || D.stream[s].divisor) return;
+    uint64_t end = 0;
+    for (int i = 0; i < 16; i++) { va_st a; memcpy(&a, &D.attr[i], 4); if (!a.fmt || a.stream != s) continue;
+        int kind, bits, cn = vfmt_desc(a.fmt, &kind, &bits); uint64_t e = (uint64_t)a.offset + (cn ? (kind >= 7 ? 4u : (uint64_t)cn * (uint64_t)bits / 8) : 16u); if (e > end) end = e; }
+    uint64_t l = (uint64_t)g_vr0 * st, h = (uint64_t)(g_vr1 - 1) * st + end;
+    if (!end || l >= r->size) return;
+    if (h > r->size) h = r->size;
+    *lo = (uintptr_t)(r->address + l); *hi = (uintptr_t)(r->address + h);
+}
+static int stream_fwd(const vshader *vs, int s, VkBuffer *b, VkDeviceSize *o) {   // *o: where the stream's address is in the copy (bind_vbufs adds its first vertex's offset)
     if (vk_safe()) return 0;
     const NVNbufferRange *r = &D.vbuf[s]; if (!r->address || !r->size) return 0;
     if (fwd_early() && (!C || (!C->nfwd && !atomic_load(&g_inflight_fwd)))) { g_fwd_early++; return 0; }
     if (!stream_direct(vs, s)) return 0;
-    g_fwd_look++; return fwd_find((uintptr_t)r->address, (uintptr_t)(r->address + r->size), b, o);
+    g_fwd_look++; uintptr_t lo, hi; stream_rng(s, &lo, &hi);
+    if (!fwd_find(lo, hi, b, o)) return 0;
+    VkDeviceSize back = (VkDeviceSize)(lo - (uintptr_t)r->address); if (*o < back) return 0;   // (a copy that starts past the stream's address: its binding cannot start there)
+    *o -= back; return 1;
 }
 // ---- Binds the command buffer already holds ----
 // Every draw recorded its pipeline, the seven dynamic states (ten calls), the index buffer and each vertex binding, changed or not, and the Adreno driver marks state
@@ -3004,6 +3074,16 @@ static int bind_vbufs(VkCommandBuffer c, const vshader *vs, int64_t lo, int64_t 
 }
 static uint64_t g_captures;
 static VkRenderPass g_null_rp; static VkFramebuffer g_null_fb, g_grid_fb;   // g_grid_fb: the fragment-stage capture's (spv_tffrag.h), 1024 × 1024 without attachments
+// The pass without attachments (made once) and its 1 × 1 framebuffer: a vertex-stage capture, or a discarded draw that writes (rd_open), rasterizes nothing; the
+// fragment-stage capture runs its fragment shader in it for its side effects alone, on g_grid_fb
+static VkRenderPass null_pass(void) {
+    if (!g_null_rp) { VkSubpassDescription sp = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS};
+        VkRenderPassCreateInfo rc = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .subpassCount = 1, .pSubpasses = &sp};
+        if (vkCreateRenderPass(g_vk.dev, &rc, NULL, &g_null_rp) != VK_SUCCESS) { g_null_rp = VK_NULL_HANDLE; return VK_NULL_HANDLE; } }
+    if (!g_null_fb) { VkFramebufferCreateInfo fc = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = g_null_rp, .width = 1, .height = 1, .layers = 1};
+        if (vkCreateFramebuffer(g_vk.dev, &fc, NULL, &g_null_fb) != VK_SUCCESS) { g_null_fb = VK_NULL_HANDLE; return VK_NULL_HANDLE; } }
+    return g_null_rp;
+}
 static int tf_capture(vshader *vs, const prog_t *pr, int pst, const p_draw *dw, const p_draw_idx *di) {
     if (!D.tf_on || !vs->modtf) { if (D.tf_on) RED_ONCE(114, "transform feedback with vertex shader %s, which has no capture variant: nothing captured", vs->key); return 1; }
     int frag = vs->modtff != NULL;   // captured in the fragment stage (tf_frag)
@@ -3016,11 +3096,7 @@ static int tf_capture(vshader *vs, const prog_t *pr, int pst, const p_draw *dw, 
         if (!D.tf[b].addr || D.tf_off[b] + n > D.tf[b].size || !mtl_addr(D.tf[b].addr + D.tf_off[b], n, NULL, NULL)) {
             RED_ONCE(117, "transform feedback buffer %d of vertex %s is unbound, too small or in no memory pool: not captured", b, vs->key); return 0; }
     }
-    if (!g_null_rp) {   // a pass without attachments: the vertex-stage capture rasterizes nothing, the fragment-stage one runs its fragment shader for its side effects alone
-        VkSubpassDescription sp = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS};
-        VkRenderPassCreateInfo rc = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .subpassCount = 1, .pSubpasses = &sp};
-        if (vkCreateRenderPass(g_vk.dev, &rc, NULL, &g_null_rp) != VK_SUCCESS) return 0;
-    }
+    if (!null_pass()) return 0;
     VkFramebuffer *fbp = frag ? &g_grid_fb : &g_null_fb; uint32_t side = frag ? 1u << SPV_TFF_SHIFT : 1;
     if (!*fbp) { VkFramebufferCreateInfo fc = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = g_null_rp, .width = side, .height = side, .layers = 1};
                  if (vkCreateFramebuffer(g_vk.dev, &fc, NULL, fbp) != VK_SUCCESS) { *fbp = VK_NULL_HANDLE; return 0; } }
@@ -3066,11 +3142,12 @@ static int tf_capture(vshader *vs, const prog_t *pr, int pst, const p_draw *dw, 
 }
 static uint64_t g_draws, g_draws_dropped;
 static int vk_draw_(const p_draw *dw, const p_draw_idx *di);
+static void rd_close(void);
 static int ind_read(uint64_t addr, void *out, size_t n) {   // indirect arguments (and multi-draw counts), read on the CPU once the GPU's writes have landed
     if (!addr || !mtl_addr(addr, n, NULL, NULL)) { RED_ONCE(105, "indirect arguments at %#llx are in no memory pool: the draw is skipped", (unsigned long long)addr); return 0; }
     memcpy(out, (const void *)(uintptr_t)addr, n); return 1;
 }
-static int vk_draw__(const p_draw *dw, const p_draw_idx *di) { int r = vk_draw_(dw, di); g_drawing = 0; g_fwd_nwb = -1; g_c1d_on = 0; tc_clear(); return r; }
+static int vk_draw__(const p_draw *dw, const p_draw_idx *di) { int r = vk_draw_(dw, di); rd_close(); g_vdisp = 0; g_vr0 = g_vr1 = 0; g_drawing = 0; g_fwd_nwb = -1; g_c1d_on = 0; tc_clear(); return r; }
 // DM_VK_TBUF_RANGE=0 (env.txt): a shader with a buffer texture or image syncs its draw on anything pending, as before draw_view looked their memory up (the A/B of that alone)
 static int tbuf_range_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TBUF_RANGE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_TBUF_RANGE=0: a buffer texture or image syncs on anything pending"); } return v; }
 // DM_VK_DEP_LOG=<n> (env.txt; a diagnostic): one in every n reads that met a pending write-back is logged, the whole run long, instead of the first 40
@@ -3093,11 +3170,14 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
     if (gm_view(sh)) { g_fwd_nwb = 0; return; }   // raw global memory reads anything at the GPU's time: with DM_VK_RAW_GMEM_SYNC=1 every pending write-back landed (gfx_vk_gmem.inc)
     rd_rng r[16 + 1 + 4 * 32 + 4 * 32]; char kd[16 + 1 + 4 * 32 + 4 * 32], K = 'v'; signed char ks[16 + 1 + 4 * 32 + 4 * 32], KS = -1; int n = 0, over = 0;
     #define RNG(a, s) do { uintptr_t a_ = (uintptr_t)(a); uint64_t s_ = (s); if (a_ && s_) { if (n < (int)(sizeof r / sizeof *r)) { kd[n] = K; ks[n] = KS; r[n++] = (rd_rng){a_, a_ + (uintptr_t)s_}; } else over = 1; } } while (0)
-    #define FWD(f, a, s, w) do { VkBuffer fb_; VkDeviceSize fo_; int w_ = (w); if ((w_ && !cs) || !f((a), (s), w_, &fb_, &fo_)) RNG(a, s); } while (0)   // a dispatch's pending write: read on the GPU (buf_fwd)
-    g_fwd_nwb = C ? C->nwb : 0; const int cs = sh[0] && sh[0]->stage == SH_CS;   // a dispatch (its stage alone)
+    #define FWD(f, a, s, w) do { VkBuffer fb_; VkDeviceSize fo_; int w_ = (w);   /* a dispatch's pending write: read on the GPU (buf_fwd) */ \
+        if (w_ && g_vdisp && (f) == sb_fwd && rd_home_on()) { uintptr_t hl_ = 0, hh_ = 0; if ((a) && (s)) rd_home_find(&g_rd_homes, (uintptr_t)(a), (uintptr_t)((a) + (s)), &hl_, &hh_); \
+            if (hh_ > hl_ && !fwd_find(hl_, hh_, &fb_, &fo_)) RNG(hl_, hh_ - hl_); break; }   /* a discarded draw's write: its home range, found whole on the GPU or landed (rd_bind_w) */ \
+        if ((w_ && !cs) || !f((a), (s), w_, &fb_, &fo_)) RNG(a, s); } while (0)
+    g_fwd_nwb = C ? C->nwb : 0; const int cs = (sh[0] && sh[0]->stage == SH_CS) || g_vdisp;   // a dispatch (its stage alone), or a draw run as one (g_vdisp)
     if (vtx) { uint32_t seen = 0; for (int i = 0; i < 16; i++) { va_st a; memcpy(&a, &D.attr[i], 4); VkBuffer fb; VkDeviceSize fo;
         if (a.fmt && fwd_early()) { if (seen >> a.stream & 1) continue; seen |= 1u << a.stream; }   // each stream once (stream_fwd)
-        if (a.fmt && !stream_fwd(sh[0], a.stream, &fb, &fo)) RNG(D.vbuf[a.stream].address, D.vbuf[a.stream].size); } }
+        if (a.fmt && !stream_fwd(sh[0], a.stream, &fb, &fo)) { uintptr_t sl, sh_; stream_rng(a.stream, &sl, &sh_); RNG(sl, sh_ - sl); } } }
     K = 'i'; if (di && di->ibuf) RNG(di->ibuf, (uint64_t)(di->count > 0 ? di->count : 0) * (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4) + 4);
     for (int k = 0; k < 4; k++) { const vshader *s = sh[k]; if (!s) continue; int nst = nvn_stage_of(s->stage); KS = (signed char)k;
         if (!tbuf_range_on()) { for (int i = 0; i < s->ntx; i++) if ((s->tx[i].type & 0xff) == 2) { g_vs = 5; cpu_view(); return; }
@@ -3208,16 +3288,18 @@ static void pipe_key_build(pipe_key *k, int prim) {
       if (!k->sh[0]->modz) k->z = 0; }
 }
 // a draw's dynamic state: the viewport (see the file header for the origin), the scissor, stencil, blend constants, depth bias (vk_draw_, gfx_vk_mesh.inc vk_mesh_draw_);
-// *ov / *osc: the viewport and scissor set, for the dump's log
-static void draw_dyn_state(VkCommandBuffer c, VkViewport *ov, VkRect2D *osc) {
+// *ov / *osc: the viewport and scissor set, for the dump's log; rd: the 1 × 1 pass without attachments of a discarded draw (rd_draw: rasterization is off)
+static void draw_dyn_state(VkCommandBuffer c, VkViewport *ov, VkRect2D *osc, int rd) {
     float vx = 0, vy = 0, vw = (float)P.w, vh = (float)P.h; if (D.has_vp) { vx = D.vp[0][0]; vy = D.vp[0][1]; vw = D.vp[0][2]; vh = D.vp[0][3]; }
     float n = D.dr[0] < 0 ? 0 : D.dr[0] > 1 ? 1 : D.dr[0], f = D.dr[1] < 0 ? 0 : D.dr[1] > 1 ? 1 : D.dr[1];
     VkViewport v = g_origin_ll ? (VkViewport){vx, vy, vw, vh, n, f} : (VkViewport){vx, vy + vh, vw, -vh, n, f};
+    if (rd) v = (VkViewport){0, 0, 1, 1, 0, 1};
     if (!bf_same(c, BF_VP, &g_bf.vp, &v, sizeof v)) vkCmdSetViewport(c, 0, 1, &v);
     VkRect2D sc = {{0, 0}, {P.w, P.h}};
     if (R.has_sc) { int x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y; int64_t x1 = (int64_t)R.sc.x + R.sc.w, y1 = (int64_t)R.sc.y + R.sc.h;
         if (x1 > (int64_t)P.w) x1 = P.w; if (y1 > (int64_t)P.h) y1 = P.h;
         sc = (VkRect2D){{x0, y0}, {(uint32_t)(x1 > x0 ? x1 - x0 : 0), (uint32_t)(y1 > y0 ? y1 - y0 : 0)}}; }
+    if (rd) sc = (VkRect2D){{0, 0}, {1, 1}};
     if (!bf_same(c, BF_SC, &g_bf.sc, &sc, sizeof sc)) vkCmdSetScissor(c, 0, 1, &sc);
     if (!bf_same(c, BF_BC, g_bf.bc, D.blend_color, sizeof g_bf.bc)) vkCmdSetBlendConstants(c, D.blend_color);
     if (!bf_same(c, BF_CM0, &g_bf.cm[0], &D.st_vmask[0], 4)) vkCmdSetStencilCompareMask(c, VK_STENCIL_FACE_FRONT_BIT, D.st_vmask[0]);
@@ -3228,6 +3310,53 @@ static void draw_dyn_state(VkCommandBuffer c, VkViewport *ov, VkRect2D *osc) {
     if (!bf_same(c, BF_REF1, &g_bf.ref[1], &D.st_ref[1], 4)) vkCmdSetStencilReference(c, VK_STENCIL_FACE_BACK_BIT, D.st_ref[1]);
     { float db[3] = {D.po.units, g_vk_feat.depthBiasClamp ? D.po.clamp : 0, D.po.factor}; if (!bf_same(c, BF_DB, g_bf.db, db, sizeof db)) vkCmdSetDepthBias(c, db[0], db[1], db[2]); }
     *ov = v; *osc = sc;
+}
+// ---- Draws under rasterizer discard that write memory ----
+// Rasterizer discard stops a draw at rasterization: its vertex and geometry shaders still run, with their storage buffer and image writes and atomics. Xenoblade
+// Chronicles 2 skins each character with such a draw (shd_post.wishp var122, no transform feedback): its vertex shader writes the blended bone matrices, 48 bytes
+// at gl_VertexIndex, into slot 0 of one 384,000-byte storage buffer, which the character's draws then read. The replay made a discarded draw only as a transform
+// feedback capture (tf_capture), so these did nothing and every character went undrawn on Android, the world and the HUD around them drawn (nvn_mtl.m met the
+// same on Xenoblade Chronicles 3 and Metroid Prime Remastered: docs/reference/rendering.md, Rasterizer discard preserves vertex storage writes).
+// Such a draw now runs as a dispatch does (vk_dispatch): the targets' pass ended before its bindings are made, its vertex (and geometry) stage alone in a pipeline
+// with rasterization off in the pass without attachments (rd_key), a full barrier before it (earlier draws may still read what it writes over: XC2's next character
+// writes from slot 0 again) and after it (rd_close: later draws read what it wrote). So, as a dispatch's, its writes may go in place on a write-back of the chunk and
+// later shaders read them on the GPU (g_vdisp: disp_like, buf_fwd) instead of syncing: XC2 skins dozens of characters a frame, each read by the draws after it.
+// The cost is a pass break at each one. A discarded draw that writes nothing still draws nothing. DM_VK_RAST_DISCARD=0 (env.txt): every discarded draw without
+// transform feedback is left out, as before (the A/B of this alone)
+static int rd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAST_DISCARD"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAST_DISCARD=0: draws under rasterizer discard are left out unless transform feedback captures them"); } return v; }
+static uint64_t g_rd_made, g_rd_none;   // discarded draws made as dispatches; left out (nothing they write)
+static int g_rd_open;   // the pass without attachments of the discarded draw being made is open (rd_open; vk_draw__ closes it, whatever the draw's outcome)
+static int rd_writes(const vshader *s) {   // the stage writes memory: a storage buffer (or atomics on one: Ryujinx's BufferUsageFlags.Write), an image (TextureUsageFlags.ImageStore), raw global memory (its write log)
+    if (!s) return 0;
+    for (int i = 0; i < s->nsb; i++) if (s->sb[i].flags & 1) return 1;
+    for (int i = 0; i < s->nim; i++) if (s->im[i].flags & 4) return 1;
+    return s->gm == 2;
+}
+static int rd_draw(vshader *const sh[4]) {   // under rasterizer discard, without a transform feedback capture: whether the draw runs, as a dispatch
+    if (D.tf_on || !rd_on()) return 0;
+    if (!rd_writes(sh[0]) && !rd_writes(sh[2])) { g_rd_none++; return 0; }
+    if (!g_vk_feat.vertexPipelineStoresAndAtomics) { RED_ONCE(184, "a draw under rasterizer discard writes memory from its vertex stage (shader %s), which this GPU cannot: left out (said once)", sh[0]->key); g_rd_none++; return 0; }
+    return 1;
+}
+static void rd_key(pipe_key *k) {   // over the built key: the vertex (and geometry) stage alone, rasterization off, in the pass without attachments; no target state
+    k->tf = 2; k->rp = null_pass(); memset(&k->rk, 0, sizeof k->rk); k->ncolor = 0; k->z = 0; k->ll = 0; k->depth_clamp = 0;
+    memset(&k->color, 0, sizeof k->color); k->color.logic_op = NVN_LOGIC_OP_COPY; memset(&k->chmask, 0, sizeof k->chmask); memset(k->blend, 0, sizeof k->blend);
+    memset(&k->ms, 0, sizeof k->ms); memset(&k->poly, 0, sizeof k->poly); memset(&k->ds, 0, sizeof k->ds);
+}
+static int rd_open(void) {   // after the draw's bindings (stage_set), in their chunk: the pass without attachments begun, after a full barrier
+    VkCommandBuffer c = cb(); if (!c || !null_pass()) return 0;   // cb: outside the targets' pass
+    cb_barrier();
+    VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = g_null_rp, .framebuffer = g_null_fb, .renderArea = {{0, 0}, {1, 1}}};
+    vkCmdBeginRenderPass(c, &rb, VK_SUBPASS_CONTENTS_INLINE); bf_reset();   // its binds are made behind the bind filter's back: it forgets what it knew
+    g_rd_open = 1; return 1;
+}
+static void rd_close(void) {   // the pass ended, the scratch copies back in their home copies (rd_bind_w), and everything after it ordered after the draw's writes
+    int opened = g_rd_open, nb = 0;
+    if (opened) { g_rd_open = 0; if (C && C->open) { vkCmdEndRenderPass(C->cb); cb_barrier(); } bf_reset(); }
+    for (int i = 0; i < g_rd_nback && opened; i++) { if (!C || !C->open || g_rd_back[i].seq != C->seq) continue;   // (not drawn: the scratch holds what the home copy does; another chunk: a sync made it, and the draw took its bindings again there)
+        VkBufferCopy cp = {g_rd_back[i].so, g_rd_back[i].ho, g_rd_back[i].n}; vkCmdCopyBuffer(C->cb, g_rd_back[i].sb, g_rd_back[i].hb, 1, &cp); nb++; }
+    if (nb) cb_barrier();
+    g_rd_nback = 0;
 }
 static uint64_t g_drop[8];   // draws not made, by reason: 0 shader missing, 1 targets, 2 pipeline, 3 descriptors, 4 an invalid binding, 5 pass, 6 vertex buffers
 static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
@@ -3267,17 +3396,22 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
         g_c1d_on = 1; g_pmemo_miss++;
     }
     resolved:;
+    // under rasterizer discard: a transform feedback capture, nothing, or (a stage writes memory) the draw run as a dispatch, its fragment stage dropped and the
+    // targets' pass ended before its bindings are made, as vk_dispatch does (an image it writes may be one of the targets)
+    int rd = D.rast_discard && rd_draw(k.sh);
+    if (rd) { k.sh[1] = NULL; g_vdisp = 1; rp_end(); }
+    if (dw) { g_vr0 = dw->first; g_vr1 = (int64_t)dw->first + dw->count; }   // the vertices it fetches (stream_rng)
     draw_view(k.sh, di, 1);   // what this draw reads of guest memory: pending GPU writes to it land first
-    if (D.rast_discard) return tf_capture(k.sh[0], pprog[0], pst[0], dw, di);   // the vertex stage only: a capture, or nothing
+    if (D.rast_discard && !rd) return tf_capture(k.sh[0], pprog[0], pst[0], dw, di);   // the vertex stage only: a capture, or nothing
     for (int i = 0; i < 4; i++) if (k.sh[i]) stage_textures(k.sh[i]);
     int pool = (k.sh[0] && k.sh[0]->pool) || (k.sh[1] && k.sh[1]->pool) || (k.sh[2] && k.sh[2]->pool) || (k.sh[3] && k.sh[3]->pool);
     if (pool) pool_sync();   // the IDs read since made, before the pass begins (their uploads would end it)
-    if (!rp_prepare_((k.sh[0] && k.sh[0]->wlayer) || (k.sh[2] && k.sh[2]->wlayer) || (k.sh[3] && k.sh[3]->wlayer))) { g_drop[1]++; return 0; }
-    if (g_dup_mask) dup_check();
+    if (!rd && !rp_prepare_((k.sh[0] && k.sh[0]->wlayer) || (k.sh[2] && k.sh[2]->wlayer) || (k.sh[3] && k.sh[3]->wlayer))) { g_drop[1]++; return 0; }
+    if (!rd && g_dup_mask) dup_check();
     g_drawing = 1;   // from here no chunk is closed (chunk_submit reports one)
     int prim = dw ? dw->prim : di->prim;
-    pipe_t *pm = pso_memo_find(k.sh, prim), *pp = pm;   // the draw before's pipeline when nothing its key takes has changed (pso_memo_find); NULL: the key is built
-    if (!pm || pso_check()) { pipe_key_build(&k, prim); pp = pipe_get(&k); if (!pp) { g_drop[2]++; return 0; } pso_memo_note(&k, prim, pp, pm); }
+    pipe_t *pm = rd ? NULL : pso_memo_find(k.sh, prim), *pp = pm;   // the draw before's pipeline when nothing its key takes has changed (pso_memo_find); NULL: the key is built
+    if (!pm || pso_check()) { pipe_key_build(&k, prim); if (rd) rd_key(&k); pp = pipe_get(&k); if (!pp) { g_drop[2]++; return 0; } if (!rd) pso_memo_note(&k, prim, pp, pm); }   // (the memo keeps the targets' pass's pipelines)
     uint32_t base_inst = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     VkDescriptorSet sets[4] = {0}; uint32_t dyn[4][18];   // dyn: each stage's dynamic offsets (stage_set)
     for (int t = 0;; t++) {   // t 1: every stage again from the chunk recorded now when a sync inside stage_set closed the one the sets came from (ds_moved)
@@ -3289,14 +3423,15 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
         if (!ds_moved(dseq) || ds_again(t, 0)) { g_drop[3]++; return 0; }
     }
     if (g_bind_bad) { g_drop[4]++; static int nb; if (nb < 10) { nb++; LOG("[RED] [vk] draw skipped: a binding has no valid descriptor (shaders %s %s)", k.sh[0]->key, k.sh[1] ? k.sh[1]->key : "-"); } return 0; }
-    if (!rp_start()) { g_drop[5]++; return 0; }   // after the textures: their uploads end a pass begun before (it is begun again on the same targets); it only takes cur(), so the sets' chunk is the one they are bound in below
+    if (rd ? !rd_open() : !rp_start()) { g_drop[5]++; return 0; }   // after the textures: their uploads end a pass begun before (it is begun again on the same targets); it only takes cur(), so the sets' chunk is the one they are bound in below
     VkCommandBuffer c = C->cb;
-    occl_begin();
+    if (!rd) occl_begin();
+    else if (!g_rd_made++) LOG("[vk] rasterizer discard: a draw whose vertex stage writes memory runs as a dispatch, in a pass of its own (vertex %s, %u %s; DM_VK_RAST_DISCARD=0 leaves it out)", k.sh[0]->key, dw ? (unsigned)dw->count : (unsigned)di->count, dw ? "vertices" : "indices");
     bf_pipeline(c, pp->p);   // binds the command buffer already holds are left out (bf_*)
     if (pp->alpha) vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof D.alpha_ref, &D.alpha_ref);   // the alpha test's reference, data rather than a key (spv_alpha.h)
     for (int i = 0; i < 4; i++) if (k.sh[i]) vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, (uint32_t)(k.sh[i]->set & 3), 1, &sets[i], k.sh[i]->ndyn, dyn[i]);
     if (pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { g_drop[3]++; return 0; }
-    VkViewport v; VkRect2D sc; draw_dyn_state(c, &v, &sc);
+    VkViewport v; VkRect2D sc; draw_dyn_state(c, &v, &sc, rd);
     // indices: copied, quads made triangles; vertex range for the vertex data copy
     int64_t vlo = 0, vhi = 0; uint32_t count = dw ? (uint32_t)dw->count : (uint32_t)di->count, inst = (uint32_t)(dw ? dw->instances : di->instances); if (!inst) inst = 1;
     // More instances than any Switch game draws (2^24): the GPU would work through them until the driver's hang recovery cut the submission short, and the game drew no
