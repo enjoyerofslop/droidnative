@@ -11,6 +11,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_spv_mesh import KERNEL, SPV_AS, SPV_VAL, mesh_info, sa, ms_   # noqa: E402  # pyright: ignore[reportMissingImports]
+from test_spv_readonly import REPO   # noqa: E402
 import spv_meshemu as me   # noqa: E402  # pyright: ignore[reportMissingImports]
 import spv_mesh as sm   # noqa: E402  # pyright: ignore[reportMissingImports]
 
@@ -108,7 +109,7 @@ class SpvMeshEmu(unittest.TestCase):
             outs = {}
             for j in (1, 3):
                 dst = Path(d, f'out{j}')
-                r = subprocess.run([sys.executable, sa.__file__, '-j', str(j), str(src), str(dst)], capture_output=True, text=True)
+                r = subprocess.run([sys.executable, str(REPO / 'dm/android/tools/spv_android.py'), '-j', str(j), str(src), str(dst)], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertIn(f'spv_android: {len(keys)} shaders', r.stdout); self.assertIn(f'; {len(keys)} task / mesh shaders in compute form too', r.stdout)
                 outs[j] = {p.name: p.read_bytes() for p in dst.iterdir()}
