@@ -42,8 +42,8 @@ static _Atomic uint64_t g_me_kpipe_ns;
 static int memu_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_MESH_EMU"); on = !(e && *e == '0'); } return on && !g_mesh; }
 // ---- the kernels ahead of the pass (the comment above) ----
 // DM_VK_MESH_LA: 0 (default) every draw cuts the pass, as before; 1 the kernels ahead of the pass; 2 (a diagnostic) the passes in command buffers of their own but every draw cutting the pass as before.
-// Off by default: measured in Kokiri Forest it is worth about 0.5 ms of a OnePlus Pad 3's 27 ms GPU frame, and nothing or a loss on a Galaxy S25 Edge and Z Fold 8, where the pass
-// in a command buffer of its own costs their driver builds about as much as the pass breaks did (the numbers in docs/reference/rendering.md)
+// Off by default: measured in Kokiri Forest it is worth nothing on a OnePlus Pad 3 (29.3 → 29.1 fps, GPU 26.6 ms either way) and nothing or a loss on a Galaxy S25 Edge and Z Fold 8:
+// the pass in a command buffer of its own costs the drivers about as much as the pass breaks did (the numbers in docs/reference/rendering.md)
 static int la_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_MESH_LA"); v = !e ? 0 : atoi(e); if (v) LOG("[vk] DM_VK_MESH_LA=%d: %s", v, v == 1 ? "render passes in command buffers of their own, the compute form's kernels ahead of each" : "render passes in command buffers of their own, every task / mesh draw in compute form cutting the pass as before (diagnostic)"); } return v; }
 static int la_on(void) { return la_mode() == 1; }
 static uint32_t la_cap(void) { static uint32_t v; if (!v) { const char *e = getenv("DM_VK_MESH_LA_CAP"); v = e && atoi(e) > 0 ? (uint32_t)atoi(e) : 1024; } return v; }
