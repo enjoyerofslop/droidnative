@@ -21,6 +21,8 @@ System → Save and a restart into Argentum were exercised during bring-up;
 the save was created with the isolated winding diagnostic and reloaded with
 the production path. The final fixed host also loads it and walks in Argentum.
 
+On Android, 2.1.0 plays the opening and King Crustip at 30 fps, but draws none of its characters ([Android](#android)).
+
 ## Profile and memory
 
 The NPDM declares no system resource. Startup sets a `0xC9400000`-byte heap
@@ -258,6 +260,29 @@ analysis, bounded runs, saves and logs live in `0100E95004038000-work/`.
 `run/boot.py` accepts a log name, duration and environment assignments.
 `boot01.log` records the initial startup and clearing frames; it stops because
 that diagnostic launch did not yet have a shader map configured.
+
+## Android
+
+First run on Android, 2026-11-11. The cartridge's 2.1.0 (v983040, the registered build), packed as a game app (`build_android_from_nsp.py --game-apk`, a 158 MB APK with the 14 GB RomFS as its OBB) from DroidPlay Core `main` at `1c06a5c4`. Two phones:
+- a Galaxy S25 Edge: SM8750, Adreno 830 with Qualcomm's driver 0x80320001, Android 16;
+- a Galaxy Z Flip 7: Exynos 2500, Xclipse 950 with Samsung's driver 0x6000215, Android 16, unfolded.
+
+Both in handheld mode, driven over adb with `DM_CTL`.
+
+- **The build:** the dump has no DLC, so the split's DLC-only path made a shader-only derived profile (the registered module fixes kept). It found 12,738 shaders (the registered tables, with the DLC's, have 15,572), all translated to SPIR-V, none failed.
+- **What was played:**
+  - **S25 Edge:** the title (no logo, the game's own fresh-save behaviour), New Game, Easy, the opening (the Cloud Sea, the salvage dive, Rex and Gramps), King Crustip's tutorial battle (won: auto-attacks, the EXP and SP shown), and the scenes after it.
+  - **Z Flip 7:** the same into King Crustip's tutorial.
+- **No characters drawn, on both GPUs:** Rex, Gramps and King Crustip never appear.
+  - The cutscenes frame them over an empty deck, an empty cabin ("No worries, Gramps!") and empty sky. In battle, only the target marker, the red ring and the damage numbers show where the crab is.
+  - The world, the ship, the Cloud Sea, the opening's titans, the UI and the effects draw.
+  - No `[RED]` line on either phone, and the host's pipeline counters show only the draws a first build leaves out. On the S25 Edge, Qualcomm's driver logged 272 "Failed to link shaders" / "Shader compilation failed for shaderType: 4" lines; Samsung's logged none.
+  - The Mac draws the characters (its Argentum runs). Where to start: the characters' skinning passes, which the Mac's notes describe as vertex updates whose pipelines take the stream-output (transform feedback) variant (`pipeline … again with other: stream`, 0 colour targets, in the Android log).
+- **Frame rate:** 30 fps (the target), every 60 s window 29.6–30.1 on the S25 Edge over 12.5 minutes, frame p50 33.2 ms; GPU 18–23 ms on the S25 Edge, 12.5–13 ms on the Z Flip 7.
+- **Sound:** a stereo `AudioOut`, no underrun on either phone. The `DM_AUDIO_DUMP` has signal (RMS about 640–1,360). Not listened to by a person.
+- **Memory:** 2.38 GB PSS on the S25 Edge (0.77 GB graphics) and 2.31 GB on the Z Flip 7. Neither was killed.
+- **Save:** not tried (System → Save comes later in the chapter).
+- **Not tried:** past King Crustip, and the other devices.
 
 ## Found on this game
 
