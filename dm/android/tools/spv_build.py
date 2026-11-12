@@ -189,7 +189,7 @@ def main():
     done = sorted(p.name[:-4] for p in tout.glob('*.spv') if not p.name.endswith('.reader.spv'))
     for k in done:   # the feedback layout goes with the shader's reflection: spv_android.py makes the capture variant from it
         if k in tfs: rp = tout / f'{k}.res.json'; r = json.loads(rp.read_text(encoding='utf-8')); r['tf'] = tfs[k]; rp.write_text(json.dumps(r), encoding='utf-8')
-    if done: subprocess.run([sys.executable, str(HERE / 'spv_android.py'), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters
+    if done: subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
     for k in keys:
         if k not in done and k not in failed: failed[k] = 'no output from the translator'
     for k, why in sorted(skipped.items()): print(f'[RED] {k}: {why}')
