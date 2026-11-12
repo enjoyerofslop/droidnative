@@ -38,7 +38,7 @@ class BuildShaders(unittest.TestCase):
         self.registered = Profile(REPO / 'dm/games' / GID)
         self.provisional = Profile(self.tmp / 'profile' / GID)
         self.ran = []; self.translation_stops = False; self.log_text = 'IndexError: list index out of range\n'
-        def run(cmd, log, env=None):   # spv_build.py: its output folder and its last line, or what bi.run raises for its exit code
+        def run(cmd, log, env=None, on_line=None):   # spv_build.py: its output folder and its last line, or what bi.run raises for its exit code
             self.ran.append([str(c) for c in cmd]); (self.work / 'spv').mkdir(exist_ok=True)
             if self.translation_stops:   # the post-pass stopped at an empty .spv after a few shaders were done (Pokopia's log)
                 (self.work / 'spv' / '0123456789abcdef.spv').write_bytes(b'\3\2\x23\7'); Path(log).write_text(self.log_text)
@@ -196,7 +196,7 @@ class NoneTranslated(unittest.TestCase):
         if os.name == 'nt': self.xlate = self.tmp / 'xlate.cmd'; self.xlate.write_text(f'@echo {self.GONE} 1>&2\n@exit /b 1\n')   # Windows runs a .cmd through cmd.exe
         else: self.xlate = self.tmp / 'xlate'; self.xlate.write_text(f'#!/bin/sh\necho "{self.GONE}" >&2\nexit 1\n'); self.xlate.chmod(0o755)
         real = ba.bi.run
-        def run(cmd, log, env=None):   # the run as build_shaders asks for it, the stand-in in the dll's place
+        def run(cmd, log, env=None, on_line=None):   # the run as build_shaders asks for it, the stand-in in the dll's place
             cmd = [str(c) for c in cmd]; cmd[cmd.index('--xlate') + 1] = str(self.xlate)
             return real(cmd, log, env=env)
         for p in (mock.patch.object(ba.bi, 'run', side_effect=run), mock.patch.object(ba.bi, 'PROG', mock.MagicMock()), mock.patch.object(ba.bi, 'split_shaders'),
