@@ -5,6 +5,8 @@
 #   python scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys> --push-only [--serial ...]   install the app and copy a game built before, without building
 #   python scripts/build_android_from_nsp.py --apk-only [--serial ...]                                  the app with every game host built on this computer, installed
 #   python scripts/build_android_from_nsp.py --migrate --title <title ID> [--serial ...]               a one-game install's folder (files/game) into files/games/<title ID>
+#   python scripts/build_android_from_nsp.py --import-save <folder | archive> --title <title ID> [--serial ...]   a save for that game, swapped in by the app after it asks
+#   python scripts/build_android_from_nsp.py --restore-backup <backup folder> [--title <title ID>] [--serial ...]   a game's save (or every game's) from Back up saves' copy
 #   python scripts/build_android_from_nsp.py --check | --info <NSP folder>                              requirements / the game's details, as JSON (the desktop app)
 #   python scripts/build_android_from_nsp.py --setup [--accept-android-licenses]                         install what --check finds missing (Windows: dm/android/tools/host_setup.py)
 #   python scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys> --game-apk [--xapk] [--out <folder>]   the game in an app of its own, to install anywhere (make_game_app)
@@ -28,7 +30,7 @@
 #      A one-game install of the same game (files/game, the layout before the launcher) is moved there instead of copied again, and its save is copied by the app
 # The picture comes from the Vulkan replay of NVN (dm/android/gfx_vk.c).
 # Needs: Python with lz4, capstone, fonttools and backports.zstd (not on Python 3.14), the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
-import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, re, shutil, struct, subprocess, sys, tarfile, tempfile, threading, time
+import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, platform, re, shutil, struct, subprocess, sys, tarfile, tempfile, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -231,14 +233,15 @@ def standard_font(font):   # <font>/standard.ttf: a hinted TrueType font; withou
     if not dst.is_file() or dst.stat().st_size != Path(src).stat().st_size: shutil.copyfile(src, dst)
 
 
-def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derived=''):
+def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derived='', oodle=None):
     """The game's NVN shaders for the Vulkan replay: the split (build_ipa_from_nsp.py split_shaders, checked against the profile's tables), then
     dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. Returns that folder (None when there are none) and the profile.
     A registered profile's tables may differ from the split in two ways the iPhone build accepts as well: installed DLC's own shaders, and compute kernels a newer reader decodes
     from the registered build (compute_reader_additions). derive(reason) then makes the shader-only derived profile that the translation and the rest of the build use. Any other
     failure of a registered profile's split stops the build: packed without shaders, AI: The Somnium Files played its sound over a black screen (droidplay-core#218).
     derived: why main packs from a profile derived from a registered one ('' for a registered or provisional profile). Its split failing stops the build too, though the profile
-    is outside dm/games: its game has the shaders the registered tables list (Pokémon Pokopia's split failed on Windows, and the build packed it without them, droidplay-core#307)"""
+    is outside dm/games: its game has the shaders the registered tables list (Pokémon Pokopia's split failed on Windows, and the build packed it without them, droidplay-core#307).
+    oodle: build_ipa_from_nsp.py split_shaders' (a Mac host for the game's Oodle, mac_decoder), which puts the host in the split's inputs"""
     if not sv: return None, g
     sh = work / 'shader'
     own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional or derived profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
@@ -249,7 +252,7 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
     dd = (lambda: promote('the installed DLC shader content differs from the registered tables')) if derive and not own else None
     dc = (lambda: promote('the reader decoded additional compute kernels from this registered build')) if derive and not own else None
     try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own,   # its own stage (a DLC's shaders too)
-                          dlc_roms=dlc_roms, derive_dlc=dd, derive_compute=dc)
+                          oodle=oodle, dlc_roms=dlc_roms, derive_dlc=dd, derive_compute=dc)
     except BuildError as e:
         if not own: raise BuildError(f'{e}\nThe game is not packed: without its shaders it would play its sound over a black screen. Check that the folder holds the versions game profile '
                                      f'{g.id} registers (its game.tsv); if it does, report this build with {logs / "shader_split.log"}') from e
@@ -288,13 +291,7 @@ def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, 
         raise BuildError('the game\'s Unreal shaders are Oodle-compressed, and only the game\'s own decoder undoes them: it runs on the phone here, so connect one (or build once without '
                          '--no-push, or build the game in DroidPlay for Mac first)')
     bi.PROG.set(step='the game\'s host and code to the phone, where its own Oodle decodes the shaders')
-    so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
-    library_add(g.id, so, loader, st, {'title_id': g.id, 'name': bi.nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
-                                       'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
-    install(serial, make_apk(sdk, logs, env), logs)
-    dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
-    push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
-    phone = android_oodle.Phone(adb, serial, g.id, REMOTE, PKG, work, logs, say)
+    phone = oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env)
     t0, total = time.time(), 0
     for v, d in todo.items():
         bi.PROG.set(step=f'{v}: decoding the shaders with the game\'s Oodle on the phone')
@@ -306,6 +303,72 @@ def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, 
         (out / 'stamp').write_text(bi.ue_stamp(d)); bi.swap_in(out, d / 'ue_shaders'); bi.rmtree(jd)
         total += n + sum(x['shaders'] for x in listing if x['compression'] == 'IoStore, decoded')
     bi.PROG.end(f'{total:,} shaders in {bi.hms(time.time() - t0)}, {phone.jobs} job(s) on the phone')
+
+
+def oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env):
+    """The game's host into the app and its rewritten code to the phone, for the jobs of scripts/android_oodle.py Phone (ue_decode, oodle_decode): the host does not depend on the
+    shaders, which do not exist yet. Only the code goes: a job reads no RomFS"""
+    import android_oodle   # pyright: ignore[reportMissingImports]
+    so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
+    library_add(g.id, so, loader, st, {'title_id': g.id, 'name': bi.nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
+                                       'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
+    install(serial, make_apk(sdk, logs, env), logs)
+    dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
+    push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
+    return android_oodle.Phone(adb, serial, g.id, REMOTE, PKG, work, logs, say)
+
+
+def mac_decoder(nsp_dir, work, g, pkg_ver, game, env):
+    """DM_OODLE_HOST / DM_OODLE_MODULES for the shader split's Oodle on this computer, or None: set by hand, or on an Apple-silicon Mac the Mac host and the Apple-rewritten modules
+    of DroidPlay for Mac's build of the same main (<game>/<title ID>_build beside the NSP folder, or this build's own folder when the Mac's NSP script ran on it too). The Android
+    build's own modules cannot stand in: they reach their thread slots through x18 (dm/tools/nso_asm.py), where the Mac host gives them through tpidrro_el0"""
+    if env.get('DM_OODLE_HOST') and env.get('DM_OODLE_MODULES'): return {k: env[k] for k in ('DM_OODLE_HOST', 'DM_OODLE_MODULES')}
+    if sys.platform != 'darwin' or platform.machine() != 'arm64' or os.environ.get('DM_UE_DECODE') == 'phone': return None
+    bid = bi.build_id(game / 'ExeFS/main')
+    for b in (nsp_dir.parent / f'{g.id}_build', work):
+        host, fx = b / 'tools/dmhost', b / f'patched_{pkg_ver}' / 'main.fixups.tsv'
+        if host.is_file() and fx.is_file() and f'# BUILD_ID\t{bid}' in fx.read_text(errors='replace').splitlines()[:20]:
+            say(f'the game\'s Oodle for the shader split: the Mac host of the Mac build in {b}')
+            return {'DM_OODLE_HOST': str(host), 'DM_OODLE_MODULES': str(fx.parent)}
+    return None
+
+
+def oodle_decode(roms, mains, dlc_roms, game, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk):
+    """The streams of the game's Oodle-compressed archives (profile_guess.py oodle_packs) decoded with the game's own Oodle on the phone before the shader split, into
+    <extraction>/oodle_cache, which the split then reads in place of the Mac host (DM_OODLE_CACHE; scripts/android_oodle.py fill). Pokémon Legends: Arceus's split failed on all
+    678 GFPAKs without it (issue #310). The record runs list what the split reads (the whole split each, decoding nothing); the phone is set up only when one lists a stream the
+    cache lacks. A cache that last ended on the same files, split code and decoder is taken as it is → its folder"""
+    import android_oodle   # pyright: ignore[reportMissingImports]
+    bi.PROG.add(1); bi.PROG.stage('Oodle decode')
+    cache = android_oodle.Cache(game / 'oodle_cache', hashlib.sha256((game / 'ExeFS/main').read_bytes()).hexdigest())   # streams are keyed by content; the decoder is main's
+    key = bi.fingerprint('oodle-record-v1', ('files', bi.python_tool_files(REPO, 'dm/gfx/tools/shader_split.py', ('dm/gfx/tools', 'dm/tools', 'dm/games'))), *[('tree', r) for r in roms],
+                         ('files', list(mains)), *[x for r in dlc_roms for x in (('dlc', Path(r).name), ('stat', r))])
+    if cache.done(key): bi.PROG.end(f'reused: {len(cache):,} streams'); return cache.d
+    runs, held = [0], contextlib.ExitStack()
+    def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
+        if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): bi.PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
+    def record(want):
+        runs[0] += 1; out = work / 'tmp/oodle_record'; bi.rmtree(out); out.mkdir(parents=True)
+        bi.PROG.set(step=f'run {runs[0]}: listing the streams the shader split reads')
+        cmd = [sys.executable, REPO / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), out / 'pkg'] + [out / n for n in ('map.tsv', 'facts.tsv', 'pairs.tsv', 'pso.tsv')]
+        # a failed run's listed streams still count, and the real split says again whatever else went wrong
+        bi.run(cmd + ([','.join(map(str, dlc_roms))] if dlc_roms else []), logs / 'oodle_record.log', env=dict(env, DM_OODLE_CACHE=str(cache.d), DM_OODLE_RECORD=str(want)),
+               on_line=counted, fatal=False)
+        bi.rmtree(out)
+    def decoder():
+        if not serial:
+            raise BuildError('the game\'s shaders are in archives compressed with its own Oodle, which only the game\'s own decoder reads: it runs on the phone here, so connect one '
+                             'and build without --no-push or --game-apk (or build the game in DroidPlay for Mac first)')
+        held.enter_context(phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Oodle archives'))   # only while the phone works: the record runs take minutes
+        bi.PROG.set(step='the game\'s host and code to the phone, where its own Oodle decodes the archives')
+        return oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env)
+    t0 = time.time()
+    with held:
+        try: _, n = android_oodle.fill(cache, record, decoder, work / 'tmp/oodle_want')
+        except ValueError as e: raise BuildError(str(e)) from e   # the phone's job (its log named), or a split that kept asking
+    cache.finish(key)
+    bi.PROG.end(f'{n:,} streams decoded on the phone in {bi.hms(time.time() - t0)}' if n else f'{len(cache):,} streams, none new ({runs[0]} run(s))')
+    return cache.d
 
 
 # ---------------- The library of game hosts ----------------
@@ -988,6 +1051,102 @@ def migrate_legacy(serial, gid, nacp_local=None):
     return True
 
 
+# ---------------- Saves from the computer ----------------
+# adb can't write the app's internal storage, where the saves are (saves/<title ID>), so a save to swap in goes to files/import/<title ID>/. The launcher takes it at its
+# start or when it comes back to the front (LauncherSaves.incoming), finds the save in it as an import from Android's file picker does (Saves.java: a DroidPlay backup,
+# yuzu and its successors, Ryujinx, JKSV, EdiZon, Checkpoint, or the folder as it is), asks, keeps the game's save in files/backups/<time>-<title ID>/ and swaps the new
+# one in. --import-save sends a folder under its own name (which can say whose save it is) or an archive's files; --restore-backup sends a game's save from a backup that
+# Back up saves to this computer pulled, in the backup's own layout (saves/<title ID>/, xattrs.tsv)
+IMPORT = f'{REMOTE}/import'
+SAVE_DIR = re.compile(r'(?i)(0[1-7][0-9a-f]{14})(_device)?')   # Saves.TITLE: a title ID's folder, never a Ryujinx save ID (00…) or a system save's (80…)
+
+
+def save_title_ids(root, own_name=True):   # the title IDs a save's files give, as Saves.java reads them: folder names (root's own too, with own_name), Checkpoint's 0x<id>, EdiZon's json, JKSV's meta, Ryujinx's ExtraData0
+    ids = set()
+    for p in [root] * own_name + [*root.rglob('*')]:
+        if p.is_dir():
+            m = re.fullmatch(r'(?i)(?:0x)?(0[1-7][0-9a-f]{14})(?:_device| .*)?', p.name)
+            if m: ids.add(m[1].upper())
+        elif p.name == 'edizon_save_metadata.json':
+            m = re.search(r'"title_id"\s*:\s*"(0[1-7][0-9A-Fa-f]{14})"', p.read_text(encoding='utf-8', errors='replace'))
+            if m: ids.add(m[1].upper())
+        elif p.name in ('.nx_save_meta.bin', 'ExtraData0'):   # JKSV: "JKSV", a revision byte, then the title ID; Ryujinx: the title ID first
+            b = p.read_bytes()[:13]; at = 5 if p.name.startswith('.') else 0
+            if len(b) >= at + 8 and (at == 0 or b[:4] == b'JKSV') and any(b[at:at + 8]): ids.add(f'{struct.unpack_from("<Q", b, at)[0]:016X}')
+    return ids
+
+
+def unpack_save(src, dst):   # an archive's files → dst: Python's zipfile (Stored, Deflate, bzip2, LZMA), else tar (bsdtar, on Windows 10 and later and on a Mac: RAR, 7z)
+    import zipfile
+    shutil.rmtree(dst, ignore_errors=True); dst.mkdir(parents=True); method = None
+    try:
+        with zipfile.ZipFile(src) as z: z.extractall(dst)   # names that would leave dst are cut down to stay inside it
+        return
+    except NotImplementedError as e: method = e   # Deflate64, which Windows' own zip uses for big files: bsdtar (libarchive 3.7) doesn't read it either
+    except zipfile.BadZipFile: pass   # not a zip
+    shutil.rmtree(dst); dst.mkdir()
+    try: r = subprocess.run(['tar', '-xf', str(src), '-C', str(dst)], capture_output=True, text=True, errors='replace')
+    except OSError as e: raise BuildError(f"{src.name} isn't a zip, and there's no tar here to unpack it ({e}): unpack it with another tool and send the folder") from None
+    if r.returncode and method: raise BuildError(f"{src.name} is packed with a compression Python and tar don't read ({method}): unpack it with Windows' Explorer "
+                                                 "(Extract all), which wrote it, or another tool, then send the folder")
+    if r.returncode:
+        raise BuildError(f"{src.name} can't be unpacked here ({(r.stderr or r.stdout).strip()[-300:] or f'tar exit status {r.returncode}'}): unpack it with another tool and send the folder")
+
+
+def send_save(serial, gid, local, parent, name, logs):
+    dst = f'{IMPORT}/{gid}'
+    adb(serial, 'shell', f'rm -rf {sh_quote(dst)} && mkdir -p {sh_quote(dst)}')
+    push_dir(serial, local, parent, name, logs / 'adb_push_save.log')
+    adb(serial, 'shell', f'find {sh_quote(dst)} -name {MANIFEST} -delete', check=False)   # a copy as a tar leaves its manifest, which isn't the save's
+    open_tree(serial, dst)
+    # the launcher takes it when it comes to the front: brought there now, unless a game is being played (a jump to the launcher would interrupt it). Single-top
+    # (0x20000000), so a launcher in front already gets the intent (onNewIntent): a plain am start only brings its task forward, and it never looked
+    if not adb(serial, 'shell', f'pidof {PKG}:game', check=False).strip(): adb(serial, 'shell', 'am', 'start', '-f', '0x20000000', '-n', f'{PKG}/.Launcher', check=False)
+
+
+@survives_drops
+@says_when_phone_full
+def import_save(serial, gid, src, work, logs):   # a save folder or archive → files/import/<gid>/ on the phone
+    gid = gid.upper(); src = Path(src).expanduser()
+    if not src.exists(): raise BuildError(f'no such file or folder: {src}')
+    if src.is_file(): local = work / 'save_import' / gid; unpack_save(src, local); parent, name = IMPORT, gid
+    else: local, parent, name = src, f'{IMPORT}/{gid}', src.name
+    if not any(f.is_file() for f in local.rglob('*')): raise BuildError(f'{src} holds no files')
+    ids = save_title_ids(local, own_name=src.is_dir())   # an archive's folder here is named by gid
+    if ids and gid not in ids:
+        say(f'[RED] {src.name} gives the title ID{"s" if len(ids) > 1 else ""} {", ".join(sorted(ids))}, not {gid}: it may be another game\'s save. '
+            'The app on the phone shows what it found and asks before swapping it in')
+    send_save(serial, gid, local, parent, name, logs)
+    say(f'sent to {IMPORT}/{gid}: DroidPlay on the phone shows the save it found for {gid} and asks before swapping it in (it keeps the save there in files/backups/ first)')
+
+
+def backup_games(folder):   # title ID → (the backup folder, its saves/<id>[_device] folders): the newest by name of the backups under folder holding that game (Launcher.backup's layout)
+    out = {}
+    for saves in sorted(p for p in [Path(folder), *Path(folder).rglob('saves')] if p.name == 'saves' and p.is_dir()):
+        parts = {}
+        for k in saves.iterdir():
+            m = SAVE_DIR.fullmatch(k.name)
+            if m and k.is_dir() and any(f.is_file() for f in k.rglob('*')): parts.setdefault(m[1].upper(), []).append(k)
+        for gid, ks in parts.items(): out[gid] = (saves.parent, ks)   # sorted: a later backup (its time) replaces an earlier one
+    return out
+
+
+@survives_drops
+@says_when_phone_full
+def restore_backup(serial, folder, gid, work, logs):   # a game's save (gid), or every game's, from a backup on this computer → files/import/<id>/ on the phone
+    games = backup_games(folder)
+    if not games: raise BuildError(f'{folder} holds no DroidPlay save backup: a folder with saves/<title ID>/ in it, as Back up saves makes')
+    if gid and gid.upper() not in games: raise BuildError(f'{folder} holds no save of {gid.upper()}; it has {", ".join(sorted(games))}')
+    on = set(adb(serial, 'shell', f'ls {sh_quote(REMOTE + "/games")} 2>/dev/null', check=False).upper().split())
+    for g in [gid.upper()] if gid else sorted(games):
+        if g not in on: say(f'{g}: not on the phone, so its save is left out'); continue
+        root, ks = games[g]; local = work / 'save_restore' / g; shutil.rmtree(local, ignore_errors=True)
+        for k in ks: shutil.copytree(k, local / 'saves' / (g + ('_device' if k.name.lower().endswith('_device') else '')))
+        if (root / 'xattrs.tsv').is_file(): shutil.copy2(root / 'xattrs.tsv', local / 'xattrs.tsv')
+        send_save(serial, g, local, IMPORT, g, logs)
+        say(f'{g}: the save in {root} sent to {IMPORT}/{g}: DroidPlay on the phone asks before putting it back (it keeps the save there in files/backups/ first)')
+
+
 @survives_drops
 @says_when_phone_full
 def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, meta):
@@ -1099,6 +1258,16 @@ def unsupported_graphics(gfx, name):   # why a game cannot be built for Android,
             f'so this game cannot be built for Android yet')
 
 
+def undecodable_packs(packs, name, decoder):   # why a game's shaders cannot be split here, from profile_guess.build_sources' oodle_packs; None when the split can read them
+    # Only the game's own Oodle reads these archives: the phone (oodle_decode), a Mac host (mac_decoder), or what an earlier build with the phone decoded. Without one, Pokémon
+    # Legends: Arceus's split failed on all 678 GFPAKs after about 220 s, then the build stopped (issue #310). ue_legacy is left out, as Python reads its Zlib and LZ4 paks
+    on, why = packs
+    if not on or decoder: return None
+    return (f'{name} keeps its shaders in files compressed with the game\'s own Oodle ({why.split(", Oodle-compressed")[0]}), which only the game\'s own decoder reads. '
+            'An Android build runs it on the phone: connect one and build without --no-push or --game-apk (later builds and game apps take what it decoded), '
+            'or build the game in DroidPlay for Mac first')
+
+
 def games_table():   # {title ID: {engine, graphics, build, sdk}} from dm/games/README.md's Games table
     out = {}
     for line in (REPO / 'dm/games/README.md').read_text(encoding='utf-8').splitlines():
@@ -1185,7 +1354,10 @@ def main(argv):
     ap.add_argument('--update-shaders', action='store_true', help='pull the shaders a game compiled at run time on the phone, translate the new ones and copy them (no app build)')
     ap.add_argument('--apk-only', action='store_true', help='pack the app with every game host built on this computer and install it')
     ap.add_argument('--migrate', action='store_true', help="move a one-game install's files/game to files/games/<--title> on the phone")
-    ap.add_argument('--title', help='the title ID for --migrate')
+    ap.add_argument('--title', help='the title ID for --migrate, --import-save and --restore-backup')
+    ap.add_argument('--import-save', metavar='PATH', help="send a save folder or archive (an emulator's, a JKSV / EdiZon / Checkpoint backup, a PC port's) for --title to the phone, "
+                    'where DroidPlay asks before swapping it in')
+    ap.add_argument('--restore-backup', metavar='FOLDER', help="send a game's save (--title) or every game's from a backup Back up saves pulled to this computer, to put back on the phone")
     ap.add_argument('--check', action='store_true', help='print the requirements as JSON and stop')
     ap.add_argument('--info', action='store_true', help="print the NSP folder's game details as JSON and stop")
     ap.add_argument('--progress', choices=('auto', 'bar', 'lines', 'json', 'off'), default='auto', help='stage lines on the console; json = newline-delimited JSON events')
@@ -1215,9 +1387,19 @@ def main(argv):
         with contextlib.redirect_stdout(sys.stderr): out = check(a.sdk) if a.check else info(Path(a.nsp_dir).expanduser().resolve(), Path(a.keys).expanduser().resolve() if a.keys else None)
         print(json.dumps(out, indent=1)); return
     if a.setup: setup(a.sdk, a.accept_android_licenses); return
-    if a.apk_only or a.migrate:
+    if a.apk_only or a.migrate or a.import_save or a.restore_backup:
         logs = data_dir() / 'logs'; logs.mkdir(parents=True, exist_ok=True)
         serial = a.serial or os.environ.get('ANDROID_SERIAL') or pick_device()
+        if a.import_save or a.restore_backup:
+            if a.import_save and a.restore_backup: raise BuildError('--import-save and --restore-backup go one at a time')
+            if a.title and not re.fullmatch(r'[0-9A-Fa-f]{16}', a.title) or a.import_save and not a.title:
+                raise BuildError(f'{"--import-save" if a.import_save else "--restore-backup"} needs --title <the game\'s 16-digit title ID>' + ('' if a.import_save else ' (or none: every game)'))
+            work = data_dir() / 'saves_sent'; work.mkdir(parents=True, exist_ok=True)
+            bi.PROG.plan(1); bi.PROG.stage('send the save')
+            with phone(serial, 'build_android_from_nsp.py: sending a save'):
+                if a.import_save: import_save(serial, a.title, a.import_save, work, logs)
+                else: restore_backup(serial, a.restore_backup, a.title, work, logs)
+            shutil.rmtree(work, ignore_errors=True); bi.PROG.end(); return
         if a.migrate:
             if not a.title or not re.fullmatch(r'[0-9A-Fa-f]{16}', a.title): raise BuildError('--migrate needs --title <the game\'s 16-digit title ID>')
             bi.PROG.plan(1); bi.PROG.stage('move the one-game install')
@@ -1230,7 +1412,7 @@ def main(argv):
         with phone(serial, 'build_android_from_nsp.py: installing the app'): install(serial, apk, logs)
         bi.PROG.end(serial)
         return
-    if not a.nsp_dir: raise BuildError('give the NSP folder (or the .nup file) and -k <prod.keys> (or --check / --apk-only / --migrate)')
+    if not a.nsp_dir: raise BuildError('give the NSP folder (or the .nup file) and -k <prod.keys> (or --check / --apk-only / --migrate / --import-save / --restore-backup)')
     src, keys = Path(a.nsp_dir).expanduser().resolve(), Path(a.keys).expanduser().resolve() if a.keys else None
     if not src.exists(): raise BuildError(f'not a folder: {src}')
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
@@ -1290,6 +1472,7 @@ def main(argv):
         bi.PROG.plan((0 if a.update_shaders else 3) + 2 * bool(new) + bool(a.update_shaders))
         if new:   # the split again with the new captures, and the new ones translated (the others are kept)
             aoc = work / 'aoc'; dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc.is_dir() else []
+            if (game / 'oodle_cache/complete').is_file(): env['DM_OODLE_CACHE'] = str(game / 'oodle_cache')   # what the full build decoded on the phone (oodle_decode)
             spv = build_shaders(g.words('shader_versions') or [pkg_ver], {pkg_ver: game}, work, logs, env, g, dlc_roms)[0] or spv
         if a.update_shaders:
             if not new: say('no new run-time shaders on the phone'); bi.PROG.end(); return
@@ -1311,9 +1494,10 @@ def main(argv):
             if kind == 'folder': return bi.extract_dump(ex, v, u or b, app)
             return bi.extract(nx, keys, ex, v, b, u, None, logs, g, app)
         game = extract(pkg_ver)
-        why = unsupported_graphics(bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['graphics'],
-                                   nacp.name(game / 'control.nacp') or g.get('name', '') or g.id)
-        if why: raise BuildError(why)   # before the rewrite and the shaders, which take minutes and make an app that cannot start
+        src, name = bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main']), nacp.name(game / 'control.nacp') or g.get('name', '') or g.id
+        mac_oodle = mac_decoder(nsp_dir, work, g, pkg_ver, game, env) if src['oodle_packs'][0] else None   # not only with sv: a build mismatch below sets it
+        why = unsupported_graphics(src['graphics'], name) or (undecodable_packs(src['oodle_packs'], name, mac_oodle or serial or (game / 'oodle_cache/complete').is_file()) if sv else None)
+        if why: raise BuildError(why)   # before the rewrite and the shaders, which take minutes and make an app that cannot start (or no app at all)
         bad = [] if derived or prov else bi.build_mismatch(game, pkg_ver, g)
         if bad:   # files of another build under a registered version's tag: packed like any other version
             derived = f'not the builds game profile {g.id} registers: {"; ".join(bad)}'; sv = [pkg_ver]
@@ -1337,6 +1521,9 @@ def main(argv):
         if sv and bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['ue_decode'][0]:   # Unreal's Oodle-compressed shaders (ue_decode)
             with phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Unreal shaders') if serial else contextlib.nullcontext():
                 ue_decode(sdirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game)
+        if sv and src['oodle_packs'][0] and not mac_oodle:   # the archives' Oodle streams, decoded on the phone before the split
+            env['DM_OODLE_CACHE'] = str(oodle_decode([bi.rfs.source(sdirs[v]) for v in sv], [sdirs[v] / 'ExeFS/main' for v in sv], dlc_roms, game, pkg_ver, nsp_dir, patched,
+                                                     work, logs, env, g, serial, sdk))
         def derive_shader_tables(reason):   # build_ipa_from_nsp.py main's: the registered profile with the split's shader tables, everything else as registered
             assert g is not None   # main stopped earlier without a profile; a nested function keeps no narrowing
             pdir = work / 'profile'
@@ -1346,7 +1533,7 @@ def main(argv):
             dg = gamemod.load(g.id)
             say(f'{reason}: using a shader-only derived profile at {dg.dir}; registered module fixes are preserved')
             return dg
-        spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables, derived)
+        spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables, derived, (lambda: mac_oodle) if mac_oodle else None)
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         if not a.game_apk: library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                             'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
