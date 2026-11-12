@@ -124,6 +124,14 @@
   - Only a registered profile that isn't derived asks for it.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): the split of its named files took 10.9 s instead of 128 s, with the same package, shader map, facts and pipeline pairs, and 28,176 of its 28,178 variation pairs. [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0, with the shader map of its derived profile (the profile registers only its base version, v0, so its builds here still split every file): 6.5 s instead of 144 s, every output the same, its pairs included.
 
+### A failed Android shader translation leaves tens of GB in the system's temp folder
+
+- **Symptom:** after an Android build stops in or after the shader translation (`spv_build.log` ends in a traceback), the drive with the system's temp folder has lost tens of GB, which deleting `<id>_build` doesn't give back. On Windows that's C:, whatever drive the game is on: each failed run left a `%TEMP%\spv_<random>` folder holding a `<key>.bin` per shader, `job_*.json` files and an `out` folder of the translator's `.spv` and `.res.json` files.
+- **Cause:** `dm/android/tools/spv_build.py` made its working folder with `tempfile.mkdtemp`, in the system's temp folder, not in the build's `WORK` (`<id>_build/tmp`), and removed it only at the end of a run that finished. A post-pass that stopped (`check=True`), an integer-input pass that raised or a full disk left the whole folder. For Pokémon Pokopia's 131,426 shaders that is the code areas, about 4 GB, plus the translator's output, about the size of the translated shaders.
+- **Fix:** the folder is made under `WORK` when the build sets it (`work_dir`), on the game's drive beside its other files, and `main` removes it in a `finally`, however the run ends. A `spv_*` folder already under `WORK` at the start is one a killed run left (a closed window runs no `finally`), and goes first. Run by hand without `WORK`, the folder is still the system's.
+- **Check:** `dm/tools/tests/test_spv_build.py` runs `spv_build.py` over synthetic pixel shader records with a stand-in translator and the real post-pass: the folder is under `WORK` and gone after a run that finished, a post-pass that stopped, and a full disk while the code areas are written (`OSError` with `ENOSPC`); a folder a killed run left is removed by the next run.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) on Windows 11 ([droidplay-core#307](https://github.com/enjoyerofslop/droidplay-core/issues/307)): three runs, each starting with about 70 GB free, filled the SSD during the translation. Not rebuilt here (no game files).
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

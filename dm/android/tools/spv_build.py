@@ -9,6 +9,8 @@
 # shaders are translated as compute with their stage memory in shared memory, as dmsh_build.py job_for does, and spv_android.py makes them Vulkan task and mesh modules
 # (spv_mesh.py; the replay draws them on VK_EXT_mesh_shader, gfx_vk_mesh.inc).
 # Vertex shaders in two parts (VertexA + VertexB, Catherine: Full Body's GLSLC) are merged into one program first, as dmsh_build.py vertex_ab does.
+# The code areas, the job lists and the translator's output go in a temporary folder under WORK (build_android_from_nsp.py sets it to <id>_build/tmp), which the run
+# removes however it ends: for a big game it holds tens of GB, so it stays on the game's drive, beside its other files, and a failed run leaves nothing behind.
 # Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N]
 import spv_android as sa   # beside this file
 import argparse, concurrent.futures as cf, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile
@@ -147,7 +149,22 @@ def int_input_jobs(keys, jobs, tout, j):
     if ex: ex.shutdown()
     return again
 
+def work_dir():
+    """Where the run's temporary folder goes: WORK, which build_android_from_nsp.py sets to <id>_build/tmp, else the system's temp folder (a run by hand). On Windows
+    that one is on C: whatever drive the game is on, and out of sight: droidplay-core#307's three failed Pokémon Pokopia runs each left tens of GB in %TEMP%.
+    Under WORK, a spv_* folder is one that a killed run left (a closed window runs no finally), so it is removed first"""
+    d = os.environ.get('WORK')
+    if not d: return None
+    os.makedirs(d, exist_ok=True)
+    for old in Path(d).glob('spv_*'): shutil.rmtree(old, ignore_errors=True)
+    return d
+
 def main():
+    w = tempfile.mkdtemp(prefix='spv_', dir=work_dir())
+    try: translate(w)
+    finally: shutil.rmtree(w, ignore_errors=True)   # the code areas and the translator's output: as large as the shaders made, whether the run finished or not
+
+def translate(w):
     ap = argparse.ArgumentParser(description='translate a shader_split package for the Android Vulkan replay')
     ap.add_argument('package'); ap.add_argument('out'); ap.add_argument('--xlate', required=True); ap.add_argument('--facts'); ap.add_argument('-j', type=int, default=os.cpu_count() or 4)
     a = ap.parse_args()
@@ -156,7 +173,6 @@ def main():
     if a.facts and os.path.exists(a.facts):
         for ln in open(a.facts, encoding='utf-8'):
             if ln.strip() and not ln.startswith('#'): k, v = ln.rstrip('\n').split('\t', 1); facts[k] = json.loads(v)
-    w = tempfile.mkdtemp(prefix='spv_')
     jobs, skipped, have, tfs, upg = {}, {}, 0, {}, 0
     for f in sorted(Path(a.package).glob('*.bin')):
         stage = f.name[:2]
@@ -210,7 +226,6 @@ def main():
     for k, why in sorted(skipped.items()): print(f'[RED] {k}: {why}')
     for k, why in sorted(failed.items()): print(f'[RED] {k}: {why}')
     print(f'spv_build: {len(done)} translated, {have} already there ({upg} given their constant buffer extents), {len(failed)} failed, {len(skipped)} skipped, {sum(1 for k in jobs if jobs[k].get("no_facts"))} without facts')
-    shutil.rmtree(w, ignore_errors=True)
 
 if __name__ == '__main__':
     main()
