@@ -916,6 +916,18 @@ TAR_FILES = 200   # a folder with more files than this goes over as one tar arch
 MANIFEST = '.nxnative_manifest'   # in a folder copied as a tar: each file's size and modification time, for the next copy to send only what changed
 
 
+def local_room(f, need, what):   # room on this computer for a file of need bytes the copy writes at f (what it holds now counts, as it is overwritten), or a plain stop
+    free = free_on(f.parent)
+    if free is None: return
+    have = f.stat().st_size if f.is_file() else 0
+    if free + have >= need + LOCAL_SPARE: return
+    raise BuildError(f'this computer has {size_text(free)} free on {drive_of(f)}: {what} needs {size_text(need)} there for the copy to the phone ({f}), plus '
+                     f'{size_text(LOCAL_SPARE)} left free. Free up {size_text(need + LOCAL_SPARE - free - have)} on that drive, then install again')
+
+
+LOCAL_SPARE = 64 << 20   # left free on this computer besides a copy's piece
+
+
 def tar_pieces(local, rels, most):   # rels (sorted) → lists of them of about most bytes each, in order; a larger file alone
     out, cur, n = [], [], 0
     for r in rels:
@@ -948,11 +960,13 @@ def push_tar(serial, local, parent, name, files, log, sync):
         adb(serial, 'push', man, f'{dst}/{MANIFEST}')
     for i, piece in enumerate(pieces, 1):
         bi.PROG.set(done=done, total=total, unit='B', note='packing' + (f' archive {i} of {len(pieces)}' if len(pieces) > 1 else ''))
-        with tarfile.open(tar, 'w', format=tarfile.USTAR_FORMAT) as t:
-            for r in piece:
-                ti = t.gettarinfo(local / r, arcname=r); ti.mode = 0o666; ti.uid = ti.gid = 0; ti.uname = ti.gname = ''
-                with open(local / r, 'rb') as fh: t.addfile(ti, fh)
-        try:
+        size = sum(-(-(local / r).stat().st_size // 512) * 512 + 512 for r in piece) + 1024   # the archive: each file in 512-byte blocks after its header, then two closing
+        local_room(tar, -(-size // 10240) * 10240, f'{name}\'s archive')                      # blocks, in tarfile's 10 KiB records
+        try:   # packing in it: an archive cut short by a full disk is removed too
+            with tarfile.open(tar, 'w', format=tarfile.USTAR_FORMAT) as t:
+                for r in piece:
+                    ti = t.gettarinfo(local / r, arcname=r); ti.mode = 0o666; ti.uid = ti.gid = 0; ti.uname = ti.gname = ''
+                    with open(local / r, 'rb') as fh: t.addfile(ti, fh)
             with counting('sending' + (f' archive {i} of {len(pieces)}' if len(pieces) > 1 else ''), total, 'B',
                           lambda base=done: (lambda n: None if n is None else base + n)(remote_size(serial, remote))):
                 adb(serial, 'push', tar, remote, log=log)
@@ -1003,15 +1017,17 @@ def push_resumable(serial, local, remote, log):
         folder, file = remote.rsplit('/', 1)
         need_room(serial, folder, size - have + min(CHUNK, size - have), f'{file} ({size_text(size - have)} left to send)')
     piece, tmp = log.with_suffix('.piece'), remote + '.piece'
-    with counting('sending', size, 'B', lambda: (lambda a, b: None if a is None else a + (b or 0))(remote_size(serial, part), remote_size(serial, tmp))):
-        with open(local, 'rb') as f:
-            f.seek(have)
-            while have < size:
-                data = f.read(min(CHUNK, size - have)); piece.write_bytes(data)
-                adb(serial, 'push', piece, tmp, log=log)
-                adb(serial, 'shell', f'cat {sh_quote(tmp)} >> {sh_quote(part)} && rm {sh_quote(tmp)}')
-                have += len(data); moved()
-    piece.unlink(missing_ok=True)
+    if have < size: local_room(piece, min(CHUNK, size - have), f'{remote.rsplit("/", 1)[1]}\'s piece')   # Pokopia's full disk was found only at piece.write_bytes (#307)
+    try:   # the piece goes whatever stops the copy: a full disk, a lost phone (survives_drops takes it again), an adb error
+        with counting('sending', size, 'B', lambda: (lambda a, b: None if a is None else a + (b or 0))(remote_size(serial, part), remote_size(serial, tmp))):
+            with open(local, 'rb') as f:
+                f.seek(have)
+                while have < size:
+                    data = f.read(min(CHUNK, size - have)); piece.write_bytes(data)
+                    adb(serial, 'push', piece, tmp, log=log)
+                    adb(serial, 'shell', f'cat {sh_quote(tmp)} >> {sh_quote(part)} && rm {sh_quote(tmp)}')
+                    have += len(data); moved()
+    finally: piece.unlink(missing_ok=True)
     if remote_size(serial, part) != size: raise BuildError(f'{part} is not {size:,} bytes after the copy: run the install again')
     adb(serial, 'shell', f'mv -f {sh_quote(part)} {sh_quote(remote)}')
 

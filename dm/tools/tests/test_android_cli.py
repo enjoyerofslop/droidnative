@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 from typing import Any
 import unittest
 from unittest import mock
@@ -849,6 +850,47 @@ class Phone(Base):
         self.assertEqual(len(files[f'{dst}/{ba.MANIFEST}'].decode().splitlines()), ba.TAR_FILES + 10)
         self.assertFalse(any(k.endswith('.tar') for k in files))   # no archive left on the phone
         self.assertTrue(any('archives' in m for m in self.said), self.said)
+
+    def test_a_large_copys_piece_goes_whatever_stops_it(self):   # droidplay-core#307: Pokopia's full disk stopped the copy at piece.write_bytes, and the piece was left
+        big = self.tmp / 'RomFS.img'; big.write_bytes(bytes(range(256)) * 9000); piece = self.tmp / 'logs' / 'p.piece'
+        files: dict[str, bytes] = {}; pushed: list = []
+        real = Path.write_bytes
+        def full(p, data):   # the second piece finds the disk full partway through its write
+            if p == piece and pushed: real(p, data[:1000]); raise OSError(28, 'No space left on device')
+            return real(p, data)
+        with mock.patch.object(ba, 'adb', self.phone_fs(files, pushed)), mock.patch.object(ba, 'CHUNK', 1 << 20), mock.patch.object(Path, 'write_bytes', full):
+            with self.assertRaises(OSError): ba.push_resumable('S', big, '/r/RomFS.img', self.tmp / 'logs' / 'p.log')
+        self.assertFalse(piece.exists())
+        self.assertEqual(len(files['/r/RomFS.img.partial']), 1 << 20)   # the next install goes on from the piece the phone has
+        def lost(c):   # an adb error that isn't a drop: the copy stops there
+            if c[0] == 'push': raise ba.BuildError('adb push failed (exit status 1): no output')
+            return False
+        with mock.patch.object(ba, 'adb', self.phone_fs(files, pushed, lost)), mock.patch.object(ba, 'CHUNK', 1 << 20):
+            with self.assertRaises(ba.BuildError): ba.push_resumable('S', big, '/r/RomFS.img', self.tmp / 'logs' / 'p.log')
+        self.assertFalse(piece.exists())
+
+    def test_a_copy_without_room_for_its_piece_on_this_computer_stops_first(self):
+        big = self.tmp / 'RomFS.img'; big.write_bytes(bytes(range(256)) * 9000)
+        files: dict[str, bytes] = {}; pushed: list = []
+        usage = SimpleNamespace(total=1 << 40, used=1 << 40, free=(1 << 20) + ba.LOCAL_SPARE - 1)   # a byte short of a 1 MiB piece and the spare
+        with mock.patch.object(ba, 'adb', self.phone_fs(files, pushed)), mock.patch.object(ba, 'CHUNK', 1 << 20), mock.patch.object(ba.shutil, 'disk_usage', return_value=usage):
+            with self.assertRaisesRegex(ba.BuildError, r"this computer has 68 MB free on .+: RomFS\.img's piece needs 1 MB there for the copy to the phone \(.+p\.piece\), plus 67 MB "
+                                        r'left free\. Free up 0 MB on that drive, then install again'):
+                ba.push_resumable('S', big, '/r/RomFS.img', self.tmp / 'logs' / 'p.log')
+        self.assertEqual(pushed, []); self.assertFalse((self.tmp / 'logs' / 'p.piece').exists())
+
+    def test_a_folders_archive_goes_whatever_stops_its_packing(self):   # the archive cut short by a full disk while it was packed, then no room for the next
+        spv = self.tmp / 'spv'; spv.mkdir()
+        for i in range(ba.TAR_FILES + 1): (spv / f'{i:04}.spv').write_bytes(b'x' * 100)
+        tar = self.tmp / 'logs' / 'p.tar'
+        def full(self, tarinfo, fileobj=None): raise OSError(28, 'No space left on device')
+        with mock.patch.object(ba.tarfile.TarFile, 'addfile', full), self.assertRaises(OSError):
+            ba.push_dir('S', spv, f'{ba.REMOTE}/games/{GID}', 'spv', self.tmp / 'logs' / 'p.log', sync=True)
+        self.assertFalse(tar.exists())
+        usage = SimpleNamespace(total=1 << 40, used=1 << 40, free=ba.LOCAL_SPARE)
+        with mock.patch.object(ba.shutil, 'disk_usage', return_value=usage), self.assertRaisesRegex(ba.BuildError, r"spv's archive needs 0 MB there for the copy to the phone"):
+            ba.push_dir('S', spv, f'{ba.REMOTE}/games/{GID}', 'spv', self.tmp / 'logs' / 'p.log', sync=True)
+        self.assertFalse(tar.exists()); self.assertFalse(any(c[0] == 'push' and c[-1].endswith('.tar') for c in self.cmds), self.cmds)
 
     def test_a_large_dlc_image_goes_on_from_what_the_phone_holds(self):   # issue #169's Booster Course Pass is gigabytes
         aoc = self.tmp / 'aoc'; aoc.mkdir(); (aoc / '1.img').write_bytes(bytes(range(256)) * 9000); (aoc / '2.img').write_bytes(b'small')
