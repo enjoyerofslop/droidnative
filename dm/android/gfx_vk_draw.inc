@@ -469,6 +469,20 @@ static size_t spv_fit_tgs(const uint32_t *code, size_t nw, const char *what, uin
     static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("[vk] the GPU takes %lld bytes of shared memory a compute shader: shaders that declare more take it from a storage buffer, a region a workgroup (spv_tgspill). First: %s, %u bytes", tgs_limit(), what, b);
     *out = o; return k;
 }
+// The vertex shader with its outputs started as (0,0,0,1) (spv_vsinit.h), in *out (to free); 0 when it is no vertex shader or has no output to start.
+// On every GPU: an unwritten component is undefined in Vulkan and reads 0 on the Adreno 840 and the Mali-G715, where the hardware gives (0,0,0,1).
+// DM_SPV_VSINIT=0 (env.txt): modules as translated
+static size_t spv_fit_vsinit(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_VSINIT"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_VSINIT=0: vertex shader outputs are not started as (0,0,0,1)"); }
+    *out = NULL;
+    if (!on || nw < 5 || !spv_vsinit_wanted(code, nw)) return 0;
+    size_t cap = nw + 15 + 3 * SPV_VSINIT_MAX; uint8_t *s = malloc(2 * (size_t)code[3]); uint32_t *o = malloc(cap * 4);
+    size_t k = s && o ? spv_vsinit(code, nw, s, o, cap) : 0; free(s);
+    if (!k) { free(o); return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1)) LOG("[vk] vertex shader outputs start as (0,0,0,1), as on the hardware, where Vulkan leaves an unwritten component undefined (DM_SPV_VSINIT=0: as translated). First: %s", what);
+    *out = o; return k;
+}
 static size_t spv_fit_layer(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LAYER"); on = !(e && *e == '0'); }
     *out = NULL;

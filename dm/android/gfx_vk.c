@@ -29,6 +29,7 @@
 #include "spv_alpha.h"
 #include "spv_limits.h"
 #include "spv_layer.h"   // layer and viewport output made ordinary outputs on a GPU that has none (gfx_vk_draw.inc spv_fit_layer)
+#include "spv_vsinit.h"   // vertex shader outputs start as (0,0,0,1), as on the hardware (gfx_vk_draw.inc spv_fit_vsinit)
 #include "pk_guard.h"   // the start-up list's marker and skip list (gfx_vk_draw.inc pk_guard)
 #include "spv_pool.h"
 #include "spv_wide.h"
