@@ -2198,7 +2198,14 @@ def oodle(comp, n):
 
 def oodle_supposed(comp, n):
     """A stream a blind scan only supposes (uepak.shader_map_entries): None when the decoder refuses it, or main has no decoder to refuse it (hle_oodle.c lzd_find: OCTOPATH TRAVELER's Unreal 4.18 links no
-    Oodle). A host that is gone for any other reason is red, as it says nothing about the stream"""
+    Oodle). A host that is gone for any other reason is red, as it says nothing about the stream.
+    With no decoder here at all (no DM_OODLE_HOST, no DM_OODLE_CACHE: the Android build gives one only to games with Oodle archives or Unreal shader code archives), nothing can prove the
+    table, so it is taken as no table and the package's other shaders are read. Red there, it cost the whole package: OCTOPATH TRAVELER II 1.0.0's Android build left out six packages
+    whose export lists only look like tables, which the Mac host's decoder refuses. A real table's shaders are left out then, as they were with the rest of its package; the log names
+    each stream left unchecked"""
+    if not os.environ.get('DM_OODLE_CACHE') and not (os.environ.get('DM_OODLE_HOST') and os.environ.get('DM_OODLE_MODULES')):
+        print(f'shader_split: a supposed {len(comp)} → {n} byte Oodle stream left unchecked (no decoder here): taken as no shader table', file=sys.stderr)
+        return None
     s, gone = oodle_ask(comp, n)
     if gone and 'no streaming decoder to find' not in oodle_said(): oodle_red(comp, n)
     return s
