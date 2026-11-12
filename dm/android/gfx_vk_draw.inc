@@ -2947,8 +2947,9 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
 static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o, int *res) {
     for (int k = 0; k < c->ncop; k++) if (c->cop[k].dst < hi && lo < c->cop[k].dst + c->cop[k].n) { *res = 0; return 1; }
     for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, hi)) continue;
-        *res = w->fwd && (w->st < 0 || w->inpl) && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes;   // (in place: read where it was written)
-        if (*res) { *b = w->inpl ? w->ipb : c->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); }
+        size_t ext = w->rows > 1 ? w->rows * w->row_bytes : w->row_bytes; int lin = w->rows <= 1 || w->dst_pitch == w->src_pitch;   // contiguous in the copy and in guest memory (a texture-to-buffer copy's slice, t2b_fwd_on)
+        *res = w->fwd && lin && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + ext;   // (in place: read where it was written)
+        if (*res) { *b = w->inpl ? w->ipb : w->st >= SP_ST ? c->sb[w->st - SP_ST].b : w->st >= 0 ? c->stg[w->st].b : c->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); }
         else if (w->vd && w->rows == 1) {   // a discarded draw's write that the read is not inside: the two as one home range (rd_home.h)
             uintptr_t wl = (uintptr_t)w->dst, wh = wl + w->row_bytes, hl = lo < wl ? lo : wl, hh = hi > wh ? hi : wh;
             if (rd_home_learn(&g_rd_homes, hl, hh, RD_HOME_MAX) && g_rd_learned++ < 8)

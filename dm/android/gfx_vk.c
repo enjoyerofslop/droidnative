@@ -305,7 +305,7 @@ typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize n, used;
 static _Atomic uint64_t g_stg_allocs, g_stg_frees; static uint32_t g_stg_mt = UINT32_MAX;   // staging vkAllocateMemory / vkFreeMemory calls (DM_VK_STG_STAT); the memory type the last one took
 static int stg_new(stg_t *s, VkDeviceSize n) {
     memset(s, 0, sizeof *s); if (!n) n = 16;
-    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VkBufferCreateInfo bc = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};   // storage: a texture-to-buffer copy's slice read by a later dispatch on the GPU (t2b_fwd_on)
     if (vkCreateBuffer(g_vk.dev, &bc, NULL, &s->b) != VK_SUCCESS) return 0;
     VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g_vk.dev, s->b, &mr);
     uint32_t mt = vkb_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
@@ -734,6 +734,11 @@ static void wb_view(void) { view_(0); }
 static int vk_safe(void) { static int v = -1; if (v < 0) v = getenv("DM_VK_SAFE") != NULL; return v; }
 static uint64_t g_view_cur, g_view_fly, g_view_free;   // draws that waited for the current chunk / for chunks in flight / that needed no wait
 static int wb_hits(const wb_t *w, uintptr_t lo, uintptr_t hi) { uintptr_t a = (uintptr_t)w->dst, e = a + w->dst_pitch * (w->rows ? w->rows - 1 : 0) + w->row_bytes; return a < hi && lo < e; }
+// A texture-to-buffer copy's write-back is forwardable (fwd): a later shader that reads its destination binds the staging slice the GPU copied into, at its offset, instead of the
+// replay submitting the chunk and waiting for the copy to land (ranges_view_). Ocarina of Time copies a texture into a buffer and reads it with a compute shader every
+// frame (24f2e2c92ca45a52, 23,360 bytes): on a Galaxy Z Fold 8 that drain took the replay thread 13 ms a frame in Kokiri Forest, with the GPU idle meanwhile and its governor
+// holding the clock low. The slice stays as the copy left it until the reading chunk completes (fwd_find holds the chunk; stg_release). DM_VK_T2B_FWD=0 (env.txt): as before
+static int t2b_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_T2B_FWD"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_T2B_FWD=0: a shader reading a texture-to-buffer copy's destination waits for the copy to land"); } return v; }
 static int chunk_hits(const chunk *c, uintptr_t lo, uintptr_t hi, int write) {   // write: the CPU writes the range (a queued copy's source counts too: it is read when the copy runs)
     if (c->gm_st && gm_store_wait()) { g_gm_store_hits++; return 1; }   // raw stores ran in it: where they landed is known only from its write log, read when it completes
     for (int i = 0; i < c->nwb; i++) if (wb_hits(&c->wb[i], lo, hi)) return 1;
@@ -1036,9 +1041,8 @@ static void chunk_done(chunk *c) {
             o->q1 = nvn_timestamp_from_ns(back < base ? base - back : base); }
         c->ntq = 0; }
     gap_ev(21, c->seq, 4); for (int i = 0; i < c->npost; i++) post_apply(&c->post[i]);
-    gap_ev(21, c->seq, 5); for (int i = 0; i < c->nstg; i++) stg_free(&c->stg[i]);
+    gap_ev(21, c->seq, 5);
     if (c->ngml) gm_chunk_done(c);   // its raw stores' write logs, before its dead objects (a table they index may be one)
-    sp_done(c);   // after the write-backs, which read its blocks
     for (int i = 0; i < c->ndead; i++) {
         uint64_t h = c->dead[i].h;
         switch (c->dead[i].kind) { case 1: vkDestroyImageView(g_vk.dev, (VkImageView)h, NULL); break; case 2: vkDestroyFramebuffer(g_vk.dev, (VkFramebuffer)h, NULL); break;
@@ -1047,10 +1051,13 @@ static void chunk_done(chunk *c) {
     }
     gap_ev(21, c->seq, 6); draw_chunk_reset(c);
     gap_ev(21, c->seq, 7); vkResetCommandPool(g_vk.dev, c->pool, 0); gap_ev(21, c->seq, 8); vkResetFences(g_vk.dev, 1, &c->fence);
-    c->nstg = c->npost = c->ndead = 0; gap_ev3(21, c->seq, 9, (uint64_t)c->nq | (uint64_t)c->ntq << 16 | (uint64_t)c->nwb << 32 | (uint64_t)c->npost << 48);
+    c->npost = c->ndead = 0; gap_ev3(21, c->seq, 9, (uint64_t)c->nq | (uint64_t)c->ntq << 16 | (uint64_t)c->nwb << 32 | (uint64_t)c->npost << 48);
 }
 static _Atomic uint64_t g_fence, g_done, g_presents;
 static pthread_mutex_t g_fmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_fcv = PTHREAD_COND_INITIALIZER;
+// The chunk's staging (its own buffers and its pool blocks), given back once nothing reads it: after its write-backs landed (chunk_done), and once it is no longer held by a
+// later chunk that reads a forwarded slice of it on the GPU (hold; under g_cmu, before busy = 0, so the chunk is not recorded into meanwhile)
+static void stg_release(chunk *c) { for (int i = 0; i < c->nstg; i++) stg_free(&c->stg[i]); c->nstg = 0; sp_done(c); }
 static void *chunk_thread(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-done");
     uint64_t last = 0;   // the GPU time the previous chunk ended (g_fgpu: each chunk counts its span after it)
@@ -1086,8 +1093,8 @@ static void *chunk_thread(void *arg) {
         if (had_fwd) atomic_fetch_sub(&g_inflight_fwd, 1);   // after its write-backs landed (chunk_done), as g_inflight_wb
         g_seq_done = c->seq;
         if (c->gtag) { fgpu_done(c->gf, busy); c->gtag = 0; }
-        if (c->hold > c->seq) c->held = 1; else { c->busy = 0; c->hold = 0; }
-        for (int i = 0; i < g_nchunk; i++) if (g_ch[i].held && g_ch[i].hold <= g_seq_done) { g_ch[i].held = 0; g_ch[i].hold = 0; g_ch[i].busy = 0; }
+        if (c->hold > c->seq) c->held = 1; else { stg_release(c); c->busy = 0; c->hold = 0; }
+        for (int i = 0; i < g_nchunk; i++) if (g_ch[i].held && g_ch[i].hold <= g_seq_done) { stg_release(&g_ch[i]); g_ch[i].held = 0; g_ch[i].hold = 0; g_ch[i].busy = 0; }
         pthread_cond_broadcast(&g_ccv);
         pthread_mutex_unlock(&g_cmu);
         gap_ev(GAP_D_DONE, c->seq, c->nvn_fence);
@@ -1954,7 +1961,8 @@ static void copy_t2b(const p_copy_b2t *c) {
         VkBufferImageCopy r = {.bufferOffset = s.off + (size_t)z * rb * rows, .imageSubresource = {v->aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : v->aspect, level, is3d ? 0 : layer0 + c->r.zoffset + z, 1},
                                .imageOffset = {c->r.xoffset, c->r.yoffset, is3d ? c->r.zoffset + z : 0}, .imageExtent = {(uint32_t)c->r.width, (uint32_t)c->r.height, 1}};
         vkCmdCopyImageToBuffer(cbuf, v->img, VK_IMAGE_LAYOUT_GENERAL, s.b, 1, &r);
-        wb_t *w = wb_add(); if (w) *w = (wb_t){s.st, (size_t)s.off + (size_t)z * rb * rows, rb, rows, rb, row, (uint8_t *)c->src + (size_t)z * img, NULL};
+        wb_t *w = wb_add(); if (w) { *w = (wb_t){s.st, (size_t)s.off + (size_t)z * rb * rows, rb, rows, rb, row, (uint8_t *)c->src + (size_t)z * img, NULL};
+            if (t2b_fwd_on() && (rows == 1 || row == rb)) { w->fwd = 1; C->nfwd++; } }   // contiguous in the slice and in guest memory: readable on the GPU where it lies (fwd_hit)
     }
     cb_barrier();
 }
