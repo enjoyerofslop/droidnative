@@ -1377,23 +1377,32 @@ def provisional_profile(gamemod, nsp_dir, app):   # the provisional profile an e
     return gamemod.load(f'{app:016X}')
 
 
-def scan(src, keys, env, nsz=True):
+def title_id(text):   # --title-id / TITLE_ID → the title ID as a number, or None when empty; anything else than 16 hex digits is a BuildError
+    t = (text or '').strip()
+    if not t: return None
+    if not re.fullmatch(r'0[0-9A-Fa-f]{15}', t): raise BuildError(f'--title-id / TITLE_ID: {t!r} is no title ID (16 hex digits, e.g. 0100E870163CA000)')
+    return int(t, 16)
+
+
+def scan(src, keys, env, nsz=True, want=None):
     """The game in src as build_ipa_from_nsp.py's main finds it: (folder, title ID, fam, kind). src is a folder of NSPs / XCIs (kind None), a dump folder ('folder')
-    or a NUP container ('nup': a .nup file, or the one .nup in the folder); the folder is where <title ID>_build goes. A NUP and a dump are not encrypted: no keys"""
+    or a NUP container ('nup': a .nup file, or the one .nup in the folder); the folder is where <title ID>_build goes. A NUP and a dump are not encrypted: no keys.
+    want: the game to pack when the folder holds several (--title-id / TITLE_ID), as build_ipa_from_nsp.py's: a cartridge with more than one game (Batman: Arkham
+    Trilogy) stopped with the scan's "more than one game" error, which names an option this script didn't have"""
     nup = bi.nup_file(src)
     folder = src.parent if src.is_file() else src
     if nup:
-        app, fam = bi.scan_nup(nup)
+        app, fam = bi.scan_nup(nup, want)
         say(f'a NUP: {nup.name}, {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
         if fam['base'] is None: say(bi.pack_nup.NO_BASE)
         return folder, app, fam, 'nup'
     if bi.dump_folder(folder):
-        app, fam = bi.scan_dump(folder)
+        app, fam = bi.scan_dump(folder, want)
         say(f'a dump folder: {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
         return folder, app, fam, 'folder'
     if not keys: raise BuildError('give -k <prod.keys>: the game is in NSP / XCI files, which are encrypted')
     with bi.package_reader(REPO, keys, env) as packages:
-        app, fam = bi.scan_nsps(folder, packages.contents)
+        app, fam = bi.scan_nsps(folder, packages.contents, want)
         packages.check_keys(fam)
     if nsz: fam = bi.decompress_nsz(folder, app, fam, keys, env)
     return folder, app, fam, None
@@ -1405,11 +1414,11 @@ def game_files(fam, kind):   # what the game was read from, for the desktop app:
     return [{'name': p.name, 'bytes': p.stat().st_size} for p in [fam['base'], *[p for _, p in fam['updates']], *[p for _, _, p in fam['dlc']]] if p]
 
 
-def info(src, keys=None):
+def info(src, keys=None, want=None):
     sys.path.insert(0, str(REPO / 'dm/games')); import game as gamemod
     sys.path.insert(0, str(REPO / 'dm/tools')); import nacp
     env = dict(os.environ); bi.configure_dotnet(env)
-    nsp_dir, app, fam, kind = scan(src, keys, env, nsz=False)
+    nsp_dir, app, fam, kind = scan(src, keys, env, nsz=False, want=want)
     tid = f'{app:016X}'; g = gamemod.by_title(app); prov = False
     if g is None: g = provisional_profile(gamemod, nsp_dir, app); prov = g is not None   # an experimental build's: its art, versions and host show like a profiled game's
     out = {'title_id': tid, 'folder': str(nsp_dir), 'profile': bool(g), 'provisional': prov, 'name': g.get('name', '') if g else '', 'table': games_table().get(tid),
@@ -1448,6 +1457,8 @@ def main(argv):
     ap.add_argument('--apk-only', action='store_true', help='pack the app with every game host built on this computer and install it')
     ap.add_argument('--migrate', action='store_true', help="move a one-game install's files/game to files/games/<--title> on the phone")
     ap.add_argument('--title', help='the title ID for --migrate, --import-save and --restore-backup')
+    ap.add_argument('--title-id', default=os.environ.get('TITLE_ID', ''), help='the game to pack when the folder holds several (a cartridge with more than one game): '
+                    'its title ID, 16 hex digits (default: the TITLE_ID environment variable)')
     ap.add_argument('--import-save', metavar='PATH', help="send a save folder or archive (an emulator's, a JKSV / EdiZon / Checkpoint backup, a PC port's) for --title to the phone, "
                     'where DroidPlay asks before swapping it in')
     ap.add_argument('--restore-backup', metavar='FOLDER', help="send a game's save (--title) or every game's from a backup Back up saves pulled to this computer, to put back on the phone")
@@ -1477,7 +1488,7 @@ def main(argv):
     if not (a.check or a.info) and os.environ.get('NXNATIVE_JOURNAL', '1') != '0': bi.PROG = Journaled(bi.PROG.mode, argv)
     if a.check or a.info:   # stdout carries the JSON alone: messages on the way (say) go to stderr
         if a.info and not a.nsp_dir: raise BuildError('--info needs the NSP folder')
-        with contextlib.redirect_stdout(sys.stderr): out = check(a.sdk) if a.check else info(Path(a.nsp_dir).expanduser().resolve(), Path(a.keys).expanduser().resolve() if a.keys else None)
+        with contextlib.redirect_stdout(sys.stderr): out = check(a.sdk) if a.check else info(Path(a.nsp_dir).expanduser().resolve(), Path(a.keys).expanduser().resolve() if a.keys else None, title_id(a.title_id))
         print(json.dumps(out, indent=1)); return
     if a.setup: setup(a.sdk, a.accept_android_licenses); return
     if a.apk_only or a.migrate or a.import_save or a.restore_backup:
@@ -1518,7 +1529,7 @@ def main(argv):
     sys.path.insert(0, str(REPO / 'dm/tools')); import nacp; bi.nacp = nacp
     sdk = sdk_dir(a.sdk)
     env = dict(os.environ); bi.configure_dotnet(env)
-    nsp_dir, app, fam, kind = scan(src, keys, env)
+    nsp_dir, app, fam, kind = scan(src, keys, env, want=title_id(a.title_id))
     g = gamemod.by_title(app)
     if g is None:   # no game profile: surveyed and packed from a provisional profile outside the repository, as build_ipa_from_nsp.py does (the game may not boot)
         pdir = nsp_dir / f'{app:016X}_build' / 'profile'
