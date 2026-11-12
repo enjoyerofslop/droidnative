@@ -50,13 +50,14 @@ First run on Android, 2026-11-11, on a Galaxy S25 Edge (SM8750, Adreno 830 with 
 
 - **The build:** a profile derived from 1.1.0's, though 1.0.0 is another Unity major (2022.3, not 6000.0). All three modules differ from 1.1.0's, so this was the riskiest split of the new games. It found 16,718 shaders (1.1.0 has 19,314), all translated to SPIR-V, none failed.
 - **What was played:** the title and its attract demo, L+R, slot 1, Modern Mode, one player, the opening movie, the treehouse prompt (X pressed about 30 times, 0.23 s apart, as on the Mac), then 1-1 Jungle Hijinxs: running, jumping, the pig's hints, and a heart lost to an enemy.
-- **The opening movie froze:** `GI.mp4` (119 s) stopped on one frame at about 87 s. The decoder's last output was at 68 s of video and 87 s of audio. The game went on presenting that frame at 60 fps. A skipped the movie, and everything after it worked. Seen once; not tried again.
+- **The opening movie froze:** `GI.mp4` (119 s) stopped on one frame at about 87 s. The decoder's last output was at 68 s of video and 87 s of audio. The game went on presenting that frame at 60 fps. A skipped the movie, and everything after it worked. It froze on the same frame on the Odin 2 (below), the decoder's last audio output again at 87.5 s, so it repeats on another phone and GPU.
 - **Save and Continue:** after a cold start, slot 1 shows "Game 1, 1-1 00%, Modern Mode", and loading it opens the island map at Jungle.
 - **Frame rate:** 60 fps (the game's own): every 30 s window 59.6–60.1, frame p50 16.7 ms, p95 about 19 ms; GPU about 6 ms in the menus and 10 ms in 1-1.
 - **Sound:** FMOD's stereo `AudioOut`, no underrun. The `DM_AUDIO_DUMP` has the movie and the level's music (RMS about 400–3,700). Not listened to by a person.
 - **Picture:** nothing wrong seen in the attract demo, the menus, the movie up to its freeze, the treehouse or 1-1. No `[RED]` line.
 - **Memory:** 2.51 GB PSS (0.67 GB graphics). Not killed.
 - **Not Playable yet:** it's a real-time platformer, so the stretch (1-1 to its end) needs a person with a controller.
+- **On an Ayn Odin 2 (SM8550, Adreno 740 with Qualcomm's driver 0x802a4000), with its built-in controller:** a new save through the menus, the movie (frozen as above, skipped with A), the treehouse and 1-1 at 60 fps (GPU about 2.6 ms), 1.89 GB PSS, no red line; 89 underruns in two reports during start-up, none in the level. The game app and its save stay installed there for a person to play.
 - **Not tried:** the other devices, and update 1.1.0 (the profile's build) on Android.
 
 ## Found on this game
