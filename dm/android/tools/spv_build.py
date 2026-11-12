@@ -14,7 +14,7 @@
 # A run that had shaders to translate and translated none of them stops (none_made): the build must not pack the game without them.
 # Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N]
 import spv_android as sa   # beside this file
-import argparse, concurrent.futures as cf, errno, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile
+import argparse, concurrent.futures as cf, errno, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile, threading
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -242,6 +242,21 @@ def work_dir():
     for old in Path(d).glob('spv_*'): shutil.rmtree(old, ignore_errors=True)
     return d
 
+PROGRESS_SECS = 10   # how often the first pass says how far it got: build_android_from_nsp.py shows the count, and a game with a very large shader set (Pokopia) translates for hours
+
+
+def translated(tout):   # the shaders the translator has finished so far in this run's output folder: each one's .spv, its reader variant aside (as `done` counts them)
+    try: return sum(1 for e in os.scandir(tout) if e.name.endswith('.spv') and not e.name.endswith('.reader.spv'))
+    except OSError: return 0
+
+
+def progress(tout, total, stop):   # 'progress: <done>/<total>' every PROGRESS_SECS while the first pass runs, when the count moved (droidplay-core#307: hours with nothing to show)
+    last = -1
+    while not stop.wait(PROGRESS_SECS):
+        n = translated(tout)
+        if n != last: print(f'progress: {n}/{total}', flush=True); last = n
+
+
 def main():
     w = tempfile.mkdtemp(prefix='spv_', dir=work_dir())
     try: translate(w)
@@ -291,8 +306,17 @@ def translate(w):
         jp = Path(w) / f'job_{abs(hash(ch[0]))}.json'; jp.write_text(json.dumps([jobs[k] for k in ch]), encoding='utf-8')
         return subprocess.run(xl + [str(jp), str(tout)], capture_output=True, text=True, errors='replace')
     failed, said, other = {}, set(), []
-    with cf.ThreadPoolExecutor(a.j) as ex:
-        for r in ex.map(run, [c for c in chunks if c]): take(r, failed, said, other)
+    # the shaders left to translate in this run (those an earlier run made are not counted), so a build that carries on after a stopped one starts from 0 of what is left
+    if jobs: print(f'progress: 0/{len(jobs)}', flush=True)
+    stop = threading.Event(); watch = threading.Thread(target=progress, args=(tout, len(jobs), stop), daemon=True)
+    if jobs: watch.start()
+    try:
+        with cf.ThreadPoolExecutor(a.j) as ex:
+            for r in ex.map(run, [c for c in chunks if c]): take(r, failed, said, other)
+    finally:
+        stop.set()
+        if watch.is_alive(): watch.join()
+    if jobs: print(f'progress: {translated(tout)}/{len(jobs)}', flush=True)
     stop_if_full(failed, tout, 'first pass')
     again = int_input_jobs(keys, jobs, tout, a.j)
     if again:

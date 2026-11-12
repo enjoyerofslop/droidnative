@@ -277,6 +277,8 @@ The translated shaders take about 12 to 14 times the package's size, and the tra
 
 Those are on top of the extracted game and the package. Yoshi and the Mysterious Book has over 100,000 shaders too (133,155), not measured.
 
+While they translate, the Builds page counts the shaders done out of those left to translate (`progress: <done>/<total>` in `spv_build.log`, every 10 seconds). A game with over 100,000 shaders can take hours on a home PC. A translation stopped part-way keeps nothing of that run (its outputs are in `tmp` until it ends), so letting it finish is quickest.
+
 - **The build checks first.** Before it translates, it works out what the shaders left to translate need, and stops when the drive can't hold it:
   `[RED] spv_build: not enough free space to translate … shaders`, with what the drive has and what it needs. Nothing has been translated then, and what the build
   did before (the extraction, the shader split) is kept.

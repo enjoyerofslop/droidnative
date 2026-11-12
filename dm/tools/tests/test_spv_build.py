@@ -18,6 +18,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -354,6 +356,35 @@ class PostPass(unittest.TestCase):   # spv_android.py post_one in this process
                           (FRAGMENT[:-4], f'cut short ({n - 4} bytes: it does not end in OpFunctionEnd)'),
                           (FRAGMENT[:32], 'cut short (32 bytes: an instruction runs past the end)')):   # the header, OpCapability, then OpMemoryModel's first word
             with self.subTest(why=why): self.assertEqual(sa.unreadable(data), why)
+
+
+class Progress(Harness):   # 'progress: <done>/<total>', which build_android_from_nsp.py shows as a count (droidplay-core#307: hours of translation with nothing to show)
+    def counts(self, text): return [ln for ln in text.splitlines() if ln.startswith('progress: ')]
+
+    def test_a_run_says_it_starts_and_ends_with_the_shaders_it_translates(self):
+        c = self.counts(self.build())
+        self.assertEqual(c[0], f'progress: 0/{self.N}'); self.assertEqual(c[-1], f'progress: {self.N}/{self.N}')
+
+    def test_only_the_shaders_left_to_translate_count(self):   # a build after a stopped one counts from 0 of what is left
+        for k in self.keys()[:2]: self.old_output(k, sa.ANDROID_CHAIN)
+        c = self.counts(self.build())
+        self.assertEqual(c[0], f'progress: 0/{self.N - 2}'); self.assertEqual(c[-1], f'progress: {self.N - 2}/{self.N - 2}')
+
+    def test_nothing_left_says_no_count(self):
+        for k in self.keys(): self.old_output(k, sa.ANDROID_CHAIN)
+        self.assertEqual(self.counts(self.build()), [])
+
+    def test_the_count_is_the_translators_finished_shaders(self):   # each one's .spv, its reader variant aside, as spv_build's `done` counts them
+        d = self.tmp / 'tout'; d.mkdir()
+        for n in ('a.spv', 'b.spv', 'b.reader.spv', 'a.res.json'): (d / n).write_bytes(b'')
+        self.assertEqual(sb.translated(d), 2); self.assertEqual(sb.translated(self.tmp / 'missing'), 0)
+
+    def test_the_watch_says_a_count_that_moved_once(self):
+        d = self.tmp / 'tout'; d.mkdir(); (d / 'a.spv').write_bytes(b'')
+        stop, buf = threading.Event(), io.StringIO()
+        with mock.patch.object(sb, 'PROGRESS_SECS', 0.01), contextlib.redirect_stdout(buf):
+            t = threading.Thread(target=sb.progress, args=(d, 4, stop)); t.start(); time.sleep(0.2); stop.set(); t.join()
+        self.assertEqual(self.counts(buf.getvalue()), ['progress: 1/4'])
 
 
 if __name__ == '__main__':
