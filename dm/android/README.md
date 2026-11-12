@@ -62,7 +62,8 @@ cream on ink, with a monochrome layer), which `tools/build_apk.py` links unless 
 A game's settings screen (the iOS launcher's counterpart) shows its icon and name and the settings the Android host reads: console mode (`DM_OPMODE`), game language (`DM_LANG`, the game's own languages), game timing
 (`DM_AUDIO_PACE`), game rumble and its strength (`DM_RUMBLE`, `DM_RUMBLE_GAIN`). Defaults come from the game's `defaults.txt`: the packing script's `--language`, and the switches a game's profile lists in `dm/games/<id>/android_defaults.txt` (KEY=VALUE per line), which the host takes after `launcher.txt` without overriding it or `env.txt`. The frame-rate counter
 (`DM_SHOW_FPS`, drawn by `Gamepad.java` from the frames presented) and the render scale (`DM_RENDER_SCALE`, offered when `main.fixups.tsv` marks a render-scale stub: Mario 1.2.1 has
-one, `dm/games/010015100B514000/patches.py`) are there too. Play writes the game's `launcher.txt` and starts `GameActivity`, which reads it after `env.txt` without overriding it; a key
+one, `dm/games/010015100B514000/patches.py`) are there too, and Keep the GPU clock up (`DM_VK_GPU_FLOOR=100`, `gfx_vk_floor.inc`: a KGSL power constraint on the Vulkan
+device's own contexts), offered for every game on a phone with `/dev/kgsl-3d0` (Qualcomm's kernel GPU driver, tested as `vk_driver.c` does before loading Turnip), off by default. Play writes the game's `launcher.txt` and starts `GameActivity`, which reads it after `env.txt` without overriding it; a key
 `env.txt` sets is shown greyed out. The choices are kept per game. Not yet on Android: touch feedback.
 
 Write watches (`DM_PROBE_WATCH`, `dm/host/probe.c`) work here too: `heap+<offset>` names a guest-heap address (the guest address space moves between runs on Android), the page is made
@@ -180,11 +181,12 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   (a write fault reaching the host's hook past ART, the save transaction's tree copy with xattrs and `renameat2(RENAME_EXCHANGE)`, an unmapped read).
 - In the app without a game, with switches in `env.txt`: `DM_PAD_TEST=1` sends made-up touches to the virtual gamepad (not to the screen) and checks every
   key, the D-pad, both sticks, two fingers and the game's touch screen (`gamepad check: 44 checks, 0 failed`); `DM_TEXT_TEST=2` opens the text box after the demo and
-  types and confirms "Zelda" itself (`DM_TEXT_TEST=1` waits for a person); `DM_RUMBLE_TEST=1` vibrates half a second (`dumpsys vibrator_manager` shows it).
+  types and confirms "Zelda" and an emoji itself, under a minimum of 2 characters (`text box check: … OK with 1 character disabled`, then `text "Zelda😀" (9 bytes)`; `DM_TEXT_TEST=1` waits for a person); `DM_RUMBLE_TEST=1` vibrates half a second (`dumpsys vibrator_manager` shows it).
 - `tests/t_audio`: the AAudio output at real time (a 440 Hz tone for two seconds: the frames rendered, the underruns), Stop and Start again.
-- `tests/t_media <h264> <aac>`: the movie decoders on clips ffmpeg makes (`ffmpeg -f lavfi -i color=c=0x2060c0:size=320x240:rate=30 -t 1 -c:v libx264 -profile:v high -bf 2
-  -pix_fmt yuv420p -x264-params aud=1 -f h264 blue.h264`; `ffmpeg -f lavfi -i sine=frequency=1000:sample_rate=48000 -t 1 -ac 2 -c:a aac -f adts tone.aac`): every picture
-  in NV12 and RGBA with its colour, the tone's length and pitch.
+- `tests/t_media <h264> <aac> [<h264 without B-frames>]`: the movie decoders on clips ffmpeg makes (`ffmpeg -f lavfi -i color=c=0x2060c0:size=320x240:rate=30 -t 1 -c:v libx264 -profile:v high -bf 2
+  -pix_fmt yuv420p -x264-params aud=1 -f h264 blue.h264`; `ffmpeg -f lavfi -i sine=frequency=1000:sample_rate=48000 -t 1 -ac 2 -c:a aac -f adts tone.aac`; the same picture
+  with `-profile:v main -bf 0` into `blue_p.h264`): every picture in NV12 and RGBA with its colour, the tone's length and pitch, and every picture of the clip without
+  B-frames before the end of stream, as it is and with its SPS's `bitstream_restriction` taken out (10 of 10 on the Odin 2 on 2026-11-12).
 - `-DDM_TESTS=ON`: `t_thread_leak`, `t_condvar`, `t_fs`, `t_fs_commit_list`, `t_svc_memory` (with and without the map limit), `t_nro`, `t_hid`,
   `t_preempt` (both modes) pass on the device. `t_nvn` passes 154 of 154 on `gfx_vk.c` (130 on `gfx_null.c`; two of its checks time the GPU right after a submit and can miss on a
   fast run); before asynchronous submissions three of them failed: they expect the GPU to be

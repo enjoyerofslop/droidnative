@@ -192,6 +192,20 @@
 - **Check:** `dm/tools/tests/test_spv_build.py` (`NoneTranslated`): a translator that prints dotnet's line and makes nothing, one that prints nothing, the same on a later run, and one that fails every shader of a new build with its reasons each stop the run with exit code 1 before any post-pass, their line last; a later run with only shaders the translator can't handle, a run that translated 1 of 5 (2 failed with reasons, 2 without) and a run with nothing to translate go on; `DiskFull`'s run with 3 of 5 failing still goes on. `test_android_shaders.py` (`NoneTranslated`): `build_shaders` running `spv_build.py` for real, with a stand-in in the dll's place that prints dotnet's line and exits 1, stops with `Shader translation failed, so the game is not packed`, no `.res.json` and no temporary folder; on `main` at `6d497be5` it returned the `spv` folder for packing.
 - **Found on:** a check of the [droidplay-core#307](https://github.com/enjoyerofslop/droidplay-core/issues/307) fixes on the Mac (`main` at `6d497be5`), with the dll moved aside: [Persona 3 Portable](../../dm/games/0100DCD01525A000/README.md)'s build read `0 translated, 0 already there, 30 failed` and went on to pack.
 
+### Android logs say `build: commit not recorded`
+
+- **Symptom:** Android only: every play log's start line reads `build: commit not recorded, shader chain …, profile …`, so a report doesn't say which DroidPlay Core release or commit built the game's host. In [droidplay-core#389](https://github.com/enjoyerofslop/droidplay-core/issues/389), each game's version had to be worked out from the phone's clock against the release times.
+- **Cause:** `main.c` takes the commit from the app's Info.plist (`DMCommit`, which `dm/mac/pack_app.py` and `build_ipa.sh` write). An Android app has no Info.plist, and nothing else gave the host its commit. The launcher's versionName names the release, but it is the version of whichever build packed the APK last: the APK also carries the hosts of games built earlier.
+- **Fix:** the commit and version are built into each host library. `dm/android/tools/build_stamp.py` writes them into `build_stamp.h` at every build (`build_stamp`, a target of `dm/android/CMakeLists.txt`), only when they change, so only `build_stamp.c` recompiles. `main.c` logs them on the same line on Android (`dm_build_commit`): `build: commit c6920f36abcd (v0.8.4), shader chain …`.
+  - **A checkout:** HEAD's 12-character hash, `+dirty` with uncommitted changes to tracked files (as `DMCommit` has it), then `git describe --tags`: `v0.8.4` on the tag, `v0.8.4-4-gc6920f36` after it.
+  - **A release's source archive or DroidPlay for Windows' staged tree:** these come from `git archive`, with no `.git`. The version is their `VERSION` file (`release-assets.yml`, `stage.ps1`), as the launcher's versionName is (`build_android_from_nsp.py` `core_version`). The commit is `dm/android/tools/build_commit`, a `$Format:%H$` placeholder that `git archive` fills in with the commit (`export-subst`, `dm/android/tools/.gitattributes`). GitHub's own archives of a tag or branch carry the commit too.
+  - **A copy without either:** `not recorded`, with the version when there is a `VERSION` file.
+- **Check:** `dm/tools/tests/test_build_stamp.py`. It covers a release's tree, a checkout on a tag, past it, with changes and with untracked files, a tree unpacked inside another checkout, `git archive` filling in this repository's HEAD, and a header left alone when nothing changed. Android host builds (the stamp is read from the library; no device run):
+  - From a checkout, five commits past v0.8.4: `<commit> (v0.8.4-5-g<hash>)`, and `<commit>+dirty (…)` before the change was committed.
+  - From a `git archive` of that commit with `VERSION` 0.8.5, as `release-assets.yml` makes them: `<commit> (v0.8.5)`.
+  - A second build with nothing changed recompiled nothing. After a commit, only `build_stamp.c` recompiled.
+- **Found on:** [droidplay-core#389](https://github.com/enjoyerofslop/droidplay-core/issues/389): logs of four games from a Galaxy S23, on 0.8.3 or 0.8.4.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

@@ -31,7 +31,7 @@ body:
     id: commit
     attributes:
       label: DroidPlay Core commit
-      description: "`git rev-parse --short HEAD` in the checkout you built from (or the date you downloaded it)."
+      description: "`git rev-parse --short HEAD` in the checkout you built from (or the date you downloaded it). On Android, the play log's `build: commit …` line near its top names it."
       placeholder: 4639c511
     validations:
       required: true

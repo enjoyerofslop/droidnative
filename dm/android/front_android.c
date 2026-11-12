@@ -31,6 +31,7 @@ int main(int argc, char **argv);   // main.c
 void dm_focus_set(int st);
 void dm_audio_suspend(int on);
 void dm_gfx_suspend(int on);
+extern int g_swkbd_min_chars;   // hle_swkbd.c: this input's minimum length from ShowKeyboardArg; the applet keeps OK disabled until then, and so does the box (front_mac.m)
 void guest_clock_freeze_for(int reason, int on);   // hle_os.c
 
 enum { ST_START, ST_SELFTEST, ST_PASS, ST_FAIL, ST_GAME, ST_ENDED, ST_CRASHED, ST_DEMO };
@@ -169,7 +170,10 @@ static void *guest_thread(void *p) {
             usleep(500000); u[0].value = u[1].value = (dm_vibration){0, 160, 0, 320}; dm_haptics_send(u, 2); LOG("rumble check: off");
         }
         const char *tt = getenv("DM_TEXT_TEST");   // env.txt: the software keyboard's box, as a game's swkbd call shows it (hle_swkbd.c), once after the demo
-        if (tt && atoi(tt)) { char out[64] = ""; int r = front_text_input("Name", "Check of the text box", "Type a name", "Link", 10, out, sizeof out); LOG("text box check: result %d, text \"%s\"", r, out); }
+        if (tt && atoi(tt)) {   // with a minimum of 2 characters, as a game's ShowKeyboardArg sets one; 2 types "Zelda" and a character outside the BMP, 9 bytes of UTF-8
+            char out[64] = ""; g_swkbd_min_chars = 2; int r = front_text_input("Name", "Check of the text box", "Type a name", "Link", 10, out, sizeof out); g_swkbd_min_chars = -1;
+            LOG("text box check: result %d, text \"%s\" (%d bytes)", r, out, (int)strlen(out));
+        }
     }
     int st = atomic_load(&g_state); if (st == ST_GAME || st == ST_SELFTEST) atomic_store(&g_state, ST_ENDED);
     return NULL;
@@ -236,22 +240,36 @@ static jclass g_gp;   // org.nxnative.android.Gamepad (java/), from the activity
 // bottom of its stack (its implicit stack-overflow check), and it stays protected after the detach. The guest's main thread runs on its host thread's stack, which
 // QueryMemory reported to the SDK at start as that thread's stack (dm_android_stack_info), so Unity's conservative GC, which scans the whole range, faulted on the page
 // at its next collection (Brilliant Diamond 17 s after name entry: main+0x2944c0 under GC mark, the first page of the main thread's stack). No guest thread may attach.
-typedef struct { const char *title, *sub, *guide, *initial; int max_chars, out_cap, ok; char *out; } text_req;
+// Text crosses as UTF-8 in byte arrays, both ways: JNI's own strings (NewStringUTF, GetStringUTFChars) are modified UTF-8, where a character outside the BMP (an emoji) is
+// two 3-byte surrogates. The guest's 4-byte sequence is not valid input to NewStringUTF, and the surrogate bytes coming back are not UTF-8 to hle_swkbd.c.
+typedef struct { const char *title, *sub, *guide, *initial; int max_chars, min_chars, out_cap, ok; char *out; } text_req;
+static jbyteArray text_bytes(JNIEnv *e, const char *s) {
+    jsize n = s ? (jsize)strlen(s) : 0; jbyteArray a = (*e)->NewByteArray(e, n);
+    if (a && n) (*e)->SetByteArrayRegion(e, a, 0, n, (const jbyte *)s);
+    return a;
+}
 static void *text_input_thread(void *p) {
     text_req *q = p; JavaVM *vm = g_app->activity->vm; JNIEnv *e;
     if ((*vm)->AttachCurrentThread(vm, &e, NULL)) return NULL;
-    jmethodID m = (*e)->GetStaticMethodID(e, g_gp, "ask", "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/String;");
-    jstring jt = (*e)->NewStringUTF(e, q->title ? q->title : ""), js = (*e)->NewStringUTF(e, q->sub ? q->sub : ""), jg = (*e)->NewStringUTF(e, q->guide ? q->guide : ""), ji = (*e)->NewStringUTF(e, q->initial ? q->initial : "");
-    jstring r = m ? (*e)->CallStaticObjectMethod(e, g_gp, m, g_app->activity->clazz, jt, js, jg, ji, (jint)q->max_chars) : NULL;
+    jmethodID m = (*e)->GetStaticMethodID(e, g_gp, "ask", "(Landroid/app/Activity;[B[B[B[BII)[B");
+    jbyteArray jt = text_bytes(e, q->title), js = text_bytes(e, q->sub), jg = text_bytes(e, q->guide), ji = text_bytes(e, q->initial);
+    jbyteArray r = m ? (*e)->CallStaticObjectMethod(e, g_gp, m, g_app->activity->clazz, jt, js, jg, ji, (jint)q->max_chars, (jint)q->min_chars) : NULL;
     if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionDescribe(e); (*e)->ExceptionClear(e); r = NULL; }
     q->ok = r != NULL;
-    if (q->ok) { const char *u = (*e)->GetStringUTFChars(e, r, NULL); snprintf(q->out, (size_t)q->out_cap, "%s", u ? u : ""); (*e)->ReleaseStringUTFChars(e, r, u); }
+    if (q->ok) {   // a text longer than the caller's buffer ends at a whole character
+        jsize n = (*e)->GetArrayLength(e, r); jbyte *b = (*e)->GetByteArrayElements(e, r, NULL);
+        if (!b) n = 0;
+        if (n > q->out_cap - 1) { n = q->out_cap - 1; while (n > 0 && (b[n] & 0xC0) == 0x80) n--; }
+        if (n) memcpy(q->out, b, (size_t)n);
+        q->out[n] = 0;
+        if (b) (*e)->ReleaseByteArrayElements(e, r, b, JNI_ABORT);
+    }
     (*vm)->DetachCurrentThread(vm);
     return NULL;
 }
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
     if (!g_gp || out_cap <= 0) return -1;
-    text_req q = {title, sub, guide, initial, max_chars, out_cap, -1, out}; pthread_t th;
+    text_req q = {title, sub, guide, initial, max_chars, g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0, out_cap, -1, out}; pthread_t th;
     if (pthread_create(&th, NULL, text_input_thread, &q)) return -1;
     pthread_join(th, NULL);
     if (q.ok < 0) return -1;

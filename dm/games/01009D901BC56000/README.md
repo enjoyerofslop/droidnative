@@ -50,7 +50,7 @@ First run on Android, 2026-11-11, on a Galaxy S25 Edge (SM8750, Adreno 830 with 
 
 - **The build:** a profile derived from 1.1.0's, though 1.0.0 is another Unity major (2022.3, not 6000.0). All three modules differ from 1.1.0's, so this was the riskiest split of the new games. It found 16,718 shaders (1.1.0 has 19,314), all translated to SPIR-V, none failed.
 - **What was played:** the title and its attract demo, L+R, slot 1, Modern Mode, one player, the opening movie, the treehouse prompt (X pressed about 30 times, 0.23 s apart, as on the Mac), then 1-1 Jungle Hijinxs: running, jumping, the pig's hints, and a heart lost to an enemy.
-- **The opening movie froze:** `GI.mp4` (119 s) stopped on one frame at about 87 s. The decoder's last output was at 68 s of video and 87 s of audio. The game went on presenting that frame at 60 fps. A skipped the movie, and everything after it worked. It froze on the same frame on the Odin 2 (below), the decoder's last audio output again at 87.5 s, so it repeats on another phone and GPU.
+- **The opening movie froze four pictures before its end (fixed 2026-11-12):** `GI.mp4` (119 s) stopped on its 3,566th of 3,570 pictures, at 118.8 s, and the game went on presenting it at 60 fps; A skipped the movie, and everything after it worked. It froze on the same picture on the Odin 2 (below). The "about 87 s" first noted here came from the trace's sampled lines (every 2^k-th call), not from the picture. Cause and fix: [Android: an H.264 movie stops a few pictures before its end](../../../docs/reference/movies.md#android-an-h264-movie-stops-a-few-pictures-before-its-end). The Mac's build of 1.0.0 plays it through (3,570 of 3,570) and goes on to the treehouse.
 - **Save and Continue:** after a cold start, slot 1 shows "Game 1, 1-1 00%, Modern Mode", and loading it opens the island map at Jungle.
 - **Frame rate:** 60 fps (the game's own): every 30 s window 59.6–60.1, frame p50 16.7 ms, p95 about 19 ms; GPU about 6 ms in the menus and 10 ms in 1-1.
 - **Sound:** FMOD's stereo `AudioOut`, no underrun. The `DM_AUDIO_DUMP` has the movie and the level's music (RMS about 400–3,700). Not listened to by a person.
@@ -58,7 +58,8 @@ First run on Android, 2026-11-11, on a Galaxy S25 Edge (SM8750, Adreno 830 with 
 - **Memory:** 2.51 GB PSS (0.67 GB graphics). Not killed.
 - **Not Playable yet:** it's a real-time platformer, so the stretch (1-1 to its end) needs a person with a controller.
 - **On an Ayn Odin 2 (SM8550, Adreno 740 with Qualcomm's driver 0x802a4000), with its built-in controller:** a new save through the menus, the movie (frozen as above, skipped with A), the treehouse and 1-1 at 60 fps (GPU about 2.6 ms), 1.89 GB PSS, no red line; 89 underruns in two reports during start-up, none in the level. The game app and its save stay installed there for a person to play.
-- **Not tried:** the other devices, and update 1.1.0 (the profile's build) on Android.
+- **2026-11-12, the movie fix on the Odin 2** (a game app from DroidPlay Core `main` at `3b380b2f` with the fix, a new save in a private `DM_SAVE` folder): the movie plays to its end (3,570 of 3,570 pictures), the game ends it itself and goes on to the treehouse; the prompt (X 30 times) and 1-1 at 60 fps, no red line. Before the fix, the same build froze as above.
+- **Not tried:** the other devices (the movie fix included), and update 1.1.0 (the profile's build) on Android.
 
 ## Found on this game
 
