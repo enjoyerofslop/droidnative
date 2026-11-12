@@ -671,12 +671,14 @@ static void all_wait(void) { uint64_t s = chunk_submit(0); seq_wait(s ? s : g_se
 // cops: the large copies and fills queued for the completion thread land too (wb_view: only the GPU's writes, for a copy queued behind the others)
 static uint64_t g_vsite[8][2];   // syncs that waited, by call site (0 other, 1 draw reads in flight, 2 texture upload, 3 texture-to-buffer copy, 4 large copy, 5 buffer texture, 6 buffer image, 7 dispatch): submitted / in flight
 static int g_vs;   // the call site of the next view_
+static uint64_t g_vsite_ns[8];   // the time those syncs took, by site (a test build's breakdown of the replay's waits)
 static void view_(int cops) {
     int site = g_vs; g_vs = 0;
-    if (C && (C->nwb || (C->gm_st && gm_store_wait()) || (cops && C->ncop))) { g_vsite[site][0]++; submit_wait(); return; }
+    if (C && (C->nwb || (C->gm_st && gm_store_wait()) || (cops && C->ncop))) { g_vsite[site][0]++; uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); submit_wait(); g_vsite_ns[site] += clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0; return; }
     if (!atomic_load(&g_inflight_wb) && !(cops && atomic_load(&g_inflight_cop))) return;
-    g_vsite[site][1]++;
+    g_vsite[site][1]++; uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     pthread_mutex_lock(&g_cmu); while (atomic_load(&g_inflight_wb) || (cops && atomic_load(&g_inflight_cop))) pthread_cond_wait(&g_ccv, &g_cmu); pthread_mutex_unlock(&g_cmu);
+    g_vsite_ns[site] += clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0;
 }
 static void cpu_view(void) { view_(1); }
 static void wb_view(void) { view_(0); }
@@ -1511,10 +1513,10 @@ static void up_view(const vtex *v, const tex_t *t) {
         size_t pitch = (size_t)((v->w + bw - 1) / bw) * bpb, rows = (v->h + bh - 1) / bh, srow = t->L.layer_size / (rows ? rows : 1); if (srow < pitch) srow = pitch;
         size_t e = (size_t)(v->layers - 1) * t->L.layer_size + srow * (rows ? rows - 1 : 0) + pitch; if (e > n) n = e; }
     uintptr_t lo = (uintptr_t)t->mem, hi = lo + n; uint64_t seq = 0;
-    if (C && chunk_hits(C, lo, hi, 0)) { g_vsite[2][0]++; submit_wait(); return; }
+    if (C && chunk_hits(C, lo, hi, 0)) { g_vsite[2][0]++; uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); submit_wait(); g_vsite_ns[2] += clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0; return; }
     if (atomic_load(&g_inflight_wb) || atomic_load(&g_inflight_cop)) {
         pthread_mutex_lock(&g_cmu); for (int f = 0; f < g_fifo_n; f++) if (chunk_hits(g_fifo[f], lo, hi, 0)) seq = g_fifo[f]->seq; pthread_mutex_unlock(&g_cmu); }
-    if (seq) { g_vsite[2][1]++; seq_wait(seq); return; }
+    if (seq) { g_vsite[2][1]++; uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); seq_wait(seq); g_vsite_ns[2] += clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0; return; }
     g_up_free++;
 }
 static int vt_upload_(vtex *v, const tex_t *t, int track) {
@@ -2632,6 +2634,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
           frame - f0, (double)(a - a0) / nf, (double)(r - r0) / nf, (double)(sl - s0) / nf, g_sp_on > 0 ? "" : " (DM_VK_STG_POOL=0)", nb, SP_NBLK, fr, SP_BLOCK >> 20, (unsigned long long)g_sp_made, (unsigned long long)atomic_load(&g_sp_trimmed),
           SP_MAXREQ >> 20, (unsigned long long)g_sp_big, (unsigned long long)g_sp_full);
       f0 = frame; a0 = a; r0 = r; s0 = sl; }
+    { static uint64_t ns0[8]; static unsigned long long f0; double nf = frame > f0 ? (double)(frame - f0) : 1; char tm[200]; int k = 0;
+      for (int i = 0; i < 8; i++) { k += snprintf(tm + k, sizeof tm - (size_t)k, "%s%.2f", i ? " / " : "", (g_vsite_ns[i] - ns0[i]) / 1e6 / nf); ns0[i] = g_vsite_ns[i]; } f0 = frame;
+      LOG("[vk] sync time by site, ms a frame over the last %.0f frames (other / draw / upload / t2b / large copy / buffer texture / buffer image / dispatch): %s; the replay's wait for a free chunk is in the GPU busy line", nf, tm); }
     LOG("[vk] syncs by site (submitted / in flight): other %llu/%llu, draw %llu/%llu, upload %llu/%llu (%llu waited for nothing), t2b %llu/%llu, large copy %llu/%llu, buffer texture %llu/%llu, buffer image %llu/%llu, dispatch %llu/%llu",
         (unsigned long long)g_vsite[0][0], (unsigned long long)g_vsite[0][1], (unsigned long long)g_vsite[1][0], (unsigned long long)g_vsite[1][1], (unsigned long long)g_vsite[2][0], (unsigned long long)g_vsite[2][1], (unsigned long long)g_up_free,
         (unsigned long long)g_vsite[3][0], (unsigned long long)g_vsite[3][1], (unsigned long long)g_vsite[4][0], (unsigned long long)g_vsite[4][1], (unsigned long long)g_vsite[5][0], (unsigned long long)g_vsite[5][1],
