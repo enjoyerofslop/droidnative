@@ -12,7 +12,7 @@ opening movies, the first enemy defeat, destination tutorials, walking and the
 engagement-area collision boundary work. All 27,055 base/update shaders compile
 for Mac and iOS. The unsigned IPA is built and its archive checks pass.
 
-On Android, the cartridge's base game 1.0.0 reaches the first battle without losing the device, with its world and its characters drawn (stencil-mode texture slots and draws under rasterizer discard), but its gameplay runs at 5.6–7 fps, bound by the replay's handling of the skinning draws ([Android](#android)).
+On Android, the cartridge's base game 1.0.0 is Playable – major issues: from a new game through the opening, four battles and the Everblight Plain to a save and Continue, at 30 fps in every window on the Ayn Odin 2 and nearly every one on the Galaxy Z Flip 7; the Moto Razr Plus 2023 plays the same route at 17–28 fps in battle ([Android](#android)).
 
 iOS runtime testing, DLC gameplay and later-game allocation peaks remain open.
 The supplied four DLC packs are included; their additional shaders have not been
@@ -230,7 +230,23 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - **Gameplay speed (2026-11-12):** the 5.6–7 fps above were the replay waiting for the GPU.
   - 53 of its 55 waits a frame were character draws reading a skinned vertex buffer as a storage buffer. The buffer sat inside a home range two buffers wide, learned from overrunning vertex streams, and 48 bytes off the storage buffer alignment in its copy ([An indexed draw's vertex stream read only as far as the write-back it starts in](../../../docs/reference/rendering.md#an-indexed-draws-vertex-stream-read-only-as-far-as-the-write-back-it-starts-in-android)).
   - With that fixed, the first battle and the field run at about 12 fps at the same 160 MHz, and the replay thread's CPU time drops from 78 to 38 ms a frame.
-  - Still slow: draws' writes read by later draws, and the first draw after each submission, wait for the GPU (fixes in their own pull requests; with all three, 30 fps). The skinning draws' writes past the alignment still go through scratch copies.
+  - The rest of the waits: a draw's storage buffer write read by a later draw ([A draw's storage buffer write read by a later draw after a barrier](../../../docs/reference/rendering.md#a-draws-storage-buffer-write-read-by-a-later-draw-after-a-barrier-android)), and the first draw after each submission ([Pending writes read on the GPU by the first draw of a submission](../../../docs/reference/rendering.md#pending-writes-read-on-the-gpu-by-the-first-draw-of-a-submission-android)). With all three, the S25 Edge plays the first battle and the plain at 30 fps (GPU 24.6–24.9 ms at 342–389 MHz). The skinning draws' writes past the alignment still go through scratch copies.
+- **2026-11-12, by hand on the Galaxy Z Flip 7 and the Moto Razr Plus 2023 (q270):** a game app built from `main` at `021fc6b6` with #367, #368 and #369 (merged since), a new game on Normal, driven over adb with `DM_CTL`.
+  - **Played on both:** the opening's cutscenes; four battles, all won: auto-attacks; the arts tutorial (5 arts with X/Y/B); arts; the Lv 4 Agnus machine with a Role Action (behind it, then Edge Thrust) and, on the Z Flip 7, the Talent Art. Then the 20-minute cutscene chain, the plain by day toward Colony 9, System → Save to a new file (Chapter 1, 0:43–0:47), a cold start, Continue back at the same spot, and walking on.
+  - **Z Flip 7** (Xclipse 950): 30 fps in 280 of 294 ten-second windows (frame p50 33.2 ms, GPU 18.6 ms a frame at 240–509 MHz).
+    - The slower windows are the first battle's pipeline builds, the arts' effects, loads, and the plain by day. There the GPU is 85–95% busy at 404–509 MHz, and some windows drop to 23–28 fps.
+    - The first battle matches the Mac's gallery frame (2.2.1): the terrain, the characters and the effects. Faces and hair in close-ups are right.
+    - PSS 3.4–4.9 GB, up to 0.96 GB swapped; no crash or kill; no underruns (not listened to).
+  - **Razr Plus 2023** (Adreno 730, V@0615.98): the cutscenes run at 30 fps; the battles and the plain at 17–28 fps (frame p50 36–60 ms).
+    - Its overnight update (Android 16, security patch 2026-09-01, build W1TZS36H.24-71-2-4) left the GPU driver as it was: 0x80267062, V@0615.98, Compiler EV031.36.08.33.
+    - Its GPU is busy 37–41 ms a frame, with about one wait a frame left (a draw's write in a submission in flight), so the 730's GPU bounds it. Its clock isn't readable from the shell.
+    - Menu presses need holding for 0.2 s there. PSS 2.5–3.1 GB, about 1–1.4 GB swapped; no crash; no underruns.
+  - **Red lines:** one a session, `transform feedback with vertex shader <key>, which has no capture variant`, naming the first such shader (`0b8bcbe86791ef65` on the Razr, others on the Z Flip 7). What it leaves out isn't found.
+  - **Saves:** the save slots' thumbnails are black.
+- **2026-11-12, the same route on the Ayn Odin 2 (q270):** a game app from `main` at `3d9f479c`, which has #367–#369 and the later replay changes (compute dispatches ordered by the game's barriers, 687b7358). Adreno 740, driver V@0676.0 (0x802a4000, Compiler E031.41.03.36).
+  - **Played:** the same: the opening, the four battles (arts, the Role Action and the Talent Art), the cutscene chain, the plain by day, System → Save to a new file (Chapter 1, 0:41), a cold start and Continue back at the same spot.
+  - **Frame rate:** 30 fps in every one of 276 ten-second windows, the battles included. GPU median 11.5 ms a frame, the clock at 680 MHz throughout.
+  - **Other:** one red line (`0b8bcbe86791ef65`, as above); PSS 2.9–3.3 GB, little swap; no crash; no underruns (not listened to).
 
 ## Found on this game
 
@@ -241,6 +257,8 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - [Rasterizer discard preserves vertex storage writes](../../../docs/reference/rendering.md#rasterizer-discard-preserves-vertex-storage-writes).
 - [Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android): the world's zebra stripes on Android; see [Android](#android).
 - [An indexed draw's vertex stream read only as far as the write-back it starts in](../../../docs/reference/rendering.md#an-indexed-draws-vertex-stream-read-only-as-far-as-the-write-back-it-starts-in-android): the skinned buffers' storage buffer reads, 53 waits a frame; see [Android](#android).
+- [Pending writes read on the GPU by the first draw of a submission](../../../docs/reference/rendering.md#pending-writes-read-on-the-gpu-by-the-first-draw-of-a-submission-android): about 5 drains of the GPU a frame on the S25 Edge; see [Android](#android).
+- [A draw's storage buffer write read by a later draw after a barrier](../../../docs/reference/rendering.md#a-draws-storage-buffer-write-read-by-a-later-draw-after-a-barrier-android): two waits a frame; see [Android](#android).
 - [Primitive barriers order vertex storage writes](../../../docs/reference/rendering.md#primitive-barriers-order-vertex-storage-writes).
 - [Transform feedback captured by a vertex entry point](../../../docs/reference/rendering.md#transform-feedback-captured-by-a-vertex-entry-point): interleaved outputs and geometry capture.
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff): contended native decoder waits must release a handoff.

@@ -18,10 +18,11 @@ SETUP_TITLE = 'Set up this computer'   # the Builds page's title for --setup, fr
 INTRO = ('<b>Setting up takes about half an hour the first time:</b> the tools download once (1.5 GB), and the first build of a game takes about 10–20 minutes. '
          'After that, a new game takes about 10 minutes, and playing again takes seconds.')
 KEYS_INTRO = ('DroidPlay reads your games with the keys from your own Switch, a file called <b>prod.keys</b> (Lockpick_RCM makes it). '
-              'They stay on this PC.')
+              "They stay on this PC. A Switch 2 game's .nup or dump folder doesn't need them.")
 TOOLS_INTRO = ("DroidPlay builds games with Microsoft's Java and .NET and Google's Android SDK. They download once: about 1.5 GB, 5 GB on disk.")
 PHONE_INTRO = 'Plug in your Android phone or handheld with a USB cable.'
-GAME_INTRO = ("Pick the folder with a game's NSP or XCI files: the base game, and its update if you have it. "
+GAME_INTRO = ("Pick the folder with a game's NSP or XCI files (the base game, and its update if you have it), or the folder that holds a Switch 2 game's "
+              '.nup file or its dump. '
               'DroidPlay writes its build files (a few GB) into a folder beside them.')
 
 

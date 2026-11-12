@@ -41,3 +41,7 @@ DM_VK_OCCLUSION=0
 # culling makes about 1.4 such dispatches a frame; each drain took the replay thread 7-10 ms a frame on a Galaxy Z Fold 8 and a Galaxy S25 Edge in Kokiri Forest, the GPU idle
 # meanwhile. With the frame step's hold 2 forced on the S25: 27.7 -> 29.4 fps, the GPU at 832 MHz for 99 % of the time. Off for other games until a sweep has run it (2026-11-12)
 DM_VK_IND_FWD=1
+# DM_VK_MESH_LEAVE_OUT=0: the forest's ferns, flowers and tree canopies drawn (the game profile's mesh_leave_out keys, seven mesh pairs). The key here makes the launcher offer
+# "Fewer plants (faster)" for this game: =1 leaves them out, about 3 ms of GPU time a frame (a OnePlus Pad 3: 29.1 -> 30.0 fps, GPU 27.0 -> 24.2 ms in Kokiri Forest), the
+# trees standing bare (gfx_vk_mesh.inc mesh_left_out; the list and the idea are nebadasSwifty's, Banana Native #167, MIT)
+DM_VK_MESH_LEAVE_OUT=0

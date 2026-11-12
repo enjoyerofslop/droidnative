@@ -260,6 +260,7 @@ static int vk_memu_draw_(const p_draw *dw) {
     memu_t *m = ms->memu; if (!m || !m->pvs) { g_me_skipped++; return 0; }
     if (m->task && (!ts || !ts->memu)) { RED_ONCE(180, "mesh shader %s takes a task shader's payload, and its program has no task shader in compute form: draw skipped", ms->key); g_me_skipped++; return 0; }
     if (!m->task) ts = NULL;
+    if (mesh_left_out(ms, ts)) return 1;
     if (!memu_arena() || !memu_kernels()) { g_drop[2]++; g_me_skipped++; return 0; }
     { vshader *vw[4] = {ms, fs, ts, NULL}; draw_view(vw, NULL, 0);   // what the stages read of guest memory: pending GPU writes to it land first
       for (int i = 0; i < 3; i++) if (vw[i]) stage_textures(vw[i]);

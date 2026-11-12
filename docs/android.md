@@ -47,7 +47,7 @@ DroidPlay opens on **Get started**: four steps, each saying what it needs and wh
   [license](https://developer.android.com/studio/terms), which the app asks first; its usage metrics stay off. What the computer already has is kept.
   From a console: `build_android_from_nsp.py --setup --accept-android-licenses`.
 - **Your phone:** plug it in with USB debugging on; the step says when the phone is waiting for you to tap **Allow**.
-- **Your first game:** add the folder with its NSP or XCI files, then **Build and install**. The build works beside the game's files, so their drive needs room:
+- **Your first game:** add the folder with its NSP or XCI files, or the folder that holds a Switch 2 game's `.nup` or dump (no keys needed), then **Build and install**. The build works beside the game's files, so their drive needs room:
   a lot of it for a game with many shaders ([Free space](#free-space)).
 
 Until all four are done, a launch opens on the checklist and the top bar's **Setup 2 of 4** opens it; **Settings › Show the setup checklist** does any time.
@@ -61,7 +61,7 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 
 ### The pages
 
-- **Library:** the games you added (**+ Build game** picks a folder with a game's NSP files), each with its box art, version and status on the phone picked at the top.
+- **Library:** the games you added (**+ Build game** picks a folder with a game's NSP or XCI files, or a Switch 2 game's `.nup` or dump; Windows' folder picker shows no files, so pick the folder that holds them), each with its box art, version and status on the phone picked at the top.
   The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
   build only, update the app on the phone, remove the game, import a save to the phone, restore its save from a backup ([Saves](#saves)). A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
   provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.

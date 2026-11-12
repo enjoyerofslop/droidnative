@@ -228,6 +228,11 @@ public class Launcher extends Activity {
             "Game time keeps levels timed to the music in step with the picture when the phone runs the game below its frame rate; the music can stutter.");
         s.values = new String[] {"real", "game"}; s.labels = new String[] {"Real time", "Game time"}; s.def = "real"; settings.add(s);
         s = new Setting("DM_SHOW_FPS", "toggle", "Game", "Frame-rate counter", null); s.def = "0"; settings.add(s);
+        if (defaults.containsKey("DM_VK_MESH_LEAVE_OUT")) {   // a game whose profile names plants the host can leave out (its android_defaults.txt carries the key; gfx_vk_mesh.inc): Ocarina of Time's forest
+            s = new Setting("DM_VK_MESH_LEAVE_OUT", "toggle", "Game", "Fewer plants (faster)",
+                "Leaves out the ferns, flowers and the trees' canopies: about 3 ms of GPU time a frame (a OnePlus Pad 3 went from 29.1 to 30.0 fps in Kokiri Forest). The trees stand bare.");
+            s.def = "0"; settings.add(s);
+        }
         s = new Setting("DM_PAD_ABXY", "choice", "Controls", "Controller face buttons",
             "By label for a controller that already gives its buttons Nintendo's letters (a Retroid in its Retro layout); by position for an Xbox-style controller.");
         s.values = new String[] {"position", "label"}; s.labels = new String[] {"By position", "By label"}; s.def = "position"; settings.add(s);   // front_android.c face_button
