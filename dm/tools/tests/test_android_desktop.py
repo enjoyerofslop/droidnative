@@ -12,6 +12,8 @@ sys.path.insert(0, str(REPO / 'dm/android/desktop'))
 import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop, put on the path above)
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]
+sys.path.insert(0, str(REPO / 'dm/android/tools'))
+import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above)
 
 ROWS_OK = [{'name': n, 'ok': True, 'detail': '', 'fix': ''} for n in ('Python module lz4', '.NET SDK 10', 'Android SDK', 'NDK', 'CMake', 'build-tools 36.0.0',
                                                                        'platform android-35', 'adb', 'JDK keytool', 'JDK javac', 'signing key', 'game hosts')]
@@ -108,6 +110,55 @@ class Phone(unittest.TestCase):
     def test_the_picked_phone_first(self):
         pad = dict(self.S25, serial='PAD', name='OnePlus Pad 3')
         self.assertIn('OnePlus Pad 3', fr.phone_step([self.S25, pad], True, picked='PAD').text)
+
+
+class PhoneId(unittest.TestCase):   # one phone, one name: over USB, over Wi-Fi by address or by mDNS name, before and after its port changes (phone_id.py)
+    MDNS = 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp'
+
+    def test_transport_from_the_serial(self):
+        for serial, t in (('R5CY51ZLGKH', 'usb'), ('emulator-5554', 'usb'), ('192.168.1.20:37123', 'tcp'), ('[fe80::1%wlan0]:5555', 'tcp'), ('pixel.lan:5555', 'tcp'),
+                          (self.MDNS, 'mdns'), (self.MDNS + '.', 'mdns')):
+            self.assertEqual(phone_id.transport(serial), t, serial)
+        self.assertFalse(phone_id.wifi('R5CY51ZLGKH')); self.assertTrue(phone_id.wifi(self.MDNS))
+
+    def test_mdns_names_carry_the_serial_number(self):   # a phone found on the network is known before anything is asked of it
+        self.assertEqual(phone_id.mdns_serialno(self.MDNS), 'R5CY51ZLGKH')
+        self.assertEqual(phone_id.mdns_serialno('adb-ZY22-ABC1-q1w2e3._adb-tls-connect._tcp'), 'ZY22-ABC1')   # the suffix is after the last hyphen
+        self.assertIsNone(phone_id.mdns_serialno('adb-0123456789ABCDEF-q1w2e3._adb-tls-connect._tcp'))   # a placeholder is no one's
+        self.assertIsNone(phone_id.mdns_serialno('192.168.1.20:37123'))
+
+    def test_phones_offering_a_connection_on_the_network(self):   # adb mdns services, as adb 35 and older adbs print it; pairing services are not connections
+        out = ('List of discovered mdns services\n'
+               'adb-R5CY51ZLGKH-AbCdEf\t_adb-tls-connect._tcp\t192.168.1.20:41011\n'
+               'adb-e7879cce-q1w2e3\t_adb-tls-connect._tcp.\t10.0.0.7:39999\n'
+               'adb-R5CY51ZLGKH-AbCdEf\t_adb-tls-pairing._tcp\t192.168.1.20:37000\n'
+               'adb-0123456789ABCDEF-zzzzzz\t_adb-tls-connect._tcp\t10.0.0.9:5555\n')
+        self.assertEqual(phone_id.mdns_services(out), [('R5CY51ZLGKH', '192.168.1.20:41011'), ('e7879cce', '10.0.0.7:39999')])
+        self.assertEqual(phone_id.mdns_services(''), [])
+
+    def test_the_id_is_the_serial_number_or_the_android_id(self):
+        self.assertEqual(phone_id.from_props('R5CY51ZLGKH\r\n9774d56d682e549c\r\n'), 'R5CY51ZLGKH')
+        for placeholder in ('0123456789ABCDEF', 'unknown', ''):
+            self.assertEqual(phone_id.from_props(f'{placeholder}\n9774D56D682E549C\n'), 'aid-9774d56d682e549c', placeholder)
+        self.assertIsNone(phone_id.from_props('unknown\nnull\n')); self.assertIsNone(phone_id.from_props(''))
+        self.assertIsNone(phone_id.from_props('\n0000000000000000\n'))
+        self.assertEqual(phone_id.from_props('ab/cd\n9774d56d682e549c'), 'aid-9774d56d682e549c')   # a serial number no file could be named after
+        self.assertEqual(phone_id.safe(phone_id.from_props('\n9774d56d682e549c')), 'aid-9774d56d682e549c')   # the ID is a name every file system takes
+
+    def test_one_entry_per_phone_cable_first(self):
+        usb, tcp, mdns = ({'serial': s, 'id': 'R5CY51ZLGKH'} for s in ('R5CY51ZLGKH', '192.168.1.20:37123', self.MDNS))
+        pad = {'serial': '10.0.0.7:5555', 'id': 'e7879cce'}; new = {'serial': 'XYZ', 'id': None}
+        self.assertEqual(phone_id.one_per_phone([tcp, pad, mdns, usb, new]), [usb, pad, new])   # in the order each phone first came
+        self.assertEqual(phone_id.one_per_phone([tcp, mdns]), [mdns])
+        self.assertEqual(phone_id.one_per_phone([{'serial': 'A', 'id': None}, {'serial': 'B', 'id': None}]), [{'serial': 'A', 'id': None}, {'serial': 'B', 'id': None}])
+
+    def test_the_picked_phone_is_found_by_its_id(self):   # the picker keeps the phone when its cable comes out and its Wi-Fi entry takes over, and the reverse
+        ids = {'R5CY51ZLGKH': 'R5CY51ZLGKH', '192.168.1.20:41011': 'R5CY51ZLGKH', '10.0.0.7:5555': 'e7879cce'}
+        picker = ['10.0.0.7:5555', '192.168.1.20:41011', None]
+        self.assertEqual(phone_id.find(picker, ['R5CY51ZLGKH'], ids), 1)   # saved by ID before the port changed
+        self.assertEqual(phone_id.find(picker, [None, '', '192.168.1.20:37123', '10.0.0.7:5555'], ids), 0)   # the first key that names a listed phone
+        self.assertEqual(phone_id.find(picker, ['192.168.1.20:37123'], ids), -1)
+        self.assertEqual(phone_id.find(['R5CY51ZLGKH'], ['192.168.1.20:41011', ids['192.168.1.20:41011']], ids), 0)   # the Phones page's Wi-Fi row picks the cable entry
 
 
 class Game(unittest.TestCase):
