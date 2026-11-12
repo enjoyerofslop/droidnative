@@ -110,6 +110,7 @@ General host changes first needed here; each applies to every game:
   - **Resolved: nothing cast a sun shadow outdoors,** with the swapchain fixed: Link, the flowers and the cucco, none of which the Mac draws without one. Mabe stayed dimmer than on the Mac: at Marin's door its mean colour was 0.17, 0.25, 0.13, against 0.42, 0.56, 0.21 in the Mac's screenshot of the same spot. That isn't another gamma error, which would make the blue 0.03, but the missing direct sunlight.
     - It was LA's resolved Mac fault again, where vertex outputs left unwritten started at w = 0 ([Unwritten components of a written output start as (0, 0, 0, 1)](../../../docs/reference/shaders.md#unwritten-components-of-a-written-output-start-as-0-0-0-1)): `vs_init` fixed it in the MSL only, and Android's SPIR-V left those components undefined.
     - [#340](https://github.com/enjoyerofslop/droidplay-core/pull/340) starts them at (0, 0, 0, 1) on Android too ([Unwritten components of a written output start as (0, 0, 0, 1) on Android too](../../../docs/reference/shaders.md#unwritten-components-of-a-written-output-start-as-0-0-0-1-on-android-too)). Retroid Pocket 5, the Ancient Ruins save, two runs each (q242): with `DM_SPV_VSINIT=0` nothing casts a shadow; with the fix every pillar, statue, Link and the ruins' wall does, 20.6 % of the screen is 20+ levels darker, and the game keeps its 30 fps interval (33.7 and 37.3 fps against 36.6 and 36.0). Mabe's brightness against the Mac's wasn't measured again.
+    ![The Legend of Zelda: Link's Awakening on a OnePlus Pad 3 with #340, from a downloaded save: Link beside the rooster weathervane in Mabe Village, in daylight with sun shadows](../../../docs/images/android/zelda-links-awakening-oneplus-pad-3.jpg)
 - **The sword, OnePlus Pad 3, 2026-11-11.** LA's host from `main` `205aef53` (with #258), the same way as above, from that save. Two launches, about 25 minutes.
   - **The beach:** the save puts Link at the water's edge, right below a Spiked Beetle. Idle, or walking east, he lost all three hearts within seconds, three times: twice to that beetle, once to a second one near the outcrops. Their hits knock him back into the surf.
     - Holding the shield (R) as he appeared held the beetle off, and he walked east through the shallow surf.
@@ -121,3 +122,45 @@ General host changes first needed here; each applies to every game:
   - **Sound:** 3 underruns.
   - **Red line:** the same one per launch.
   - **Not tried:** fighting with the sword, the walk back north, the Mysterious Forest.
+- **By hand from a new game to the sword and its first fights, Retroid Pocket 5, 2026-11-12 (q269).** Snapdragon 865, Adreno 650 with Qualcomm's driver (0x802ea000), Android 13. LA's host from `main` `021fc6b6` (with #340), installed as an APK only, beside game files packed earlier. Input came through `DM_CTL` over adb, steered from screenshots between moves, and saves went to a `DM_SAVE` folder of their own. Two launches, about 28 minutes.
+  - **The route:**
+    - the attract scene and the opening movie, which a first start plays through (A skipped it on the second start), the title's L+R, File 1, Normal, the name "Link";
+    - Marin's house: Marin's dialogue, then Tarin, who stops Link at the door and gives him the shield once he walks over and talks to him;
+    - Mabe Village, west along the dirt path past BowWow and the library, then south through the three gaps in the field walls (an Octorok took half a heart) to Toronbo Shores.
+  - **The beach:** three Game Overs before the sword. An Octorok on the upper beach, then the Spiked Beetle and a Leever on the lower one, wore Link down between one screenshot and the next.
+    - Retry put him back with three hearts at the beach's edge, the third time beside the Spiked Beetle.
+    - With the shield raised as he appeared (`R+LRight` in `DM_CTL`: the button and the stick together), he walked east through the surf, pushed the Sea Urchin out of the gap between the two outcrops and reached the sword at the waterline.
+  - **The sword:** the Owl's scene, then "Take" and "You found your sword!".
+  - **Fights:**
+    - before the save, the Sea Urchin, cut down with three strokes; then the Spiked Beetle and an Octorok together took his last hearts (the fourth Game Over);
+    - after Continue, the urchin again (it dropped a green rupee) and two Sand Crabs, for half a heart.
+    - Slow enemies can be fought this way. The Spiked Beetle, which needs a shield block before the sword can hurt it, wasn't beaten.
+  - **Save:** Game Over → Save and Quit → File 1 ("Game saved.", Toronbo Shores, 10:58, 4 deaths). After a cold start the file list showed it beside the 10:55 autosave, and Start put Link back on the beach with the sword in hand.
+  - **Frame rate:** the log's 300-frame windows, by where Link was.
+
+    | Where | Windows | Median fps | GPU p50 |
+    |---|---|---|---|
+    | Marin's house | 31 | 59.3 | 9.3–13.2 ms |
+    | Mabe Village | 14 | 31.8 | 10.2–12.9 ms |
+    | The walled fields | 7 | 31.5 | 11.2–13.2 ms |
+    | Toronbo Shores to the sword (the four Game Over screens run at 60) | 81 | 31.6 | 6.9–14.0 ms |
+    | The beach after Continue | 17 | 30.9 | 11.5–13.3 ms |
+
+    - Outdoors the Retroid Pocket 5 runs at the game's 30 fps interval, as at the Ancient Ruins (above). The Pad 3 kept Mabe Village at 60.
+    - The same morning, LA's bench routes on this phone held the GPU at 490 MHz throughout (kgsl).
+  - **Resident:** PSS 1.80 GB at the save in the first launch, 1.50 GB on the beach in the second.
+  - **Sound:**
+    - a 48 kHz stereo AAudio stream at clock rate 1.000;
+    - 88 % of the first launch's 264,000 renderer frames not silent (the host's `audren` count);
+    - 5 underruns in the first launch, 2 in the second.
+    - Not listened to.
+  - **Red line:** the same one per launch (`shape_anim_compute`'s unbound storage slot).
+  - **No crash.**
+  - **Against the Mac:** Link at Marin's door in Mabe Village, the Mac's screenshot (left, this repository's [picture](../../../docs/images/zelda-links-awakening.jpg)) and the Retroid Pocket 5's (right).
+    - Mean colour over the house, fence and path: 0.402, 0.518, 0.215 on the Mac and 0.413, 0.529, 0.220 here, against 0.17, 0.25, 0.13 before #340.
+    - The sun shadows of the fence posts, the cucco and Link are the same.
+    - The phone's frame is a little softer, from the handheld 1280x720 picture shown full screen.
+
+    ![Link at Marin's door in Mabe Village: the Mac (left) and the Retroid Pocket 5 from a new game (right), the same daylight and sun shadows](../../../docs/images/android/zelda-links-awakening-retroid-pocket-5-mabe-vs-mac.jpg)
+
+  - **Not tried:** the Mysterious Forest, and a fight with the Spiked Beetle.
