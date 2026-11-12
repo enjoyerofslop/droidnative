@@ -499,19 +499,23 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
     - `complete` holds the key of the files, DLC and split code that the last fill ended on. A build with the same key runs no record split and needs no phone, including a game app or a `--no-push` build.
     - The cache can be deleted; the next build with a phone makes it again.
   - **No decoder at all** (no Mac decoder, no phone and no finished cache): the build stops right after its graphics check, before the rewrite, and says to connect a phone or build the game in DroidPlay for Mac first (`undecodable_packs`).
-- **Costs (estimated, not measured):**
-  - **Splits:** a first build runs the split three times (two record runs, then the real one). Arceus's split took about 220 s on the reporter's Ryzen AI 300 laptop, so that's about 7 extra minutes before the phone's time.
-  - **Decoded size:** Arceus's GFPAKs are 1.6 GB stored, all Oodle Kraken. Pokémon Sword's GFPAK tables (LZ4, 7,699 archives, 201,635 entries) give 20.5 GB raw from 8.5 GB stored, a ratio of 2.42. Kraken compresses at least as tightly as LZ4, so Arceus decodes to at least 3.9 GB, likely 4–5 GB, in roughly 16–20 jobs.
-  - **Transfer:** about 1.6 GB of job files goes to the phone and 4–5 GB comes back. adb moves 35–40 MB/s over USB 2 and about 100 MB/s over USB 3, so that's 1–3 minutes. Each job also launches the game: a few seconds, or up to about 25 s where the host's last log line misses `log.txt` ([A phone's Oodle job counted as unfinished after it finished](#a-phones-oodle-job-counted-as-unfinished-after-it-finished)). So the phone's part is about 5–10 minutes.
-  - **Disk:** the cache is as large as the decoded streams, about 4–5 GB in the game's extraction. The record runs' want files, as large as the compressed streams, are removed after each run.
+- **Costs, measured on Pokémon Legends: Arceus** (1.1.1, a Pixel 9 Pro XL decoding, built on an Apple-silicon Mac with `DM_UE_DECODE=phone`):
+  - **Streams:** 75,468 Oodle Kraken streams in its 678 GFPAKs, 1.22 GB compressed and 5.41 GB decoded (4.43×), in 21 jobs.
+  - **The step:** 4:00 in all. The first record run took 46 s. The host, the app install and the code push took about 39 s. The 21 jobs took about 2:05, 3–5 s each: the decode itself, the game's launch, and the transfer at USB 3 speed. The second record run took 33 s and listed nothing new.
+  - **The real split** took 31 s from the cache. A record run costs about as much as the split, and a slower computer pays it twice more: the reporter's split took about 220 s.
+  - **Disk:** the cache is 5.0 GiB in the extraction. The want files (1.22 GB) are removed after each run.
+  - **The phone:** each job needs its file, its output and 64 MB free, under 600 MB at a time. Nothing is left on the phone after the step.
   - **Heavier games:** Legends: Z-A's Trinity packs (4.4 GB stored, 17.7 GB unpacked) and Bayonetta 3's PKZs (14 GB) would pull and keep several times more. Decoding only the streams that hold shaders would cut that: a job flag for the host to return only records that hold one of `scan_blob`'s magics, the others answered as empty. That's open.
 - **Not covered:** `ue_legacy` (DRAGON QUEST XI S's LZ5 paks). That key also covers Zlib paks that Python reads itself, and the blind scan's guessed streams would all go to the phone. That's open.
 - **Check:**
   - `test_android_oodle` `SplitCacheTest`: the split reads what `Cache` writes and lists what it lacks once per process, with a missing or refused stream red in a real split. `fill` settles a two-layer chain in two runs with one phone setup, sends no zeros, and asks nothing of the phone once the cache has everything. Batches of at most 256 MB are each a job, and a cut batch isn't taken. Another decoder's stamp empties the cache.
   - `test_android_shaders` `OodleDecode`: `oodle_decode` with a stand-in split and phone keeps its cache and reuses it with no phone, and stops with "connect one" without a phone. `mac_decoder` takes a Mac build of the same `main` only on an Apple-silicon Mac.
   - `test_gfpak`: a compression 3 entry read from the cache.
-  - Not run on a device or with any of these games' files (none on hand).
-- **Found on:** [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md), built for a Retroid Pocket G2 on Windows (droidplay-core#310). Untested there so far.
+  - On a device: Pokémon Legends: Arceus, below. The other `oodle_packs` games haven't been run.
+- **Found on:** [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md), built for a Retroid Pocket G2 on Windows (droidplay-core#310). Checked on a Pixel 9 Pro XL (Mali-G715) from a cartridge dump holding the base game and 1.1.1:
+  - The real split read every GFPAK from the cache. Its tables were byte-identical to the profile's, which were made with the Mac host's decoder: 12,851 shaders, 73 of them from the GFPAKs.
+  - The game reached its language screen about 40 s after launch, at 30 fps (frame time p50 33.3 ms over 1,500 frames).
+  - A `--no-push` build afterwards took the cache with no record run and no phone.
 
 ### A phone's Oodle job counted as unfinished after it finished
 

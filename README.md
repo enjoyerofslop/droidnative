@@ -235,7 +235,7 @@ Games that keep their shaders in archives compressed with the game's own Oodle n
 Pokémon Legends: Z-A, Bayonetta 3, Batman: Arkham Knight and EA SPORTS FC 27. The packing script decodes those archives with the game's own decoder on the
 phone before it splits the shaders, which adds minutes and keeps the decoded streams (gigabytes) in the game's build folder for later builds; on a Mac with
 DroidPlay for Mac's build of the game, its Mac host does it instead. Without either, the script stops at the start and says so
-([#310](https://github.com/enjoyerofslop/droidplay-core/issues/310); none of these has been run on Android yet).
+([#310](https://github.com/enjoyerofslop/droidplay-core/issues/310)). Arceus built this way reached its language screen on a Pixel 9 Pro XL; the others have not been run on Android yet.
 
 ## Help and reports
 
