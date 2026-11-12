@@ -3,7 +3,7 @@
 The cartridge's base game, 1.0.0, SDK **8.2.0** (`NintendoSDK_NVN-8_2_0`, `NintendoSDK_gfx-8_2_0`). It holds **Assassin's Creed IV: Black Flag** and **Assassin's Creed Rogue** on Ubisoft's **AnvilNext**, with Havok and Wwise. It renders with **NVN**. The RomFS is 120 files, 10.95 GB in all: 28 `.forge` archives, 15 Wwise `.pck` banks, 75 Bink movies (`.bik`, `.bk2`), a `.txt` and a `.lang` file.
 
 - **On the Mac:** In-game. Black Flag boots straight to its title, menus and opening storm at sea, with the player in control at 30 fps. The ship, Edward and the crew are drawn, and no shader the run asks for is missing from the map. The shaders come from the `.forge` archives; see [Shaders](#shaders).
-- **On Android:** In-game on a OnePlus Pad 3 and a Moto Razr Plus 2023, at 30 fps, with the same picture as the Mac. Edward walks the deck to the ship's wheel, the save loads, and sound plays. Sailing wasn't reached. See [Android](#android).
+- **On Android:** In-game on a OnePlus Pad 3, a Moto Razr Plus 2023 and an Ayn Odin 2, at 30 fps, with the same picture as the Mac. Edward walks the deck to the ship's wheel, the save loads, and sound plays. Sailing wasn't reached. Rogue can't run from this cartridge: its game data isn't on it. See [Android](#android).
 
 ## What it needs
 
@@ -78,6 +78,23 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made (the sur
 - **Saves:** after a restart, Story Mode lists the opening's save and loads it back into the storm.
 - **Sound:** the AudioOut dump holds signal in 55 of 58 ten-second windows (the silent ones at the start), with peaks to 27,500. Nobody listened.
 - **Red lines:** none, and no crash.
+
+### Ayn Odin 2
+
+- **Tested 2026-11-12** (SM8550, Adreno 740 with Qualcomm's driver 0x802a4000), from this branch with main 011e97f9 merged in, as a game app: a 421 MB APK with the 11.8 GB RomFS as its OBB. The split found 33,147 shaders, and all translated (1 min 8 s on the Mac). No Mac decoder is involved: `anvil_forge.py` reads the archives in Python.
+- **Route:** the title, Story Mode, start new game, the name (`DM_KBD=Abstergo`), the save, "Ubisoft Presents" and the opening storm, with Edward walking the deck toward the "reach the ship's wheel" marker.
+  - Near the raised deck he stopped advancing under scripted input, so the wheel wasn't reached here either.
+- **Frame rate:** 30.0 fps in every 30 s window over 4 minutes of the storm, frame p50 33.4 ms, p95 about 37 ms, GPU 9.3 ms a frame.
+- **Memory:** 1.41 GB PSS.
+- **Saves:** after a cold start, Story Mode lists "Abstergo, 0%" with its date and time, and loads it back into the storm.
+- **Sound:** the 6-channel `AudioOut` and the audio renderer underran only in two reports, during start-up and the opening's load; none in play.
+- **Red lines:** none.
+
+## Rogue (program 1)
+
+- **Not on the cartridge:** program 1 (`010044700DEB0001`) has a full `main` (44.7 MB of code), but its RomFS is 0.8 GB of ten Bink movies and a language file, with no `.forge` archive. Program 0's RomFS holds only Black Flag's (the Caribbean, Kingston, Havana, Nassau…), and the cartridge carries no other content. So Rogue's game data is a download, not part of this dump.
+- **On Android, 2026-11-12, Ayn Odin 2:** packed with a test wrapper that does what `build_ipa_from_nsp.py --program 1` does: program 1 as a title of its own, from a provisional profile, 427 shaders from `main`. It crashes on its main thread before its first frame: a read of address 0x50 at `main+0xd6f19c`, right after mounting its RomFS, with an `.ini` path on the stack. A game missing its data would do that.
+- **Unblock:** dump Rogue's download. `build_android_from_nsp.py` also has no `--program` yet, which the iOS script has.
 - **The lightning-like bright frames** show here too, now and then.
 
 ## Open
