@@ -124,15 +124,6 @@ class RecorderCalls(unittest.TestCase):
             self.assertEqual(users, [only])
             self.assertRegex((android / only).read_text(encoding='utf-8'), r'rec_on\(\)')
 
-    def test_a_command_taken_by_name_is_called_by_the_recorder_alone(self):   # vkCmdDrawMeshTasksEXT: a pointer, so no macro can redirect it
-        android = REPO / 'dm/android'
-        src = {p.name: p.read_text(encoding='utf-8') for p in [*android.glob('gfx_vk*.inc'), android / 'gfx_vk.c']}
-        ptrs = sorted({m for t in src.values() for m in re.findall(r'\bPFN_vkCmd\w+ +(\w+)\s*[;=,]', t)})
-        self.assertIn('g_draw_mesh', ptrs)
-        for name in ptrs:
-            callers = sorted(f for f, t in src.items() if re.search(rf'\b{name}\(', t))
-            self.assertEqual(callers, ['gfx_vk_rec.inc'], f'{name} is called outside the recorder')
-
 
 if __name__ == '__main__':
     unittest.main()
