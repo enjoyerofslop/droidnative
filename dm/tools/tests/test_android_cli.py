@@ -63,6 +63,19 @@ class Json(unittest.TestCase):
         t = ba.games_table()   # no game played on Android is one the table lists as drawing without NVN
         self.assertEqual([g for g in ba.ANDROID_TESTED if g in t and 'NVN' not in t[g]['graphics']], [])
 
+    def test_oodle_packs_stop_early(self):   # issue #310: Pokémon Legends: Arceus's split failed on its 678 GFPAKs after about 220 s, with no decoder for the game's Oodle
+        sys.path.insert(0, str(REPO / 'dm/games')); import profile_guess as pg   # noqa: E401
+        src = pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_gfpak=678)
+        why = ba.undecodable_packs(src['oodle_packs'], 'Pokémon Legends: Arceus', {})
+        self.assertIn("Arceus keeps its shaders in files compressed with the game's own Oodle (678 Game Freak GFPAK archive(s) with Oodle Kraken entries "
+                      '(Pokémon Legends: Arceus)). The Android build cannot decode those yet', why)
+        self.assertIn('droidplay-core/issues/310', why); self.assertNotIn('Mac host', why)
+        self.assertIsNone(ba.undecodable_packs(pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0)['oodle_packs'], 'Odyssey', {}))
+        self.assertIsNone(ba.undecodable_packs(src['oodle_packs'], 'Arceus', {'DM_OODLE_HOST': 'dmhost', 'DM_OODLE_MODULES': 'patched_v262144'}))   # a Mac host set up by hand
+        for s in (pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, trinity_packs=1), pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_pkz=1),
+                  pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_ue3=1)):   # Legends: Z-A, Bayonetta 3, Batman: Arkham Knight
+            self.assertIn('cannot decode those yet', ba.undecodable_packs(s['oodle_packs'], 'x', {}))
+
     def test_games_played_on_android_have_profiles(self):   # a mistyped title ID would leave its game shown as not played on Android
         t = ba.games_table()
         self.assertTrue(ba.ANDROID_TESTED)
