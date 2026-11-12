@@ -57,6 +57,7 @@ No frame-rate key: the game asks for present interval 2 and runs at 30 fps, as o
 - iOS: no IPA built yet; untested on a device (the 2 GB block comes from #384's iPad run).
 - 60 fps, picture settings (render scale, the engine's SMAA): #384 has both; not taken here.
 - Only update 1.0.5 is registered.
+- **Android: not run.** The Batman: Arkham Trilogy cartridge (2026-11-12, q268) carries Arkham Knight as this same stub, base 1.0.0 with no RomFS (`program has no data section`), and no update, so there is nothing to pack until update 1.0.5 is dumped. Arkham City (`01003F00163CE000`) on that cartridge is a stub the same way; Arkham Asylum (`0100E870163CA000`) is complete there and was tested (the README's Game Status row).
 
 ## Found on this game
 
