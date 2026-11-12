@@ -160,7 +160,15 @@ public final class Gamepad extends View {
     }
     static RectF grow(RectF r, float d) { return new RectF(r.left - d, r.top - d, r.right + d, r.bottom + d); }
     boolean inSwap(float x, float y) { return dist(x, y, swapCx(), swapCy()) <= K_SWAP_R * u() * 1.6f; }
-    boolean inMenu(float x, float y) { return dist(x, y, menuCx(), menuCy()) <= K_SWAP_R * u() * 1.4f; }
+    boolean inMenu(float x, float y) { return menuAlpha() > 0 && dist(x, y, menuCx(), menuCy()) <= K_SWAP_R * u() * 1.4f; }   // a hidden button is not there to be hit
+    // With a controller the button would sit over the picture all the time, and the controller's own menu key opens the menu: it hides, and a touch of the screen brings it
+    // back for a few seconds (it fades out, and while it is shown it is a plain button). Without a controller it is always there, as before
+    static final long MENU_SHOW_MS = 3000, MENU_FADE_MS = 600;
+    long menuShownAt = -MENU_SHOW_MS - MENU_FADE_MS;
+    float menuAlphaAfter(long ms) { return ms < MENU_SHOW_MS ? 1 : ms < MENU_SHOW_MS + MENU_FADE_MS ? 1 - (ms - MENU_SHOW_MS) / (float)MENU_FADE_MS : 0; }
+    float menuAlpha() { return !padOff || menuHeld ? 1 : menuAlphaAfter(android.os.SystemClock.uptimeMillis() - menuShownAt); }
+    final Runnable menuFade = new Runnable() { public void run() { invalidate(); if (padOff && menuAlpha() > 0) postDelayed(this, 50); } };
+    void menuReveal() { if (!padOff) return; menuShownAt = android.os.SystemClock.uptimeMillis(); removeCallbacks(menuFade); post(menuFade); }
     long faceAt(float x, float y) { long m = 0; float r = faceR() * 1.25f; for (int b = B_A; b <= B_Y; b++) if (dist(x, y, faceX(b), faceY(b)) <= r) m |= 1L << b; return m; }
     long dpadAt(float x, float y) {
         float dx = x - dpadCx(), dy = y - dpadCy();
@@ -220,7 +228,8 @@ public final class Gamepad extends View {
     void begin(int p, float x, float y) {
         down[p] = true; px[p] = x; py[p] = y; owner[p] = C_NONE; faceOf[p] = 0;
         boolean g = false;
-        if (inMenu(x, y)) owner[p] = C_MENU;   // shown with a controller too (the pad hidden): the way back to the launcher
+        boolean menuThere = inMenu(x, y); menuReveal();   // judged before the touch brings the button back: a tap on its hidden place goes to the game
+        if (menuThere) owner[p] = C_MENU;   // shown with a controller too (the pad hidden): the way back to the launcher
         else if (padOff) g = gameBegin(p);
         else {
             int hit = tap ? -1 : btnAt(x, y);
@@ -346,7 +355,12 @@ public final class Gamepad extends View {
             }
             shape(c, circle(swapCx(), swapCy(), K_SWAP_R * u), swapHeld); label(c, tap ? "Tap" : full ? "3D" : "2D", swapCx(), swapCy(), 12 * u, swapHeld);
         }
-        shape(c, circle(menuCx(), menuCy(), K_SWAP_R * u), menuHeld); label(c, "≡", menuCx(), menuCy(), 18 * u, menuHeld);
+        float ma = menuAlpha();
+        if (ma > 0) {
+            float r = K_SWAP_R * u * 1.3f; int sv = c.saveLayerAlpha(menuCx() - r, menuCy() - r, menuCx() + r, menuCy() + r, (int)(255 * ma));
+            shape(c, circle(menuCx(), menuCy(), K_SWAP_R * u), menuHeld); label(c, "≡", menuCx(), menuCy(), 18 * u, menuHeld);
+            c.restoreToCount(sv);
+        }
     }
 
     // ---- The pause menu: ≡ (or a controller's Mode / Menu key, front_android.c) opens it and the game is held under it (nativePause) until it closes ----
@@ -539,7 +553,7 @@ public final class Gamepad extends View {
         }
         return false;
     }
-    void padsChanged() { boolean any = anyPad(); if (any != padOff) { padOff = any; reset(); invalidate(); nativeLog("gamepad: " + (any ? "a controller is connected: the touch controls hide" : "no controller: touch controls")); } }
+    void padsChanged() { boolean any = anyPad(); if (any != padOff) { padOff = any; reset(); menuReveal(); invalidate(); nativeLog("gamepad: " + (any ? "a controller is connected: the touch controls hide" : "no controller: touch controls")); } }
 
     // ---- Start (front_android.c, from the native thread) ----
     static Gamepad view; static PopupWindow popup;
