@@ -3694,8 +3694,10 @@ static int vk_dispatch(const p_dispatch *dp) {
     if (!ok) return 0;
     if (s->upsq && upsq_run(s)) { g_dispatches++; C->ndraw++; return 1; }   // a game's upscaler network replaced (gfx_vk_upsq.inc)
     if (g_e5_need) { cpipe_t *ce = cpipe_e5(s, g_e5_need); if (!ce) return 0; cp = ce; }   // E5B9G9R9 storage images: the pipeline that packs RGB9E5 into their R32_UINT views
-    VkCommandBuffer c = cb(); if (!c) return 0;
-    cb_barrier();
+    g_cs_in_disp = 1; VkCommandBuffer c = cb(); g_cs_in_disp = 0; if (!c) return 0;
+    int chain = cs_game() && g_cs_chain && C->seq == g_cs_chain_seq && !gpu_args;   // the command before this one in the command buffer is a dispatch with its barrier deferred (gfx_vk.c cs_chain_close); the copy of the counts below reads the writer's output: a barrier first
+    if (!chain) { cb_barrier(); g_cs_first++; g_cs_chain = 0; } else if (g_cs_gbar) { cb_barrier(); g_cs_gbarred++; g_cs_chain = 0; } else g_cs_free++;   // a run left open stays open: a return before the dispatch below leaves its barrier to the next
+    g_cs_gbar = 0;
     if (gpu_args) { VkBufferCopy cpy[2] = {{io, g_c0_off + DMSH_C0_DISPATCH, 12}, {io, g_c0_off + DMSH_C0_DISPATCH_NVN2, 12}};   // the group counts into the bank, where the shader reads them (bank_c0)
         vkCmdCopyBuffer(c, ib, g_c0_b, dm_sdk_ounce() ? 2u : 1u, cpy); cb_barrier(); }
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p);
@@ -3710,7 +3712,7 @@ static int vk_dispatch(const p_dispatch *dp) {
     crumb(dp->ind ? 'C' : 'c', s->key, NULL, g[0], g[1] * g[2]);
     bc_end(c, bcid);
     if (pr_i >= 0) { g_prof[pr_i].s1 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->pq, (uint32_t)g_prof[pr_i].s1); }
-    cb_barrier();
+    if (cs_game()) { g_cs_chain = 1; g_cs_chain_seq = C->seq; } else cb_barrier();   // the barrier after it waits for the next command of another kind, or the game's barrier
     g_dispatches++; C->ndraw++;
     return 1;
 }

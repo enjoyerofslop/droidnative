@@ -509,6 +509,22 @@ static void qr_done(chunk *c, int fence_ok, int ts, int nq, int ntq, int npq) { 
     if (ntq > c->td) c->td = ntq;
     if (npq > c->pd) c->pd = npq;
 }
+// Compute dispatches are ordered by the game's own barriers, as NVN orders them: the same rule as seedds/nxnative 547c5db6 (PR #2250, nvn_mtl.m dispatch_enc_cs, MIT), written
+// anew for the Vulkan replay. vk_dispatch put a full pipeline barrier before and after every dispatch, so the GPU ran them one at a time, with a launch and a drain each:
+// Ocarina of Time's Kokiri Forest frame has about 140 dispatches, 110 of them under 60 us, 5.6 ms together on an Adreno 830 at 1,100 MHz. NVN makes a dispatch's writes visible
+// to later work only when the game issues nvnCommandBufferBarrier (OP_BARRIER, any bits), so a dispatch that follows another dispatch in the command buffer gets a barrier
+// only when the game issued one between them (g_cs_gbar); the barrier after a run of dispatches is deferred (g_cs_chain) and recorded before the next command of any other
+// kind (cb(), which every transfer, clear, upload and render pass goes through; the chunk's end has its own). A dispatch after any other command keeps the full barrier
+// before it, as before: what a pass or a copy wrote is visible to it whatever the game asked. The replay's own syncs stand for the rest (a dispatch's guest memory reads
+// land first: draw_view). DM_VK_CS_BARRIER=full (env.txt): a full barrier before and after every dispatch, as before (diagnostic)
+static int g_cs_gbar, g_cs_chain, g_cs_in_disp; static uint64_t g_cs_chain_seq;   // a game barrier since the last dispatch; a run of dispatches open in chunk seq g_cs_chain_seq with its barrier deferred; cb() called by vk_dispatch itself
+static uint64_t g_cs_free, g_cs_gbarred, g_cs_first, g_cs_closed;   // dispatches with no barrier before them / after a game barrier / after another command (the full order); runs closed by a later command
+static int cs_game(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_CS_BARRIER"); v = !(e && !strcmp(e, "full")); if (!v) LOG("[vk] DM_VK_CS_BARRIER=full: a full barrier before and after every compute dispatch (diagnostic)"); } return v; }
+static void cb_barrier(void);
+static void cs_chain_close(void) {   // the barrier deferred after a run of dispatches, before a command of another kind
+    if (!g_cs_chain) return;
+    g_cs_chain = 0; if (C && C->open && C->seq == g_cs_chain_seq) { cb_barrier(); g_cs_closed++; }
+}
 static VkCommandBuffer cb(void) {
     if (!cur()) return VK_NULL_HANDLE;
     if (!C->open) { VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}; vkBeginCommandBuffer(C->cb, &bi); C->open = 1;
@@ -519,6 +535,7 @@ static VkCommandBuffer cb(void) {
         if (C->pq && C->pd) { vkCmdResetQueryPool(C->cb, C->pq, 0, (uint32_t)C->pd); g_qr_cmd += (uint64_t)C->pd; }
         C->qd = C->td = C->pd = 0; C->nq = C->ntq = C->npq = 0; bf_reset(); }   // a new recording holds no bound state (gfx_vk_draw.inc bf_*)
     rp_end();   // transfers and clears run outside a draw's render pass (only the draw path records inside one, through C->cb)
+    if (!g_cs_in_disp) cs_chain_close();
     return C->cb;
 }
 // Every transfer / clear is ordered after everything before it (the images stay in GENERAL; one full barrier between operations; a chunk also ends with one, which
@@ -697,6 +714,7 @@ static uint64_t chunk_submit(uint64_t nvn_fence) {
     if (rec && (C->gm_st || C->ip_wr)) {   // raw stores or storage buffers written in place wrote guest memory itself (gfx_vk_gmem.inc): made visible to the host, which reads it once the fence is signalled
         VkMemoryBarrier hb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT};
         vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL, 0, NULL); }
+    g_cs_chain = 0;   // (the chunk's end barrier closes a run of dispatches)
     if (rec) { cb_barrier(); rb_record(C); if (C->ts) vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsq, 2 * (uint32_t)(C - g_ch) + 1); if (!deferred) vkEndCommandBuffer(C->cb); C->open = 0; }
     C->nvn_fence = nvn_fence;
     chunk *c = C; C = NULL;
@@ -2355,7 +2373,8 @@ void mtl_exec(const uint8_t *p) {
                 if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
                 { p_draw_idx t; if (!vk_draw(NULL, draw_idx_rec(a, h.size, &t))) g_draws_dropped++; break; }
             case OP_DISPATCH: if (!vk_dispatch((const p_dispatch *)a)) g_draws_dropped++; break;
-            case OP_BARRIER: case OP_VP_SWIZZLE: case OP_BEGIN: break;   // the replay's own syncs stand for barriers; viewport swizzles are not replayed (as before the unhandled-op line)
+            case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4); if (bits) g_cs_gbar = 1; break; }   // the replay's own syncs stand for barriers, apart from the order of dispatches (cs_game)
+            case OP_VP_SWIZZLE: case OP_BEGIN: break;   // viewport swizzles are not replayed (as before the unhandled-op line)
             default: if (!draw_state_op(h.op, a) && h.op < 64 && !(g_op_warned & 1ull << h.op)) { g_op_warned |= 1ull << h.op; LOG("[RED] [vk] command op %u is not replayed on Vulkan: skipped", h.op); }
                 break;   // state for draws (programs, bindings, render state)
         }
@@ -2699,6 +2718,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     shadow_line();
     LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu (%llu looked up as far as the write-back's end), other bindings %llu, written in place by a later dispatch %llu; bound on another binding's copy of the same shader %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd, own_alias)", (unsigned long long)g_fwd, (unsigned long long)g_stream_clip, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1], (unsigned long long)g_alias);
     LOG("[vk] render passes with every layer of their targets attached (a draw writes the layer): %llu (cumulative; gfx_vk_draw.inc rp_prepare_)", (unsigned long long)g_layered_passes);
+    LOG("[vk] compute dispatches: %llu with no barrier before them, %llu after a barrier of the game's, %llu after a command of another kind (a full barrier), %llu runs closed by a later command (cumulative; %s)",
+        (unsigned long long)g_cs_free, (unsigned long long)g_cs_gbarred, (unsigned long long)g_cs_first, (unsigned long long)g_cs_closed, cs_game() ? "ordered by the game's barriers, DM_VK_CS_BARRIER" : "DM_VK_CS_BARRIER=full");
     if (slot0_fill_on()) LOG("[vk] render passes given a scratch target in their empty colour slot 0: %llu (cumulative; gfx_vk_draw.inc slot0_fill_on)", (unsigned long long)g_slot0_fills);
     if (dup_slots_on()) LOG("[vk] render passes attaching an image once that two colour slots name: %llu, draws whose write to the slot left unused was lost: %llu (cumulative; gfx_vk_draw.inc dup_slots)", (unsigned long long)g_dup_passes, (unsigned long long)g_dup_lost);
     if (stg_stat()) { static unsigned long long f0; static uint64_t a0, r0, s0; uint64_t a = atomic_load(&g_stg_allocs), r = atomic_load(&g_stg_frees), sl = g_sp_slices; double nf = frame > f0 ? (double)(frame - f0) : 1;

@@ -216,6 +216,21 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pool_notes`: a pool change, a finalized pool, a retired ID across submissions, a takeover, a registration past the budget and a read written in place each patch or keep the table, and the patched tables hold what tables built whole do. The notes and the patching were measured on the host of [PR #1387](https://github.com/seedds/nxnative/pull/1387) (MacBook Pro M5 Pro, a six-minute walk through Kokiri Forest): tables built whole about 9,600 (26 s) with only pool changes noted, 14 (0.3 s) with all three. Open: the counts on this walk, which also has the read bitmap and the budget, are not measured yet. The table patching and the first notes are [PR #1299](https://github.com/seedds/nxnative/pull/1299)'s; the unnoted takeover was found in [issue #1326](https://github.com/seedds/nxnative/issues/1326).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### A host write into guest memory looked at every pool range
+
+- **Symptom:** Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8 (Android): the GPU busy 77–81 % of each frame and its governor holding it at 460–500 MHz of 1,300; the
+  replay waiting 15–18 ms a frame for a free chunk of its ring of 8 while the GPU finished a 64-draw chunk in about 0.35 ms, and the completion thread retiring one every
+  ~0.4 ms, 90 % of it in `post_apply`'s counter reports (`dm_guest_write_prepare` 14.8 µs each, about 2,200 a frame).
+- **Cause:** `nvn_dirty.c` `prep_write`, called before every host write into guest memory, walked every registered range slot (thousands in this game) to find the ones
+  covering the write, for a 16-byte report at the next address of one pool.
+- **Fix:** `prep_write` remembers, per thread, the ranges covering a page span in a 32-entry table keyed by the span's first page, valid while no pool was registered or
+  retired since (`g_rgen`, bumped by `nvn_dirty_add_range` and `nvn_dirty_remove_range`): a write to the same pages releases those ranges' pages without a scan. A range
+  registered after a set was remembered has no protected page yet, so the remembered set is still the right one to release; a span more than `PW_MAX` ranges cover is not
+  remembered. 14.8 → 2.5 µs a report on the Fold, the chunk's retirement 434 → 123 µs, the replay's wait for a free chunk 17 → 8 ms a frame.
+- **Check:** `t_dirty_slots`, `t_dirty_race`, `t_dirty_retire_race` (`dm/gfx/tests`).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a Galaxy Z Fold 8 (DroidPlay Core; the raw global memory entry in
+  [rendering.md](rendering.md) had noted the walk and prepared its own write-backs once per chunk).
+
 ### Memory-pool tracking table grows in blocks
 
 - **Cause:** the memory-pool tracking table had a fixed 4,096 slots; a pool past the end would have its textures re-uploaded at every use.
