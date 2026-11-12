@@ -77,7 +77,8 @@ First run on Android, 2026-11-11, on a Galaxy Z Flip 7 (Exynos 2500, Xclipse 950
 - **Memory:** 1.80 GB PSS (0.80 GB graphics). Not killed.
 - **Input:** the game confirms with B and goes back with A ([Input](#input)), so a menu that ignores A is expected.
 - **Not Playable yet:** it's real-time action, so the stretch (the Asylum through the Asylum Demon) needs a person with a controller.
-- **Not tried:** the other devices, and an Adreno phone.
+- **On an Ayn Odin 2 (SM8550, Adreno 740 with Qualcomm's driver 0x802a4000), with its built-in controller:** the same route into the Asylum cell, with the name given by `DM_KBD=Ash` in `env.txt` (the host answers the software keyboard, so no Android keyboard opens). 30 fps in every 30 s window, GPU about 6.7 ms in the cell, 1.1 GB PSS. The movie's output underran in only 1 of its 10 reports there (22 underruns), so the Z Flip 7's crackle is mostly that phone's. The game app and its save in the cell stay installed there for a person to play.
+- **Not tried:** the other devices.
 
 ## Found on this game
 
