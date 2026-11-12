@@ -59,7 +59,7 @@ static int gm_inplace_w(uint64_t addr, size_t n, int cs, VkBuffer *b, VkDeviceSi
     g_ip_binds--; g_ip_bytes -= n;   // (counted as written, not read)
     wb_t *w = wb_add(); if (!w) return 0;
     *w = (wb_t){0, (size_t)*off, n, 1, n, n, (uint8_t *)(uintptr_t)addr, NULL, cs}; w->ipb = *b; w->inpl = 1;
-    if (cs) C->nfwd++;
+    if (cs) C->nfwd++; else C->nipw++;   // a draw's: read where it lies by a later dispatch (gfx_vk_draw.inc fwd_hit)
     C->ip_wr = 1; g_ip_wbinds++; g_ip_wbytes += n;
     return 1;
 }

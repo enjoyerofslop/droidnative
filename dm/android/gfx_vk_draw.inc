@@ -2369,7 +2369,9 @@ static int buf_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = ge
 static uint64_t g_buf_fwd[2];   // bindings read on the GPU from a pending write-back / written in place
 // al: the binding's offset alignment; write: the shader writes it too (a dispatch's only, in place on the current chunk's write-back)
 static int buf_fwd(uint64_t addr, uint64_t n, int write, VkDeviceSize al, VkBuffer *b, VkDeviceSize *o) {
-    if (vk_safe() || !addr || !n || !buf_fwd_on() || !C || (!C->nfwd && (write || !atomic_load(&g_inflight_fwd)))) return 0;
+    if (vk_safe() || !addr || !n || !buf_fwd_on() || !C) return 0;
+    int ipw = g_rd_cs && ip_read_on() && (C->nipw || atomic_load(&g_inflight_ipw));   // a draw's in-place write a dispatch may read where it lies
+    if (!C->nfwd && !ipw && (write || !atomic_load(&g_inflight_fwd))) return 0;
     uintptr_t lo = (uintptr_t)addr, hi = (uintptr_t)(addr + n); VkBuffer fb; VkDeviceSize fo; int r = 0;
     if (write) { int nw = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb; if (!fwd_hit(C, nw, lo, hi, &fb, &fo, &r) || !r) return 0; }
     else if (!fwd_find(lo, hi, &fb, &fo)) return 0;
@@ -2842,7 +2844,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         if (s->gm && u && u->addr) gm_lazy_ptrs(u->addr, n);   // chunks its pointers reach, placed (gfx_vk_gmem_lazy.inc)
         VkDeviceSize ao, ipr;   // ao: the arena offset (off above is the c0 / uniform buffer word); ipr: the range bound in place
         int wr_ = (sb->flags & 1) != 0;   // written by the shader
-        g_rd_cs = disp_like(s);
+        g_rd_cs = disp_like(s) || ((s->stage == SH_MS || s->stage == SH_TK) && !g_mesh);
         if (u && u->addr && (!wr_ || disp_like(s)) && sb_fwd(u->addr, n, wr_, &b, &ao)) g_buf_fwd[wr_]++;   // on the GPU from a dispatch's pending write (buf_fwd)
         else if (u && u->addr && wr_ && g_vdisp && rd_home_on() && rd_bind_w(u->addr, n, &b, &ao)) {}   // a discarded draw's write: on its home range's copy (rd_bind_w)
         else if (u && u->addr && !wr_ && gm_inplace(u->addr, n, &b, &ao, &ipr)) {   // read only, in a placed pool: bound there (gfx_vk_gmem_inplace.inc)
@@ -3274,7 +3276,8 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
             if (hh_ > hl_ && !fwd_find(hl_, hh_, &fb_, &fo_)) RNG(hl_, hh_ - hl_); break; }   /* a discarded draw's write: its home range, found whole on the GPU or landed (rd_bind_w) */ \
         if (!w_ && (a) && (s)) wb_promote((uintptr_t)(a), (uintptr_t)((a) + (s)));   /* a draw's write it reads whole: on the GPU after a barrier */ \
         if ((w_ && !cs) || !f((a), (s), w_, &fb_, &fo_)) RNG(a, s); } while (0)
-    g_fwd_nwb = C ? C->nwb : 0; const int cs = (sh[0] && sh[0]->stage == SH_CS) || g_vdisp;   // a dispatch (its stage alone), or a draw run as one (g_vdisp)
+    g_fwd_nwb = C ? C->nwb : 0;   // cs: a dispatch (its stage alone), a draw run as one (g_vdisp), or a task / mesh draw in compute form, whose kernels are dispatches behind full barriers (gfx_vk_meshemu.inc)
+    const int cs = (sh[0] && (sh[0]->stage == SH_CS || ((sh[0]->stage == SH_MS || sh[0]->stage == SH_TK) && !g_mesh))) || g_vdisp;
     g_rd_cs = cs;
     if (vtx) { uint32_t seen = 0; for (int i = 0; i < 16; i++) { va_st a; memcpy(&a, &D.attr[i], 4); VkBuffer fb; VkDeviceSize fo;
         if (a.fmt && fwd_early()) { if (seen >> a.stream & 1) continue; seen |= 1u << a.stream; }   // each stream once (stream_fwd)
