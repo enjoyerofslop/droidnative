@@ -1,0 +1,16 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+// Raw global memory's self-test through the table of pointers (gfx_vk_gmem_check.inc gm_selftest, DM_VK_RAW_GMEM_TEST=1, gfx_vk_gmem_noptr.inc): each lane adds the table
+// entry's delta to a guest address as the translator's helper does, which gives the piece's slot in the high word and the offset in the low one, loads the slot's pointer
+// and reads 16 bytes as spv_noptr.h makes the helper read them, four words through the pointer
+layout(local_size_x = 64) in;
+layout(buffer_reference, buffer_reference_align = 4, std430) readonly buffer U { uint d[]; };
+layout(set = 0, binding = 0, std430) readonly buffer Tab { uint w[]; } tab;
+layout(set = 0, binding = 1, std430) buffer Io { uvec4 req[64]; uvec4 got[64]; } io;   // req: the address's low and high words, the table entry
+layout(set = 1, binding = 0, std430) readonly buffer Ptrs { U p[]; } ptrs;
+void main() {
+    uint i = gl_LocalInvocationID.x; uvec4 r = io.req[i]; uint e = r.z * 8u;
+    uint lo = r.x + tab.w[e + 4u], hi = r.y + tab.w[e + 5u] + (lo < r.x ? 1u : 0u), o = lo >> 2;
+    U u = ptrs.p[hi];
+    io.got[i] = uvec4(u.d[o], u.d[o + 1u], u.d[o + 2u], u.d[o + 3u]);
+}

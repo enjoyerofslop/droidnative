@@ -227,7 +227,7 @@ static int vk_try(char *why, size_t nwhy) {
     smid = smid && smq.shaderModuleIdentifier && pcq.pipelineCreationCacheControl;
     if (smid) { dext[nde++] = "VK_EXT_pipeline_creation_cache_control"; dext[nde++] = "VK_EXT_shader_module_identifier"; }
     if (gm) gm = gm_feat_take(dext, &nde);
-    if (gm && gmdi) gm_np_take(&diq, dix, dext, &nde);   // the pools' descriptor array, for a driver that refuses OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
+    if (gm) gm_np_take(gmdi ? &diq : NULL, dix, dext, &nde);   // the table of pointers or the pools' descriptor array, for a driver that refuses OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT dve = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT, .vertexAttributeInstanceRateDivisor = dv.vertexAttributeInstanceRateDivisor};
     VkPhysicalDeviceHostQueryResetFeaturesEXT hqe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT, .pNext = divisor ? &dve : NULL, .hostQueryReset = VK_TRUE};
     VkPhysicalDeviceShaderDrawParametersFeatures dpe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES, .pNext = hqr ? (void *)&hqe : divisor ? (void *)&dve : NULL, .shaderDrawParameters = dp.shaderDrawParameters};
@@ -2135,6 +2135,7 @@ static void clear_tex(const p_clear_tex *ct) {
 static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, uint32_t w, uint32_t x, uint32_t y, uint32_t cw, uint32_t ch, int flip);   // below (the pass dump's PNGs)
 #include "gfx_vk_posrows.inc"   // the vertex shaders whose position reads its constant buffer rows at run time (vk_pos_rows)
 #include "gfx_vk_draw.inc"
+#include "gfx_vk_pevict.inc"   // pipelines no draw has bound for a while, destroyed, for drivers that hold 8 MiB per pipeline (DM_VK_PIPE_EVICT_AGE)
 #include "gfx_vk_mesh.inc"
 #include "gfx_vk_meshemu.inc"   // the same draws in compute form, on a GPU without VK_EXT_mesh_shader
 
@@ -2542,6 +2543,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     pcache_made_n(0);   // the driver's cache file, when a request for it came inside the gap after the last write (gfx_vk_draw.inc)
     vtex *v = vt_get(t); flush(); rec_drain();   // the frame's chunks on the queue before the front end's blit of it (rec_submit)
     vt_evict();   // images no draw has used for a while (gfx_vk_evict.inc)
+    pev_sweep();   // pipelines no draw has bound for a while (gfx_vk_pevict.inc)
     spare_sweep(atomic_load(&g_presents));   // spare image memory unused for a while (gfx_vk_spare.inc)
     dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents));
     if (prof_on()) { all_wait(); prof_write(); }
@@ -2649,7 +2651,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     frame, mb, g_tex.n, (unsigned long long)g_pkg_uploads, (unsigned long long)g_pkg_reuploads, (unsigned long long)(g_up_bytes >> 20), (unsigned long long)g_lsnap, (unsigned long long)g_lsnap_stale,
     (unsigned long long)atomic_load(&g_lwb_whole), (unsigned long long)atomic_load(&g_lwb_diff), (unsigned long long)(atomic_load(&g_lwb_bytes) >> 10), (unsigned long long)atomic_load(&g_lwb_same),
     atomic_load(&g_lwb_ns) / 1e6, (unsigned long long)atomic_load(&g_ab_taken), (unsigned long long)atomic_load(&g_ab_noted), (unsigned long long)atomic_load(&g_ab_clean), (unsigned long long)atomic_load(&g_ab_differ), (unsigned long long)atomic_load(&g_ab_refused));
-    ev_stat(); spare_stat(); fb_stat();
+    ev_stat(); pev_stat(); spare_stat(); fb_stat();
     if (wb_revert_on()) rv_stat(frame);
     if (DM_GAME_RENDER_COND) LOG("[vk] conditional rendering: %llu clears and draws dropped, samples-passed conditions %llu read once landed / %llu in flight (drawn), %u counter report addresses kept "
                                  "(cumulative)", (unsigned long long)g_rc_skipped, (unsigned long long)g_rc_landed, (unsigned long long)g_rc_flying, g_rc_n);

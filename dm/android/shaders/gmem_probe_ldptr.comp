@@ -1,0 +1,10 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+// Raw global memory's second probe (gfx_vk_gmem_noptr.inc gm_np_made): a physical pointer loaded from a storage buffer, as spv_noptr.h's table of pointers has the shaders load
+// it, then a load through it. A driver that refuses OpConvertUToPtr but builds this (the Ayn Odin 2's Adreno 740 V@0676.32, the Razr's 730 V@0615.98) gets raw global memory
+// through the table; one that refuses this too gets the pools' descriptor array. Never run, only built
+layout(local_size_x = 1) in;
+layout(buffer_reference, buffer_reference_align = 4, std430) readonly buffer U { uint d[]; };
+layout(set = 0, binding = 0, std430) buffer Io { uint slot; uint off; uint got; } io;
+layout(set = 0, binding = 1, std430) readonly buffer Tab { U p[]; } tab;
+void main() { io.got = tab.p[io.slot].d[io.off]; }
