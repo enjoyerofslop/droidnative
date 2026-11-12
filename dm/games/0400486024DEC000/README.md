@@ -86,10 +86,13 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 - **Xclipse 950 (Galaxy Z Flip 7):** lit at about 12 fps, 8.25 GB at most.
 - **Mali (Pixel 9 Pro XL):** lit at about 9 fps with the E5B9G9R9 storage view (#281); the native heap is about 0.4 GB with the dense binding numbers (#276).
 - **Adreno 7xx on older Qualcomm drivers** (the Ayn Odin 2's 740 at V@0676, the Moto Razr Plus 2023's 730 at V@0615): the characters are dark, because the driver rejects `OpConvertUToPtr`, the pointer conversion raw global memory's shaders use. With Turnip T30 the 740 draws them lit at about 9 fps. Pointer-free raw global memory is in progress (#286).
+- **The replay's CPU since 0.8.1 (2026-11-11):** the set of counter report addresses grows and occlusion conditions are read once landed ([Report tables that dropped entries](../../../docs/reference/rendering.md#report-tables-that-dropped-entries)), and this game's `android_defaults.txt` turns on the command recorder (`DM_VK_RECORDER=1`: [Command recording on a thread of its own](../../../docs/reference/rendering.md#command-recording-on-a-thread-of-its-own-android)). Kokiri Forest, `bench_android.tsv` route `kokiri`, the replay thread's CPU a frame:
+  - Ayn Odin 2 (Adreno 740): 40.1 ms on main before them, 30.2 with the address set, 18.8 with the recorder as well; 13.2, 14.5 and 14.9 fps. Its GPU is busy 50 ms a frame throughout, so the frame rate is now the GPU's.
+  - OnePlus Pad 3 (Adreno 830): 34 → 14 ms with both, and the GPU 34.9 → 21.4 ms as its clock went from about 650 to 1,100 MHz. The frame rate stayed at 19.9 fps, because the frame step holds 3 vsyncs; with 2 held by hand (`DM_FPS_TARGET=30 DM_FPS_HOLD=off`) it ran at 27.5 fps.
+  - Galaxy S25 Edge (Adreno 830): 38 → 17 ms with both, 17.6 → 19.0 fps; its GPU clock stays at 525 MHz, 41 ms a frame.
 - **Open:**
   - the frame rate;
   - the mesh-shaded foliage, left out: the Vulkan replay has no mesh stage yet. #83 draws it on `VK_EXT_mesh_shader`, but leaves white tears in the distant canopy, which aren't the mist shader's NaN (`5ad65c0eefd09c7f` and the light-tile pass `ea1bf96b72e72476` skipped, the tears stay);
-  - pale, flat water patches on Adreno;
   - a stall of about 10 s at the first start, and after a shader-chain update, while Kokiri Forest's pipelines build.
 
 The history below is dated; the state above supersedes it.
@@ -174,6 +177,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Storage the CPU wrote before a texture's first use](../../../docs/reference/nvn-objects.md#storage-the-cpu-wrote-before-a-textures-first-use-android): resolved on Android: Kokiri Forest's terrain tiles were missing on the Galaxy Z Fold 8, seen as flat, pale water patches. The water and fog pass (`888c1068ac8f7043`) tinted the far depth it saw through them. The tiles' height, blend, hole and detail maps are filled from the CPU before their textures are made.
 - [Set layouts sized by their highest binding number](../../../docs/reference/rendering.md#set-layouts-sized-by-their-highest-binding-number): on a Galaxy Z Flip 7, its constant buffers at 1,048,576 and up cost 64 to 192 MB a layout, about 9 GB over Kokiri Forest.
 - [A start-up list entry with a mesh shader in its vertex slot](../../../docs/reference/rendering.md#a-start-up-list-entry-with-a-mesh-shader-in-its-vertex-slot): on a OnePlus Pad 3, every start crashed the Adreno 830's compiler a few seconds in, on an entry with mesh shader `0c1ffecd02018fb0` in the vertex slot that another build had written to the start-up list.
 
