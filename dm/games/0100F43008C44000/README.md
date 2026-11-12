@@ -121,7 +121,16 @@ First run on Android, 2026-11-12. The cartridge's base game 1.0.0 (v0, the Switc
   - The same two red lines.
 - **A downloaded save** offered for deeper testing turned out to be a Pokémon Legends: Arceus save, so it wasn't used.
 - **Not Playable yet:** the stretch has to reach the first battle, and the battles are real-time, so it likely needs a person.
-- **Not tried:** past the station, update 2.0.2 (the profile's build), and the other devices.
+- **Update 2.0.2 (v393216, the registered build), the same day:** packed from the cartridge with the update beside it, from `main` at `52941f97`.
+  - **The build:** the registered profile, no derived one. The split found 28,603 shaders through the Mac host's Oodle, as above. 5,587 new ones translated (23,016 were 1.0.0's already), none failed. Installed through DroidPlay again.
+  - **Ayn Odin 2:** the 1.0.0 save made on Android loads on 2.0.2, onto the Gare de Lumiose platform.
+    - **Frame rate:** 30 fps in every 30 s window (29.9–30.1), GPU 8.7–11.3 ms.
+    - **Sound:** no underrun. **Memory:** 1.8 GB PSS.
+    - The same two red lines.
+    - **Save:** a save made with R on 2.0.2 loads by Continue after a cold start.
+  - **Pixel 9 Pro XL:** the same save loads, and the platform is still drawn nearly black at 20 fps (GPU 24–26 ms), so 2.0.2 doesn't change Mali's picture. 2.7 GB PSS; memory cgroup peak 1.87 GB, no Android 17 kill.
+  - **Not reached on either version:** the ticket gate out of the station. The agent's walks kept circling the platform as the camera turned, and the map isn't open yet at that point. So the city, the first battle and the night are still untested.
+- **Not tried:** past the station, and the other devices.
 
 ## Found on this game
 

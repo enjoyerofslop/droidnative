@@ -1470,6 +1470,7 @@ static vtex *slot0_scratch(uint32_t w, uint32_t h) {
     LOG("[vk] scratch target for an empty colour slot 0: %ux%u", v->w, v->h);
     return sv[n++] = v;
 }
+#include "gfx_vk_layerpad.inc"   // small layered passes padded past the tile memory (layer_pad_on)
 // One image in two colour slots of a pass: Breath of the Wild's 1280x720 G-buffer passes bind one target at slots 1 and 2 and another at 3 and 4, and write only the
 // first of each (channel mask 0xf0f0ff). Vulkan leaves attachments that alias in one subpass undefined: the OnePlus Pad 3's Adreno 830 stored the unwritten copy over
 // the written one, and the Shrine of Resurrection was drawn dark (Link unlit) and blurred (dm/android/baselines.md problem 15), where the Odin 2's Adreno 740 drew it
@@ -1561,6 +1562,7 @@ static int rp_prepare_(int layered) {
         VkImageView iv = sv ? view_get(sv, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, NULL) : VK_NULL_HANDLE;
         if (iv) { cvw[0] = iv; k.color[0] = sv->fmt; nv++; g_slot0_fills++; }
     }
+    layer_pad(&k, cvw, w, h, layers);   // after slot 0 is filled: the slots it adds come after the game's
     nv = 0; for (uint32_t i = 0; i < k.ncolor; i++) if (cvw[i]) views[nv++] = cvw[i];
     if (dvw) views[nv++] = dvw;
     VkRenderPass rp = rp_get(&k); if (!rp) { lsnap_drop_all(); return 0; }
@@ -2248,7 +2250,7 @@ static uint32_t g_cdim[3];   // the current dispatch's group counts (c0 + 0x200 
 // android_defaults.txt: Ocarina of Time's) turns it on; off by default until more games have run it
 static int ind_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IND_FWD"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_IND_FWD=1: an indirect dispatch whose arguments a dispatch wrote runs on the GPU's copy of them"); } return v; }
 static VkBuffer g_c0_b; static VkDeviceSize g_c0_off;   // where stage_set put the compute c0 bank (the arena): the GPU writes the counts into it
-static uint64_t g_ind_gpu, g_ind_cpu, g_ind_cpu_wait, g_ind_seq;   // indirect dispatches run on the GPU's copy of their arguments / with the arguments read on the CPU / of them, after a wait
+static uint64_t g_ind_gpu, g_ind_cpu, g_ind_cpu_wait, g_ind_seq, g_ind_inpl;   // g_ind_inpl: of g_ind_gpu, read in place in a placed pool   // indirect dispatches run on the GPU's copy of their arguments / with the arguments read on the CPU / of them, after a wait
 static VkBuffer g_tgs_b; static VkDeviceSize g_tgs_off;   // where the dispatch's spilled shared memory lies when it is not the chunk's arena (stage_set; gfx_vk_meshemu.inc memu_kernel sets it for a kernel)
 static void bank_c0(int nst, uint8_t *b, uint32_t base_inst) {
     memset(b, 0, 0x800);
@@ -3688,7 +3690,10 @@ static int vk_dispatch(const p_dispatch *dp) {
     uint32_t g[3] = {(uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z};
     VkBuffer ib = VK_NULL_HANDLE; VkDeviceSize io = 0; int gpu_args = 0;   // the arguments read on the GPU from a pending write of them (ind_fwd_on)
     g_rd_cs = 1;
-    if (dp->ind && ind_fwd_on() && !s->tgs && !s->upsq && cur()) { g_fwd_nwb = -1; gpu_args = fwd_find((uintptr_t)dp->ind, (uintptr_t)dp->ind + 12, &ib, &io) && !(io % 4); }
+    if (dp->ind && ind_fwd_on() && !s->tgs && !s->upsq && cur()) { g_fwd_nwb = -1; gpu_args = fwd_find((uintptr_t)dp->ind, (uintptr_t)dp->ind + 12, &ib, &io) && !(io % 4);
+        // no pending write-back holds them (the writer stored them through the raw pool table, or the game wrote them): in a placed pool they are read where they lie, which a
+        // raw store or the CPU wrote and the dispatch's barrier orders (gfx_vk_gmem_inplace.inc); on the Galaxy S25 Edge 18,600 of 25,600 indirect dispatches a run took the CPU path
+        VkDeviceSize rng_; if (!gpu_args && gm_inplace_al(dp->ind, 12, 4, &ib, &io, &rng_)) { gpu_args = 2; g_ind_inpl++; } }
     { vshader *sh[4] = {s, NULL, NULL, NULL}; rd_rng r[1] = {{(uintptr_t)dp->ind, (uintptr_t)dp->ind + 12}};   // what the dispatch reads of guest memory lands first (draw_view), not everything pending
       if (dp->ind && !gpu_args) { uint64_t w0 = g_view_cur + g_view_fly; ranges_view(r, 1); g_ind_cpu++; g_ind_cpu_wait += g_view_cur + g_view_fly != w0; } draw_view(sh, NULL, 0); }
     if (dp->ind && !gpu_args && !ind_read(dp->ind, g, 12)) return 0;

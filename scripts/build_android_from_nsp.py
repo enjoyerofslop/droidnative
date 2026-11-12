@@ -87,7 +87,7 @@ ANDROID_TESTED = {
     '01009D901BC56000',   # Donkey Kong Country Returns HD (In-game into 1-1 at 60 fps; Playable needs a person; 1.0.0 from a derived profile)
     '010069C01AB82000',   # SHIN MEGAMI TENSEI V: Vengeance (a contributor's report)
     '01001F5010DFA000',   # Pokémon Legends: Arceus (In-game; washed-out picture, no characters on Mali)
-    '0100F43008C44000',   # Pokémon Legends: Z-A (In-game into Lumiose's station at 30 fps on Adreno; Mali draws it nearly black; 1.0.0 from a derived profile)
+    '0100F43008C44000',   # Pokémon Legends: Z-A (In-game into Lumiose's station at 30 fps on Adreno, 1.0.0 and 2.0.2; Mali draws it nearly black)
     '010074F013262000',   # Xenoblade Chronicles 3 (In-game, blocked: characters only in cutscenes, world striped; 1.0.0 from a derived profile)
 }
 

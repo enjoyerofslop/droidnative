@@ -82,7 +82,12 @@ First run on Android, 2026-11-11: a Google Pixel 9 Pro XL (Tensor G4, Mali-G715 
   - From the title: A, A (New Game), L, L (H'aanit), A, then Down, Up (the cursor), A.
   - The opening takes about 400 A presses at 0.6 s; the radar tutorial closes with B.
   - Talking and Path Actions need H'aanit level with the person (the same depth on screen), facing them. Y offering only Examine means nobody is in front. The headman stands by his door, so stop at the door ("Open"), then turn right to him. The save monument opens from in front of it, facing up.
-- **Not tried:** a person playing with the on-screen controls or a controller; `DM_FPS_TARGET=30`; past the Whisperwood's first battle; the other devices.
+- **Not tried:** a person playing with the on-screen controls or a controller; `DM_FPS_TARGET=30`; past the Whisperwood's first battle; the other devices but the Retroid Pocket 5 (below).
+
+Second device, 2026-11-12: a Retroid Pocket 5 (Snapdragon 865, Adreno 650 with Qualcomm's driver 0x802ea000 and Vulkan 1.1.128), as a game app from `main` a50dfcb0.
+
+- **The boot crash:** every start crashed about 3 s in, before the first frame was presented (`CRASH sig=11 addr=0x2f100000058 pc=…(vulkan.adreno.so+0x170020)`, thread `NVN queue repla`). The driver crashes in `vkCreateFramebuffer` for the game's 32×32×32 colour-grading LUT, drawn as 32 layers into one A2B10G10R10 target: a layered framebuffer small enough for the GPU's tile memory. Such passes now get scratch colour slots on Adreno 6xx: [A small layered render pass crashes the Adreno 650's driver](../../../docs/reference/rendering.md#a-small-layered-render-pass-crashes-the-adreno-650s-driver-android).
+- **With that:** from a new game through the title, H'aanit's flashback, S'warkii, the radar tutorial and the walk toward the headman, at about 49 fps (frame p50 20.4 ms), 2.16 GB PSS. The grading looks as on the Pixel: S'warkii's red-tinted edges and its bluish mist. The same two red lines as on the Pixel. Not played further: no battle, save or Continue here yet.
 
 ## Found on this game
 
@@ -92,6 +97,7 @@ General changes first needed here; each applies to every game:
 - **Provisional profiles:** Unreal's 64 GB alias layout only with virtual address memory (`profile_guess.py`): [Unreal's engine address region](../../../docs/reference/memory.md#unreals-engine-address-region-and-its-options).
 - **NVN:** `nvnTextureBuilderGetSparseTileLayout` / `nvnTextureGetSparseTileLayout`: [The sparse tile layout of a texture](../../../docs/reference/nvn-objects.md#the-sparse-tile-layout-of-a-texture); every virtual pool with a range of its own until its first mapping decides: [Virtual pools of one texture each](../../../docs/reference/nvn-objects.md#virtual-pools-of-one-texture-each-mapped-before-and-after-the-texture); sparse textures' block height: [Sparse textures take the block height of their 64 KB tile](../../../docs/reference/rendering.md#sparse-textures-take-the-block-height-of-their-64-kb-tile).
 - **Audio:** the update lock without `SdkMutexType`: [No `SdkMutexType` in SDK 3](../../../docs/reference/audio.md#no-sdkmutextype-in-sdk-3).
+- **Android, Adreno 6xx:** small layered render passes padded past the tile memory: [A small layered render pass crashes the Adreno 650's driver](../../../docs/reference/rendering.md#a-small-layered-render-pass-crashes-the-adreno-650s-driver-android).
 - **Frame rate:** Unreal console variables registered by inlined static constructors, from a page base made far before the name: [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name).
 
 ## Open

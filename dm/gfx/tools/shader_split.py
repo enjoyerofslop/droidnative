@@ -47,6 +47,7 @@
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · Liquid Engine archives (11 bit studios, Frostpunk): one shader per entry of the .dat archive its .idx / .str index and name (zstd entries), see liquid_index and liquid_shaders
+#   · AnvilNext forge (Ubisoft, Assassin's Creed: The Rebel Collection): BNSH in the LZO1X blocks of the .forge entries (version 27, anvil_forge.py), see anvil_jobs and anvil_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -68,6 +69,7 @@ from profile_guess import glsl_sources
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import uepak
 GAME = _game.load()   # the current game profile (DM_GAME, required): source group rules and the table header note
 GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
+SEPARATE = GAME.get('shader_separate', 'off') == 'on'   # every vertex shader is single-stage, whatever its source (separable_pairs)
 KEY_SKIP = tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'))   # control bytes the keys hash as zeros (key_ctl); dm/games/game.py checks the form
 # The sources are what the game files hold, with no profile switch: GLSLC outputs in main (glslc_shaders), the outputs the game compiles at run time when a capture is there (DM_GLSLC_CAPTURE,
 # hle_glslc.c), the shader code archives of Unreal paks once decoded on the Mac (uepak.py, DM_OODLE_JOB, hle_oodle.c); the NSP script decides from the files which of the last two to make
@@ -2103,6 +2105,41 @@ def frostbite_shaders(path, rel, ents, out):
             if why: print(f'[RED] {label}: {why}; left out', flush=True); continue
             out.append((label, st, ctl, code))
 
+ANVIL = 'AnvilNext forge'
+def anvil_jobs(files, parts=64):
+    """Ubisoft's AnvilNext archives (Assassin's Creed: The Rebel Collection, anvil_forge.py): every entry of every .forge file of version 27, in ranges of about equal size. → ([(path, rel,
+    (ANVIL, ((offset, size, name), …))), …], the paths taken). Their entries are LZO1X blocks, so a loose scan of the file finds no shader, only the BNSH magic by chance in compressed bytes (five
+    of the Rebel Collection's 28 files, which then counted as unreadable). A file whose tables can't be read is left to the loose scan, which reports it"""
+    import anvil_forge
+    from romfs import mmap
+    fs = []
+    for p, r in files:
+        if not p.endswith('.forge'): continue
+        with open(p, 'rb') as f:
+            if anvil_forge.version(f.read(13)) != anvil_forge.VERSION: continue
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+                try: fs.append((p, r, anvil_forge.entries(d, '/' + r)))
+                except ValueError as e: print(f'[RED] {e}', flush=True)
+    jobs, step = [], sum(e[1] for _, _, es in fs for e in es) / parts
+    for p, r, es in fs:
+        cur, size = [], 0
+        for e in es:
+            cur.append(e); size += e[1]
+            if size >= step: jobs.append((p, r, (ANVIL, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (ANVIL, tuple(cur))))
+    return jobs, {p for p, _, _ in fs}
+
+def anvil_shaders(path, rel, ents, out):
+    """A range of a .forge file's entries (anvil_jobs), each block decoded and scanned as a loose file is (scan_blob) when it holds the BNSH magic: the shaders are BNSH files (every control
+    section in DataNX_Intro.forge is inside one), and the other blocks (textures, meshes, sound) are left to no reader's chance match. Labels: /<forge>#<entry name>#BNSH@<offset in its block>…"""
+    import anvil_forge
+    from romfs import mmap
+    with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+        for off, size, name in ents:
+            label = f'/{rel}#{name}'
+            for b in anvil_forge.read(d, off, size, label):
+                if b'BNSH\0\0\0\0' in b: scan_blob(b, label, out)
+
 def smash_arc_jobs(files, parts=128):
     """Super Smash Bros. Ultimate's data.arc (17.6 GB, smash_arc.py): the game's current files, in ranges of about equal stored size. → ([(path, rel, entries), …], the paths taken)"""
     import smash_arc
@@ -2911,8 +2948,10 @@ def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
     from the pipeline state) have their real pairs only at draw time. vs_pad uses only the union of the locations the paired pixel shaders read, so every single-stage vertex shader is paired with
     a "cover": the fewest pixel shaders whose read locations together equal those of all pixel shaders (greedy, ties go to the smaller key); padded that way, a vertex shader links with any pixel shader.
-    All pairs would be 376 × 375 rows; the cover needs a few rows × 376. No single-stage vertex shader, no cover"""
-    single = [v for v in keys if keys[v][1] == 'vs' and any(s in keys[v][0] for s in SINGLE_STAGE) and '#var' not in keys[v][0]]   # '#var': a GLSLC output of several stages (glslc_program)
+    All pairs would be 376 × 375 rows; the cover needs a few rows × 376. No single-stage vertex shader, no cover. The profile's shader_separate makes every vertex shader single-stage: Assassin's
+    Creed: The Rebel Collection's BNSH files each hold one stage, in main and in its .forge archives, and it draws with a vertex shader of one and a pixel shader of another (two of main's
+    pairs failed to link, the pixel shader reading location 3, which the vertex shader did not write)"""
+    single = [v for v in keys if keys[v][1] == 'vs' and (SEPARATE or any(s in keys[v][0] for s in SINGLE_STAGE) and '#var' not in keys[v][0])]   # '#var': a GLSLC output of several stages (glslc_program)
     if not single: return set(), []
     cover = pixel_input_cover({k: v[3] for k, v in keys.items() if v[1] == 'ps'})
     return {(v, p) for v in single for p in cover}, cover
@@ -3116,6 +3155,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), lost or trees
     if len(args) > 2 and args[2][0] == FB_CAS:   # CompiledBytecode resources of a Frostbite cas file (frostbite_jobs)
         frostbite_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == ANVIL:   # entries of an AnvilNext .forge file (anvil_jobs)
+        anvil_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == PKZL:   # entries of a PlatinumGames PKZ (pkz_jobs)
         pkz_shaders(path, rel, args[2], found)
@@ -3345,9 +3387,10 @@ def main():
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
+    av_jobs, anvils = anvil_jobs(files)   # The Rebel Collection's AnvilNext .forge files: LZO1X blocks
     liqs = {p[:-4] + e for p, _ in files if liquid_index(p) is not None for e in ('.str', '.dat')}   # Frostpunk's Liquid archives: read through their .idx (liquid_shaders)
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in liqs]
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + av_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in liqs and p not in anvils]
     os.makedirs(os.path.dirname(os.path.abspath(pkg)), exist_ok=True)
     spill = tempfile.mkdtemp(prefix='spill.', dir=os.path.dirname(os.path.abspath(pkg)))   # the pool's large results (SPILL), on the drive the package goes to, which has room for it
     atexit.register(shutil.rmtree, spill, True)
