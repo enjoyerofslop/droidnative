@@ -9,8 +9,10 @@
 # A script that holds a device runs its children with NXNATIVE_DEVICE_LOCKED listing it, so bench_android.py --install's build_android_from_nsp.py goes on.
 # Locks are per computer: two computers sharing one phone over adb (one adb server) don't see each other's.
 #   python3 dm/android/tools/device_lock.py           which devices are held, by whom, doing what, since when
-import contextlib, datetime, json, os, re, socket, sys, time
+import contextlib, datetime, json, os, socket, sys, time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import phone_id   # noqa: E402
 
 LOCKED_ENV = 'NXNATIVE_DEVICE_LOCKED'   # the devices this process's parent holds, comma-separated
 _held = {}                              # serial -> the open lock file
@@ -25,8 +27,8 @@ def lock_dir():
     return base / 'nxnative' / 'android' / 'locks'
 
 
-def _path(serial):   # a Wi-Fi device's serial is host:port
-    return lock_dir() / (re.sub(r'[^A-Za-z0-9._-]', '_', serial) + '.lock')
+def _path(serial):   # a Wi-Fi device's serial is host:port, or adb's mDNS name
+    return lock_dir() / (phone_id.safe(serial) + '.lock')
 
 
 # Windows locks bytes, and a locked byte can't be read: lock one byte far past what the file holds, so the holder's description stays readable

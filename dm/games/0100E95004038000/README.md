@@ -21,6 +21,8 @@ System → Save and a restart into Argentum were exercised during bring-up;
 the save was created with the isolated winding diagnostic and reloaded with
 the production path. The final fixed host also loads it and walks in Argentum.
 
+On Android, 2.1.0 is Playable – major issues on the Galaxy S25 Edge, from a new game through King Crustip's battle and Argentum to a save and Continue (2026-11-12): 30 fps through the opening and the battle, 10–30 fps in Argentum; the dark stipple pattern over the characters and much of the world it had then is fixed ([Android](#android)).
+
 ## Profile and memory
 
 The NPDM declares no system resource. Startup sets a `0xC9400000`-byte heap
@@ -259,6 +261,54 @@ analysis, bounded runs, saves and logs live in `0100E95004038000-work/`.
 `boot01.log` records the initial startup and clearing frames; it stops because
 that diagnostic launch did not yet have a shader map configured.
 
+## Android
+
+First run on Android, 2026-11-11. The cartridge's 2.1.0 (v983040, the registered build), packed as a game app (`build_android_from_nsp.py --game-apk`, a 158 MB APK with the 14 GB RomFS as its OBB) from DroidPlay Core `main` at `1c06a5c4`. Two phones:
+- a Galaxy S25 Edge: SM8750, Adreno 830 with Qualcomm's driver 0x80320001, Android 16;
+- a Galaxy Z Flip 7: Exynos 2500, Xclipse 950 with Samsung's driver 0x6000215, Android 16, unfolded.
+
+Both in handheld mode, driven over adb with `DM_CTL`.
+
+- **The build:** the dump has no DLC, so the split's DLC-only path made a shader-only derived profile (the registered module fixes kept). It found 12,738 shaders (the registered tables, with the DLC's, have 15,572), all translated to SPIR-V, none failed.
+- **What was played:**
+  - **S25 Edge:** the title (no logo, the game's own fresh-save behaviour), New Game, Easy, the opening (the Cloud Sea, the salvage dive, Rex and Gramps), King Crustip's tutorial battle (won: auto-attacks, the EXP and SP shown), and the scenes after it.
+  - **Z Flip 7:** the same into King Crustip's tutorial.
+- **Resolved, no characters drawn on both GPUs:** Rex, Gramps and King Crustip never appeared (fixed: see the next item).
+  - The cutscenes frame them over an empty deck, an empty cabin ("No worries, Gramps!") and empty sky. In battle, only the target marker, the red ring and the damage numbers show where the crab is.
+  - The world, the ship, the Cloud Sea, the opening's titans, the UI and the effects draw.
+  - No `[RED]` line on either phone, and the host's pipeline counters show only the draws a first build leaves out. On the S25 Edge, Qualcomm's driver logged 272 "Failed to link shaders" / "Shader compilation failed for shaderType: 4" lines; Samsung's logged none.
+  - The Mac draws the characters (its Argentum runs).
+- **Cause and fix (2026-11-11):** the game skins every character with a vertex-only draw under rasterizer discard, without transform feedback
+  (`shd_post.wishp` var122, `fa456dcb6b05c2ce`, `0cf988e8a8ea2aee`, `bce3419b07cb2f3d`, `3fb8ebc13eb37ad7`: the bone matrices into one 384,000-byte
+  storage buffer; and `bd4b7f58c16f180f`, which updates vertex buffers), and the Vulkan replay left every such draw out
+  ([Draws under rasterizer discard that write memory](../../../docs/reference/rendering.md#draws-under-rasterizer-discard-that-write-memory-android)).
+  The S25 Edge's "Failed to link shaders" lines are the Adreno's shader module identifiers' cache misses, not failed pipelines.
+  - **Moto Razr Plus 2023** (Adreno 730, V@0615.98, Android 16), one host: with `DM_VK_RAST_DISCARD=0` the three are missing as above; with the fix,
+    New Game on Easy through the opening (Rex diving in the salvage suit, Rex and Gramps on deck) into the tutorial battle (Rex auto-attacking King
+    Crustip), all drawn, a steady 30 fps (battle frame p50 33.3 ms, p95 33.9 ms, GPU 27.1 ms), no red line.
+  - **Galaxy S25 Edge**, with the fix: the same route, all three drawn, a steady 30 fps (battle frame p50 33.2 ms, GPU 22.1 ms), no red line.
+  - The Z Flip 7 was not run with the fix.
+- **Resolved, a dark stipple and stripes (2026-11-12):** with the characters drawn, their skin, hair and clothes showed dark, blocky speckles in close-ups,
+  and much of the world (crates, walls, the rock spires on the deck) carried the same pattern; the Mac's frames are clean. The deferred lighting classifies
+  pixels by stencil bits 3 and 4 (`3a65a75970c5ac32`, `68bd4ad78d01642b`), read through a stencil-mode view of the depth-stencil buffer, and the Vulkan replay
+  read its depth there ([Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android)).
+  It wasn't Adreno-only: the Pixel 9 Pro XL's Mali-G715 drew the same. With the fix, the S25 Edge's battle frames and the Pixel's rock spires are clean, 30 fps. The Galaxy Z Flip 7 (Xclipse 950) too: the game app at v0.8.2, then with the fix's host, each from a new game to King Crustip, has the stipple, then is clean in the same frames, median 30.1 fps both (q255).
+  ![Xenoblade Chronicles 2 on a Galaxy S25 Edge at v0.8.2, before the fix: Rex at Goldmouth Return Port, a stipple pattern over the walls and crates](../../../docs/images/android/xenoblade-chronicles-2-galaxy-s25-edge.jpg)
+  ![Xenoblade Chronicles 2 on a Galaxy Z Flip 7 with the fix: King Crustip on the ship's deck, drawn clean](../../../docs/images/android/xenoblade-chronicles-2-galaxy-z-flip-7.jpg)
+  The Pixel draws no characters either way (no `vertexPipelineStoresAndAtomics` on the Mali, so the skinning draws are left out).
+- **Frame rate:** 30 fps (the target), every 60 s window 29.6–30.1 on the S25 Edge over 12.5 minutes, frame p50 33.2 ms; GPU 18–23 ms on the S25 Edge, 12.5–13 ms on the Z Flip 7.
+- **Sound:** a stereo `AudioOut`, no underrun on either phone. The `DM_AUDIO_DUMP` has signal (RMS about 640–1,360). Not listened to by a person.
+- **Memory:** 2.38 GB PSS on the S25 Edge (0.77 GB graphics) and 2.31 GB on the Z Flip 7. Neither was killed.
+- **Save:** not tried in that run (System → Save opens in Argentum: see the run of 2026-11-12 below).
+- **Not tried:** past King Crustip, and the other devices.
+- **2026-11-12, Playable – major issues from a new game on the Galaxy S25 Edge, at v0.8.2.** The game app rebuilt at v0.8.2 (shaders as before, the host new), played by hand over adb with `DM_CTL` presses, each batch after a check that the game ran and held the focus.
+  - **Played:** New Game on Normal; the opening (the Cloud Sea, the salvage dive, Rex and Gramps); King Crustip's tutorial battle (drawing the weapon, auto-attacks, the arts tutorial, Anchor Shot on X), won; the scenes after it; the arrival at the Argentum Trade Guild, its landmark and controls tutorials, and walking at Goldmouth Return Port; System → Save (Rex Lv 2, Chapter 1, 0:17:34, Argentum Trade Guild); a cold start, the title now with Continue, and Continue back at the same spot, walking on.
+  - **Frame rate:** 30 fps (the target) through the opening, the battle and the scenes after it, 29.9 over 15.5 minutes with the worst 30 s window 28.9, GPU 21.8 ms. Argentum depends on the view: looking into the town (2,200–2,800 draws a frame) 10–16 fps with GPU 38–62 ms a frame; looking out over the docks (500–700 draws) 30 fps at GPU 20–24 ms; about 20 fps over its 6.5 minutes in the two sessions. There the replay makes about 54 skinning dispatches a frame, with 16 scratch copies, 13 home copies, 4 waits on submissions in flight and 19 write-backs (7 MB); which of these costs the GPU time isn't measured.
+  - **Picture:** a dark stipple and stripe pattern over the characters' skin, hair and clothes in close-ups and over much of the world (crates, walls, Gramps's scales, the rocks on the deck); the Mac's frame of the same spot in Argentum has none. The xc2 session's S25 frames from before v0.8.2 show it too. 919 draws were skipped while their pipelines were first built; no `[RED]` line.
+  - **Sound, memory:** sound running, no underrun (not listened to); PSS 1.8 GB at the title, 2.4 GB in the opening, up to 3.3 GB in Argentum; no crash, no kill.
+  - **Not tried:** battles after the first, Argentum's shops and the rest of the chapter, the other devices.
+  ![Xenoblade Chronicles 2 on a Galaxy S25 Edge: Rex sitting by the cabin after King Crustip's battle, the stipple pattern over his face, arms and clothes](../../../docs/images/android/xenoblade-chronicles-2-galaxy-s25-edge-close-up.jpg)
+
 ## Found on this game
 
 - [Ten attachment records for eight colors and depth-stencil](../../../docs/reference/rendering.md#ten-attachment-records-for-eight-colors-and-depth-stencil): the iPad character smear and malformed skinning pipeline formats.
@@ -267,4 +317,6 @@ that diagnostic launch did not yet have a shader map configured.
 - [Queue initialization captures the raster origin](../../../docs/reference/rendering.md#queue-initialization-captures-the-raster-origin).
 - [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own): the light probe lists; see [Rendering](#rendering).
 - [Ordering barriers before a draw that writes](../../../docs/reference/rendering.md#ordering-barriers-before-a-draw-that-writes): the skinning draws; see [Rendering](#rendering).
+- [Draws under rasterizer discard that write memory](../../../docs/reference/rendering.md#draws-under-rasterizer-discard-that-write-memory-android): the skinning draws on Android; see [Android](#android).
+- [Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android): the deferred lighting's stipple on Android; see [Android](#android).
 - [Present thread rescues a silent display link](../../../docs/reference/frame-rate.md#present-thread-rescues-a-silent-display-link): the motion review's windowed timing comparison is confounded by repeated stalls; see [Controller motion review](#controller-motion-review).

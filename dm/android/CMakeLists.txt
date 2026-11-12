@@ -51,7 +51,7 @@ endif()
 list(GET GLSLC 0 GLSLC)
 file(MAKE_DIRECTORY ${GEN}/shaders)
 set(SHADER_INC)
-foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag bc_decode.comp gmem_test.comp upscale_square.comp)
+foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag bc_decode.comp gmem_test.comp gmem_test_noptr.comp gmem_probe.comp upscale_square.comp)
   add_custom_command(OUTPUT ${GEN}/shaders/${s}.inc
     COMMAND ${GLSLC} --target-env=vulkan1.1 -O -mfmt=c ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s} -o ${GEN}/shaders/${s}.inc
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s})
@@ -79,6 +79,7 @@ set(ANDROID_C
   ${CMAKE_CURRENT_SOURCE_DIR}/haptics_android.c
   ${CMAKE_CURRENT_SOURCE_DIR}/apple_stubs.c
   ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/vk_start.c
   ${CMAKE_CURRENT_SOURCE_DIR}/module_pack.c
   ${CMAKE_CURRENT_SOURCE_DIR}/gfx_${DM_GFX}.c)
 
@@ -177,6 +178,7 @@ if(DM_TESTS)
   # the guest address space only 4 KiB alignment. A 16 KiB-page Android kernel runs t_svc_memory itself at its real page size
   dm_test(t_nro SOURCES ${T}/t_nro.c)
   dm_test(t_module_pack SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_module_pack.c ${CMAKE_CURRENT_SOURCE_DIR}/module_pack.c)
+  dm_test(t_vm_remap SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_vm_remap.c)   # vm_remap to a fixed destination: a refused duplication leaves no hole (plat_android.c)
   dm_test(t_audio SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_audio.c ${CMAKE_CURRENT_SOURCE_DIR}/coreaudio_aaudio.c)
   target_link_libraries(t_audio aaudio mediandk m)
   dm_test(t_media SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_media.c ${CMAKE_CURRENT_SOURCE_DIR}/media_android.c)
@@ -189,7 +191,7 @@ if(DM_TESTS)
   list(REMOVE_ITEM GFX_NO_IF ${DM}/gfx/nvn/hle_nvn.c)
   dm_test(t_nvn SOURCES ${DM}/gfx/tests/t_nvn.c ${DM}/host/crash.c ${DM}/host/hle_bigstack.c ${GFX_NO_IF} ${CMAKE_CURRENT_SOURCE_DIR}/gfx_${DM_GFX}.c
           ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_android_stubs.c ${DM}/gfx/tests/t_host_stubs.c ${CMAKE_CURRENT_SOURCE_DIR}/apple_stubs.c ${GEN}/asm/nvn_entry.S ${GEN}/asm/nvn_thunks.S
-          ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver.c)
+          ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver.c ${CMAKE_CURRENT_SOURCE_DIR}/vk_start.c)
   target_include_directories(t_nvn PRIVATE ${DM}/gfx/nvn/include ${DM}/gfx/nvn ${DM}/gfx/tex ${DM}/third_party/vulkan-headers/include)
   target_compile_options(t_nvn PRIVATE -march=armv8.2-a+lse)
   target_link_libraries(t_nvn dl)

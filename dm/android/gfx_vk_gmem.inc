@@ -26,6 +26,7 @@
 // made with the extensions only for such a game. Off, nothing changes: the device is made as before, no pool is placed and the table binding reads 16 zero bytes. Only
 // Qualcomm's Adreno has run it (its own driver and Turnip), and Samsung's Xclipse (its driver compiles the physical pointers, and the AHardwareBuffer route's pages read
 // cached: Frostpunk's meshes on a Galaxy Z Flip 7). Another GPU stays off unless DM_VK_RAW_GMEM_ANYGPU=1 (Mali would take the AHardwareBuffer route too, not shown there).
+// A driver that refuses OpConvertUToPtr (the Ayn Odin 2's Adreno 740, the Razr's 730) reaches the pieces through a descriptor array instead (gfx_vk_gmem_noptr.inc, spv_noptr.h).
 #ifndef VK_EXT_map_memory_placed   // Vulkan 1.3.290; the NDK r28 headers are 1.3.275
 #define VK_EXT_map_memory_placed 1
 #define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT ((VkStructureType)1000272000)
@@ -49,8 +50,10 @@ enum { GM_TAB_BYTES = GMEM_TAB_BYTES, GM_LOG_BYTES = DMSH_GMEM_MAP_ENTRIES / 8, 
 #define GM_USAGE (VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | \
                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | \
                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)
-typedef struct { uintptr_t lo, hi; const void *pool; VkDeviceMemory m; VkBuffer b; uint64_t gpu; AHardwareBuffer *ahb; uint64_t *rd; } gm_seg;   // one placed allocation over [lo, hi) of the pool at pool;
-                                                                                                                                  // ahb: the AHardwareBuffer route's buffer; rd: each page's last in-place read (gfx_vk_gmem_inplace.inc)
+typedef struct { uintptr_t lo, hi; const void *pool; VkDeviceMemory m; VkBuffer b; uint64_t gpu; AHardwareBuffer *ahb; uint64_t *rd; uint32_t slot; } gm_seg;   // one placed allocation over [lo, hi) of the pool at pool;
+                                                                                                                                  // ahb: the AHardwareBuffer route's buffer; rd: each page's last in-place read (gfx_vk_gmem_inplace.inc);
+                                                                                                                                  // slot: its place in the pools' descriptor array (gfx_vk_gmem_noptr.inc)
+static void gm_np_made(void); static uint32_t gm_np_slot(VkBuffer b, VkDeviceSize n); static void gm_np_free(uint32_t s); static void gm_np_stat(void);   // gfx_vk_gmem_noptr.inc
 static int g_gm_on;   // the device has a route (gm_feat_take, gm_device_made); gm_on also asks gm_game
 static int g_gm_mode, g_gm_has_placed, g_gm_has_ahb;   // the route: 1 placed maps, 2 AHardwareBuffers; what the device offers
 static PFN_vkGetAndroidHardwareBufferPropertiesANDROID g_gm_ahbp;
@@ -131,6 +134,7 @@ static void gm_device_made(void) {   // the device has the extensions: their ent
     g_gm_mt = vkb_mem_type(mr.memoryTypeBits, hv | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); if (g_gm_mt == UINT32_MAX) g_gm_mt = vkb_mem_type(mr.memoryTypeBits, hv);
     if (g_gm_mode == 2) { long pgs = sysconf(_SC_PAGESIZE); g_gm_align = (VkDeviceSize)pgs; if (g_gm_piece > (256u << 20)) g_gm_piece = 256u << 20; }   // (the buffer's own memory types: gm_place1_ahb)
     else if (g_gm_mt == UINT32_MAX) { LOG("[RED] [vk] raw global memory: no host-visible, coherent and cached memory type for the pools (of the types %#x): off", mr.memoryTypeBits); return; }
+    gm_np_made();   // a driver that refuses OpConvertUToPtr: the pools' descriptor array, and pieces no larger than one descriptor reaches (gfx_vk_gmem_noptr.inc)
     // Unset, the cap is a quarter of the device's memory: placed memory is committed whole, and Ocarina of Time places about 2 GiB in Kokiri Forest (PSS 8.7 → 10.8 GB on a
     // Fold with 10.8 GB). A pool past it stays anonymous and is copied as before, and raw accesses to it read 0 (red line 162), rather than the low-memory killer ending the game
     gm_frz_register();   // the freeze window's hooks (gfx_vk_gmem_lazy.inc), before any pool is placed
@@ -174,10 +178,13 @@ static int gm_pending(uintptr_t lo, uintptr_t hi) {
 }
 static __thread gm_note t_gn;
 static uint64_t gm_now(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+static void fb_placed(uintptr_t lo, uintptr_t hi);   // gfx_vk_fileback.inc: a placed range out of the pool file
 static void gm_seg_insert(const gm_seg *s) {   // caller holds g_gm_mu
     if (g_ngm == g_cgm) { g_cgm = g_cgm ? 2 * g_cgm : 256; g_gm = realloc(g_gm, (size_t)g_cgm * sizeof *g_gm); if (!g_gm) die("raw global memory: the segment list"); }
     int at = g_ngm; while (at > 0 && g_gm[at - 1].lo > s->lo) at--;
     memmove(g_gm + at + 1, g_gm + at, (size_t)(g_ngm - at) * sizeof *g_gm); g_gm[at] = *s; g_ngm++;
+    if (g_gm_np && !g_gm[at].slot) g_gm[at].slot = gm_np_slot(s->b, s->hi - s->lo);   // (a piece listed again after a failed give-back keeps its slot)
+    fb_placed(s->lo, s->hi);
 }
 static int gm_place1(uintptr_t lo, size_t n, gm_seg *s) {   // [lo, lo + n) as one placed allocation; 0: the range is as it was (t_gn says why). Logs nothing
     memset(s, 0, sizeof *s); s->lo = lo; s->hi = lo + n; t_gn = (gm_note){0, VK_SUCCESS, n, lo, NULL, 0, 0};
@@ -373,7 +380,7 @@ static int gm_seg_giveback(const gm_seg *s) {
         if (a != (void *)s->lo) die("raw global memory: pool memory %#lx+%#zx could not be given back (errno %d)", (unsigned long)s->lo, len, errno);
         memcpy(a, t, len); munmap(t, len); }
     if (s->ahb) { vkDestroyBuffer(g_vk.dev, s->b, NULL); vkFreeMemory(g_vk.dev, s->m, NULL); AHardwareBuffer_release(s->ahb); }   // the mapping is ours: the pages replaced it first
-    free(s->rd);
+    gm_np_free(s->slot); free(s->rd);
     g_gm_given++;
     return 1;
 }
@@ -440,7 +447,8 @@ static int gm_table(void) {
     pthread_mutex_lock(&g_gm_mu);
     t.gen = atomic_load(&g_gm_gen);
     if (g_ngm > cseg) { cseg = g_ngm + 256; seg = realloc(seg, (size_t)cseg * sizeof *seg); if (!seg) die("raw global memory: the table's ranges"); }
-    for (int i = 0; i < g_ngm; i++) { seg[n][0] = g_gm[i].lo; seg[n][1] = g_gm[i].hi; seg[n++][2] = g_gm[i].gpu - g_gm[i].lo; }
+    for (int i = 0; i < g_ngm; i++) { if (g_gm_np && !g_gm[i].slot) continue;   // without physical pointers: the slot in the high word, the offset in the low one (gfx_vk_gmem_noptr.inc)
+        seg[n][0] = g_gm[i].lo; seg[n][1] = g_gm[i].hi; seg[n++][2] = g_gm_np ? ((uint64_t)g_gm[i].slot << 32) - g_gm[i].lo : g_gm[i].gpu - g_gm[i].lo; }
     pthread_mutex_unlock(&g_gm_mu);
     { int n0 = n; n = gm_sink_ranges(&seg, &cseg, n); if (n > n0) qsort(seg, (size_t)n, sizeof *seg, gm_seg_cmp); }   // DM_VK_RAW_GMEM_SINK (gfx_vk_gmem_lazy.inc)
     n = gmem_table_fill(t.p, (const uint64_t (*)[3])seg, n, &over);
@@ -493,7 +501,7 @@ static int gm_view(vshader *const sh[4]) {   // 1: everything pending landed (cp
 static void gm_ip_stat(void); static void gm_lazy_stat(void);   // gfx_vk_gmem_inplace.inc, gfx_vk_gmem_lazy.inc
 static void gm_stat(void) {
     if (!gm_on() && !g_ngm) return;
-    gm_ip_stat(); gm_lazy_stat();
+    gm_ip_stat(); gm_lazy_stat(); gm_np_stat();
     {   uint64_t by[4] = {0}, nb[4] = {0}; const pool_rng *big[8] = {0};   // the pools by the addresses the game took in them (mtl_pool_addressed), and the largest
         pthread_mutex_lock(&g_pool_mu);
         for (int i = 0; i < g_npool; i++) { const pool_rng *p = &g_pools[i]; int c = p->how & 1 ? 1 : p->how & 2 ? 2 : 0; by[c] += (uint64_t)(p->hi - p->lo); nb[c]++;
@@ -508,6 +516,7 @@ static void gm_stat(void) {
         (unsigned long long)g_gm_overlap, (unsigned long long)g_gm_failed, (unsigned long long)g_gm_code_skipped, (unsigned long long)g_gm_waits, (unsigned long long)g_gm_tabs, (unsigned long long)g_gm_tab_new, (unsigned long long)g_gm_draws, (unsigned long long)g_gm_stdraws, (unsigned long long)g_gm_logs,
         (unsigned long long)g_gm_logbits, (unsigned long long)g_gm_store_hits, (unsigned long long)g_gm_unsynced, (unsigned long long)g_gm_synced);
 }
+#include "gfx_vk_gmem_noptr.inc"   // the pools through a descriptor array, for drivers that refuse OpConvertUToPtr (DM_VK_RAW_GMEM_NOPTR)
 #include "gfx_vk_gmem_check.inc"   // DM_VK_RAW_GMEM_TEST and DM_VK_RAW_GMEM_CHECK: the self-test on the GPU and the pointers the shaders read
 #include "gfx_vk_gmem_lazy.inc"   // large pools placed in chunks as they are used (DM_VK_RAW_GMEM_LAZY)
 #include "gfx_vk_gmem_inplace.inc"   // storage buffers bound in their placed pools (DM_VK_INPLACE)

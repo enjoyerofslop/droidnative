@@ -131,6 +131,20 @@ class SpvTgSpill(unittest.TestCase):
         k = self.lib.run(w, n, binding, self.sc(data), o, cap)
         return bytes(o)[:4 * k] if k else None
 
+    def test_a_task_or_mesh_shaders_compute_form_spills(self):
+        # spv_meshemu.py's compute form of a task / mesh kernel (a GPU without VK_EXT_mesh_shader runs it, gfx_vk_meshemu.inc) keeps the kernel's stage memory a
+        # Workgroup array that only its access chains reach, so a kernel past the GPU's limit gets the storage buffer as a compute shader does
+        import test_spv_mesh as tm, test_spv_meshemu as te   # their kernel, assembled with the same spirv-as
+        for n, info in enumerate((tm.mesh_info(False, False), tm.mesh_info(True, False), {'kind': 'ts', 'threads': 32, 'payload': 256})):   # a mesh shader without and with a task, a task shader
+            with self.subTest(kind=info['kind'], n=n):
+                data, lay = te.kernel(info)
+                out, keep = te.me.compute(data, info, lay)
+                hdr, ins = te.sa.process(out, 'cs', None, keep)[:2]; cs = te.sa.emit(hdr, ins)
+                self.assertGreater(self.bytes_of(cs), 0)
+                sp = self.run_on(cs); self.assertIsNotNone(sp); assert sp is not None
+                self.valid(sp, f'memu_{n}')
+                self.assertFalse([x for op, x in ops(sp) if op == 59 and x[2] == 4])   # no Workgroup variable left
+
     def test_shared_memory_becomes_a_storage_buffer_region_per_workgroup(self):
         data = self.asm(CS, 'cs')
         self.assertEqual(self.bytes_of(data), (12288 + 16) * 4)

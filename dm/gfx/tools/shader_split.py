@@ -56,11 +56,11 @@
 # Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x08 the key's 8 bytes, +0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key
 #   (dmsh_build.py finds a map row's record by that key, not by the row's index: a package from another split than the map stops it instead of translating a neighbour's bytes, issue #1841);
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 records where the key first appeared); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
-# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
+# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8), DM_SPLIT_FROM_MAP=<shader_map.tsv> (read only the files it names: from_map)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
-import base64, collections, concurrent.futures as cf, glob, hashlib, json, os, re, shutil, struct, subprocess, sys, time, zlib
+import atexit, base64, collections, concurrent.futures as cf, glob, hashlib, json, os, pickle, re, shutil, struct, subprocess, sys, tempfile, time, zlib
 from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
@@ -2174,8 +2174,10 @@ _OODLE = None
 def oodle_ask(comp, n):
     """The game's own decoder: OodleLZ_Decompress (Trinity's packs are Oodle Mermaid, Pokémon Legends: Arceus's GFPAK entries Oodle Kraken, and Oodle is linked into main), or LZ5_decompress_safe (DRAGON QUEST XI S's legacy Unreal paks):
     one Mac host per worker process in its tool mode (dm/host/hle_oodle.c, DM_OODLE_SERVE), fed over a pipe. DM_OODLE_HOST = the host, DM_OODLE_MODULES = the rewritten modules it loads
-    (the NSP script sets both for a game with Trinity packs, Oodle PKZ or GFPAK entries, or legacy Unreal paks, profile_guess.py shader_sources). → (the decoded bytes or None, the host is gone)"""
+    (the NSP script sets both for a game with Trinity packs, Oodle PKZ or GFPAK entries, or legacy Unreal paks, profile_guess.py shader_sources). → (the decoded bytes or None, the host is gone)
+    With DM_OODLE_CACHE, the streams come from the decoder run before the split instead (oodle_cached)"""
     global _OODLE
+    if os.environ.get('DM_OODLE_CACHE'): return oodle_cached(comp, n)
     if _OODLE is None:
         import tempfile
         host, mods = os.environ.get('DM_OODLE_HOST'), os.environ.get('DM_OODLE_MODULES')
@@ -2190,8 +2192,36 @@ def oodle_ask(comp, n):
     if got == n: return p.stdout.read(n), False
     return None, got != 0   # 0: the decoder refused the stream, and the host goes on
 
+_CACHED = None
+def oodle_cached(comp, n):
+    """DM_OODLE_CACHE=<folder>: the game's decoder ran before the split, where it takes only batched jobs (the game's Android host on a phone, scripts/android_oodle.py Cache).
+    Each <name>.idx there has a line per stream: blake2b-128 of the compressed bytes in hex, the raw length, and the decoded bytes' offset in <name>.pack (-1: the decoder refused
+    the stream). A stream not there is red, unless DM_OODLE_RECORD=<folder>: then it is listed in that folder's want.<pid> (u32 compressed length, u32 raw length, the bytes) and
+    zeros stand in for it, so one run names the streams the next job decodes. → as oodle_ask"""
+    global _CACHED
+    d = os.environ['DM_OODLE_CACHE']
+    if _CACHED is None:
+        _CACHED = {}
+        for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            if f.endswith('.idx'):
+                with open(os.path.join(d, f), encoding='ascii') as t:
+                    for ln in t: h, raw, at = ln.split('\t'); _CACHED[h, int(raw)] = (os.path.join(d, f[:-4] + '.pack'), int(at))
+    k = (hashlib.blake2b(comp, digest_size=16).hexdigest(), n)
+    pack, at = _CACHED.get(k, ('', -2))
+    if at >= 0:
+        with open(pack, 'rb') as f: f.seek(at); s = f.read(n)
+        if len(s) != n: red(f'{pack} ends inside the {n}-byte stream at {at:#x}: delete {d}, then build again')
+        return s, False
+    if at == -1: return None, False   # refused, as the Mac host's 0
+    rec = os.environ.get('DM_OODLE_RECORD')
+    if not rec: red(f'a {len(comp)} → {n} byte stream of the game\'s Oodle is not among the streams decoded before the split ({d}; a run with DM_OODLE_RECORD lists them)')
+    if at == -2:   # listed once per process
+        with open(os.path.join(rec, f'want.{os.getpid()}'), 'ab') as f: f.write(struct.pack('<II', len(comp), n) + bytes(comp))
+        _CACHED[k] = ('', -3)
+    return bytes(n), False
+
 def oodle_said():   # what the host wrote so far
-    assert _OODLE
+    if _OODLE is None: return f'(no host here: the game\'s decoder ran before the split and refused this stream; DM_OODLE_CACHE={os.environ.get("DM_OODLE_CACHE")})'
     _OODLE[1].seek(0)
     return _OODLE[1].read().decode(errors='replace')
 
@@ -2205,7 +2235,14 @@ def oodle(comp, n):
 
 def oodle_supposed(comp, n):
     """A stream a blind scan only supposes (uepak.shader_map_entries): None when the decoder refuses it, or main has no decoder to refuse it (hle_oodle.c lzd_find: OCTOPATH TRAVELER's Unreal 4.18 links no
-    Oodle). A host that is gone for any other reason is red, as it says nothing about the stream"""
+    Oodle). A host that is gone for any other reason is red, as it says nothing about the stream.
+    With no decoder here at all (no DM_OODLE_HOST, no DM_OODLE_CACHE: the Android build gives one only to games with Oodle archives or Unreal shader code archives), nothing can prove the
+    table, so it is taken as no table and the package's other shaders are read. Red there, it cost the whole package: OCTOPATH TRAVELER II 1.0.0's Android build left out six packages
+    whose export lists only look like tables, which the Mac host's decoder refuses. A real table's shaders are left out then, as they were with the rest of its package; the log names
+    each stream left unchecked"""
+    if not os.environ.get('DM_OODLE_CACHE') and not (os.environ.get('DM_OODLE_HOST') and os.environ.get('DM_OODLE_MODULES')):
+        print(f'shader_split: a supposed {len(comp)} → {n} byte Oodle stream left unchecked (no decoder here): taken as no shader table', file=sys.stderr)
+        return None
     s, gone = oodle_ask(comp, n)
     if gone and 'no streaming decoder to find' not in oodle_said(): oodle_red(comp, n)
     return s
@@ -2628,10 +2665,15 @@ def sarc_members(d, label='SARC'):
 NV_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # NVN stage order
 COMMON, TREES = None, {}   # Unity common strings and borrowed type trees (given when the pool starts)
 ZDICTS, _ZD = {}, {}       # zstd dictionaries by ID (given when the pool starts) and their digested form in this process
+SPILL_DIR = None           # where a pool worker writes a result too large to send back (given when the pool starts; None: every result is sent)
+# A batch whose shaders' control and code bytes pass this goes back through a file in SPILL_DIR. Windows can't send one pipe message of several GB (WriteFile
+# takes its length as a 32-bit DWORD): Pokémon Pokopia keeps 125,950 of its 131,426 shaders in one .fdata, read in one job, and its result (about 4.4 GB pickled) failed with WinError 87
+# (droidplay-core#307). Through a file, neither the worker nor the main process holds a pickled copy beside the result either
+SPILL = 256 << 20
 
-def _pool_init(common, trees, zdicts={}):
-    global COMMON, TREES, ZDICTS
-    COMMON, TREES, ZDICTS = common, trees, zdicts
+def _pool_init(common, trees, zdicts={}, spill_dir=None):
+    global COMMON, TREES, ZDICTS, SPILL_DIR
+    COMMON, TREES, ZDICTS, SPILL_DIR = common, trees, zdicts, spill_dir
 
 def zs_dicts(romfs):
     """Tears of the Kingdom compresses its RomFS files with zstd dictionaries (the frame header names one, ID 1 for the shader packages). They ship as Pack/ZsDic.pack.zs:
@@ -3234,8 +3276,39 @@ def nso_image(path):   # an NSO's image (dm/tools/nso.py); nso.Error (a ValueErr
     import nso
     with open(path, 'rb') as f: return bytes(nso.load(f.read(), path).image)
 
-def scan_batch(jobs):   # scan_file over a batch of jobs, in a pool worker
-    return [scan_file(j) for j in jobs]
+def scan_batch(jobs):   # scan_file over a batch of jobs, in a pool worker; a batch over SPILL comes back as the path of a file that holds it (unspill reads it)
+    results = [scan_file(j) for j in jobs]
+    if SPILL_DIR is None or sum(len(v[2]) + len(v[3]) for r in results for v in r[1].values()) <= SPILL: return results
+    fd, path = tempfile.mkstemp('.pickle', dir=SPILL_DIR)
+    with os.fdopen(fd, 'wb') as f: pickle.dump(results, f, pickle.HIGHEST_PROTOCOL)
+    return path
+
+def unspill(result):   # a scan_batch result as its list, read back from its file (then removed) when the worker spilled it
+    if not isinstance(result, str): return result
+    try:
+        with open(result, 'rb') as f: return pickle.load(f)
+    finally: os.unlink(result)
+
+
+def from_map(files, mp):
+    """DM_SPLIT_FROM_MAP=<shader_map.tsv>: only the RomFS files the map's source column names, as main lists them (a later version's under its tag), with the folders and
+    archives above a member, and the files beside one under the same name with another extension (a .bdt's .bhd5 index, a Liquid archive's .idx / .str, a Trinity pack's
+    .trpfd). DLC files are all read. The Android build sets it for a profile that registers the version (build_ipa_from_nsp.py split_shaders), whose split is then checked
+    against that profile's tables and done again in full if they differ: Ocarina of Time's split read 1,124 of its 186,583 files, in 11 s instead of 128. → files, in their order"""
+    named = set()
+    for ln in open(mp, encoding='utf-8', errors='replace'):
+        c = ln.rstrip('\n').split('\t')
+        if len(c) > 4 and c[4].startswith('/'):
+            parts = c[4].split('#', 1)[0].strip('/').split('/')
+            named.update('/'.join(parts[:i]) for i in range(1, len(parts) + 1))
+    def stem(r):   # the path without the file name's last extension; None without one
+        d, _, f = r.rpartition('/')
+        return (d + '/' if d else '') + f.rsplit('.', 1)[0] if '.' in f else None
+    stems = {stem(r) for _, r in files if r in named} - {None}   # of named files, not of the folders above them
+    dlc = lambda r: r.startswith('aoc/')
+    kept = [(p, r) for p, r in files if dlc(r) or r in named or stem(r) in stems]
+    print(f'files the shader map names: {sum(not dlc(r) for _, r in kept):,} of {sum(not dlc(r) for _, r in files):,} RomFS files ({mp})', flush=True)
+    return kept
 
 
 def pooled(ex, jobs, total, start=0, chunk=1):
@@ -3248,7 +3321,7 @@ def pooled(ex, jobs, total, start=0, chunk=1):
         finished, pending = cf.wait(pending, timeout=0.5)
         done += sum(futures[f] for f in finished)
         if not pending or time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
-    return [r for f in futures for r in f.result()]
+    return [r for f in futures for r in unspill(f.result())]
 
 
 def main():
@@ -3296,6 +3369,7 @@ def main():
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
         files += sorted((os.path.join(dp, f), tag + '/' + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+    if os.environ.get('DM_SPLIT_FROM_MAP'): files = from_map(files, os.environ['DM_SPLIT_FROM_MAP'])   # before the archives' jobs, which are made from this list
     zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
@@ -3317,7 +3391,10 @@ def main():
     liqs = {p[:-4] + e for p, _ in files if liquid_index(p) is not None for e in ('.str', '.dat')}   # Frostpunk's Liquid archives: read through their .idx (liquid_shaders)
     big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + av_jobs
     files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in liqs and p not in anvils]
-    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
+    os.makedirs(os.path.dirname(os.path.abspath(pkg)), exist_ok=True)
+    spill = tempfile.mkdtemp(prefix='spill.', dir=os.path.dirname(os.path.abspath(pkg)))   # the pool's large results (SPILL), on the drive the package goes to, which has room for it
+    atexit.register(shutil.rmtree, spill, True)
+    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts, spill)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
     trees, defer = {}, []
@@ -3329,7 +3406,8 @@ def main():
         import unityfs
         for k in unityfs.KNOWN_TREES: trees.setdefault(k, unityfs.known_tree(*k))
         byrel = {r: p for p, r in files}
-        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, spill)) as ex:
+            again = [r for b in ex.map(scan_batch, [[(byrel[r], r)] for r in defer]) for r in unspill(b)]
         for rel, uniq, pr, extra in again:
             if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
         results = [r for r in results if r[3] != 'defer'] + again

@@ -1,0 +1,10 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_ARB_gpu_shader_int64 : require
+// Raw global memory's probe (gfx_vk_gmem_noptr.inc gm_np_probe): a physical pointer made as the translator's raw helper makes it, a v2uint bitcast to ulong
+// (packUint2x32) and OpConvertUToPtr, then a load through it. A driver that refuses this pipeline (the Ayn Odin 2's Adreno 740 V@0676.32: "Instruction
+// OpConvertUToPtr not supported") gets raw global memory through the pools' descriptor array instead (spv_noptr.h). Never run, only built
+layout(local_size_x = 1) in;
+layout(buffer_reference, buffer_reference_align = 4) readonly buffer U { uint v; };
+layout(set = 0, binding = 0, std430) buffer Io { uvec2 a; uint got; } io;
+void main() { io.got = U(packUint2x32(io.a)).v; }

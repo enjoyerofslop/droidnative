@@ -6,8 +6,33 @@
 # (gfx_vk_gmem_lazy.inc), so the low-memory killer no longer ends Kokiri Forest on the Fold, under app pressure too. Not yet on a OnePlus Pad 3: 7 of 11 launches killed
 # there (README.md, Android)
 DM_VK_RAW_GMEM=1
+# DM_VK_RAW_GMEM_NOPTR=0: on a Qualcomm driver that refuses the shaders' physical pointers (the Ayn Odin 2's Adreno 740 at V@0676.32, the Adreno 730 at V@0615), raw global
+# memory can go through a descriptor array instead (gfx_vk_gmem_noptr.inc). This game stays off it. On the Odin 2 (11.5 GB of RAM) its raw-memory shaders build that way,
+# but their pipelines take 0.63 GB more of the driver's memory, and the low-memory killer ended the game about 20 s into the Kokiri Forest load in 12 of 12 launches.
+# Without the array it runs there as before, its characters dark, at 13 fps with the swap full. No picture through the array was seen. =1 in env.txt tries it, for a
+# phone with more memory. A driver that takes the pointers never uses the array, so the switch changes nothing there (2026-11-11, docs/reference/rendering.md)
+DM_VK_RAW_GMEM_NOPTR=0
 # DM_VK_UPSCALER_SQUARE=1: the game's upscaler network (agl's NDSR, one of four compute shaders by the dynamic resolution, square-root colour from a335c1db6270c355 in,
 # its 1440x810 scene to 1920x1080 out) is replaced by a bilinear scale and a signed square (gfx_vk_upsq.inc). The network itself draws right since its input is written
 # (#193) and its warp operations fit 64-lane subgroups (#189), but on the OnePlus Pad 3's Adreno 830 it is 21 of a frame's 45 ms of GPU work, and replacing it takes
 # Kokiri Forest from 10.4 to 15.8 fps (raw global memory on), over half of the game's 30. No network detail is added. =0 in env.txt runs the network
 DM_VK_UPSCALER_SQUARE=1
+# DM_VK_POOL_FILEBACK=auto: on a phone under 14 GiB of RAM, this game's texture pools (2.9 GB: 2,432, 232, 202 and 88 MiB) are backed by a file, so what it keeps
+# there is a clean page the kernel drops and reads back instead of compressed swap (gfx_vk_fileback.inc). On the 11.3 GB Galaxy Z Fold 8 in Saria's scene: lmkd killed the
+# game in 1 run of 2 without it and in 0 of 2 with it, PSS peak 9.8 -> 7.7 GB, swap 5.2 -> 3.2 GB, the device's lowest MemAvailable 0.5-0.8 -> 1.9 GB, 15.0-15.3 -> 15.6-16.8 fps.
+# It writes about 1.1 GB to flash at each area load and about 0.7 GB an hour in play. On the 16 GB Pixel 9 Pro XL, which never swapped, it only cost frame rate (9.0 -> 6.3 fps),
+# hence auto (2026-11-11, q207)
+DM_VK_POOL_FILEBACK=auto
+# DM_VK_RECORDER=1: the replay's vkCmd* calls, descriptor set writes and submissions on a thread of their own (gfx_vk_rec.inc), as Breath of the Wild has them. Kokiri
+# Forest is about 2,100 draws a frame. There on an Ayn Odin 2 (Adreno 740; one run each, 2026-11-11): the replay thread 18.8 ms of CPU a frame instead of 30.2, the same
+# picture, 6.2 GB either way, and 14.9 fps instead of 14.5, as its GPU is busy 50 ms a frame either way. The recorder thread's work is new: the whole process 120 ms of
+# CPU a frame instead of 106. On a OnePlus Pad 3 (Adreno 830), the recorder together with the growing report address set (#182) and its descriptor writes (#301), against
+# main before them: the replay 14 ms instead of 34 and the GPU 21.4 ms instead of 34.9, its clock at 1,100 MHz, but 19.9 fps as before while the frame step holds
+# 3 vsyncs; with 2 held by hand (DM_FPS_TARGET=30 DM_FPS_HOLD=off), 27.5 fps. On a Galaxy S25 Edge the same three gave 19.0 fps instead of 17.6: its GPU clock stays
+# low (41 ms a frame). =0 in env.txt makes the calls on the replay thread
+DM_VK_RECORDER=1
+# DM_VK_OCCLUSION=0: no occlusion queries (gfx_vk.c occl_mode): the game draws what its samples-passed conditions would have culled. It resets its counter before every one of
+# about 530 reports a frame, each a query on a binned 1440x810 pass. On a OnePlus Pad 3 (Adreno 830 at 1,100 MHz) in Kokiri Forest the queries themselves cost 5.25 ms of a
+# 21.3 ms frame and the culling they buy is worth 3.5 ms (2,100 instead of 2,420 draws), so without them the GPU takes 19.6 ms a frame; a query without the precise count costs
+# the same as one with it there. The picture is the same: the draws added are the ones the game's own tests had found hidden. =precise in env.txt brings the queries back
+DM_VK_OCCLUSION=0

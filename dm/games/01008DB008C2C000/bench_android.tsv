@@ -3,3 +3,5 @@
 # ready (postwick): Postwick's outdoor area loads (a_0101; the house is a_t0101_i0101), DM_FS=1 logs it
 postwick	f660:A,32:LDown~0.8,33:LLeft~2.5,35.8:LRight~0.5,36.5:LDown~2.5,39.2:LLeft~0.3,39.7:LDown~2	saves/bedroom	50	30	field/area/other/a_0101\.gfpak	Continue from a save in the bedroom with the Bag, out of the front door, then the player standing outside the house in Postwick (the garden, the thatched roof, the sky)
 boot	-	-	20	30	-	a fresh save: the boot, then the language menu idling; no input
+dl_wyndon	f660:A	saves/dl-8badges-wyndon/shield-8badges-wyndon.rar	35	60	field/area/texture/a_1101\.gfpak	a downloaded save with all eight badges (read from its archive): Continue at the title, then the player standing in a Wyndon street
+dl_postgame	f660:A	saves/dl-postgame-predlc/shield-postgame-predlc.zip	35	60	field/area/texture/a_c0301_pc0101\.gfpak	a downloaded post-game save from before the DLC (read from its archive): Continue at the title, then the player standing in a Pokémon Center
