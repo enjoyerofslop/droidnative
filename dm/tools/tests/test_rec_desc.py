@@ -1,8 +1,10 @@
 """dm/android/rec_desc.h (a vkUpdateDescriptorSets call's writes packed into a block of bytes for the command recorder's thread, and read back there: gfx_vk_rec.inc
-R_UPDDS), built for the PC with the system's clang against the NDK's Vulkan headers and called through ctypes. Skipped without the NDK or a C compiler."""
+R_UPDDS), built for the PC with the system's clang against the NDK's Vulkan headers and called through ctypes. Skipped without the NDK or a C compiler.
+RecorderCalls reads the sources instead: every command the replay can make has a wrapper in gfx_vk_rec.inc."""
 import ctypes
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -102,6 +104,25 @@ class RecDesc(unittest.TestCase):
     def test_a_write_of_no_descriptors(self): self.assertEqual(self.lib.a_write_of_no_descriptors(), 0)
 
     def test_chains_unknown_types_and_oversized_calls_are_left_to_a_direct_call(self): self.assertEqual(self.lib.what_is_not_packed(), 0)
+
+
+# The recorder takes the replay's calls by macro (#define vkCmdX rec_vkCmdX, at the end of gfx_vk_rec.inc). A command with no macro is made on the replay thread, on a
+# command buffer the recorder thread is filling: it lands ahead of the binds queued for it, and two threads write one command buffer.
+NOT_RECORDED = {'vkCmdFillBuffer': 'gfx_vk_bc.inc'}   # the breadcrumbs' only: bc_on turns them off when the recorder is on
+
+
+class RecorderCalls(unittest.TestCase):
+    def test_every_command_the_loader_has_goes_through_the_recorder(self):
+        android = REPO / 'dm/android'
+        rec = (android / 'gfx_vk_rec.inc').read_text(encoding='utf-8')
+        macros = set(re.findall(r'^#define (vkCmd\w+) rec_\1$', rec, re.M))
+        loaded = set(re.findall(r'X\((vkCmd\w+)\)', (android / 'gfx_vk.h').read_text(encoding='utf-8')))
+        self.assertGreater(len(loaded), 30)
+        self.assertEqual(sorted(loaded - macros - set(NOT_RECORDED)), [], 'commands of gfx_vk.h with no wrapper in gfx_vk_rec.inc')
+        for name, only in NOT_RECORDED.items():   # the exceptions are used where they say, and that file still turns itself off with the recorder
+            users = sorted(p.name for p in [*android.glob('gfx_vk*.inc'), android / 'gfx_vk.c'] if re.search(rf'\b{name}\(', p.read_text(encoding='utf-8')))
+            self.assertEqual(users, [only])
+            self.assertRegex((android / only).read_text(encoding='utf-8'), r'rec_on\(\)')
 
 
 if __name__ == '__main__':
