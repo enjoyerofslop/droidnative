@@ -16,8 +16,8 @@
 static const uint32_t MESHLAUNCH[] = {
 #include "shaders/meshlaunch_comp.inc"
 };
-enum { ME_HDR = 16, ME_PC = 8, ME_ALIGN = 256, ME_KBIND = 100 };   // ME_KBIND: the kernels' set 1 bindings, 100 to 103 (spv_meshemu.B_TASKOUT ...)   // launch list words before its entries (spv_meshemu.HDR); push constant bytes {first, base}
-typedef struct memu_t { int task, pay, threads, nrec, nout, ipw, verts; VkPipeline p; VkPipelineLayout pl; int bad; vshader *pvs;
+enum { ME_HDR = 16, ME_PC = 12, ME_ALIGN = 256, ME_KBIND = 100 };   // ME_KBIND: the kernels' set 1 bindings, 100 to 103 (spv_meshemu.B_TASKOUT ...)   // launch list words before its entries (spv_meshemu.HDR); push constant bytes {first, base}
+typedef struct memu_t { int task, pay, threads, nrec, nout, ipw, verts, pack; VkPipeline p; VkPipelineLayout pl; int bad; vshader *pvs;
                         int queued; int bgdone; VkPipeline bgp; uint64_t bgns; } memu_t;   // queued: its pipeline is being built in the background (the replay's); bgdone, bgp, bgns: that build's result, under g_me_mu (memu_cpipe)
 static struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; int bad; } g_me;
 static vshader g_me_kset, g_me_lset;   // their layouts alone, for ds_get's sets kept by each chunk: the kernels' set 1 (four buffers), meshlaunch.comp's set (two)
@@ -25,11 +25,12 @@ static VkDescriptorSetLayout g_me_vdsl;   // the pass-through vertex shaders' se
 static VkPipeline g_me_launch; static VkPipelineLayout g_me_lpl; static int g_me_kbad;
 static uint64_t g_me_draws, g_me_parts, g_me_skipped, g_me_left, g_me_kpipes, g_me_kbg, g_me_kcached;   // draws, their parts, skipped; left out while a kernel's pipeline was built; kernel pipelines made, of them in the background / from the driver's cache at once
 static _Atomic uint64_t g_me_kpipe_ns;
+static int memu_packed(const vshader *s) { return s->memu && s->memu->pack > 1; }
 static int memu_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_MESH_EMU"); on = !(e && *e == '0'); } return on && !g_mesh; }
 static int memu_facts(vshader *s, const jv *e) {   // res.json mesh_emu (null: spv_meshemu.py could not make the compute form)
     if (!e || js_int(e, "pay", 0) <= 0) return 0;
     memu_t *m = calloc(1, sizeof *m); if (!m) return 0;
-    m->pay = js_int(e, "pay", 1); m->threads = js_int(e, "threads", 32); m->task = js_int(e, "task", 0);
+    m->pay = js_int(e, "pay", 1); m->threads = js_int(e, "threads", 32); m->task = js_int(e, "task", 0); m->pack = js_int(e, "pack", 1); if (m->pack < 1) m->pack = 1;   // pack: the shader's workgroups in one of the kernel's (spv_meshemu.py)
     m->nrec = js_int(e, "nrec", 0); m->nout = js_int(e, "nout", 0); m->ipw = js_int(e, "ipw", 0); m->verts = js_int(e, "verts", 3);
     if (s->stage == SH_MS && (m->nrec <= 0 || m->nout <= 0 || m->ipw <= 0)) { free(m); return 0; }
     s->memu = m; return 1;
@@ -80,7 +81,7 @@ static int memu_kernels(void) {   // the emulation's set layouts and meshlaunch.
     g_me_lset.dsl = memu_dsl(2, 0, VK_SHADER_STAGE_COMPUTE_BIT); g_me_lset.ndesc = 2; g_me_lset.ok = 1; memcpy(g_me_lset.key, "mesh-emu-launch", 16);
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo ec = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &ec, NULL, &g_empty_dsl); }
     if (!g_me_kset.dsl || !g_me_lset.dsl || !g_empty_dsl) return 0;
-    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
     VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_me_lset.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
     VkShaderModuleCreateInfo mc = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof MESHLAUNCH, .pCode = MESHLAUNCH}; VkShaderModule sm;
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &g_me_lpl) != VK_SUCCESS || vkCreateShaderModule(g_vk.dev, &mc, NULL, &sm) != VK_SUCCESS) return 0;
@@ -174,7 +175,8 @@ static VkDescriptorSet memu_set(vshader *l, uint32_t n, uint32_t base, const VkD
 // and takes from the compute form's arena at spill (g_tgs_b): scratch for this dispatch alone, where the chunk's arena would keep it for every dispatch of the chunk
 static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize r[8], uint32_t first, uint32_t groups, VkDeviceSize ind, uint32_t most, VkDeviceSize spill) {
     VkDescriptorSet set, es; uint32_t dyn[18]; int ok;
-    g_cdim[0] = groups ? groups : most; g_cdim[1] = g_cdim[2] = 1;
+    memu_t *m = s->memu; uint32_t pk = (uint32_t)m->pack, kgroups = (groups + pk - 1) / pk;   // the kernel's workgroups: pack of the shader's each (spv_meshemu.py), the last one short
+    g_cdim[0] = groups ? kgroups : (most + pk - 1) / pk; g_cdim[1] = g_cdim[2] = 1;
     g_tgs_b = s->tgs ? g_me.b : VK_NULL_HANDLE; g_tgs_off = spill;
     for (int t = 0;; t++) {   // as vk_dispatch: the set taken again when a sync inside stage_set closed the chunk it came from
         g_bind_bad = 0; if (!cur()) return 0; uint64_t dseq = C->seq; int got = stage_set(s, 0, &set, dyn, pr, pst, 0, dseq); ok = got && !g_bind_bad;
@@ -185,7 +187,7 @@ static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize
     if (!ok || !(es = memu_set(&g_me_kset, 4, ME_KBIND, r, r + 4))) return 0;
     VkCommandBuffer c = cb(); if (!c) return 0;
     cb_barrier();
-    memu_t *m = s->memu; uint32_t pc[2] = {first, 0};
+    uint32_t pc[3] = {first, 0, groups};   // {first, base, count}: a packed kernel's half past count does nothing
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->p);
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl, 0, 1, &set, s->ndyn, dyn);
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl, 1, 1, &es, 0, NULL);
@@ -193,11 +195,11 @@ static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize
     if (s->gm && g_gm_np) gm_np_bind(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl);   // raw memory's pools as a descriptor array (gfx_vk_gmem_noptr.inc)
     vkCmdPushConstants(c, m->pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, ME_PC, pc);
     // a profiled frame's record and the breadcrumbs, as vk_dispatch's: the kernel by its key, x its workgroups (an indirect dispatch: the most it runs, z 0)
-    uint32_t g[3] = {groups ? groups : most, 1, groups ? 1 : 0}; int pr_i = -1;
+    uint32_t g[3] = {groups ? groups : most, 1, groups ? 1 : 0}; int pr_i = -1;   // (the profile counts the shader's workgroups, whatever the pack)
     if (prof_on() && C->pq && C->npq + 2 <= 512 && g_nprof < 1024) { prof_rec *q = &g_prof[pr_i = g_nprof++]; memset(q, 0, sizeof *q); q->c = C; q->ncolor = -1; q->w = g[0]; q->h = g[1]; q->draws = (int)g[2]; q->seq = g_prof_seq++; q->bigfs = s->key;
         q->s0 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->pq, (uint32_t)q->s0); }
     uint32_t bcid = bc_on() ? bc_begin(c, s->key, g, C->seq) : 0;   // DM_VK_BC (gfx_vk_bc.inc)
-    if (groups) vkCmdDispatch(c, groups, 1, 1); else vkCmdDispatchIndirect(c, g_me.b, ind);
+    if (groups) vkCmdDispatch(c, kgroups, 1, 1); else vkCmdDispatchIndirect(c, g_me.b, ind);
     bc_end(c, bcid);
     if (pr_i >= 0) { g_prof[pr_i].s1 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->pq, (uint32_t)g_prof[pr_i].s1); }
     cb_barrier(); g_dispatches++; C->ndraw++;
@@ -206,9 +208,9 @@ static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize
 static int memu_launch(const VkDeviceSize r[8], uint32_t ntask, const memu_t *ts, const memu_t *ms, uint32_t cap) {   // meshlaunch.comp over taskout and launch
     if (!cur()) return 0;
     VkDescriptorSet set = memu_set(&g_me_lset, 2, 0, r, r + 4); VkCommandBuffer c = cb(); if (!set || !c) return 0;
-    uint32_t pc[4] = {ntask, (uint32_t)ts->pay, cap, (uint32_t)ms->ipw};
+    uint32_t pc[5] = {ntask, (uint32_t)ts->pay, cap, (uint32_t)ms->ipw, (uint32_t)ms->pack};
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_me_launch); vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_me_lpl, 0, 1, &set, 0, NULL);
-    vkCmdPushConstants(c, g_me_lpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, pc); vkCmdDispatch(c, 1, 1, 1); cb_barrier(); g_dispatches++;
+    vkCmdPushConstants(c, g_me_lpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, 20, pc); vkCmdDispatch(c, 1, 1, 1); cb_barrier(); g_dispatches++;
     return 1;
 }
 // the draw of a part: the fragment shader under the pass-through vertex shader, nidx indices (0: the launch list header's draw arguments)

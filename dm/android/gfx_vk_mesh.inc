@@ -143,7 +143,7 @@ static lmod *ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim) {
         uint32_t *code = v, *np = NULL, *pf = NULL, *fit = NULL; size_t cn = on, nn, pn, fn;
         if ((nn = gm_np_code(code, cn, p, 1, &np))) { code = np; cn = nn; }   // raw memory without physical pointers, as lm_code (gfx_vk_gmem_noptr.inc)
         if ((pn = spv_pool_fit(code, cn, p, &pf))) { code = pf; cn = pn; }
-        if ((fn = spv_fit(code, cn, p, &fit))) { code = fit; cn = fn; }
+        if ((fn = spv_fit(code, cn, p, 0, &fit))) { code = fit; cn = fn; }
         if (s->bmap) spv_bind_remap(code, cn, s->bmap);
         { const char *dd = getenv("DM_DUMP_DIR"); if (dd) { char q[700]; mkdir(dd, 0777); snprintf(q, sizeof q, "%s/pvar_%s_%x_%x.spv", dd, s->key, miss, prim); FILE *f = fopen(q, "wb"); if (f) { fwrite(code, 4, cn, f); fclose(f); } } }   // for spirv-val
         VkShaderModule mod = lm_create(code, cn, p); free(np); free(pf); free(fit);

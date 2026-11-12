@@ -1,13 +1,14 @@
 #version 450
 // The mesh emulation's launch list (gfx_vk_meshemu.inc; spv_meshemu.py writes the kernels that read it). After the task kernel ran, task t's payload word 1 says how many
 // mesh workgroups it launches. One workgroup sums those in order and lists each mesh workgroup as {its task, its number among that task's launches} from word HDR, then
-// writes the header the next two steps read as indirect arguments: words 0-2 the mesh dispatch, 4-8 the indexed draw (ipw indices a mesh workgroup), 9 how many launches
+// writes the header the next two steps read as indirect arguments: words 0-2 the mesh dispatch (the kernel's workgroups, pack mesh workgroups each: spv_meshemu.py),
+// 3 the mesh workgroups listed, 4-8 the indexed draw (ipw indices a mesh workgroup), 9 how many launches
 // there were when more than the list holds (cap), 0 otherwise. The same design as DeathKhan's nx2android fork's meshlaunch.comp, written anew here
 // (glslc --target-env=vulkan1.1 -mfmt=num -o meshlaunch_comp.inc meshlaunch.comp)
 layout(local_size_x = 256) in;
 layout(set = 0, binding = 0) readonly buffer Task { uint taskout[]; };
 layout(set = 0, binding = 1) writeonly buffer Launch { uint launch[]; };
-layout(push_constant) uniform P { uint ntask, pay, cap, ipw; } p;
+layout(push_constant) uniform P { uint ntask, pay, cap, ipw, pack; } p;
 const uint HDR = 16u, N = 256u;
 shared uint sum[N];
 void main() {
@@ -22,7 +23,7 @@ void main() {
     }
     if (lid == 0u) {
         uint m = min(total, p.cap);
-        launch[0] = m; launch[1] = 1u; launch[2] = 1u; launch[3] = 0u;
+        launch[0] = (m + p.pack - 1u) / p.pack; launch[1] = 1u; launch[2] = 1u; launch[3] = m;
         launch[4] = m * p.ipw; launch[5] = 1u; launch[6] = 0u; launch[7] = 0u; launch[8] = 0u; launch[9] = total > p.cap ? total : 0u;
     }
 }
