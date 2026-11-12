@@ -1252,6 +1252,7 @@ typedef struct {
     uint64_t rt_last; uint32_t rt_runs;   // the last present (+1) that drew into it as a pass's target, and in how many presents in a row up to it (gfx_vk_draw.inc rt_note)
     int refs, shared, mutable_, fixed_fmt; uint64_t used;   // mutable_: views in another format of the same texel size (a texture view's format); fixed_fmt: only its format and its sRGB twin (vt_create)   // texture objects (serials) resolving to it; in the sharing table; g_fence at its last lookup
     uint64_t mem_bytes, last_present, last_w; uint8_t gpu_w, filled, pool_read, evict;   // eviction (gfx_vk_evict.inc): its memory's size, the presents of its last lookup and its last write by the GPU, written by the GPU since it was made, filled from its storage, read through the texture pool by ID, chosen
+    uint8_t taken;   // an uncompressed 2D texture taken from its storage at its first use (storage_first_use): the GPU's first write into it makes it a GPU texture (vt_get_w)
     uint32_t mem_type;   // v->mem's memory type (gfx_vk_spare.inc: a freed image's memory kept as a spare)
     VkImageUsageFlags usage; int ext_store;   // its usage; ext_store: STORAGE for views of another format only (EXTENDED_USAGE, vt_storage_up), so each view takes the usage its format has (view_get)
 } vtex;
@@ -1637,6 +1638,52 @@ static void share_take_over(const share_key *nk) {
 static int tex_once(void);   // gfx_vk_draw.inc
 static _Atomic int g_vkb_up;
 static int vkb_up(void) { if (atomic_load_explicit(&g_vkb_up, memory_order_acquire)) return 1; if (!vkb()) return 0; if (tex_once()) atomic_store_explicit(&g_vkb_up, 1, memory_order_release); return 1; }
+// Whether a texture's storage can be where its content comes from, whatever it holds now (nvn_mtl.m tex_storage_ok): not a packaged, multisample or buffer texture, nor what only the GPU
+// or the decoder fills (depth or stencil, display, video decode), not in a pool the CPU can't write or a sparse one, and none of the flags that make its memory the GPU's (compressible,
+// linear, sparse; shader-writable for an uncompressed one, as shaders can't write a block-compressed one). *unc: the uncompressed 2D kind, which the GPU can render into
+static int tex_storage_ok(const tex_t *t, int *unc) {
+    int f = (int)t->d.format, comp = (f >= 0x41 && f <= 0x50) || (f >= 0x79 && f <= 0x94);   // nvn_mtl.m fmt_compressed
+    *unc = !comp && t->d.target != NVN_TEXTURE_TARGET_3D;   // tex_unc
+    return t->mem && t->pool && !t->has_layout && t->d.samples <= 1 && t->d.target != NVN_TEXTURE_TARGET_BUFFER
+        && !(*unc && ((f >= 0x31 && f <= 0x36) || (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE))))
+        && !(t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL))
+        && !(t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE))
+        && !((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !comp);
+}
+// Whether an image the GPU wrote lies over a whole page of the texture's storage, or over all of it (g_bk held). This replay keeps no record of GPU-written storage (nvn_mtl.m gws_owned);
+// the sharing table's images are the GPU textures over their pools. Part of a page doesn't count: textures are 512-byte aligned, so a GPU-drawn neighbour may end in the page this one
+// begins in (nvn_mtl.m gws_sliver: Ocarina of Time's RG8 normal tiles reached into the height and hole maps beside them)
+static int gpu_wrote_over(const tex_t *t) {
+    static uintptr_t pg; if (!pg) { long l = sysconf(_SC_PAGESIZE); pg = l > 0 ? (uintptr_t)l : 4096; }
+    int64_t lo = t->off, hi = t->off + (int64_t)t->L.size;
+    for (uint32_t i = 0; i < g_share.cap; i++) {
+        vtex *v = g_share.vals[i]; if (!v || !v->gpu_w) continue;
+        share_key k; memcpy(&k, g_share.keys + (size_t)i * g_share.klen, sizeof k);
+        if (k.pool != (uint64_t)(uintptr_t)t->pool || k.off >= hi) continue;
+        nvn_texlayout kl; nvn_tex_layout(&k.d, &kl); int64_t klo = k.off, khi = k.off + (int64_t)kl.size;
+        if (khi <= lo) continue;
+        if (klo <= lo && khi >= hi) return 1;
+        uintptr_t a = (uintptr_t)t->pool->mem + (uintptr_t)(klo > lo ? klo : lo), e = (uintptr_t)t->pool->mem + (uintptr_t)(khi < hi ? khi : hi);
+        a = (a + pg - 1) & ~(pg - 1); e &= ~(pg - 1);
+        if (e > a) return 1;
+    }
+    return 0;
+}
+// Storage the CPU wrote before a texture's first use (nvn_mtl.m tex_cpu_content; DM_NVN_STORAGE_FIRST_USE=0 turns it off): a texture whose storage can hold its content and holds data
+// when it is first resolved is made CPU-written, uploaded now and again when its pages change, flushed or not. tex_init_fill's one-time fill takes only a pool the CPU can't access or
+// uncached, or flushed storage, and the poll (tex_dirty_upload) sees only writes after nvnTextureInitialize. Ocarina of Time writes its terrain tiles' height (260x260 R32F), blend and
+// hole (RGBA8) and detail (BC) maps into a CPU_CACHED pool before it makes the textures over them, so they were GPU images of zeros: the riverbed was never drawn, and the water pass
+// tinted the far depth it saw through it a flat pale teal. An uncompressed 2D texture can't be told from a render target by its flags (NVN has none), so it is taken only over storage no
+// image the GPU wrote lies on. → 0: not taken; 1: taken; 2: taken, uncompressed 2D (g_bk held)
+static uint64_t g_first_use_taken;
+static int storage_first_use(const tex_t *t) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_STORAGE_FIRST_USE"); on = !e || atoi(e) != 0; }
+    int unc; if (!on || !tex_storage_ok(t, &unc) || !mem_any(t->mem, t->L.size) || (unc && gpu_wrote_over(t))) return 0;
+    if (!nvn_hm_get(&g_cpuw, &t->serial)) nvn_hm_put(&g_cpuw, &t->serial, (void *)1);
+    if (g_first_use_taken++ < 4) LOG("[vk] texture written by the CPU before its first use: ser=%llu %ux%ux%u format %#x%s, pool flags %#x: uploaded from its storage, again when it changes (%llu so far)",
+        (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, unc ? " (uncompressed, over storage no GPU-written image lies on)" : "", t->pool->flags, (unsigned long long)g_first_use_taken);
+    return unc ? 2 : 1;
+}
 // The image of a texture: made at first use; a texture whose content lives in guest memory is uploaded, and uploaded again when its pages were written
 static void ev_made(vtex *v);   // gfx_vk_evict.inc
 static vtex *vt_get_(const tex_t *ct) {
@@ -1647,7 +1694,8 @@ static vtex *vt_get_(const tex_t *ct) {
     if (v && (v->store != t->mem || !desc_same(&v->desc, &t->d))) {
         static int n; if (n++ < 8) LOG("[vk] texture ser=%llu met again with %s: made anew (storage %p, now %p)", (unsigned long long)t->serial, v->store != t->mem ? "other storage" : "another description", (const void *)v->store, (const void *)t->mem);
         nvn_hm_del(&g_tex, &t->serial); g_vt_gen++; vt_unref(v); v = NULL; }
-    int pkg = is_packaged(t);
+    int pkg = is_packaged(t), took = 0;
+    if (!v && !pkg && (took = storage_first_use(t))) pkg = 1;
     if (v && v->pkg) {
         uint64_t now = nvn_dirty_now();
         int clean = v->span && (now == v->seen || !nvn_dirty_since_span(v->span, t->mem, t->L.size, v->stamp));
@@ -1667,14 +1715,21 @@ static vtex *vt_get_(const tex_t *ct) {
     }
     if (!(v = vt_create(t))) return NULL;
     v->used = atomic_load(&g_fence); ev_made(v);
-    if (pkg) { v->pkg = 1; if (vt_upload(v, t, 1)) { g_pkg_uploads++; edges_take(v, t); } }
+    if (pkg) { v->pkg = 1; v->taken = took == 2; if (vt_upload(v, t, 1)) { g_pkg_uploads++; edges_take(v, t); } }
     else if (t->pool) { v->filled = (uint8_t)tex_init_fill(v, t); share_take_over(&k); nvn_hm_put(&g_share, &k, v); v->shared = 1; }
     vt_ref(t->serial, v);
     return v;
 }
 static vtex *vt_get(const tex_t *ct) { vtex *v = vt_get_(ct); if (v) v->last_present = atomic_load(&g_presents); return v; }   // its last lookup, for eviction (gfx_vk_evict.inc)
 // A lookup for what the GPU writes (a pass's target, a copy's or a clear's destination): such an image's content is the GPU's from then on, not its storage's, so it is never evicted
-static vtex *vt_get_w(const tex_t *ct) { vtex *v = vt_get(ct); if (v) { v->gpu_w = 1; v->last_w = v->last_present; } return v; }
+// A texture taken from its storage at its first use (storage_first_use) that the GPU then writes holds what the GPU drew, not what the storage holds: it becomes a GPU texture, so a CPU write
+// beside it no longer uploads the storage over the drawing (nvn_mtl.m cpu_unc_drop)
+static vtex *vt_get_w(const tex_t *ct) {
+    vtex *v = vt_get(ct);
+    if (v && v->taken) { v->taken = 0; v->pkg = 0; nvn_hm_del(&g_cpuw, &ct->serial); }
+    if (v) { v->gpu_w = 1; v->last_w = v->last_present; }
+    return v;
+}
 // A memory pool's Finalize (mtl_alias_drop_pool): the textures made on its storage go, as nvn_mtl.m evicts its shared textures; their serials may be met again on other storage
 void vt_drop_pool(const void *pool) {
     void vkb_frame_forget(uint64_t serial);
@@ -1717,12 +1772,7 @@ int mtl_tex_gpu_owned(uint64_t serial) { BK_LOCK(); vtex *v = nvn_hm_get(&g_tex,
 // uploaded. Ocarina of Time rewrites its terrain tiles' height (R32F), blend and hole (RGBA8) maps as tile slots are reused; the nxnative merge (b547f1e2) moved the poll
 // to this question, which the replay did not answer yet, so a host with tex_dirty_upload did not link
 int mtl_tex_cpu_rewritten(const tex_t *t) {
-    int f = (int)t->d.format, comp = (f >= 0x41 && f <= 0x50) || (f >= 0x79 && f <= 0x94), unc = !comp && t->d.target != NVN_TEXTURE_TARGET_3D;   // nvn_mtl.m fmt_compressed, tex_unc
-    int ok = t->mem && t->pool && !t->has_layout && t->d.samples <= 1 && t->d.target != NVN_TEXTURE_TARGET_BUFFER
-          && !(unc && ((f >= 0x31 && f <= 0x36) || (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE))))   // depth / stencil, display, video decode
-          && !(t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL))
-          && !(t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE))
-          && !((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !comp);
+    int unc, ok = tex_storage_ok(t, &unc);
     if (ok) {
         if (unc) { BK_LOCK(); vtex *v = nvn_hm_get(&g_tex, &t->serial); int drawn = v && !v->pkg && v->rt_last; BK_UNLOCK(); if (drawn) return MTL_REWRITE_GPU_NOW; }
         mtl_tex_cpu_written(t); return MTL_REWRITE_UPLOADED;
