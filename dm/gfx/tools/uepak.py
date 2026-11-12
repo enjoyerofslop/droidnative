@@ -49,17 +49,82 @@ PAK_MAGIC, ARCHIVE_VERSION = 0x5A6F12E1, 2
 JOB_MAGIC, OUT_MAGIC = 0x4a4f4d44, 0x524f4d44   # "DMOJ", "DMOR" (hle_oodle.c)
 FREQ = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'ps', 4: 'gs', 5: 'cs'}   # EShaderFrequency (the archive's frequency census: 0 vertex, 3 pixel, 5 compute)
 
-_cc = None
+def _commoncrypto():
+    """AES-256 ECB decryption through CommonCrypto, which every Mac has"""
+    cc = ctypes.CDLL('/usr/lib/libSystem.B.dylib').CCCrypt
+    cc.restype = ctypes.c_int32
+    cc.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+    def decrypt(key, data):
+        out = ctypes.create_string_buffer(len(data)); moved = ctypes.c_size_t()
+        if cc(1, 0, 2, key, len(key), None, data, len(data), out, len(data), ctypes.byref(moved)): raise ValueError('CCCrypt failed')   # decrypt, AES, ECB
+        return out.raw[:moved.value]
+    return decrypt
+
+def _cng():
+    """AES-256 ECB decryption through Windows' CNG (bcrypt.dll), which every Windows since Vista has. The algorithm handle is opened once and kept for the process, as opening one is
+    CNG's slow step and find_key decrypts a block with each of up to some 100,000 candidate keys; a key handle is made and destroyed per call"""
+    bc = ctypes.WinDLL('bcrypt')   # pyright: ignore[reportAttributeAccessIssue]   (Windows only)
+    H, U = ctypes.c_void_p, ctypes.c_ulong   # BCRYPT_*_HANDLE, ULONG (32 bits on Windows)
+    for name, args in (('BCryptOpenAlgorithmProvider', [ctypes.POINTER(H), ctypes.c_wchar_p, ctypes.c_wchar_p, U]), ('BCryptCloseAlgorithmProvider', [H, U]),
+                       ('BCryptSetProperty', [H, ctypes.c_wchar_p, ctypes.c_void_p, U, U]), ('BCryptGenerateSymmetricKey', [H, ctypes.POINTER(H), ctypes.c_void_p, U, ctypes.c_char_p, U, U]),
+                       ('BCryptDecrypt', [H, ctypes.c_char_p, U, ctypes.c_void_p, ctypes.c_void_p, U, ctypes.c_void_p, U, ctypes.POINTER(U), U]), ('BCryptDestroyKey', [H])):
+        f = getattr(bc, name); f.argtypes, f.restype = args, ctypes.c_long   # NTSTATUS, 0 on success
+    def ok(status, what):
+        if status: raise ValueError(f'{what} failed (NTSTATUS {status & 0xffffffff:#010x})')
+    alg = H(); ok(bc.BCryptOpenAlgorithmProvider(ctypes.byref(alg), 'AES', None, 0), 'BCryptOpenAlgorithmProvider')
+    mode = ctypes.create_unicode_buffer('ChainingModeECB')   # the property's value is the UTF-16 string with its NUL, its size in bytes
+    try: ok(bc.BCryptSetProperty(alg, 'ChainingMode', mode, ctypes.sizeof(mode), 0), 'BCryptSetProperty ChainingModeECB')
+    except ValueError: bc.BCryptCloseAlgorithmProvider(alg, 0); raise
+    def decrypt(key, data):
+        k, out, moved = H(), ctypes.create_string_buffer(len(data)), U()
+        ok(bc.BCryptGenerateSymmetricKey(alg, ctypes.byref(k), None, 0, key, len(key), 0), 'BCryptGenerateSymmetricKey')   # no key object buffer: CNG allocates it (Windows 7 and later)
+        try: ok(bc.BCryptDecrypt(k, data, len(data), None, None, 0, out, len(data), ctypes.byref(moved), 0), 'BCryptDecrypt')   # no padding info, no IV, flags 0: no padding
+        finally: bc.BCryptDestroyKey(k)
+        return out.raw[:moved.value]
+    return decrypt
+
+def _libcrypto():
+    """AES-256 ECB decryption through OpenSSL's libcrypto (EVP, the same calls in 1.1, 3 and 4), which Linux distributions install. Never loaded on a Mac: its /usr/lib/libcrypto.dylib
+    aborts the process that loads it"""
+    import ctypes.util
+    for name in filter(None, ('libcrypto.so.3', 'libcrypto.so.4', 'libcrypto.so.1.1', ctypes.util.find_library('crypto'))):
+        try: lc = ctypes.CDLL(name); break
+        except OSError: pass
+    else: raise OSError('no libcrypto.so.3, .so.4 or .so.1.1')
+    P, I = ctypes.c_void_p, ctypes.c_int
+    for name, res, args in (('EVP_CIPHER_CTX_new', P, []), ('EVP_CIPHER_CTX_free', None, [P]), ('EVP_aes_256_ecb', P, []), ('EVP_DecryptInit_ex', I, [P, P, P, ctypes.c_char_p, P]),
+                            ('EVP_CIPHER_CTX_set_padding', I, [P, I]), ('EVP_DecryptUpdate', I, [P, P, ctypes.POINTER(I), ctypes.c_char_p, I]), ('EVP_DecryptFinal_ex', I, [P, P, ctypes.POINTER(I)])):
+        f = getattr(lc, name); f.restype, f.argtypes = res, args
+    def decrypt(key, data):
+        ctx = lc.EVP_CIPHER_CTX_new()
+        if not ctx: raise MemoryError('EVP_CIPHER_CTX_new')
+        try:
+            out, n, tail = ctypes.create_string_buffer(len(data) + 16), I(), I()   # a block of room past the input, which OpenSSL's documentation asks of EVP_*Update
+            if not (lc.EVP_DecryptInit_ex(ctx, lc.EVP_aes_256_ecb(), None, key, None) and lc.EVP_CIPHER_CTX_set_padding(ctx, 0)
+                    and lc.EVP_DecryptUpdate(ctx, out, ctypes.byref(n), data, len(data)) and lc.EVP_DecryptFinal_ex(ctx, ctypes.byref(out, n.value), ctypes.byref(tail))):
+                raise ValueError('OpenSSL AES decryption failed')
+            return out.raw[:n.value + tail.value]
+        finally: lc.EVP_CIPHER_CTX_free(ctx)
+    return decrypt
+
+# Each platform's own AES, so no Python package is needed: the loader of a decrypt(key, data) function, OSError when the library is not there
+AES_BACKEND = _commoncrypto if sys.platform == 'darwin' else _cng if sys.platform == 'win32' else _libcrypto
+AES_SLICE = 1 << 30   # OpenSSL takes an int length and CNG a ULONG; ECB's blocks are independent, so a longer buffer goes in slices
+
+_aes = None
 def aes_decrypt(key, data):
-    """AES-256 ECB decryption through CommonCrypto (every Mac has it; no Python package needed)"""
-    global _cc
-    if _cc is None:
-        _cc = ctypes.CDLL('/usr/lib/libSystem.B.dylib').CCCrypt
-        _cc.restype = ctypes.c_int32
-        _cc.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
-    out = ctypes.create_string_buffer(len(data)); moved = ctypes.c_size_t()
-    if _cc(1, 0, 2, key, len(key), None, data, len(data), out, len(data), ctypes.byref(moved)): raise ValueError('CCCrypt failed')   # decrypt, AES, ECB
-    return out.raw[:moved.value]
+    """AES-256 ECB decryption of whole 16-byte blocks without padding (Unreal's pak and container encryption) through the platform's own library (AES_BACKEND)"""
+    global _aes
+    key, data = bytes(key), bytes(data)
+    if len(key) != 32 or len(data) % 16: raise ValueError(f'AES-256 ECB takes a 32-byte key and whole 16-byte blocks, not a {len(key)}-byte key and {len(data)} bytes')
+    if _aes is None:
+        # ValueError, as for a damaged pak, so the NSP scripts stop with it as the build's error rather than a traceback
+        try: _aes = AES_BACKEND()
+        except (OSError, AttributeError) as e:
+            raise ValueError(f'an Unreal pak or container is AES-encrypted, and no AES library could be loaded to read it ({e}): DroidPlay uses CommonCrypto on a Mac, CNG on Windows and '
+                             'OpenSSL\'s libcrypto on Linux (libcrypto.so.3, in the libssl3 or openssl package)') from e
+    if len(data) <= AES_SLICE: return _aes(key, data) if data else b''
+    return b''.join(_aes(key, data[i:i + AES_SLICE]) for i in range(0, len(data), AES_SLICE))
 
 _M, _K0, _K1, _K2 = (1 << 64) - 1, 0xc3a5c85c97cb3127, 0xb492b66fbe98f273, 0x9ae16a3b2f90404f
 def _rot(v, s): return ((v >> s) | (v << (64 - s))) & _M if s else v
