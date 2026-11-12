@@ -110,7 +110,8 @@ static VkResult memu_cpipe_make(vshader *s, VkPipeline *out, uint64_t *ons) {   
     const char *pbk[4] = {s->key, NULL, NULL, NULL}; int pb = pb_begin('c', pbk, 0, 0, 0, 0); uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     VkResult r = lm_pipeline(NULL, &pc, &pc.stage, &s->mod, 1, out); pb_end(pb);
     uint64_t ns = clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0; atomic_fetch_add(&g_me_kpipe_ns, ns); *ons = ns;
-    if (r != VK_SUCCESS) { *out = VK_NULL_HANDLE; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) LOG("[RED] [vk] compute form of task / mesh shader %s: pipeline failed (VkResult %d): its draws are skipped", s->key, r); }
+    if (r != VK_SUCCESS) { *out = VK_NULL_HANDLE; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) LOG("[RED] [vk] compute form of task / mesh shader %s: pipeline failed (VkResult %d): its draws are skipped", s->key, r);
+                             vk_start_pipe_failed(s->key, NULL); }   // the start record's count, as a compute pipeline's (vk_start.c): a kernel is made once, so it counts once
     else { static _Atomic int n; int k = atomic_fetch_add(&n, 1); if (k < 4 || ns > 500000000ull) LOG("[vk] compute form of task / mesh shader %s: pipeline made in %.1f ms", s->key, ns / 1e6); }
     return r;
 }
