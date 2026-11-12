@@ -12,7 +12,9 @@
 // Transform feedback (the Adreno has no VK_EXT_transform_feedback): a vertex shader with a feedback layout has a <key>.tf.spv variant that stores its captured
 // outputs into storage buffers (set 0, binding 100 + buffer; tools/spv_android.py tf_variant); the capture draws it as points, rasterization off, in a pass
 // without attachments, vertex v of the draw at v × stride from the buffer's write offset, copied back to guest memory when the chunk completes (nvn_mtl.m tf_draw:
-// non-indexed, non-instanced, not fans / quads). Rasterizer discard draws nothing else.
+// non-indexed, non-instanced, not fans / quads). Rasterizer discard draws nothing else. A GPU without vertex-stage storage writes (Mali) captures in the fragment stage
+// instead (spv_tffrag.h, tf_frag): the shader wrapped to put vertex v on pixel v of a 1024-wide grid as a one-pixel point, and a fragment shader made at run time from
+// the feedback layout storing the outputs there.
 // Compute dispatches run the same way (set 0, the compute stage's banks, c0 + 0x200 the group counts). Buffer textures and buffer images are texel buffer views over
 // copies in the arena (written ones copied back); images are the textures' own images (storage usage), so what a shader writes stays on the GPU.
 // Coherence: submissions are synchronous and guest memory is copied at each draw, so a draw or dispatch after one that wrote guest memory (storage buffers, buffer
@@ -120,6 +122,7 @@ enum { SH_VS, SH_PS, SH_GS, SH_TS, SH_CS };
 #define CB_MAX 20
 typedef struct {
     char key[17]; int stage, set, ok; VkShaderStageFlagBits vkstage; struct lmod *mod, *modz, *modtf;   // modz, modtf: NULL without a .z / .tf variant (gfx_vk_lmod.inc)
+    struct lmod *modtff;   // the capture's fragment shader (tf_frag): modtf is then the shader wrapped by spv_tff_vs, not its .tf.spv; NULL on the vertex-stage capture
     uint32_t tf_stride[4]; VkDescriptorSetLayout dsl_tf;
     int ncb, nsb, ntx, nim; rb_cbuf cb[CB_MAX]; rb_sbuf sb[16]; rb_tex tx[64], im[16];
     VkDescriptorSetLayout dsl;
@@ -568,6 +571,30 @@ static lmod *ps_variant(vshader *s, uint32_t miss) {
     if (s->nvar < 4) { s->var[s->nvar].miss = miss; s->var[s->nvar++].m = m; }
     return m;
 }
+// Where transform feedback is captured. The vertex stage's capture (.tf.spv) needs vertexPipelineStoresAndAtomics, which Arm's Mali drivers lack, so there the
+// capture runs in the fragment stage (spv_tffrag.h), which needs fragmentStoresAndAtomics.
+// DM_VK_TF_FRAG (env.txt): 1 captures in the fragment stage on any GPU with fragment stores (to compare the two on an Adreno), 0 never (the capture is then refused, RED 115)
+static int tf_frag(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_TF_FRAG");
+        int want = e && *e == '1' ? 1 : e && *e == '0' ? 0 : !g_vk_feat.vertexPipelineStoresAndAtomics;
+        v = want && g_vk_feat.fragmentStoresAndAtomics;
+        if (v || (e && *e)) LOG("[vk] transform feedback: captured in the %s stage%s", v ? "fragment" : "vertex", e && *e ? " (DM_VK_TF_FRAG)" : ": the GPU has no vertex-stage storage writes");
+        else if (want) LOG("[RED] [vk] transform feedback: the GPU has neither vertex- nor fragment-stage storage writes, so nothing can be captured"); }
+    return v;
+}
+// The capture's fragment shader for vertex shader s (its layout L, its vec4 outputs outs and SPIR-V version ver): made now, a few hundred words. NULL: red line
+static lmod *tff_fs_mod(const vshader *s, const spv_tff_layout *L, uint32_t outs, uint32_t ver) {
+    enum { CAP = 4096 }; uint32_t *o = malloc(CAP * 4); if (!o) return NULL;
+    size_t n = spv_tff_fs(ver, L, outs, o, CAP); lmod *m = NULL;
+    char what[96]; snprintf(what, sizeof what, "%s (its transform feedback's fragment shader)", s->key);
+    if (n) {
+        const char *d = getenv("DM_DUMP_DIR");   // for spirv-val
+        if (d) { char q[700]; mkdir(d, 0777); snprintf(q, sizeof q, "%s/tff_%s.fs.spv", d, s->key); FILE *f = fopen(q, "wb"); if (f) { fwrite(o, 4, n, f); fclose(f); } }
+        m = lm_gen(o, n, what);
+    } else LOG("[RED] [vk] vertex shader %s: its feedback layout has a buffer of more than 128 words a vertex, so it cannot be captured in the fragment stage", s->key);
+    free(o); return m;
+}
 static lmod *sh_module(const vshader *s, const char *path, int *b0) { return lm_new(path, 0, s->bmap, b0); }   // *b0 |= the module reads the support buffer (spv_b0_used)
 // Ryujinx's TextureFormat names (an image's declared format) → Vulkan, with the texel size
 static const struct { const char *n; VkFormat f; int bytes; } DECL_FMT[] = {
@@ -675,17 +702,28 @@ static vshader *sh_get(const char *key) {
     memset(s->vin, 'f', sizeof s->vin);
     a = js_get(&r, "vin");
     for (int q = 0; a && a->t == 4 && q < a->n; q++) { int l = atoi(a->key[q]); if (l >= 0 && l < 16 && a->kid[q].s) s->vin[l] = a->kid[q].s[0]; }
-    a = js_get(&r, "tf");   // [[outputs, stride] or [] per feedback buffer]
-    for (int b = 0; a && a->t == 3 && b < a->n && b < 4; b++) if (a->kid[b].t == 3 && a->kid[b].n == 2) s->tf_stride[b] = (uint32_t)a->kid[b].kid[1].num;
+    a = js_get(&r, "tf");   // [[outputs, stride] or [] per feedback buffer], the outputs [[generic output, components], ...] in their order in the record
+    spv_tff_layout tfl; memset(&tfl, 0, sizeof tfl);
+    for (int b = 0; a && a->t == 3 && b < a->n && b < 4; b++) if (a->kid[b].t == 3 && a->kid[b].n == 2) {
+        s->tf_stride[b] = tfl.stride[b] = (uint32_t)a->kid[b].kid[1].num;
+        const jv *ou = &a->kid[b].kid[0];
+        for (int q = 0; ou->t == 3 && q < ou->n && tfl.nout[b] < SPV_TFF_MAX_OUT; q++) if (ou->kid[q].t == 3 && ou->kid[q].n == 2) {
+            tfl.loc[b][tfl.nout[b]] = (uint8_t)ou->kid[q].kid[0].num; tfl.ncomp[b][tfl.nout[b]++] = (uint8_t)ou->kid[q].kid[1].num; } }
+    int has_tf = (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) != 0; uint32_t tf_outs = 0, tf_ver = 0;
     js_free(&r);
     sh_bind_map(s);   // before its modules: they and the layout below take the same numbers
     t_pool_info = 0;
     snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(s, p, &s->b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
-      if (w) { if (s->stage == SH_CS) s->tgs = tgs_bytes(w, nw, s->key); spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
+      if (w) { if (s->stage == SH_CS) s->tgs = tgs_bytes(w, nw, s->key); if (has_tf && nw > 1) { tf_outs = spv_tff_outs(w, nw); tf_ver = w[1]; } spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
     sh_bind_apply(s);   // the layout and stage_set's writes from here on: the numbers the modules have (the matching above read the file's)
     if (s->stage == SH_VS) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(s, p, &s->b0); }
-    if (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(s, p, &s->b0); }
+    if (has_tf && s->stage == SH_VS && tf_frag()) {   // the fragment-stage capture; if it cannot be made, the .tf.spv below (which tf_capture refuses on such a GPU, RED 115)
+        snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->modtf = lm_new_t(p, s->bmap, &s->b0);
+        if (s->modtf) s->modtff = tff_fs_mod(s, &tfl, tf_outs, tf_ver);
+        if (!s->modtff) s->modtf = NULL;   // (an lmod is never freed: its module may be in a pipeline being made)
+    }
+    if (has_tf && !s->modtf) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(s, p, &s->b0); }
     if (!s->mod) return NULL;
     // a pool read spv_pool left, or pool arrays res.json names that it found no variable for: their arrays would be in no layout
     if (s->pool && !(t_pool_info & (SPV_POOL_IMG | SPV_POOL_SMP)) && !(t_pool_info & SPV_POOL_FAIL)) { t_pool_info |= SPV_POOL_FAIL; static int nl; if (nl++ < 8) LOG("[RED] [vk] shader %s: res.json names texture pool arrays its module does not have as spv_pool knows them: its draws are dropped", s->key); }
@@ -706,9 +744,9 @@ static vshader *sh_get(const char *key) {
         uint32_t big = 0; for (uint32_t i = 0; i < nb; i++) if (b[i].descriptorCount > big) big = b[i].descriptorCount;
         static int n; if (n++ < 4) LOG("[RED] [vk] shader %s: one descriptor set of its layout is larger than a whole pool (an array of %u elements): its draws are dropped", s->key, big); }
     if (s->modtf) {   // the capture variant's set: the same bindings and the feedback buffers
-        for (int q = 0; q < 4; q++) if (s->tf_stride[q]) b[nb++] = (VkDescriptorSetLayoutBinding){100u + (uint32_t)q, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL};
+        for (int q = 0; q < 4; q++) if (s->tf_stride[q]) b[nb++] = (VkDescriptorSetLayoutBinding){100u + (uint32_t)q, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, s->modtff ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT, NULL};
         lc.bindingCount = nb;
-        if (vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &s->dsl_tf) != VK_SUCCESS) s->modtf = NULL;
+        if (vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &s->dsl_tf) != VK_SUCCESS) s->modtf = s->modtff = NULL;
         if (!ds_fits(b, nb)) s->dsbig |= 2;
     }
     s->ok = 1;
@@ -1626,7 +1664,7 @@ static VkBlendOp bop(unsigned v) { return v >= 1 && v <= 5 ? (VkBlendOp)(v - 1) 
 static VkCompareOp cmpop(unsigned v, VkCompareOp def) { return v >= 1 && v <= 8 ? (VkCompareOp)(v - 1) : def; }
 static VkStencilOp stop(unsigned v) { return v >= 1 && v <= 8 ? (VkStencilOp)(v - 1) : VK_STENCIL_OP_KEEP; }
 typedef struct {
-    vshader *sh[4]; int z, tf; VkRenderPass rp; rp_key rk; uint32_t ncolor;   // tf: the capture pipeline (the vertex shader's .tf.spv, no rasterization); rk: the pass's formats and samples
+    vshader *sh[4]; int z, tf; VkRenderPass rp; rp_key rk; uint32_t ncolor;   // tf: the capture pipeline (the vertex shader's .tf.spv, no rasterization; or its wrapper and modtff, points rasterized); rk: the pass's formats and samples
     uint32_t attr[16]; vs_st stream[16]; uint8_t topo, restart, depth_clamp, ll;
     color_st color; chmask_st chmask; blend_st blend[8]; ms_st ms; poly_st poly; ds_st ds;
 } pipe_key;
@@ -1873,6 +1911,8 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
         if (s->stage == SH_VS && pos_rows_for(s->key)) st[ns].pSpecializationInfo = &g_pr_spec;   // run-time rows in the position (gfx_vk_posrows.inc)
         ns++;
         if (s->pool) { sets[POOL_SET] = g_pool_dsl; nset = POOL_SET + 1; } }
+    if (k->tf && k->sh[0] && k->sh[0]->modtff) {   // the fragment-stage capture: its fragment shader takes the vertex shader's set (bindings 100 + buffer)
+        lms[ns] = k->sh[0]->modtff; st[ns++] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .pName = "main"}; }
     VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};   // the alpha test's reference (spv_alpha.h); unused by shaders that do not declare it
     VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nset, .pSetLayouts = sets, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &pp->pl) != VK_SUCCESS) return VK_ERROR_INITIALIZATION_FAILED;
@@ -1909,7 +1949,7 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = tp, .primitiveRestartEnable = strip && k->restart};
     VkPipelineViewportStateCreateInfo vp = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     int front_ccw = k->poly.front == NVN_FRONT_FACE_CCW; if (k->ll) front_ccw = !front_ccw;   // see the file header: the queue's lower-left raster flip inverts the winding
-    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .rasterizerDiscardEnable = k->tf != 0, .depthClampEnable = k->depth_clamp && g_vk_feat.depthClamp,
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .rasterizerDiscardEnable = k->tf != 0 && !(k->sh[0] && k->sh[0]->modtff), .depthClampEnable = k->depth_clamp && g_vk_feat.depthClamp,
         .polygonMode = k->poly.mode == NVN_POLYGON_MODE_LINE && g_vk_feat.fillModeNonSolid ? VK_POLYGON_MODE_LINE : k->poly.mode == NVN_POLYGON_MODE_POINT && g_vk_feat.fillModeNonSolid ? VK_POLYGON_MODE_POINT : VK_POLYGON_MODE_FILL,
         .cullMode = (VkCullModeFlags)(k->poly.cull & 3), .frontFace = front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE, .depthBiasEnable = k->poly.offset_en != 0, .lineWidth = 1};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = (VkSampleCountFlagBits)(k->rk.samples ? k->rk.samples : 1), .alphaToCoverageEnable = k->ms.a2c != 0};
@@ -2922,27 +2962,33 @@ static int bind_vbufs(VkCommandBuffer c, const vshader *vs, int64_t lo, int64_t 
     return 1;
 }
 static uint64_t g_captures;
-static VkRenderPass g_null_rp; static VkFramebuffer g_null_fb;
+static VkRenderPass g_null_rp; static VkFramebuffer g_null_fb, g_grid_fb;   // g_grid_fb: the fragment-stage capture's (spv_tffrag.h), 1024 × 1024 without attachments
 static int tf_capture(vshader *vs, const prog_t *pr, int pst, const p_draw *dw, const p_draw_idx *di) {
     if (!D.tf_on || !vs->modtf) { if (D.tf_on) RED_ONCE(114, "transform feedback with vertex shader %s, which has no capture variant: nothing captured", vs->key); return 1; }
-    if (!g_vk_feat.vertexPipelineStoresAndAtomics) { RED_ONCE(115, "transform feedback: the GPU has no vertex-stage storage writes"); return 0; }
+    int frag = vs->modtff != NULL;   // captured in the fragment stage (tf_frag)
+    if (!frag && !g_vk_feat.vertexPipelineStoresAndAtomics) { RED_ONCE(115, "transform feedback: the GPU has no vertex-stage storage writes"); return 0; }
     if (!dw || dw->instances > 1 || dw->prim == 6 || dw->prim == 7) { RED_ONCE(116, "transform feedback draw that is indexed, instanced or a fan / quad list (vertex %s): not captured", vs->key); return 0; }
     if (dw->count <= 0) return 1;
+    if (frag && (uint32_t)dw->count > SPV_TFF_MAX_VERTS) { RED_ONCE(180, "transform feedback draw of %d vertices (vertex %s): the fragment-stage capture takes %u at most, not captured", dw->count, vs->key, SPV_TFF_MAX_VERTS); return 0; }
     for (int b = 0; b < 4; b++) if (vs->tf_stride[b]) {
         uint64_t n = (uint64_t)dw->count * vs->tf_stride[b];
         if (!D.tf[b].addr || D.tf_off[b] + n > D.tf[b].size || !mtl_addr(D.tf[b].addr + D.tf_off[b], n, NULL, NULL)) {
             RED_ONCE(117, "transform feedback buffer %d of vertex %s is unbound, too small or in no memory pool: not captured", b, vs->key); return 0; }
     }
-    if (!g_null_rp) {   // a pass and framebuffer without attachments: the capture rasterizes nothing
+    if (!g_null_rp) {   // a pass without attachments: the vertex-stage capture rasterizes nothing, the fragment-stage one runs its fragment shader for its side effects alone
         VkSubpassDescription sp = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS};
         VkRenderPassCreateInfo rc = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .subpassCount = 1, .pSubpasses = &sp};
         if (vkCreateRenderPass(g_vk.dev, &rc, NULL, &g_null_rp) != VK_SUCCESS) return 0;
-        VkFramebufferCreateInfo fc = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = g_null_rp, .width = 1, .height = 1, .layers = 1};
-        if (vkCreateFramebuffer(g_vk.dev, &fc, NULL, &g_null_fb) != VK_SUCCESS) return 0;
     }
+    VkFramebuffer *fbp = frag ? &g_grid_fb : &g_null_fb; uint32_t side = frag ? 1u << SPV_TFF_SHIFT : 1;
+    if (!*fbp) { VkFramebufferCreateInfo fc = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = g_null_rp, .width = side, .height = side, .layers = 1};
+                 if (vkCreateFramebuffer(g_vk.dev, &fc, NULL, fbp) != VK_SUCCESS) { *fbp = VK_NULL_HANDLE; return 0; } }
+    // the fragment-stage capture's points cover the grid's first rows: vertex v at pixel (v & 1023, v >> 10)
+    VkRect2D area = {{0, 0}, {side, frag ? ((uint32_t)dw->count + side - 1) >> SPV_TFF_SHIFT : 1}};
     stage_textures(vs);
     if (vs->pool) pool_sync();
     pipe_key k; memset(&k, 0, sizeof k); k.sh[0] = vs; k.tf = 1; k.rp = g_null_rp; k.topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; k.poly = D.poly; k.poly.cull = 0; k.color = D.color; k.color.logic_op = NVN_LOGIC_OP_COPY;   // no colour target: blending and logic ops do not apply
+    if (frag) k.poly.offset_en = 0;   // rasterized, its depth bias would want the dynamic state set, and there is no depth to bias
     memcpy(k.attr, D.attr, sizeof k.attr); memcpy(k.stream, D.stream, sizeof k.stream);
     pipe_t *pp = pipe_get(&k); if (!pp) return 0;
     g_drawing = 1;
@@ -2963,17 +3009,17 @@ static int tf_capture(vshader *vs, const prog_t *pr, int pst, const p_draw *dw, 
     }
     vkUpdateDescriptorSets(g_vk.dev, nw, wr, 0, NULL);
     VkCommandBuffer c = cb(); if (!c) return 0;   // ends the targets' pass
-    VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = g_null_rp, .framebuffer = g_null_fb, .renderArea = {{0, 0}, {1, 1}}};
+    VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = g_null_rp, .framebuffer = *fbp, .renderArea = area};
     vkCmdBeginRenderPass(c, &rb, VK_SUBPASS_CONTENTS_INLINE); bf_reset();   // its pipeline, viewport and scissor are set behind the bind filter (bf_*): unknown to it
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->p);
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, 0, 1, &set, vs->ndyn, dyn);
     if (vs->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { vkCmdEndRenderPass(c); cb_barrier(); bf_reset(); g_drawing = 0; return 0; }
-    VkViewport v = {0, 0, 1, 1, 0, 1}; VkRect2D sc = {{0, 0}, {1, 1}}; vkCmdSetViewport(c, 0, 1, &v); vkCmdSetScissor(c, 0, 1, &sc);
+    VkViewport v = {0, 0, (float)side, (float)side, 0, 1}; vkCmdSetViewport(c, 0, 1, &v); vkCmdSetScissor(c, 0, 1, &area);
     int ok = bind_vbufs(c, vs, dw->first, (int64_t)dw->first + dw->count, (uint32_t)dw->base_instance, 1);
     if (ok) vkCmdDraw(c, (uint32_t)dw->count, 1, 0, (uint32_t)dw->base_instance - inst_shift((uint32_t)dw->base_instance));   // gl_VertexIndex counts from 0: the vertex buffers start at the first vertex
     vkCmdEndRenderPass(c); cb_barrier(); bf_reset();
     g_drawing = 0;
-    { static int once; if (!once) { once = 1; LOG("[vk] transform feedback: first capture (vertex %s, %d vertices)", vs->key, dw->count); } }
+    { static int once; if (!once) { once = 1; LOG("[vk] transform feedback: first capture (vertex %s, %d vertices, in the %s stage)", vs->key, dw->count, frag ? "fragment" : "vertex"); } }
     g_captures++;
     return ok;
 }

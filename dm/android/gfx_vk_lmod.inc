@@ -6,14 +6,23 @@
 // VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT, which the driver's cache serves (2 ms) or answers VK_PIPELINE_COMPILE_REQUIRED (0.02 ms). Only then are
 // its modules made, from the files again through the same rewrites, and the pipeline compiled as before. The SPIR-V is not kept meanwhile (Brilliant Diamond's
 // modules are about 28 KB each). Without the extension, or with DM_VK_MODULE_ID=0 (env.txt), every module is made at once, as before
-typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha; uint64_t e5; const spv_bmap *bm; uint8_t id[VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT]; char path[]; } lmod;   // miss: ps_variant's (0: the file as it is); alpha: spv_alpha.h's test added to the code
+typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha, tff; uint64_t e5; const spv_bmap *bm; uint8_t id[VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT]; char path[]; } lmod;   // miss: ps_variant's (0: the file as it is); alpha: spv_alpha.h's test added to the code; tff: the vertex shader wrapped for the fragment-stage capture (spv_tffrag.h)
 static _Atomic uint64_t g_lm_ids, g_lm_hit, g_lm_miss;   // modules known by their identifier; pipelines the driver's cache gave for identifiers; pipelines that needed modules after all
 static __thread int t_pool_info;   // what spv_pool did to the modules lm_code made since sh_get cleared it
 // The module's code as it is made (to free): the file; a fragment shader variant's unwritten inputs made constants (spv_drop_inputs), else the vertex pipeline's
 // storage made read-only where the GPU needs it (spv_readonly); then the pool set (spv_pool_fit), the subgroup rewrites (spv_fit) and, last, the set's binding numbers compacted (spv_bind.h). first: the module's first
 // making, which tells *b0, logs and dumps (made again for a pipeline, it says nothing new)
-static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, uint64_t e5, const spv_bmap *bm, int first, int *b0, size_t *onw) {
+static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, uint64_t e5, const spv_bmap *bm, int first, int *b0, size_t *onw) {
     size_t n = 0; uint32_t *code = spv_read(path, &n); if (!code) return NULL;
+    if (tff) {   // first, so the rewrites below see the wrapper as any other code
+        size_t cap = n + 400, k = 0; uint32_t *o = malloc(cap * 4);
+        if (o) k = spv_tff_vs(code, n, o, cap);
+        free(code);
+        if (!k) { free(o); if (first) LOG("[RED] [vk] %s: no vec4 position to place, so its transform feedback cannot be captured in the fragment stage", path); return NULL; }
+        code = o; n = k;
+        const char *d = getenv("DM_DUMP_DIR");   // for spirv-val
+        if (first && d) { char q[700]; mkdir(d, 0777); const char *b = strrchr(path, '/'); snprintf(q, sizeof q, "%s/tff_%.16s.vs.spv", d, b ? b + 1 : path); FILE *f = fopen(q, "wb"); if (f) { fwrite(code, 4, n, f); fclose(f); } }
+    }
     if (e5) {   // a compute variant whose storage images at these bindings are E5B9G9R9 textures bound through R32_UINT views (spv_e5.h): RGB9E5 packed and unpacked by the shader
         uint32_t *s = malloc(5 * (size_t)code[3] * 4), *o = NULL; size_t need = 0, k = 0; int what = 0;
         if (s) { spv_e5(code, n, e5, s, NULL, 0, &need, &what); if (need && (o = malloc(need * 4))) k = spv_e5(code, n, e5, s, o, need, &need, &what); }
@@ -60,10 +69,10 @@ static VkShaderModule lm_create(const uint32_t *code, size_t nw, const char *wha
     return m;
 }
 // The module of a .spv file (and a fragment shader's variant): its identifier where the GPU takes identifiers, else made now. NULL: no file, or the driver refused it
-static lmod *lm_new_e(const char *path, uint32_t miss, int alpha, uint64_t e5, const spv_bmap *bm, int *b0) {
-    size_t n = 0; uint32_t *code = lm_code(path, miss, alpha, e5, bm, 1, b0, &n); if (!code) return NULL;
+static lmod *lm_new_x(const char *path, uint32_t miss, int alpha, int tff, uint64_t e5, const spv_bmap *bm, int *b0) {
+    size_t n = 0; uint32_t *code = lm_code(path, miss, alpha, tff, e5, bm, 1, b0, &n); if (!code) return NULL;
     size_t pl = strlen(path) + 1; lmod *l = calloc(1, sizeof *l + pl); if (!l) { free(code); return NULL; }
-    memcpy(l->path, path, pl); l->miss = miss; l->alpha = alpha; l->e5 = e5; l->bm = bm;
+    memcpy(l->path, path, pl); l->miss = miss; l->alpha = alpha; l->tff = tff; l->e5 = e5; l->bm = bm;
     if (g_smid) {
         VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = n * 4, .pCode = code};
         VkShaderModuleIdentifierEXT id = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_IDENTIFIER_EXT};
@@ -74,11 +83,20 @@ static lmod *lm_new_e(const char *path, uint32_t miss, int alpha, uint64_t e5, c
     if (!l->idn) { VkShaderModule m = lm_create(code, n, path); if (!m) { free(code); free(l); return NULL; } atomic_store(&l->m, m); }
     free(code); return l;
 }
+static lmod *lm_new_e(const char *path, uint32_t miss, int alpha, uint64_t e5, const spv_bmap *bm, int *b0) { return lm_new_x(path, miss, alpha, 0, e5, bm, b0); }
 static lmod *lm_new_a(const char *path, uint32_t miss, int alpha, const spv_bmap *bm, int *b0) { return lm_new_e(path, miss, alpha, 0, bm, b0); }
+static lmod *lm_new_t(const char *path, const spv_bmap *bm, int *b0) { return lm_new_x(path, 0, 0, 1, 0, bm, b0); }   // the vertex shader wrapped for the fragment-stage capture
+// A module whose code exists only in memory (the capture's fragment shader, spv_tffrag.h), made now: no file to make it again from. what names it in logs
+static lmod *lm_gen(const uint32_t *code, size_t nw, const char *what) {
+    size_t pl = strlen(what) + 1; lmod *l = calloc(1, sizeof *l + pl); if (!l) return NULL;
+    memcpy(l->path, what, pl);
+    VkShaderModule m = lm_create(code, nw, what); if (!m) { free(l); return NULL; }
+    atomic_store(&l->m, m); return l;
+}
 static lmod *lm_new(const char *path, uint32_t miss, const spv_bmap *bm, int *b0) { return lm_new_a(path, miss, 0, bm, b0); }
 static VkShaderModule lm_module(lmod *l) {   // the module itself, made now when it was its identifier only; VK_NULL_HANDLE: the driver refused it
     VkShaderModule m = atomic_load(&l->m); if (m) return m;
-    size_t n = 0; uint32_t *code = lm_code(l->path, l->miss, l->alpha, l->e5, l->bm, 0, NULL, &n); if (!code) return VK_NULL_HANDLE;
+    size_t n = 0; uint32_t *code = lm_code(l->path, l->miss, l->alpha, l->tff, l->e5, l->bm, 0, NULL, &n); if (!code) return VK_NULL_HANDLE;
     VkShaderModule made = lm_create(code, n, l->path); free(code); if (!made) return VK_NULL_HANDLE;
     VkShaderModule none = VK_NULL_HANDLE;
     if (!atomic_compare_exchange_strong(&l->m, &none, made)) { vkDestroyShaderModule(g_vk.dev, made, NULL); return none; }   // another thread's pipeline made it meanwhile
