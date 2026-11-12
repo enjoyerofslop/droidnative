@@ -1425,7 +1425,7 @@ static void lin_writeback(int i) {   // attachment i of the pass that ends
     wb_t *w = wb_add();
     if (w) { *w = (wb_t){s.st, (size_t)s.off, pitch, rows, pitch, srow, dst, NULL, 0};
         w->lin = v->levels == 1 && v->layers == 1 && !ly && srow * (rows - 1) + pitch <= size ? 2 : 1;   // 2: it covers every byte vt_upload_ reads, inside the storage it protects (ab_note)
-        w->ser = v->serial; w->img = (uint64_t)v->img; w->fmt = v->desc.format; w->bpb = (uint32_t)bpb; w->w = v->w; w->h = v->h; w->tsize = size;
+        w->ser = v->serial; w->img = (uint64_t)v->img; w->fmt = v->desc.format; w->bpb = (uint32_t)bpb; w->w = v->w; w->h = v->h; w->tsize = size; w->rbx = v->rbx;   // rbx: into the guest's order as it lands
         if (P.snap[i] && P.snap_dst[i] == dst && P.snap_n[i] == pitch * rows) { *(lsnap_on() ? &w->snap : &w->dsnap) = P.snap[i]; w->snap_cap = P.snap_cap[i]; P.snap[i] = NULL; P.snap_cap[i] = 0; } }
     static int nlog; if (nlog++ < 4) LOG("[vk] linear render target s%llu %ux%u (format %#x) written back to guest memory after its pass", (unsigned long long)v->serial, v->w, v->h, v->desc.format);
 }

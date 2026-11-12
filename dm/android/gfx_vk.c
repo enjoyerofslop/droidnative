@@ -36,6 +36,7 @@
 #include "spv_wide.h"
 #include "spv_e5.h"   // E5B9G9R9 storage images through R32_UINT views, RGB9E5 packed by the shader (vt_storage_up, gfx_vk_draw.inc cpipe_e5)
 #include "ds_texels.h"   // depth / stencil readbacks rebuilt in NVN's layouts (mtl_read_texels, copy_t2b)
+#include "rb16.h"   // NVN's RGB-order 16-bit formats held in Vulkan's order, converted where they cross guest memory (vt_create's rbx)
 #include "spv_narrow.h"   // each subgroup of a GPU narrower than 32 lanes a warp of its own (gfx_vk_draw.inc spv_fit_narrow)
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
 #include "spv_tgspill.h"   // compute shared memory past the GPU's limit from a storage buffer (gfx_vk_draw.inc spv_fit_tgs)
@@ -340,7 +341,9 @@ typedef struct { int st; size_t off, row_bytes, rows, src_pitch, dst_pitch; uint
                  // plane of ds_dkind, then the stencil plane when ds_sten); ds_n 0: a plain write-back
                  uint32_t ds_n, ds_fmt; int ds_dkind, ds_sten;
                  // vd: a draw under rasterizer discard wrote it, run as a dispatch (gfx_vk_draw.inc rd_bind_w): a read it overlaps but does not cover learns a home range (fwd_hit)
-                 int vd; } wb_t;
+                 int vd;
+                 // rbx: texels of an image of NVN's RGB-order 16-bit formats (vtex rbx): exchanged into the guest's order at the source before they land (chunk_done)
+                 int rbx; } wb_t;
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize n, used; } arena_blk;
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; uint64_t q0, q1; } post_op;   // kind 1 event, 2 counter, 3 samples passed (occlusion queries q0..q1)
 typedef struct { int kind; uint64_t h; } dead_t;
@@ -1044,6 +1047,7 @@ static void chunk_done(chunk *c) {
         if (w->inpl) { gm_ip_done(c, i); continue; }   // the GPU wrote guest memory itself: its pages count as written (and are writable) from now on (gfx_vk_gmem_inplace.inc)
         const uint8_t *s = w->rb ? c->rb.p + (w->rb - 1) : (w->st >= SP_ST ? c->sb[w->st - SP_ST].p : w->st >= 0 ? c->stg[w->st].p : c->ar[-1 - w->st].p) + w->off;
         if (w->st < 0) { an++; ab += w->rows ? w->src_pitch * (w->rows - 1) + w->row_bytes : 0; ar += w->rb != 0; }
+        if (w->rbx) rb16_rows((uint8_t *)(uintptr_t)s, w->row_bytes, w->rows, w->src_pitch, w->rbx);   // the GPU's copy, in Vulkan's order, into the guest's (before the snapshot compare)
         if (w->lin && wb_revert_on()) rv_check(w, s);   // before it lands: guest memory still holds what the CPU wrote during the pass
         uint64_t t0 = w->lin ? clock_gettime_nsec_np(CLOCK_MONOTONIC) : 0; int clean = w->lin == 2 && wb_absorb_on() ? ab_clean(w) : 0, wrote = wb_apply(w, s);
         if (w->lin) atomic_fetch_add(!w->snap || !lsnap_on() ? &g_lwb_whole : wrote ? &g_lwb_diff : &g_lwb_same, 1);
@@ -1335,6 +1339,7 @@ typedef struct {
     uint8_t taken;   // an uncompressed 2D texture taken from its storage at its first use (storage_first_use): the GPU's first write into it makes it a GPU texture (vt_get_w)
     uint32_t mem_type;   // v->mem's memory type (gfx_vk_spare.inc: a freed image's memory kept as a spare)
     VkImageUsageFlags usage; int ext_store;   // its usage; ext_store: STORAGE for views of another format only (EXTENDED_USAGE, vt_storage_up), so each view takes the usage its format has (view_get)
+    uint8_t rbx;   // NVN RGBA4 / RGB5 / RGB5A1 / RGB565: the image holds the Vulkan format's order and guest bytes are exchanged where they cross (rb16.h: red's bit, 4 for RGBA4); 0: as they are
 } vtex;
 static nvn_hmap g_tex = {.klen = 8}, g_cpuw = {.klen = 8};   // serial → vtex; serials the CPU wrote (WriteTexels). Keyed by the 8-byte serial
 static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_edge_skips, g_up_bytes, g_draws_skipped;
@@ -1417,6 +1422,12 @@ static vtex *vt_create(const tex_t *t) {
     if (!(ff & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) && !(ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { RED_ONCE(14, "format %d not usable as an image on this GPU (NVN format %#x)", f, t->d.format); return NULL; }
     vtex *v = calloc(1, sizeof *v); if (!v) return NULL;
     v->serial = t->serial; v->pool = t->pool; v->store = t->mem; v->desc = t->d; v->fmt = f; v->nvfmt = nf; v->conv = conv; v->px = px; v->aspect = aspect_of(f);
+    v->rbx = (uint8_t)rb16_shift(m, swz);   // the swizzle's red / blue exchange: in the bits, so what the GPU draws into the image reads as what it uploads
+    if (v->rbx && t->d.format >= 0x39 && t->d.format <= 0x3C) {   // once per format: which games take the exchange (a release sweep greps for it)
+        static _Atomic uint32_t told; uint32_t bit = 1u << (t->d.format - 0x39); static const char *const nm[4] = {"RGBA4", "RGB5", "RGB5A1", "RGB565"};
+        if (!(atomic_fetch_or(&told, bit) & bit)) LOG("[vk] first NVN %s texture (format %#x, %ux%u ser=%llu): held in VkFormat %d's order, its bits exchanged where they cross guest memory (rb16.h)",
+                                                      nm[t->d.format - 0x39], (unsigned)t->d.format, (unsigned)t->d.width, (unsigned)t->d.height, (unsigned long long)t->serial, (int)f);
+    }
     v->type = t->d.target == 0 || t->d.target == 3 ? VK_IMAGE_TYPE_1D : t->d.target == 2 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     v->w = t->d.width ? t->d.width : 1; v->h = v->type == VK_IMAGE_TYPE_1D ? 1 : (t->d.height ? t->d.height : 1); v->d = v->type == VK_IMAGE_TYPE_3D ? (t->d.depth ? t->d.depth : 1) : 1;
     v->layers = tex_layers(&t->d); v->levels = t->d.levels ? t->d.levels : 1;
@@ -1592,6 +1603,7 @@ static int vt_upload_(vtex *v, const tex_t *t, int track) {
                 if (srow < pitch) srow = pitch;
                 for (size_t r = 0; r < rows; r++) memcpy(s.p + off + r * pitch, src + r * srow, pitch);
             } else if (nvn_deswizzle(&t->d, l, y, t->mem, s.p + off, pitch)) { RED_ONCE(21, "deswizzle failed format %#x target %d", t->d.format, t->d.target); free(tmp); return 0; }
+            if (v->rbx) rb16_rows(s.p + off, out, 1, out, v->rbx);   // the guest's order into the image's (rb16.h)
             VkBufferImageCopy r = {.bufferOffset = s.off + off, .imageSubresource = {v->aspect, l, y, 1}, .imageExtent = {w, h, z}};
             vkCmdCopyBufferToImage(c, s.b, v->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
             off += out;
@@ -1957,6 +1969,7 @@ static void copy_b2t(const p_copy_b2t *c) {
         const uint8_t *src = (const uint8_t *)c->src + (size_t)z * img; uint8_t *d = s.p + (size_t)z * out_row * out_rows;
         if (v->conv) bc_decode(v->conv, src, row, (uint32_t)c->r.width, (uint32_t)c->r.height, d, out_row, v->px);
         else for (size_t y = 0; y < rows; y++) memcpy(d + y * rb, src + y * row, rb);
+        if (v->rbx) rb16_rows(d, rb, rows, rb, v->rbx);   // the guest's order into the image's (rb16.h)
         VkBufferImageCopy r = {.bufferOffset = s.off + (size_t)z * out_row * out_rows, .imageSubresource = {v->aspect & ~VK_IMAGE_ASPECT_STENCIL_BIT ? v->aspect & ~VK_IMAGE_ASPECT_STENCIL_BIT : v->aspect, level, is3d ? 0 : layer0 + c->r.zoffset + z, 1},
                                .imageOffset = {c->r.xoffset, c->r.yoffset, is3d ? c->r.zoffset + z : 0}, .imageExtent = {(uint32_t)c->r.width, (uint32_t)c->r.height, 1}};
         if (v->aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) RED_ONCE(41, "buffer→texture copy into a depth-stencil texture: only the depth is copied, as is");
@@ -1980,7 +1993,7 @@ static void copy_t2b(const p_copy_b2t *c) {
         VkBufferImageCopy r = {.bufferOffset = s.off + (size_t)z * rb * rows, .imageSubresource = {v->aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : v->aspect, level, is3d ? 0 : layer0 + c->r.zoffset + z, 1},
                                .imageOffset = {c->r.xoffset, c->r.yoffset, is3d ? c->r.zoffset + z : 0}, .imageExtent = {(uint32_t)c->r.width, (uint32_t)c->r.height, 1}};
         vkCmdCopyImageToBuffer(cbuf, v->img, VK_IMAGE_LAYOUT_GENERAL, s.b, 1, &r);
-        wb_t *w = wb_add(); if (w) *w = (wb_t){s.st, (size_t)s.off + (size_t)z * rb * rows, rb, rows, rb, row, (uint8_t *)c->src + (size_t)z * img, NULL};
+        wb_t *w = wb_add(); if (w) { *w = (wb_t){s.st, (size_t)s.off + (size_t)z * rb * rows, rb, rows, rb, row, (uint8_t *)c->src + (size_t)z * img, NULL}; w->rbx = v->rbx; }   // rbx: into the guest's order as it lands
     }
     cb_barrier();
 }
@@ -2065,7 +2078,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
                                     .imageOffset = {r->xoffset, r->yoffset, is3d ? r->zoffset + z : 0}, .imageExtent = {(uint32_t)r->width, (uint32_t)r->height, 1}};
             vkCmdCopyImageToBuffer(cbuf, v->img, VK_IMAGE_LAYOUT_GENERAL, s.b, 1, &rc);
         }
-        for (int z = 0; z < nz; z++) { wb_t *w = wb_add(); if (w) *w = (wb_t){s.st, (size_t)s.off + (size_t)z * wb * hb, wb, hb, wb, row, dst + (size_t)z * img, NULL}; }   // copied out by the completion thread
+        for (int z = 0; z < nz; z++) { wb_t *w = wb_add(); if (w) { *w = (wb_t){s.st, (size_t)s.off + (size_t)z * wb * hb, wb, hb, wb, row, dst + (size_t)z * img, NULL}; w->rbx = v->rbx; } }   // copied out by the completion thread (rbx: in the guest's order)
         submit_wait();
         if (half) for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) n16_back(v->conv, dst + (size_t)z * img + y * row, wb);
     }
