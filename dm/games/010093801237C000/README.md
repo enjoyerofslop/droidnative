@@ -69,7 +69,7 @@ The game plays VP9 WebM movies through the SDK's own demuxer and a decoder in na
 First test on Android, 2026-11-12, from `main` c6920f36, as a game app: a 60 MB APK with the 4.4 GB RomFS as its OBB.
 
 - **The build:** the cartridge holds 1.0.0 (v0), which this profile wasn't brought up on (2.1.0), so it was packed from a profile derived from it: 1,010 shaders, all translated. The Mac build of the same 1.0.0 runs the opening into the first cavern.
-- **Played over adb** with A presses from a new game, on two phones: the title, the opening movie and briefing, the gunship's approach and Samus's arrival on ZDR, into control in the first cavern. Then walking, jumping and shooting through the next caverns, a fight with the crawlers there, and damage taken.
+- **Played over adb** with A presses from a new game, on three phones: the title, the opening movie and briefing, the gunship's approach and Samus's arrival on ZDR, into control in the first cavern. Then walking, jumping and shooting through the next caverns, a fight with the crawlers there, and damage taken.
 - **Google Pixel 9 Pro XL** (Mali-G715, Arm's driver 0xd803000):
   - **Frame rate:** 60.0 fps in every 30 s window of play, GPU 9–10 ms a frame.
   - **Memory:** 2.56 GB at most in the app's memory cgroup, 3.1 GB PSS.
@@ -78,8 +78,14 @@ First test on Android, 2026-11-12, from `main` c6920f36, as a game app: a 60 MB 
   - **Frame rate:** 52–60 fps, 52–53 in the caverns, where the GPU takes about 15 ms a frame.
   - **Memory:** 2.54 GB PSS.
   - **Sound:** no underrun in 74 reports.
+- **Retroid Pocket 5** (Adreno 650, Qualcomm's driver 0x802ea000, Vulkan 1.1.128), a game app from `main` 21c467ee:
+  - **Route:** the same, into the caverns. The jump onto the first room's right-hand ledge needed jump held with right.
+  - **Frame rate:** 53–58 fps in the caverns, GPU 14–16 ms a frame.
+  - **Memory:** 2.58 GB PSS.
+  - **Sound:** no underrun in 82 reports.
+  - **Adreno 6xx padding:** none of its layered passes needed padding ([A small layered render pass crashes the Adreno 650's driver](../../../docs/reference/rendering.md#a-small-layered-render-pass-crashes-the-adreno-650s-driver-android)).
 - **Picture:** the first room looks as on the Mac: the statue, the purple foliage, the dark foreground silhouettes.
-- **Red lines:** `[vk] depth-stencil clear with no depth target set`, once a launch, on both.
+- **Red lines:** `[vk] depth-stencil clear with no depth target set`, once a launch, on each.
 - **Not tried:** saves (no save station reached), past the first caverns, a person playing, the other devices.
 
 ## Mac routes
