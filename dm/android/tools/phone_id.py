@@ -65,3 +65,10 @@ def find(serials, keys, ids):   # the index in serials (a picker's entries; None
         for i, s in enumerate(serials):
             if k and s and k in (s, ids.get(s)): return i
     return -1
+
+
+def current(serial, ready, seen):   # ready: [{'serial', 'id'}] adb lists as ready now; seen: serial → ID, all known this session → the serial that phone is on now
+    # (serial itself while it is listed; else one with the ID it had, over the cable first), or None
+    if any(d['serial'] == serial for d in ready): return serial
+    same = [d for d in ready if seen.get(serial) and d.get('id') == seen[serial]]
+    return one_per_phone(same)[0]['serial'] if same else None

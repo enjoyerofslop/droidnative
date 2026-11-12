@@ -1,15 +1,19 @@
 """The Android launcher's save import and export (dm/android/java/org/nxnative/android/Saves.java), run on a JVM over the SDK's android.jar stubs: finding the save in
 the layouts other tools write (a DroidPlay export or backup, yuzu and its successors, Ryujinx, JKSV, EdiZon, Checkpoint, UltraTears, a bare folder), matching it to
-the game, keeping the current save first and swapping the new one in, the export ZIP, the ZIP reader's limits and the saves kept for Restore. Synthetic saves only:
-no phone and no game files."""
+the game, keeping the current save first and swapping the new one in, the export ZIP, the ZIP reader's limits and the saves kept for Restore. Then the computer's side
+(scripts/build_android_from_nsp.py --import-save / --restore-backup): what it sends to files/import/<title ID>/ and how, with adb a recording stand-in. Synthetic saves
+only: no phone and no game files."""
+import json
 import os
 from pathlib import Path
 from typing import Mapping, Union
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 REPO = Path(__file__).resolve().parents[3]
@@ -266,6 +270,103 @@ class Saves(unittest.TestCase):
             self.assertEqual(self.run_java('kind', f), [want])
         save = tree(self.tmp / 'save', {'option.sav': 'o', 'slot_00/a': 'a', 'slot_01/a': 'a', '.nx_save_meta.bin': 'm'})
         self.assertEqual(self.run_java('top', save, 2), ['option.sav, slot_00/ and 1 more'])
+
+
+# ---------------- the computer's side ----------------
+# test_android_cli's copy of the script, not a second one: loading it again replaces functions of build_ipa_from_nsp (shared through sys.modules) with ones that
+# read this copy's data_dir, which test_android_cli's own patches then miss
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_android_cli import ba   # noqa: E402
+IMPORT = f'{ba.REMOTE}/import'
+
+
+class SendSave(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
+        self.cmds: 'list[list[str]]' = []; self.said: 'list[str]' = []; self.pushed: 'dict[str, dict[str, bytes]]' = {}
+        self.game_pid, self.phone_games = '', f'{TID}\n{OTHER}\n'
+        def adb(serial, *a, log=None, check=True, timeout=None):
+            c = [str(x) for x in a]; self.cmds.append(c)
+            if c[0] == 'push' and Path(c[-2]).is_dir(): self.pushed[c[-1] + Path(c[-2]).name] = files_of(Path(c[-2]))   # what went where
+            if c[:2] == ['shell', 'sh'] and c[2].endswith('nxnative_mkdirs.sh'): return ba.MKDIRS_DONE + '\n'
+            if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('pidof '): return self.game_pid
+            if c[:1] == ['shell'] and len(c) == 2 and c[1].startswith('ls ') and '/games' in c[1]: return self.phone_games
+            return ''
+        for cm in (mock.patch.object(ba, 'adb', adb), mock.patch.object(ba, 'say', self.said.append), mock.patch.object(ba.bi, 'PROG', mock.Mock())):
+            cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+        self.logs = self.tmp / 'logs'; self.logs.mkdir(); self.work = self.tmp / 'work'; self.work.mkdir()
+
+    def flat(self): return [' '.join(c) for c in self.cmds]
+
+    def test_a_folder_goes_under_its_own_name_and_is_opened_to_the_app(self):
+        src = tree(self.tmp / 'Vip - 2023.01.22 @ 15.10.11', {'data0006.bin': 'save', 'sub/b.bin': 'b'})
+        ba.import_save('S', TID.lower(), src, self.work, self.logs)
+        flat = self.flat(); dst = f'{IMPORT}/{TID}'
+        self.assertIn(f"shell rm -rf '{dst}' && mkdir -p '{dst}'", flat)   # an earlier one, gone first
+        self.assertEqual(self.pushed, {f'{dst}/{src.name}': {'data0006.bin': b'save', 'sub/b.bin': b'b'}})
+        self.assertTrue(any(f"chmod -R a+rwX '{dst}' 2>&1; chmod a+rwx '{IMPORT}' 2>&1" in c for c in flat), flat)
+        self.assertIn(f'shell am start -f 0x20000000 -n {ba.PKG}/.Launcher', flat)   # the launcher takes it now, single-top: one in front already gets it too
+        self.assertFalse([x for x in self.said if '[RED]' in x])
+
+    def test_a_game_being_played_isnt_interrupted(self):
+        self.game_pid = '4242\n'
+        ba.import_save('S', TID, tree(self.tmp / 'save', {'main': 'x'}), self.work, self.logs)
+        self.assertFalse([c for c in self.flat() if 'am start' in c])
+
+    def test_an_archive_goes_as_its_files_and_another_games_title_id_is_named(self):
+        z = self.tmp / 'export.zip'
+        with zipfile.ZipFile(z, 'w') as zf: zf.writestr(f'{UID1}/{OTHER}/main.dat', 'island'); zf.writestr('../outside', 'x')
+        ba.import_save('S', TID, z, self.work, self.logs)
+        self.assertEqual(self.pushed, {f'{IMPORT}/{TID}': {f'{UID1}/{OTHER}/main.dat': b'island', 'outside': b'x'}})   # zipfile keeps a name that would leave the folder inside it
+        self.assertTrue(any('[RED]' in x and OTHER in x and 'not ' + TID in x for x in self.said), self.said)
+
+    def test_an_archive_zipfile_cant_read_goes_to_tar(self):
+        bad = self.tmp / 'save.rar'; bad.write_bytes(b'Rar!\x1a\x07\x01\x00junk')
+        r = mock.Mock(returncode=1, stdout='', stderr='tar: Error opening archive: Unrecognized archive format')
+        with mock.patch.object(ba.subprocess, 'run', return_value=r) as run, self.assertRaisesRegex(ba.BuildError, "save.rar can't be unpacked here .*Unrecognized archive format"):
+            ba.import_save('S', TID, bad, self.work, self.logs)
+        self.assertEqual(run.call_args[0][0][:3], ['tar', '-xf', str(bad)])
+        self.assertEqual(self.pushed, {})
+
+    def test_a_deflate64_zip_is_named(self):   # neither zipfile nor bsdtar reads it: the player is told to unpack it with Explorer, which wrote it
+        z = self.tmp / 'big.zip'
+        with zipfile.ZipFile(z, 'w') as zf: zf.writestr('a.bin', b'data')
+        raw = bytearray(z.read_bytes())
+        for sig, at in ((b'PK\x03\x04', 8), (b'PK\x01\x02', 10)): i = raw.index(sig); raw[i + at:i + at + 2] = struct.pack('<H', 9)
+        z.write_bytes(bytes(raw))
+        r = mock.Mock(returncode=1, stdout='', stderr='a.bin: Unsupported ZIP compression method (9: deflation-64-bit)')
+        with mock.patch.object(ba.subprocess, 'run', return_value=r), self.assertRaisesRegex(ba.BuildError, "big.zip is packed with a compression .*Extract all"):
+            ba.import_save('S', TID, z, self.work, self.logs)
+
+    def test_title_ids_the_files_give(self):
+        root = tree(self.tmp / 'x', {f'0x{TID} Game/20200101-120000/a': 'a', 'e/edizon_save_metadata.json': json.dumps({'title_id': OTHER}),
+                                     'j/.nx_save_meta.bin': jksv_meta('0100000000010000', 1), 'r/ExtraData0': extra_data('01007EF00011E000', 1),
+                                     'save/0000000000000001/0/a': 'a', 'plain/main': 'x'})
+        self.assertEqual(ba.save_title_ids(root), {TID, OTHER, '0100000000010000', '01007EF00011E000'})
+        self.assertEqual(ba.save_title_ids(tree(self.tmp / 'bare', {'main': 'x', 'slot_00/a': 'a'})), set())
+
+    def test_restore_sends_each_games_newest_backup_in_its_own_layout(self):   # Back up saves to this computer: <time>/backups/<stamp>/saves/<id>, xattrs.tsv
+        top = tree(self.tmp / 'backups/S/20261111-120000/backups', {f'20261110-090000/saves/{TID}/SaveData.bin': 'older', f'20261111-110000/saves/{TID}/SaveData.bin': 'newer',
+                                                                    f'20261111-110000/saves/{TID}_device/d.bin': 'dev', '20261111-110000/xattrs.tsv': f'saves/{TID}/SaveData.bin\tuser.x\t01\n',
+                                                                    f'20261111-110000/saves/{TID}.work/SaveData.bin': 'half', f'20261110-090000/saves/{OTHER}/main.dat': 'island',
+                                                                    '20261110-090000/saves/0100000000010000/File1.bin': 'smo'})
+        ba.restore_backup('S', top.parent, TID, self.work, self.logs)
+        self.assertEqual(self.pushed, {f'{IMPORT}/{TID}': {f'saves/{TID}/SaveData.bin': b'newer', f'saves/{TID}_device/d.bin': b'dev', 'xattrs.tsv': f'saves/{TID}/SaveData.bin\tuser.x\t01\n'.encode()}})
+        self.pushed.clear(); ba.restore_backup('S', top.parent, None, self.work, self.logs)   # every game in it that is on the phone
+        self.assertEqual(sorted(self.pushed), [f'{IMPORT}/{TID}', f'{IMPORT}/{OTHER}'])
+        self.assertTrue(any('0100000000010000: not on the phone' in x for x in self.said), self.said)
+        with self.assertRaisesRegex(ba.BuildError, 'holds no save of 01007EF00011E000'): ba.restore_backup('S', top.parent, '01007EF00011E000', self.work, self.logs)
+        with self.assertRaisesRegex(ba.BuildError, 'holds no DroidPlay save backup'): ba.restore_backup('S', self.logs, None, self.work, self.logs)
+
+    def test_the_command_line(self):
+        with mock.patch.dict(os.environ, {'NXNATIVE_JOURNAL': '0'}), mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'), mock.patch.object(ba, 'phone', mock.MagicMock()), \
+             mock.patch.object(ba, 'import_save') as imp, mock.patch.object(ba, 'restore_backup') as rest:
+            ba.main(['--import-save', 'save.zip', '--title', TID, '--serial', 'S', '--progress', 'off'])
+            self.assertEqual(imp.call_args[0][:3], ('S', TID, 'save.zip'))
+            ba.main(['--restore-backup', 'bk', '--serial', 'S', '--progress', 'off'])
+            self.assertEqual(rest.call_args[0][:3], ('S', 'bk', None))
+            with self.assertRaisesRegex(ba.BuildError, '--import-save needs --title'): ba.main(['--import-save', 'x', '--serial', 'S', '--progress', 'off'])
+            with self.assertRaisesRegex(ba.BuildError, 'one at a time'): ba.main(['--import-save', 'x', '--restore-backup', 'y', '--title', TID, '--serial', 'S', '--progress', 'off'])
 
 
 if __name__ == '__main__':

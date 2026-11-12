@@ -95,6 +95,10 @@ class Phone(unittest.TestCase):
         s = fr.phone_step([dict(self.S25, state='offline')], True)
         self.assertEqual(s.state, fr.PROBLEM); self.assertIn('plug it back in', s.text)
 
+    def test_offline_over_wifi_says_to_wake_it(self):   # an offline Wi-Fi entry left from a phone that slept
+        s = fr.phone_step([dict(self.S25, serial='192.168.1.20:37123', state='offline')], True)
+        self.assertEqual(s.state, fr.PROBLEM); self.assertIn('over Wi-Fi', s.text); self.assertNotIn('plug', s.text)
+
     def test_one_set_up_before_stays_done_unplugged(self):   # the step can't come undone each time a phone is unplugged, or the checklist would return at every launch
         self.assertTrue(fr.phone_step([], True, seen=True).done)
         self.assertEqual(fr.phone_step([], True).state, fr.TODO)
@@ -151,6 +155,15 @@ class PhoneId(unittest.TestCase):   # one phone, one name: over USB, over Wi-Fi 
         self.assertEqual(phone_id.one_per_phone([tcp, pad, mdns, usb, new]), [usb, pad, new])   # in the order each phone first came
         self.assertEqual(phone_id.one_per_phone([tcp, mdns]), [mdns])
         self.assertEqual(phone_id.one_per_phone([{'serial': 'A', 'id': None}, {'serial': 'B', 'id': None}]), [{'serial': 'A', 'id': None}, {'serial': 'B', 'id': None}])
+
+    def test_install_again_finds_the_phones_serial_now(self):   # the build's --serial was the old port's; the phone is back on another, or on its cable
+        seen = {'192.168.1.20:37123': 'R5CY51ZLGKH', '10.0.0.7:5555': 'e7879cce'}
+        ready = [{'serial': '10.0.0.7:5555', 'id': 'e7879cce'}, {'serial': '192.168.1.20:41011', 'id': 'R5CY51ZLGKH'}]
+        self.assertEqual(phone_id.current('192.168.1.20:37123', ready, seen), '192.168.1.20:41011')
+        self.assertEqual(phone_id.current('192.168.1.20:37123', ready + [{'serial': 'R5CY51ZLGKH', 'id': 'R5CY51ZLGKH'}], seen), 'R5CY51ZLGKH')   # the cable first
+        self.assertEqual(phone_id.current('10.0.0.7:5555', ready, seen), '10.0.0.7:5555')
+        self.assertIsNone(phone_id.current('192.168.1.20:37123', ready[:1], seen))   # not connected now: the build's serial stays, and the script waits for it
+        self.assertIsNone(phone_id.current('192.168.9.9:5555', ready, seen))
 
     def test_the_picked_phone_is_found_by_its_id(self):   # the picker keeps the phone when its cable comes out and its Wi-Fi entry takes over, and the reverse
         ids = {'R5CY51ZLGKH': 'R5CY51ZLGKH', '192.168.1.20:41011': 'R5CY51ZLGKH', '10.0.0.7:5555': 'e7879cce'}
@@ -257,7 +270,28 @@ class Explain(unittest.TestCase):   # the messages as the script, nx_extract and
 
     def test_no_phone(self):
         h = ex.explain('0 adb devices ready (none): connect one, or pick it with --serial')
-        self.assertEqual((h.title, h.label), ('No phone connected', 'Set up my phone…'))
+        self.assertEqual((h.title, h.label), ('No phone connected', 'Set up my phone…')); self.assertIn('over Wi-Fi', h.body)
+
+    def test_a_phone_that_dropped_off_wifi_is_told_wifi_things(self):   # "unplug it and plug it back in" was a cable's advice, at the worst moment
+        for t in ("adb -s 192.168.1.20:37123 push x y: adb lost the phone: error: closed", "adb: error: device '192.168.1.20:37123' not found"):
+            h = ex.explain(t, phone='Galaxy S25 Edge', wifi=True)
+            self.assertEqual((h.title, h.action), ('Galaxy S25 Edge dropped off Wi-Fi', 'retry'), t); self.assertIn('Wireless debugging is still on', h.body)
+            self.assertNotIn('plug', h.body)
+        gave_up = ('the phone did not come back within 180 s after adb lost it (error: closed). Wake it, check that it is on the same network as this computer and '
+                   'that Wireless debugging is still on, then install again: the copy goes on from what the phone holds')
+        self.assertEqual(ex.explain(gave_up).title, 'Your phone dropped off Wi-Fi')   # the script's words say it was Wi-Fi
+        cable = 'the phone did not come back within 180 s after adb lost it (device offline). Plug it back in, then install again: the copy goes on from what the phone holds'
+        self.assertEqual(ex.explain(cable).title, 'Your phone stopped answering')
+
+    def test_a_connection_that_keeps_dropping(self):
+        wifi = ('adb -s 10.0.0.7:5555 push x y: adb lost the phone: error: closed\nadb lost the phone 6 times in a row with nothing copied in between, so the connection is too poor to finish '
+                'over: move the phone closer to the router (5 GHz), or use a USB cable, then install again')
+        h = ex.explain(wifi, phone='OnePlus Pad 3'); self.assertEqual(h.title, 'The connection to OnePlus Pad 3 keeps dropping'); self.assertIn('closer to the router', h.body)
+        h = ex.explain('adb lost the phone 6 times in a row with nothing copied in between, so the connection is too poor to finish over: try another cable or USB port, then install again')
+        self.assertIn('another cable or USB port', h.body)
+
+    def test_a_wifi_phone_that_forgot_this_pc_pairs_again(self):
+        self.assertIn('Pair over Wi-Fi', ex.explain('adb: device unauthorized.', wifi=True).body)
 
     def test_keys(self):
         self.assertEqual(ex.explain('give -k <prod.keys>: the game is in NSP / XCI files, which are encrypted').action, 'keys')
@@ -305,6 +339,11 @@ class Report(unittest.TestCase):   # Copy report: one Discord message, home fold
     def test_the_phones_serial_stays_out(self):
         text = ex.markdown_report(self.INFO, ['[RED] adb -s R5CY00000XX push a b failed (exit status 255): no output'], ['$ python b.py D:/BD -k k --serial R5CY00000XX'], '/home/p')
         self.assertNotIn('R5CY00000XX', text); self.assertIn('adb -s <serial> push', text); self.assertIn('--serial <serial>', text)
+
+    def test_a_wifi_phones_mdns_name_and_id_stay_out(self):   # adb-<serial number>-<suffix>._adb-tls-connect._tcp carries the serial number
+        text = ex.markdown_report(self.INFO, ['[RED] the phone is back as adb-R5CY00000XX-AbCdEf._adb-tls-connect._tcp: going on'],
+                                  ['$ python b.py D:/BD -k k --serial 192.168.1.20:37123 --phone-id R5CY00000XX'], '/home/p')
+        self.assertNotIn('R5CY00000XX', text); self.assertIn('back as <serial>', text)
 
     def test_forward_slashed_home_is_redacted_too(self):
         self.assertNotIn('andre', ex.full_report(self.INFO, 'C:/Users/andre/x.log failed', 'C:\\Users\\andre\\j.jsonl', 'C:\\Users\\andre'))
