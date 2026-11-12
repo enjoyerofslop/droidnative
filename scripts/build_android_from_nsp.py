@@ -76,6 +76,7 @@ ANDROID_TESTED = {
     '0100152000022000',   # Mario Kart 8 Deluxe (Playable – minor issues through the first 50cc race)
     '01006A800016E000',   # Super Smash Bros. Ultimate
     '01006BB00C6F0000',   # The Legend of Zelda: Link's Awakening
+    '010040801A4C8000',   # Blasphemous 2 (In-game into the weapon room at 60 fps; Playable needs a person; 1.0.1 from a derived profile)
     '01002DA013484000',   # The Legend of Zelda: Skyward Sword HD
     '01007EF00011E000',   # The Legend of Zelda: Breath of the Wild (Playable – major issues through the Shrine of Resurrection onto the Great Plateau)
     '010057D006492000',   # OCTOPATH TRAVELER (Playable – major issues through H'aanit's first battles)
