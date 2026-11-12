@@ -2,7 +2,7 @@
 
 Update 1.1.1 (v131072) over the base game, SDK 12.3.2 (its own `sdk` build). Square Enix / Acquire, Unreal Engine 4.27 (`++UE4+Release-4.27`): everything in one pak with the shaders inline in the cooked packages, NVN, PhysX, CRIWARE (ADX2 sound through a 6-channel AudioOut, USM movies). Modules `main`, `subsdk0` (the movie module) and `sdk`. 60 fps (30 on the Switch) by the host's writes of Unreal's frame limits.
 
-Status: brought up on the Mac: the boot, the initial settings, the title, a new game, the traveler selection (the stick's quill cursor and L / R), Hikari's opening into his first battle (the battle tutorials, a won battle and the scene after it) and Castti's opening (the flashback, the ship, free play on the deck: talking, the Path Action tutorial), at 60 fps (frame time p50 16.7 ms, p95 about 17 ms) with CRIWARE sound; about 2.8 GB resident with 1.4–1.9 GB of Metal allocations in the battle. Plays on the iPhone (IPA 5.9 GB, user, 2026-10-25), also with the geometry split and the Unreal-heap thread stacks below (16f4889).
+Status: brought up on the Mac: the boot, the initial settings, the title, a new game, the traveler selection (the stick's quill cursor and L / R), Hikari's opening into his first battle (the battle tutorials, a won battle and the scene after it) and Castti's opening (the flashback, the ship, free play on the deck: talking, the Path Action tutorial), at 60 fps (frame time p50 16.7 ms, p95 about 17 ms) with CRIWARE sound; about 2.8 GB resident with 1.4–1.9 GB of Metal allocations in the battle. Plays on the iPhone (IPA 5.9 GB, user, 2026-10-25), also with the geometry split and the Unreal-heap thread stacks below (16f4889). On Android, the base game 1.0.0 through Hikari's first battle ([Android](#android)).
 
 ## What it needs
 
@@ -50,6 +50,40 @@ Status: brought up on the Mac: the boot, the initial settings, the title, a new 
 - **Geometry integration validation (M6 Mac, `e06adb2a` baseline, 440 seconds):** both revisions execute the 129,032-triangle split after the first attack; the corrected candidate completes without a crash, hang or red diagnostic. Baseline/candidate: 59.8/59.8 fps, frame p99 18.06/18.51 ms, peak footprint 3,609/3,762 MB; all 1,903 pipeline bases prebuild. Both comparison screenshots pass (RGB differences 0.32 and 0.36). After that measured window, closing the boost tutorial and taking a further candidate screenshot confirms the battle scene. The earlier failing run remains recorded as the descriptor-lifetime bug's reproduction.
 - **Compute primitive-ID follow-up (M6 Mac, `2c31212f` baseline, 440 seconds):** both revisions again execute the 129,032-triangle split; no new red diagnostic, crash, hang or shader-interface failure. Baseline/candidate: 59.8/59.6 fps, frame p99 17.63/17.39 ms, peak footprint 3,830/3,766 MB; all 1,903 pipeline bases prebuild. Both comparison screenshots pass (RGB differences 0.06 and 0.10). After the measured window, closing the boost tutorial in both runs confirms the battle geometry. The [general primitive-ID fix](../../../docs/reference/shaders.md#split-geometry-primitive-ids) is verified independently with a shader that reads the ID; this route checks the changed splitter in gameplay.
 - The work folder's `run/ctlrun.sh <run>` starts a run with `DM_CTL`, `run/see.sh <shot> <wait> <presses…>` presses and takes a screenshot, `run/mash.sh` presses through dialog. From `run/save_ref` (the initial settings only): `run/to_ship.sh <run>` goes through the title, New Game and Castti (R L L L L on the traveler selection) to her free play on the ship's deck, `run/to_hikari.sh` to Hikari's battlefield (R L L L), `run/to_battle.sh` on through his first battle and the scene after it, and `run/ab.sh <prefix> "<env>"…` drives several runs at once into Hikari's battlefield with shots along the way (how the scissor fix was found): [05, Scripted input](../../../docs/agents/05-debugging.md#scripted-input-and-thread-scheduling).
+
+## Android
+
+First run on Android, 2026-11-11. The cartridge's base game 1.0.0 (v0), packed as a game app (`build_android_from_nsp.py --game-apk`, a 346 MB APK with the 5.5 GB RomFS as its OBB) from DroidPlay Core `main` at `1c06a5c4` with [#333](https://github.com/enjoyerofslop/droidplay-core/pull/333). Two phones:
+- a Galaxy S25 Edge: SM8750, Adreno 830 with Qualcomm's driver (0x80320001), Android 16;
+- a Galaxy Z Flip 7: Exynos 2500, Xclipse 950 with Samsung's driver (0x6000215), Android 16, unfolded.
+
+Both in handheld mode, driven over adb with `DM_CTL`.
+
+- **The build:** a profile derived from 1.1.1's, its `fps_target 60` kept.
+  - The split found 13,942 shaders, 1.0.0's own count (1.1.1 has 13,980). All translated to SPIR-V (4 min 41 s on the Mac), none failed.
+  - Six package summaries look like Oodle shader tables (as in [Found on this game](#found-on-this-game)). Without a decoder the split left those packages out (`6 file(s) could not be read`); #333 reads them, and they add no shader.
+  - The host gave Unreal its default 62 GB engine region (`[mem] address region 62.00 GB at alias +0.06 GB`): it fits Android's 64 GB alias region, so the region gate didn't have to shrink it.
+- **Played on the S25 Edge:** a new game through the initial settings, the title, Hikari on the traveler selection (R L L L), his opening and the battlefield's first battle (the two battle tutorials, the boost tutorial, won). Then the scenes after it, free roam on the battlefield, two more battles, and Rai Mei's story battle with the mounted general.
+  - The general won: plain attacks, pressed blind, weren't enough, and the agent got Game Over there. The prologue's stretch past him wasn't played.
+- **Save and Continue:** the prologue's menu has no Save. The game autosaves when the walk west on the battlefield starts Rai Mei's story battle (`save commit #2`, "Autosave, Hinoeuma Battlefield, Lv. 1 Hikari, 0:08").
+  - After a cold start, the title opens on Continue, and the autosave loads Hikari onto the battlefield.
+  - The same on the Z Flip 7: a second new game to the same autosave, loaded after a cold start.
+- **Frame rate:** the target is 60 (the Switch's is 30).
+  - **S25 Edge:** the battles, the scenes and the camp hold 56–60 fps in 30 s windows. The battlefield's top-down field draws 1,700–2,050 draws a frame and runs at 43–50 fps (frame p50 20–23.5 ms, GPU 15.5–18.6 ms).
+    - Over the 17-minute run: frame p50 16.96 ms, 35 windows from 43.2 to 59.8 fps, median 59.1.
+  - **Z Flip 7:** the same shape, battlefield 42–50 fps and battles 55–60 (GPU p50 12.9 ms). Its long run spent most of its 39 minutes on the battlefield, so its window median is 44.6.
+- **Sound:** CRIWARE's 6-channel `AudioOut`, with no underrun on either phone. The `DM_AUDIO_DUMP` has the music and effects (RMS about 800–1,650 in play). Not listened to by a person.
+- **Picture:** the battlefield's ground, seen from above, is drawn as horizontal streaks, the texture smeared along the rows. The rocks and the camp's ground show it too.
+  - It's the same on both phones, and the Adreno reads BC textures natively, so it isn't the Xclipse's CPU BC decode.
+  - The battle scenes, the cutscene views of the desert, the menus and the traveler selection's map look right.
+  - Not compared with the Mac. No `[RED]` line on either phone.
+- **Memory:** 3.17 GB PSS on the S25 Edge (native heap 1.5 GB, graphics 1.0 GB) and 3.3 GB on the Z Flip 7 (graphics 1.35 GB); no swap to speak of. Neither was killed.
+  - The first start built 309 pipelines (5.8 s) on the S25 Edge and 313 (12.8 s) on the Z Flip 7.
+- **Driving it over adb:** `env.txt` with `DM_CTL`, `DM_NVN_TSV` and `DM_AUDIO_DUMP` in the game app's external files.
+  - Make the run folder `chmod 2777`, or the shell can't read the dumps the app writes.
+  - From the battlefield's start: walk up, press A at the soldiers and through the dialogue, B to close each tutorial, and A on Attack and the target in battle. The X menu's Miscellaneous holds Settings, Tutorial and Return to Title.
+- **Not Playable – minor issues:** the battlefield's windows fall to 43 fps (under 90% of 60), and the streaks aren't compared with the Mac.
+- **Not tried:** past Rai Mei's story battle, and the other devices.
 
 ## Found on this game
 
