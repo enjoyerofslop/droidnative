@@ -81,12 +81,21 @@
 - **Cause:** `build_android_from_nsp.py build_shaders` caught every error of the shader split and packed the game without shaders. That fallback is meant for games that compile their shaders while they run, which a provisional profile captures later ([docs/android.md](../android.md#games-that-compile-their-shaders-while-they-run)). For a registered profile it hid real failures.
   - It also turned away a difference the iPhone build accepts: compute kernels a newer reader decodes from the registered build ([registered tables after a reader update](shaders.md#unity-computeshader-objects)). The Android call passed neither `derive_compute` nor `derive_dlc` to `split_shaders`.
   - AI: THE SOMNIUM FILES 1.0.1, the update its profile registers, hit both: a player's split found 15 compute kernels the profile's 13,057 rows lack (the Unity 2017.4 layout now reads its `ComputeShader` objects).
-- **Fix:** `build_shaders` passes the same two hooks as the iPhone build. After the split's strict DLC-only or additive-compute comparison passes, `derive_shader_tables` makes a shader-only derived profile (`derive_profile(…, shader_only=True)` in `<id>_build/profile`), which the translation and the rest of the build use. Any other split failure of a registered profile now stops the build, with the split's own message and what to check. A provisional or derived profile still packs without shaders and says so.
+- **Fix:** `build_shaders` passes the same two hooks as the iPhone build. After the split's strict DLC-only or additive-compute comparison passes, `derive_shader_tables` makes a shader-only derived profile (`derive_profile(…, shader_only=True)` in `<id>_build/profile`), which the translation and the rest of the build use. Any other split failure of a registered profile now stops the build, with the split's own message and what to check. A provisional profile still packs without shaders and says so. A profile derived from a registered one did too, until [the next entry](#an-android-build-packs-a-derived-profiles-game-without-shaders-after-a-split-error).
 - **Check:** `python3 dm/tools/tests/test_android_shaders.py`:
   - a registered profile's mismatch stops the build, and a provisional profile's error still packs without shaders;
   - additive compute kernels and DLC-only shaders promote the derived profile, whose `shader_facts.tsv` the translation reads;
   - a provisional profile gets no derive hooks.
 - **Found on:** [AI: THE SOMNIUM FILES](../../dm/games/010089B00D09C000/README.md) ([droidplay-core#218](https://github.com/enjoyerofslop/droidplay-core/issues/218)), not rebuilt here (no game files).
+
+### An Android build packs a derived profile's game without shaders after a split error
+
+- **Symptom:** a registered game's build log says `derived game profile for <version>`, then the shader split fails, then `[RED] the game is packed without shaders (its draws are skipped)`, and the build ends with exit code 0. On the phone the game would play its sound over a black screen.
+- **Cause:** `build_shaders` told a registered profile from the others by its folder alone. A profile derived from a registered one is written to `<id>_build/profile`, outside dm/games, so a failed split took the provisional path and packed without shaders. That path is for games that compile their shaders while they run. A derived profile's game has the offline shaders its registered tables list.
+  - Pokémon Pokopia 2.0.1 on Windows: the split failed with WinError 87 (one pool result of about 4.4 GB, too large for a Windows pipe message), and the build had derived its profile, most likely because the player's modules have other build IDs than the profile's `build` row.
+- **Fix:** main passes its `derived` reason to `build_shaders`. When a derived profile's split fails, the build stops, naming the reason, that a version and build the profile registers packs from it instead (`--package`), and `shader_split.log`. A provisional profile still packs without shaders.
+- **Check:** `python3 dm/tools/tests/test_android_shaders.py`: a derived profile's split error stops the build with its reason, and a provisional profile's error still packs without shaders.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) ([droidplay-core#307](https://github.com/enjoyerofslop/droidplay-core/issues/307)), not rebuilt here (no game files).
 
 ### The shader package and the shader map come from different splits
 
