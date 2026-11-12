@@ -66,7 +66,7 @@ ANDROID_TESTED = {
     '010003F003A34000',   # Pokémon: Let's Go, Pikachu! (Playable – minor issues through the rival's first battle)
     '0100000011D90000',   # Pokémon Brilliant Diamond (Playable – minor issues through Lake Verity's first battle)
     '0100DCD01525A000',   # Persona 3 Portable (Playable – minor issues through the first battle)
-    '01006F8002326000',   # Animal Crossing: New Horizons
+    '01006F8002326000',   # Animal Crossing: New Horizons (Playable – major issues through the first night)
     '0100000000010000',   # Super Mario Odyssey
     '01006A800016E000',   # Super Smash Bros. Ultimate
     '01006BB00C6F0000',   # The Legend of Zelda: Link's Awakening
@@ -124,7 +124,7 @@ def sdk_dir(arg):   # --sdk, the environment, then where Android Studio puts it:
     raise BuildError('Android SDK not found: give --sdk or set ANDROID_HOME')
 
 
-sys.path.append(str(REPO / 'dm/android/tools')); import host_setup   # noqa: E402  # pyright: ignore[reportMissingImports]  (--setup; dm/android/tools, put on the path here)
+sys.path.append(str(REPO / 'dm/android/tools')); import host_setup, phone_id   # noqa: E401, E402  # pyright: ignore[reportMissingImports]  (--setup, a phone's name in folder names; dm/android/tools, put on the path here)
 NDK, CMAKE = '28.2.13676358', '3.22.1'   # what --setup installs, and the CI builds with; a build takes the newest NDK and CMake the SDK has
 
 
@@ -231,12 +231,14 @@ def standard_font(font):   # <font>/standard.ttf: a hinted TrueType font; withou
     if not dst.is_file() or dst.stat().st_size != Path(src).stat().st_size: shutil.copyfile(src, dst)
 
 
-def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None):
+def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derived=''):
     """The game's NVN shaders for the Vulkan replay: the split (build_ipa_from_nsp.py split_shaders, checked against the profile's tables), then
     dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. Returns that folder (None when there are none) and the profile.
     A registered profile's tables may differ from the split in two ways the iPhone build accepts as well: installed DLC's own shaders, and compute kernels a newer reader decodes
     from the registered build (compute_reader_additions). derive(reason) then makes the shader-only derived profile that the translation and the rest of the build use. Any other
-    failure of a registered profile's split stops the build: packed without shaders, AI: The Somnium Files played its sound over a black screen (droidplay-core#218)"""
+    failure of a registered profile's split stops the build: packed without shaders, AI: The Somnium Files played its sound over a black screen (droidplay-core#218).
+    derived: why main packs from a profile derived from a registered one ('' for a registered or provisional profile). Its split failing stops the build too, though the profile
+    is outside dm/games: its game has the shaders the registered tables list (Pokémon Pokopia's split failed on Windows, and the build packed it without them, droidplay-core#307)"""
     if not sv: return None, g
     sh = work / 'shader'
     own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional or derived profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
@@ -251,6 +253,9 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None):
     except BuildError as e:
         if not own: raise BuildError(f'{e}\nThe game is not packed: without its shaders it would play its sound over a black screen. Check that the folder holds the versions game profile '
                                      f'{g.id} registers (its game.tsv); if it does, report this build with {logs / "shader_split.log"}') from e
+        if derived: raise BuildError(f'{e}\nThe game is not packed: its profile is derived from game profile {g.id} ({derived}), whose registered tables list its shaders, and without '
+                                     f'them it would play its sound over a black screen. Packing a version and build that {g.id} registers (its game.tsv) uses the registered profile '
+                                     f'instead (--package picks the version); otherwise report this build with {logs / "shader_split.log"} and this message') from e
         bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None, g   # a provisional profile: shaders compiled at run time, captured later
     g = got.get('g', g)
     bi.PROG.stage('shaders for Vulkan', step='translating')
@@ -549,21 +554,34 @@ def make_apk(sdk, logs, env):   # the app with every host in the library → thi
 WAIT_DEVICE = 0.0   # --wait-device
 
 
+_keys = {}   # serial → phone_key's answer, asked once a run
+
+
+def phone_key(serial):   # the phone's stable ID (dm/android/tools/phone_id.py), or its serial when it gives none: what its lock and its logs folder are named after,
+    # so a phone on a cable and on Wi-Fi at once is one device with one lock, and a Wi-Fi phone keeps its folder when its port changes
+    if serial not in _keys:
+        try: _keys[serial] = phone_id.from_props(adb(serial, 'shell', phone_id.ID_CMD, check=False)) or serial
+        except OSError: _keys[serial] = serial   # no adb at all: the step that needs it says so
+    return _keys[serial]
+
+
 @contextlib.contextmanager
 def phone(serial, what):   # the device to this build while it installs or runs something there (dm/android/tools/device_lock.py): a bench's runs on it, or another build's
     # install, would be force-stopped by this one, and this one's by them. Not held while it builds on the computer
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import device_lock   # pyright: ignore[reportMissingImports]
-    try: lock = device_lock.held(serial, what, WAIT_DEVICE, say); lock.__enter__()
+    try: lock = device_lock.held(phone_key(serial), what, WAIT_DEVICE, say); lock.__enter__()
     except device_lock.DeviceBusy as e: raise BuildError(str(e)) from None
     try: yield
     finally: lock.__exit__(None, None, None)
 
 
 def pick_device():
-    """The one device adb lists as ready ('device'): an offline Wi-Fi entry left from an earlier connection does not count"""
+    """The one device adb lists as ready ('device'): an offline Wi-Fi entry left from an earlier connection does not count, and a phone on a cable and on Wi-Fi
+    at once is one device, used over the cable"""
     out = subprocess.run(['adb', 'devices'], capture_output=True, text=True, errors='replace').stdout.splitlines()[1:]
     rows = [l.split() for l in out if l.strip()]
     ready = [r[0] for r in rows if len(r) > 1 and r[1] == 'device']
+    if len(ready) > 1: ready = [d['serial'] for d in phone_id.one_per_phone([{'serial': r, 'id': phone_key(r)} for r in ready])]
     if len(ready) == 1: return ready[0]
     listed = ', '.join(f'{r[0]} ({r[1]})' for r in rows) or 'none'
     raise BuildError(f'{len(ready)} adb devices ready ({listed}): connect one, or pick it with --serial')
@@ -817,8 +835,9 @@ def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, 
     """The game's files → files/games/<gid>/ (the RomFS with --sync: a repeat copies only what changed)"""
     dst = f'{REMOTE}/games/{gid}'
     # each device's copy logs, and the tar archives and RomFS pieces named after them, in a folder of its own: two installs at once (one per device) shared
-    # adb_push_spv.tar, and one's cleanup removed the archive the other was sending
-    logs = logs / f'push_{serial}'; logs.mkdir(parents=True, exist_ok=True)
+    # adb_push_spv.tar, and one's cleanup removed the archive the other was sending. Named by phone_id.safe: a Wi-Fi phone's serial, 192.168.1.20:37123, made a
+    # folder Windows refuses, and every install over Wi-Fi from the desktop app stopped there. After the phone's ID, not its serial, which changes with its port
+    logs = logs / f'push_{phone_id.safe(phone_key(serial))}'; logs.mkdir(parents=True, exist_ok=True)
     parts = ['the one-game install', 'font', 'code'] + ['shaders'] * bool(spv) + ['RomFS'] + ['DLC'] * aoc.is_dir() + ['launcher files', 'permissions']
     def part(name, step=None):   # the part in the step's name; the count is the part's files or bytes (counting), or the parts when it has none
         bi.PROG.set(step=f'{step or name} · part {parts.index(name) + 1} of {len(parts)}'); bi.PROG.set(done=parts.index(name), total=len(parts), unit='parts')
@@ -919,6 +938,15 @@ def unsupported_graphics(gfx, name):   # why a game cannot be built for Android,
     if api == 'nvn': return None
     return (f'{name} draws with {GRAPHICS_NAMES.get(api, api)}, not NVN ({why}). DroidPlay Core on Android runs NVN games only so far, '
             f'so this game cannot be built for Android yet')
+
+
+def undecodable_packs(packs, name, env):   # why a game's shaders cannot be split here, from profile_guess.build_sources' oodle_packs; None when the split can read them
+    # The shader split decodes these archives with the game's own Oodle in the Mac host (shader_split.py oodle_ask, DM_OODLE_HOST), which the Android build never sets up:
+    # Pokémon Legends: Arceus's split failed on all 678 GFPAKs after about 220 s, then the build stopped (issue #310). ue_legacy is left out, as Python reads its Zlib and LZ4 paks
+    on, why = packs
+    if not on or (env.get('DM_OODLE_HOST') and env.get('DM_OODLE_MODULES')): return None
+    return (f'{name} keeps its shaders in files compressed with the game\'s own Oodle ({why.split(", Oodle-compressed")[0]}). The Android build cannot decode those yet, '
+            'so this game cannot be built for Android yet: https://github.com/enjoyerofslop/droidplay-core/issues/310 follows the fix')
 
 
 def games_table():   # {title ID: {engine, graphics, build, sdk}} from dm/games/README.md's Games table
@@ -1127,9 +1155,9 @@ def main(argv):
             if kind == 'folder': return bi.extract_dump(ex, v, u or b, app)
             return bi.extract(nx, keys, ex, v, b, u, None, logs, g, app)
         game = extract(pkg_ver)
-        why = unsupported_graphics(bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['graphics'],
-                                   nacp.name(game / 'control.nacp') or g.get('name', '') or g.id)
-        if why: raise BuildError(why)   # before the rewrite and the shaders, which take minutes and make an app that cannot start
+        src, name = bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main']), nacp.name(game / 'control.nacp') or g.get('name', '') or g.id
+        why = unsupported_graphics(src['graphics'], name) or (undecodable_packs(src['oodle_packs'], name, env) if sv else None)
+        if why: raise BuildError(why)   # before the rewrite and the shaders, which take minutes and make an app that cannot start (or no app at all)
         bad = [] if derived or prov else bi.build_mismatch(game, pkg_ver, g)
         if bad:   # files of another build under a registered version's tag: packed like any other version
             derived = f'not the builds game profile {g.id} registers: {"; ".join(bad)}'; sv = [pkg_ver]
@@ -1162,7 +1190,7 @@ def main(argv):
             dg = gamemod.load(g.id)
             say(f'{reason}: using a shader-only derived profile at {dg.dir}; registered module fixes are preserved')
             return dg
-        spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables)
+        spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables, derived)
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         if not a.game_apk: library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                             'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})

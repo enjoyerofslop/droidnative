@@ -82,17 +82,39 @@ class Lock(unittest.TestCase):
     def test_a_wifi_serial_gets_a_file_of_its_own(self):
         dl.acquire('192.168.50.20:5555', 'over Wi-Fi')
         self.assertTrue((self.tmp / '192.168.50.20_5555.lock').exists())
+        dl.acquire('adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp.', 'found by adb on the network')   # no dot at the end: Windows drops it
+        self.assertTrue((self.tmp / 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp.lock').exists())
 
-    def test_the_build_script_stops_with_a_build_error(self):
+    def build_script(self, props):   # build_android_from_nsp.py with adb answering phone_id.ID_CMD from props (serial → its output), and nothing else
         spec = importlib.util.spec_from_file_location('build_android_from_nsp', REPO / 'scripts/build_android_from_nsp.py')
         assert spec and spec.loader
         ba = importlib.util.module_from_spec(spec); spec.loader.exec_module(ba)
+        def adb(serial, *a, log=None, check=True):
+            self.assertEqual(a, ('shell', ba.phone_id.ID_CMD)); return props.get(serial, '')
+        cm = mock.patch.object(ba, 'adb', adb); cm.start(); self.addCleanup(cm.stop)
+        return ba
+
+    def test_the_build_script_stops_with_a_build_error(self):
+        ba = self.build_script({})   # phones that give no ID are locked by their serial
         self.hold('R5CY51ZLGKH', holder='a bench')
         with self.assertRaises(ba.BuildError) as e:
             with ba.phone('R5CY51ZLGKH', 'installing a game'): pass
         self.assertIn('in use by a bench', str(e.exception))
         with ba.phone('e7879cce', 'installing a game'): self.assertIn('e7879cce', dl._held)
         self.assertNotIn('e7879cce', dl._held)
+
+    def test_a_phone_on_usb_and_wifi_is_one_device(self):   # two serials, one phone: two locks let two installs run on it at once
+        ba = self.build_script({'R5CY51ZLGKH': 'R5CY51ZLGKH\n9774d56d682e549c\n', '192.168.1.20:37123': 'R5CY51ZLGKH\r\n9774d56d682e549c\r\n',
+                                'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp': 'R5CY51ZLGKH\n9774d56d682e549c\n'})
+        self.hold('R5CY51ZLGKH', holder='an install over the cable')
+        for wifi in ('192.168.1.20:37123', 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp'):
+            with self.assertRaisesRegex(ba.BuildError, 'in use by an install over the cable'):
+                with ba.phone(wifi, 'installing a game over Wi-Fi'): pass
+
+    def test_a_phone_with_a_placeholder_serial_is_locked_by_its_android_id(self):   # cheap phones share 0123456789ABCDEF: two of them are two devices
+        ba = self.build_script({'0123456789ABCDEF': '0123456789ABCDEF\n9774d56d682e549c\n', '10.0.0.5:5555': '0123456789ABCDEF\nf00dfeed12345678\n'})
+        with ba.phone('0123456789ABCDEF', 'installing'):
+            with ba.phone('10.0.0.5:5555', 'installing on the other one'): self.assertEqual(set(dl._held), {'aid-9774d56d682e549c', 'aid-f00dfeed12345678'})
 
 
 if __name__ == '__main__':

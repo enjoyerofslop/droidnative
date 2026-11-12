@@ -93,7 +93,7 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
   | Draws a frame | 632-641 | 559 |
 
   - **Raw memory:** 96 modules rewritten, none left as they were; 2 pieces placed (6 MiB: pools are placed in chunks as they are used now, where the earlier run placed 349 MiB whole), 2 of the array's 8,191 slots in use. `DM_VK_RAW_GMEM_TEST=1`: 64 of 64 reads through the array match the CPU's bytes.
-  - **The meshes' 10 ms of GPU time** are not the array's: an array of 16 slots (`DM_VK_RAW_GMEM_NOPTR_SLOTS=16`: 26.9 ms), no `NonUniform` decorations (`DM_VK_RAW_GMEM_NOPTR_NU=0`: 28.0 ms) and every array fetch made twice (a test build: 28.1 ms) all left it where it was. With Turnip on this phone the whole frame, meshes drawn through pointers, took 13.7 ms (below), so the cost is this driver's with these shaders; what in them isn't known.
+  - **What the meshes cost:** the mesh G-buffer pass is 18.4 of the frame's 28.2 ms, and in it the fetches through the array are what costs. A vertex's shader makes 61 of them (a word and 15 vectors, a vector being four). With the meshes' triangles culled the pass takes 4.4 times the same frame's terrain pass; 0.5 with the lookups kept and no fetch; 2.3 with each vector in one fetch (test builds, `prof_now`). A 16-slot array, a sized array, no `NonUniform` decorations and plain-memory copies in the slots changed nothing. The 27 and 17 ms above don't compare as they stand: the GPU clocks down when the frame is light (the terrain pass takes 1.44 ms with the meshes drawn and 3.93 ms without). So Turnip's 13.7 ms (below) can't be set beside them without its own per-pass profile.
   - **Red lines:** only the sky's uniform slot line. Not played past the tutorial's first pop-up; sound not checked in these runs. The phone's own app was put back after (md5 checked).
 - **On the Moto Razr Plus 2023 with a Turnip driver, 2026-11-11: the meshes draw.** Mr. Purple's Turnip T30 (`turnip_mrpurple_T30-toasted.adpkg.zip`, a third-party Mesa build; not part of DroidPlay) put on the phone and named with `DM_VK_DRIVER=vulkan.purple.so` ([Another Vulkan driver](../../../docs/android.md#another-vulkan-driver-turnip)). The installed app from `main` at `ec8f451f`, the game files as above (`DM_VK_RAW_GMEM=1`), and `DM_KEYS=45:A,52:A,60:A,100:B,105:B,112:A,122:A,132:A` into the city; the two drivers run back to back with the same build and route:
 
@@ -123,6 +123,15 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 
   - **With raw global memory allowed on Samsung's Xclipse** (no env switch), the same: 29.4–29.5 fps in the city, GPU p50 12.2–13.3 ms, PSS 3.04 GB, the meshes drawn.
   - **A camera panned low to the crater's edge** showed large flat bright faces on the cliffs. Not compared with the Mac; it may be the terrain's hull and domain shaders (Open, below).
+- **Played by hand on the Z Flip 7, 2026-11-11, to the first night:** `main` 91baeea8 (`0.7.6-24-g91baeea8`, `ANDROID_CHAIN` 6), its shaders translated again and sent with the build; raw global memory on by default on Xclipse (#251). The same route as the S25 Edge's, by adb input (`DM_CTL`), with a save folder of its own, per-frame timing and an audio dump.
+  - **The stretch:** a new game of A New Home: fifteen workers on each of the two coal piles at the north edge, five on a steel wreckage and fifteen on wood crates, three tents and a cookhouse against the Generator's ring, then free time from 18:00. Selecting the Generator at 21:22 brought up the people's demand "The heating is off", accepted; the Generator started at steam level 1; the night ran past 23:00 (the next objective, Food, came up), then saved from the pause menu.
+  - **The save:** five save commits. After a force-stop, the main menu offered **Resume story — A New Home, Day 1**, which loaded the save at 22:00 with the same stocks and buildings; the night ran on to 02:16 of day 2.
+  - **Frame rate,** in 30 s windows over both launches (1,369 s and 274 s): 29.0–29.7 fps in the city, frame p50 33.6–34.1 ms, p95 34.2–34.8 ms, GPU p50 8.4–13.5 ms. One window at 27.5 fps held a single 1.9 s frame as the build menu first opened tent placement. The loads: 23.1–24.3 fps as the scenario loads, 20.7–28.1 as the save loads.
+  - **Sound:** the dump holds sound throughout, 10 s RMS median −27 dBFS (the loudest −16), one near-silent 10 s stretch per launch (the loads), one underrun per launch. Judged from the dump; nobody listened.
+  - **Red lines:** only the sky's uniform slot. No crash.
+  - **Raw global memory** on this build logged 2 placed pieces, 6 MiB, with 440–453 MiB of the pools resident when placed (the 0.7.5 build placed 350 MiB on the S25); the Generator, the tents, the cookhouse and the wreckage drew throughout.
+  - **The 0.7.5 smoke APK** (`0.7.5-26-ga91a6a64`), put back afterwards, runs these chain-6 files too: it loaded the save at 30 fps with the Generator drawn.
+  - **A difference from the S25 route:** selecting the Generator with A picked the tent beside it or a passing citizen several times, zoomed in or out; it took the cursor moved from the north tent straight down onto the Generator's core at the zoomed-out view.
 
 ## Found on this game
 
@@ -132,7 +141,7 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 
 ## Open
 
-- **Android: on the Adreno 730's own driver (V@0615.98) the meshes cost 10 ms of GPU time a frame** (the Moto Razr Plus 2023, above: 27 ms against 17 without them, at the game's 30 fps in the first city view). The array they are reached through isn't what costs; a fuller city wasn't tried there.
+- **Android: on the Adreno 730's own driver (V@0615.98) the mesh pass is two thirds of the GPU frame** (the Moto Razr Plus 2023, above), at the game's 30 fps in the first city view. Each fetch through the pools' array costs there, and a vector is loaded in four. A test build that loaded each vector in one fetch halved the vertex cost; a fuller city wasn't tried there.
 - **Android: the opening view's darker picture** and the sky shader's unbound uniform slot, above.
 - **Android: hull and domain shaders** (terrain, terrain shadow map, water and 8 `meshsolid` variants). None were seen in the first city view; a tessellated scene was not looked for.
 - **Mac: the two domain shaders' attribute clash and the 40 shaders without a texture slot**, above.

@@ -178,11 +178,13 @@ static int gm_pending(uintptr_t lo, uintptr_t hi) {
 }
 static __thread gm_note t_gn;
 static uint64_t gm_now(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+static void fb_placed(uintptr_t lo, uintptr_t hi);   // gfx_vk_fileback.inc: a placed range out of the pool file
 static void gm_seg_insert(const gm_seg *s) {   // caller holds g_gm_mu
     if (g_ngm == g_cgm) { g_cgm = g_cgm ? 2 * g_cgm : 256; g_gm = realloc(g_gm, (size_t)g_cgm * sizeof *g_gm); if (!g_gm) die("raw global memory: the segment list"); }
     int at = g_ngm; while (at > 0 && g_gm[at - 1].lo > s->lo) at--;
     memmove(g_gm + at + 1, g_gm + at, (size_t)(g_ngm - at) * sizeof *g_gm); g_gm[at] = *s; g_ngm++;
     if (g_gm_np && !g_gm[at].slot) g_gm[at].slot = gm_np_slot(s->b, s->hi - s->lo);   // (a piece listed again after a failed give-back keeps its slot)
+    fb_placed(s->lo, s->hi);
 }
 static int gm_place1(uintptr_t lo, size_t n, gm_seg *s) {   // [lo, lo + n) as one placed allocation; 0: the range is as it was (t_gn says why). Logs nothing
     memset(s, 0, sizeof *s); s->lo = lo; s->hi = lo + n; t_gn = (gm_note){0, VK_SUCCESS, n, lo, NULL, 0, 0};

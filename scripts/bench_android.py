@@ -24,7 +24,7 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / 'dm/android/tools'))
-import device_lock   # noqa: E402  # pyright: ignore[reportMissingImports]   (dm/android/tools, put on the path above)
+import device_lock, phone_id   # noqa: E401, E402  # pyright: ignore[reportMissingImports]   (dm/android/tools, put on the path above)
 PKG = 'org.nxnative.android'
 EXT = f'/storage/emulated/0/Android/data/{PKG}/files'
 GAME_PROC = PKG + ':game'
@@ -32,6 +32,10 @@ RUNS = f'{EXT}/bench_runs'   # the runs' save folders (run_folder)
 TSV = f'{EXT}/bench_frames.tsv'   # the per-frame timing (DM_NVN_TSV)
 ADB = shutil.which('adb') or str(Path(os.environ.get('ANDROID_HOME', Path.home() / 'Library/Android/sdk')) / 'platform-tools/adb')
 TIMING = ('@t_s', '@frame_ms', '@gpu_ms', '@work_ms', '@draws')
+
+
+def device_folder(d):   # a device's runs under <out>: <model>_<serial>, safe on Windows too (a Wi-Fi device's serial has a ':', phone_id.py)
+    return phone_id.safe(f"{d['model'].replace(' ', '_')}_{d['serial']}")
 
 
 def data_dir():   # build_android_from_nsp.py's: the library of game hosts, its builds journal, and these results
@@ -103,6 +107,11 @@ def screenshot(serial) -> bytes:
 def ready_devices():
     out = subprocess.run([ADB, 'devices'], capture_output=True, text=True).stdout.splitlines()[1:]
     return [line.split()[0] for line in out if len(line.split()) > 1 and line.split()[1] == 'device']
+
+
+def phone_key(serial):   # the phone's stable ID (dm/android/tools/phone_id.py), or its serial: its lock is named after it, as build_android_from_nsp.py names it
+    try: return phone_id.from_props(sh(serial, phone_id.ID_CMD, timeout=15)) or serial
+    except (OSError, subprocess.SubprocessError): return serial
 
 
 def device_info(serial):
@@ -422,8 +431,10 @@ def main():
     serials = args.serial or ready_devices()
     if not serials: sys.exit('no adb device ready')
     what = 'bench_android.py: ' + ', '.join(Path(f).expanduser().resolve().parent.name for f in args.folders) + (f' ({args.route})' if args.route else '')
+    keys = {s: phone_key(s) for s in serials}   # a phone on a cable and on Wi-Fi at once is one device: run once, over the cable, under one lock
+    serials = [d['serial'] for d in phone_id.one_per_phone([{'serial': s, 'id': keys[s]} for s in serials])]
     for s in list(serials):   # each device for the whole run: another bench's or an install's force-stop and env.txt would void this one's runs, and the reverse
-        try: device_lock.acquire(s, what, args.wait_device, say=lambda m: print(m, flush=True))
+        try: device_lock.acquire(keys[s], what, args.wait_device, say=lambda m: print(m, flush=True))
         except device_lock.DeviceBusy as e:
             if args.serial: sys.exit(str(e))
             print(f'left out: {e}', flush=True); serials.remove(s)
@@ -443,7 +454,7 @@ def main():
                     subprocess.run([sys.executable, str(REPO / 'scripts/build_android_from_nsp.py'), folder, '-k', args.keys, '--push-only', '--serial', d['serial'], '--progress', 'lines'], check=True)
                 for n in range(0 if args.warmup else 1, args.runs + 1):   # run 0: the warm-up, the first launch after an install (pipelines built, files cached)
                     print(f"{g.get('name', gid)} ({route['name']}) on {d['model']}, {'warm-up' if n == 0 else f'run {n}'}", flush=True)
-                    r = run_one(d['serial'], folder, gid, route, n, out / f"{d['model'].replace(' ', '_')}_{d['serial']}", args); results.append(r)
+                    r = run_one(d['serial'], folder, gid, route, n, out / device_folder(d), args); results.append(r)
                     print(f"  first frame {r['first_frame_s']} s, ready {r['ready_s']} s, {r['fps']} fps, frame p50 {r['frame_p50']} / p95 {r['frame_p95']} ms, "
                           f"GPU p50 {r['gpu_p50']} ms, {r['exit'] or 'ran'}", flush=True)
                     report(out, devices, results)

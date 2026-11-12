@@ -1,6 +1,7 @@
 """The Android packing script's shader stage (scripts/build_android_from_nsp.py build_shaders) around the shader split (build_ipa_from_nsp.py split_shaders, stubbed here):
-a registered profile's split error stops the build instead of packing the game without shaders, a provisional profile's still packs without them, and compute kernels a newer
-reader decodes, or DLC-only shaders, take the shader-only derived profile the iPhone build takes, whose shader facts the translation then reads (droidplay-core#218)."""
+a registered profile's split error stops the build instead of packing the game without shaders, as a profile derived from a registered one's does (droidplay-core#307), a
+provisional profile's still packs without them, and compute kernels a newer reader decodes, or DLC-only shaders, take the shader-only derived profile the iPhone build takes,
+whose shader facts the translation then reads (droidplay-core#218)."""
 from pathlib import Path
 import sys
 import tempfile
@@ -34,9 +35,9 @@ class BuildShaders(unittest.TestCase):
 
     def tearDown(self): import shutil; shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def build(self, g, split, derive=None):
+    def build(self, g, split, derive=None, derived=''):
         with mock.patch.object(ba.bi, 'split_shaders', side_effect=split) as sp:
-            r = ba.build_shaders(['v65536'], {'v65536': self.tmp / 'v65536'}, self.work, self.logs, {}, g, (), derive)
+            r = ba.build_shaders(['v65536'], {'v65536': self.tmp / 'v65536'}, self.work, self.logs, {}, g, (), derive, derived)
         return r, sp
 
     def test_a_registered_profiles_table_mismatch_stops_the_build(self):
@@ -52,6 +53,16 @@ class BuildShaders(unittest.TestCase):
         (out, g), _ = self.build(self.provisional, split)
         self.assertIsNone(out); self.assertIs(g, self.provisional)
         self.assertTrue(any('packed without shaders' in str(c) for c in ba.say.call_args_list))
+
+    def test_a_derived_profiles_split_error_stops_the_build(self):   # its profile is outside dm/games like a provisional one, but its registered parent lists the shaders (#307)
+        derived = Profile(self.work / 'profile' / GID)
+        why = f'not the builds game profile {GID} registers: main build ID 1234 is not the registered 5678'
+        def split(*a, **k): raise ba.BuildError('shader_split.py failed: [WinError 87] The parameter is incorrect')
+        with self.assertRaises(ba.BuildError) as cm: self.build(derived, split, derived=why)
+        msg = str(cm.exception)
+        self.assertIn('WinError 87', msg); self.assertIn('not packed', msg); self.assertIn(why, msg); self.assertIn('--package', msg); self.assertIn('shader_split.log', msg)
+        self.assertEqual(self.ran, [])   # no translation, and no shaderless pack
+        self.assertFalse(any('packed without shaders' in str(c) for c in ba.say.call_args_list))
 
     def test_compute_kernels_a_newer_reader_decodes_take_the_derived_profile(self):
         derived = Profile(self.work / 'profile' / GID); reasons = []
