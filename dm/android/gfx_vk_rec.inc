@@ -20,7 +20,7 @@
 #include <sched.h>
 enum { RQ_SIZE = 8u << 20 };   // about 25,000 records a frame of 30 to 200 bytes: several frames' worth
 enum { R_BEGINQ = 1, R_BEGINRP, R_BINDDS, R_BINDIB, R_BINDP, R_BINDVB, R_BLIT, R_CLRATT, R_CLRCOL, R_CLRDS, R_CPB2I, R_CPI, R_CPI2B, R_DISPATCH, R_DRAW, R_DRAWIDX, R_ENDQ, R_ENDRP,
-       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB, R_UPDDS };
+       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB, R_UPDDS, R_MESH };
 typedef struct { uint32_t fn, n; VkCommandBuffer cb; } rq_hdr;   // n: the record's bytes, header included, a multiple of 16
 static uint8_t *g_rq;
 static _Atomic uint64_t g_rq_w, g_rq_r;   // bytes written / made since the start (the ring offset is the count modulo RQ_SIZE)
@@ -157,6 +157,12 @@ typedef struct { uint32_t x, y, z; } a_dispatch;
 static void rec_vkCmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     if (!rec_on()) { vkCmdDispatch(cb, x, y, z); return; }
     uint8_t *r = rq_take(R_DISPATCH, cb, sizeof(rq_hdr) + sizeof(a_dispatch)); *(a_dispatch *)(void *)(r + sizeof(rq_hdr)) = (a_dispatch){x, y, z}; rq_push(r);
+}
+// vkCmdDrawMeshTasksEXT, an extension's command the replay calls through g_draw_mesh (gfx_vk_mesh.inc), queued as the other draws are: made directly, it was recorded
+// on a command buffer the recorder thread was filling, ahead of the pipeline, descriptor sets and push constant queued before it
+static void rec_draw_mesh(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
+    if (!rec_on()) { g_draw_mesh(cb, x, y, z); return; }
+    uint8_t *r = rq_take(R_MESH, cb, sizeof(rq_hdr) + sizeof(a_dispatch)); *(a_dispatch *)(void *)(r + sizeof(rq_hdr)) = (a_dispatch){x, y, z}; rq_push(r);
 }
 typedef struct { uint32_t vc, ic, fv, fi; } a_draw;
 static void rec_vkCmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) {
@@ -307,6 +313,7 @@ static void rq_make(const uint8_t *rec) {   // one record's call
         case R_CPI: { const a_cpi *a = (const void *)s; vkCmdCopyImage(cb, a->s, a->sl, a->d, a->dl, a->n, (const VkImageCopy *)(const void *)(s + sizeof *a)); break; }
         case R_CPI2B: { const a_cpi2b *a = (const void *)s; vkCmdCopyImageToBuffer(cb, a->i, a->l, a->b, a->n, (const VkBufferImageCopy *)(const void *)(s + sizeof *a)); break; }
         case R_DISPATCH: { const a_dispatch *a = (const void *)s; vkCmdDispatch(cb, a->x, a->y, a->z); break; }
+        case R_MESH: { const a_dispatch *a = (const void *)s; g_draw_mesh(cb, a->x, a->y, a->z); break; }
         case R_DRAW: { const a_draw *a = (const void *)s; vkCmdDraw(cb, a->vc, a->ic, a->fv, a->fi); break; }
         case R_DRAWIDX: { const a_drawidx *a = (const void *)s; vkCmdDrawIndexed(cb, a->xc, a->ic, a->fx, a->vo, a->fi); break; }
         case R_ENDQ: { const a_endq *a = (const void *)s; vkCmdEndQuery(cb, a->p, a->q); break; }
