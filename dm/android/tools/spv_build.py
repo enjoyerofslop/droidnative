@@ -10,7 +10,7 @@
 # Vertex shaders in two parts (VertexA + VertexB, Catherine: Full Body's GLSLC) are merged into one program first, as dmsh_build.py vertex_ab does.
 # Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N]
 import spv_android as sa   # beside this file
-import argparse, concurrent.futures as cf, hashlib, json, os, re, shutil, struct, subprocess, sys, tempfile
+import argparse, concurrent.futures as cf, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -112,6 +112,31 @@ def job(key, stage, code, ctl, w, facts):
         if sh and 'shared' not in j: j['shared'] = sh
     return j, None
 
+def int_inputs_of(path):   # a pool job: one translated vertex shader's inputs that it only uses as integers, {location: type}, a few entries
+    return sa.int_inputs(sa.parse(Path(path).read_bytes())[1])
+
+CHUNK = 16   # vertex shaders per pool job
+
+def int_input_jobs(keys, jobs, tout, j):
+    """The second pass for vertex shaders (dmsh_build.py's): inputs a translated shader only uses as integers are added to its job's attr as uint (spv_android.py int_inputs),
+    and → those shaders' keys, in key order, to translate again. Reading each shader's SPIR-V is pure Python, and in one process it was most of the translation step: Super Mario
+    Odyssey's 7,418 vertex shaders took 114 of its 151 s, Ocarina of Time's 15,851 about 118 s, while the translator had finished in 14 and 70. So j processes read them (spawn
+    on every host, as Windows has only spawn), and each job returns only the few locations it found; the jobs are changed here, in key order, as one process changes them"""
+    vs = [k for k in keys if jobs[k]['stage'] == 'vs' and (tout / f'{k}.spv').exists()]
+    if sys.platform == 'win32': j = min(j, 61)   # ProcessPoolExecutor's limit on Windows (WaitForMultipleObjects); -j defaults to os.cpu_count()
+    n = max(1, min(j, -(-len(vs) // CHUNK)))
+    ex = cf.ProcessPoolExecutor(n, mp_context=multiprocessing.get_context('spawn')) if n > 1 else None
+    paths, again = [str(tout / f'{k}.spv') for k in vs], []
+    try:
+        for k, found in zip(vs, ex.map(int_inputs_of, paths, chunksize=CHUNK) if ex else map(int_inputs_of, paths)):
+            extra = {l: t for l, t in found.items() if l not in jobs[k]['attr']}
+            if extra: jobs[k]['attr'].update(extra); again.append(k)
+    except BaseException:
+        if ex: ex.shutdown(cancel_futures=True)   # a shader that stops it stops it at once, not after every other job
+        raise
+    if ex: ex.shutdown()
+    return again
+
 def main():
     ap = argparse.ArgumentParser(description='translate a shader_split package for the Android Vulkan replay')
     ap.add_argument('package'); ap.add_argument('out'); ap.add_argument('--xlate', required=True); ap.add_argument('--facts'); ap.add_argument('-j', type=int, default=os.cpu_count() or 4)
@@ -153,13 +178,7 @@ def main():
             for ln in r.stderr.splitlines() + r.stdout.splitlines():
                 m = re.match(r'\[RED\] (\w+): (.*)', ln)
                 if m: failed[m.group(1)] = m.group(2)[:160]
-    # second pass for vertex shaders (dmsh_build.py's): inputs the shader only uses as integers are declared uint and the shader translated again (spv_android.py int_inputs)
-    again = []
-    for k in keys:
-        sp = tout / f'{k}.spv'
-        if jobs[k]['stage'] != 'vs' or not sp.exists(): continue
-        extra = {l: t for l, t in sa.int_inputs(sa.parse(sp.read_bytes())[1]).items() if l not in jobs[k]['attr']}
-        if extra: jobs[k]['attr'].update(extra); again.append(k)
+    again = int_input_jobs(keys, jobs, tout, a.j)
     if again:
         with cf.ThreadPoolExecutor(a.j) as ex:
             for r in ex.map(run, [c for c in [again[i::a.j] for i in range(a.j)] if c]):
