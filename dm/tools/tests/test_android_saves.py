@@ -285,7 +285,7 @@ class SendSave(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
         self.cmds: 'list[list[str]]' = []; self.said: 'list[str]' = []; self.pushed: 'dict[str, dict[str, bytes]]' = {}
         self.game_pid, self.phone_games = '', f'{TID}\n{OTHER}\n'
-        def adb(serial, *a, log=None, check=True):
+        def adb(serial, *a, log=None, check=True, timeout=None):
             c = [str(x) for x in a]; self.cmds.append(c)
             if c[0] == 'push' and Path(c[-2]).is_dir(): self.pushed[c[-1] + Path(c[-2]).name] = files_of(Path(c[-2]))   # what went where
             if c[:2] == ['shell', 'sh'] and c[2].endswith('nxnative_mkdirs.sh'): return ba.MKDIRS_DONE + '\n'

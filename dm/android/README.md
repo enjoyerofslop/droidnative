@@ -102,6 +102,13 @@ the library, then installs it and copies the modules, the RomFS, the DLC, the bu
 adbd may not create folders there, so the folder tree is made first by a mkdir script run in the shell. The shell makes them `drwxrws---` for itself, which an Android 15 phone (a Galaxy S21 Ultra) kept the app out of (it found no game and ran the self test, logging `[RED] the game in … cannot be read`), so the script opens the copied tree to everyone at the end (`chmod 0777` folders, `0666` files; `Android/data/<package>` is reachable only by the app and the shell). Every build is signed with
 `~/.android/nxnative-debug.jks`: an app signed with another key cannot be updated, and uninstalling it deletes its saves and game files.
 
+A phone adb loses on the way (a Wi-Fi phone that slept, roamed or restarted wireless debugging, a cable pulled) stops the step it was on with `PhoneLost`: adb's
+own words (`device '…' not found`, `device offline`, `error: closed`, exit status 255 with no output), a call past its wait (`adb_timeout`: 120 s for a shell step,
+60 s plus the bytes at 0.5 MB/s for a copy) or a copy whose byte count stood still for 90 s (`counting`). The install, the folder copies, the RomFS copy and the
+game's copy as a whole then wait up to `--reconnect-wait` seconds (180) for the phone by its ID (`reacquire`): its serial again, or another serial with its ID,
+connecting over Wi-Fi to its old address and to the address `adb mdns services` gives for its serial number; every later call goes to the serial it came back
+as. Each step can run again, and the RomFS copy goes on from `RomFS.img.partial`. More than five losses in a row with no piece copied between them stop it.
+
 ### A game app
 
 `--game-apk` builds one game as an app of its own, to install on any device without this computer or the launcher: package `org.nxnative.game.t<title ID>`
@@ -143,6 +150,9 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
 - **Phones**: the adb devices over USB and Wi-Fi (*Pair over Wi-Fi*, *Connect*, *Discover*, *Disconnect*); for the phone picked at the top, the app version and the games
   on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`), *Restore a backup* and *Remove game from
   phone* (its save stays); a game's *Manage* menu has *Import a save to the phone* and *Restore its save from a backup*.
+  A phone is known by its ID (`dm/android/tools/phone_id.py`: `ro.serialno`, or the shell's Android ID where that is empty or a placeholder), asked once per adb
+  serial: the picker shows a phone on USB and Wi-Fi once, over USB; the picked phone, its backups (`<data>/backups/<id>`) and the first-start notice are kept by ID, as
+  are the script's device lock and `logs/push_<id>`, so a Wi-Fi port that changes loses nothing and one phone's two serials can't run two installs at once.
 - **Builds**: the running build's stages, progress bars and messages, from `--progress json` (or a console build's journal); *Stop* ends it and its tools.
 - **Performance**: `adb logcat -s DroidPlay` with tiles for the figures the host prints (frame time, GPU busy, replay CPU and draws, game speed, the wait for the GPU) and a frame-time
   chart; *Profile a frame* asks for a frame's GPU times per pass (`files/prof_now`) and groups them; *Thermal* shows the phone's cooling state.

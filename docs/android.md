@@ -71,12 +71,18 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 - **Phones:** adb devices over USB and Wi-Fi (pair, connect, discover), each one's battery and free space, the app version and the games on each phone, saves
   backed up to the computer and put back (**Restore a backup…**). **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
   (Samsung's Auto Blocker, Xiaomi's Install via USB, a Pixel's driver) and what to try when the phone doesn't show up; a phone below 20% battery gets a warning,
-  since a PC's USB port charges slowly and an install takes minutes.
+  since a PC's USB port charges slowly and an install takes minutes. A phone on a cable and on Wi-Fi at once is one phone: the list at the top shows it once, over
+  the cable. What DroidPlay keeps for a phone (the one you picked, its backups) follows the phone itself, not its Wi-Fi address, which changes each time wireless
+  debugging restarts.
 - **Performance:** the game's log from `adb logcat`, with the frame time, GPU and CPU figures the host prints, and a frame's GPU time per pass.
 - **Settings:** your `prod.keys`, and the [requirements](#what-the-command-line-needs) with how to install what is missing (on Windows, **Install what's missing** does it).
 
 A rebuild only does what changed: the extraction, the rewritten code and the translated shaders are reused when their inputs are the same, and the RomFS image is not
 copied to the phone again when the phone already holds the same one.
+
+If the phone drops off during an install (it slept, Wi-Fi roamed, wireless debugging restarted on a new port, or the cable came out), the install waits up to
+three minutes for it to come back, finds it again by its serial number (over Wi-Fi it connects to it again by itself) and goes on: the RomFS copy carries on from
+what the phone already holds, and the other steps run again. Wake the phone, or plug it back in, while the Builds page says it is waiting.
 
 ### From source
 

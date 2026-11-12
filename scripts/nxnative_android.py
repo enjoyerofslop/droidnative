@@ -36,6 +36,7 @@ PKG = 'org.nxnative.android'
 REMOTE = f'/sdcard/Android/data/{PKG}/files'
 sys.path.insert(0, str(REPO / 'scripts'))
 import build_android_from_nsp as ba   # noqa: E402  (data_dir, library: the host library)
+import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, which the script put on the path: a phone's ID, which outlives a Wi-Fi port)
 sys.path.insert(0, str(REPO / 'dm' / 'android' / 'desktop'))
 import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop, put on the path here: the Get started checklist's steps, Qt-free so its tests run without PySide6)
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]  (plain words for what went wrong, and the report for #help)
@@ -508,13 +509,13 @@ class LibraryPage(QWidget):
             if not s: self.win.toast(self.win.no_phone()); return
             if self.win.phone_legacy and not self.legacy_ok(s): return
             args += ['--serial', s]
-        done = after or self.after_task
+        done, key = after or self.after_task, self.win.phone_key(s)   # its ID now: over Wi-Fi, its serial may be another one by the time the build ends
         def installed():   # it went onto that phone: the next Play there is a first start, with its shaders to prepare
-            self.win.st.setValue(f'firststart/{s}/{g.id}', True); done()
+            self.win.st.setValue(f'firststart/{key}/{g.id}', True); done()
         self.win.builds.start(f'{what} {g.name}', args + extra, after=installed if '--serial' in args else done)
     def first_start_ok(self, g, s):   # the first Play since the game went onto this phone: say the screen stays black a while, so it isn't taken for a crash
-        key = f'firststart/{s}/{g.id}'
-        if not self.win.st.value(key, False, type=bool) or self.win.st.value('firststart/never', False, type=bool): return True
+        keys = {f'firststart/{self.win.phone_key(s)}/{g.id}', f'firststart/{s}/{g.id}'}   # kept by the phone's ID; by its serial before IDs
+        if not any(self.win.st.value(k, False, type=bool) for k in keys) or self.win.st.value('firststart/never', False, type=bool): return True
         box = QMessageBox(QMessageBox.Information, 'The first start', '<b>The first start takes a minute or two.</b>', parent=self)
         box.setInformativeText(f'{self.win.phone_name()} prepares {g.name}\'s shaders first, and stays on the loading screen meanwhile (80 seconds for Brilliant '
                                'Diamond on a Galaxy S25 Edge, 39 on a OnePlus Pad 3). The phone may get warm. Later starts take a few seconds.')
@@ -523,7 +524,8 @@ class LibraryPage(QWidget):
         go = box.addButton('Play', QMessageBox.AcceptRole); box.addButton(QMessageBox.Cancel); box.setDefaultButton(go); box.exec()
         if never.isChecked(): self.win.st.setValue('firststart/never', True)
         if box.clickedButton() is not go: return False
-        self.win.st.remove(key); return True
+        for k in keys: self.win.st.remove(k)
+        return True
     def game_app(self, g):   # the game as an app of its own (build_android_from_nsp.py --game-apk): no phone, and the launcher app on the phones is left as it is
         ex = (g.info.get('extracted') or {}).get(self.win.st.value(f'ver/{g.id}', '') or g.newest) or {}
         rom = ex.get('romfs_bytes'); data = f'its {gb_text(rom)} of game data' if rom else 'its game data'
@@ -990,7 +992,7 @@ class PhonesPage(QWidget):
     def backup(self, then=None):
         s = self.win.serial()
         if not s: return
-        dst = ba.data_dir() / 'backups' / re.sub(r'[^\w.-]', '_', s) / time.strftime('%Y%m%d-%H%M%S')
+        dst = ba.data_dir() / 'backups' / phone_id.safe(self.win.phone_key(s)) / time.strftime('%Y%m%d-%H%M%S')   # one folder a phone, whatever its Wi-Fi port
         def run():
             ok, out = adb_run(s, 'shell', f'ls {REMOTE}/backups')
             if not ok or not out.strip(): return None, 'no backups on the phone yet: open the app and use Back up saves in its game list'
@@ -1021,7 +1023,7 @@ class PhonesPage(QWidget):
     def restore_backup(self, gid=None, name=None):   # one game's save from a backup Back up saves pulled, or every game's in it
         s = self.win.serial()
         if not s: return
-        mine = ba.data_dir() / 'backups' / re.sub(r'[^\w.-]', '_', s)
+        mine = ba.data_dir() / 'backups' / phone_id.safe(self.win.phone_key(s))   # where backup() puts this phone's
         start = mine if mine.is_dir() else ba.data_dir() / 'backups'
         path = QFileDialog.getExistingDirectory(self, f'A backup holding {name}\'s save' if name else 'A save backup to put back (every game in it)', str(start if start.is_dir() else Path.home()))
         if path: self.win.builds.start('Restore a save backup', ['--restore-backup', path, *(['--title', gid] if gid else []), '--serial', s], after=self.win.refresh_phone)
@@ -1407,6 +1409,9 @@ class Window(QMainWindow):
         self.setup_changed()
         if self.pages.currentWidget() is not self.setup and (not self.setup.step('keys').done or self.library.no_games() or
                                                              not self.setup.step('phone').done and not self.st.value('serial', '')): self.go('setup')
+        self.ids = {}   # serial → the phone's ID (phone_id.py), asked once per serial: its settings, backups and first-start notice are kept under it
+        for k in self.st.allKeys():   # first-start notices kept under a Wi-Fi address, before IDs: the address is gone with its port, and the notice with it
+            if k.startswith('firststart/') and k.count('/') == 2 and phone_id.wifi(k.split('/')[1]): self.st.remove(k)
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh_devices); self.timer.start(5000); self.refresh_devices()
         self.settings.run(then=self.after_check)
         if os.name == 'nt': self.dark_title()
@@ -1515,12 +1520,16 @@ class Window(QMainWindow):
         return json.loads(r.stdout)
     def serial(self): return self.phone.currentData() or None
     def phone_name(self): return self.models.get(self.serial()) or self.serial()
-    def set_serial(self, s):
-        i = self.phone.findData(s)
+    def phone_key(self, s=None):   # a phone's ID (phone_id.py), or its serial when it gives none: what its settings and backups are kept under
+        s = s or self.serial()
+        return self.ids.get(s) or s
+    def find_phone(self, keys): return phone_id.find([self.phone.itemData(i) for i in range(self.phone.count())], keys, self.ids)
+    def set_serial(self, s):   # a row of the Phones page: the picker has one entry a phone, so a phone's Wi-Fi row picks its entry over the cable
+        i = self.find_phone([s, self.ids.get(s)])
         if i >= 0: self.phone.setCurrentIndex(i)
     def phone_changed(self, _):
         s = self.serial()
-        if s: self.st.setValue('serial', s)
+        if s: self.st.setValue('serial', s); self.st.setValue('phone', self.phone_key(s))   # the phone by its ID too, which outlives a Wi-Fi port
         self.refresh_phone()
     def refresh_phone(self):   # the app and the games on the picked phone: the Library's statuses and the Phones page
         s = self.serial()
@@ -1565,6 +1574,12 @@ class Window(QMainWindow):
                     d['name'] = v[4] if v[4] not in ('', 'null') else d['model']
                     d['manufacturer'] = v[5]; d.update(pg.parse_status(p) if got_p else {})
                 devs.append(d)
+            ids = self.ids.copy()   # read on the pool's thread: a copy is one step
+            for d in devs:   # each phone's ID (phone_id.py), asked once per serial: one phone on a cable and on Wi-Fi is one phone, and keeps its settings over a new port
+                if d['state'] == 'device' and d['serial'] not in ids:
+                    got_i, out_i = adb_run(d['serial'], 'shell', phone_id.ID_CMD, timeout=8)
+                    if got_i: ids[d['serial']] = phone_id.from_props(out_i)
+                d['id'] = ids.get(d['serial']) or phone_id.mdns_serialno(d['serial'])
             return devs if ok else out
         def got(r):
             if isinstance(r, Exception): return
@@ -1573,16 +1588,17 @@ class Window(QMainWindow):
                 if self.devs is not None: return
                 r = []
             r = r or []
+            was = self.phone_key(); self.ids = {d['serial']: d['id'] for d in r if d.get('id')}   # the picked phone's ID as the last list had it
             if r == self.devs and adb == self.adb: return
             ident = lambda ds: [(d['serial'], d['state'], d.get('model'), d.get('name'), d.get('android')) for d in ds]   # noqa: E731
             same = self.devs is not None and adb == self.adb and ident(r) == ident(self.devs)
             self.devs, self.adb = r, adb
             if same: self.phones.fill(r, adb); self.setup_changed(); return   # only a battery level or the free space moved: the picker and the phone's games stay
-            keep = self.serial() or self.st.value('serial', '')
+            keep = [was, self.st.value('phone', ''), self.st.value('serial', '')]   # the picked phone by its ID: the same phone over Wi-Fi once its cable is out
             self.models = {d['serial']: d.get('name') or d.get('model') or d['serial'] for d in r}
             self.phone.blockSignals(True); self.phone.clear()
-            for d in r:
-                if d['state'] == 'device': self.phone.addItem(icon('phone', TEXT2, 16), f'{self.models[d["serial"]]}' + (f' · Android {d.get("android")}' if d.get('android') else ''), d['serial'])
+            for d in phone_id.one_per_phone([d for d in r if d['state'] == 'device']):   # one entry a phone, over the cable when it is on a cable and on Wi-Fi (the Phones page lists both)
+                self.phone.addItem(icon('phone', TEXT2, 16), f'{self.models[d["serial"]]}' + (f' · Android {d.get("android")}' if d.get('android') else ''), d['serial'])
             # a phone plugged in but not ready: listed, greyed, with what to do; it said "No phone connected" while the phone waited for Allow
             for d in r:
                 if d['state'] in ('unauthorized', 'authorizing', 'offline'):
@@ -1592,7 +1608,7 @@ class Window(QMainWindow):
                     it.setToolTip(re.sub(r'<[^>]+>', '', ex.explain(f'device {d["state"]}', phone=d.get('model', '')).body))
             if not self.phone.count(): self.phone.addItem(icon('phone', TEXT3, 16), 'No phone connected' if adb else 'Install the tools to find phones', None)
             self.phone.setToolTip('The phone builds install to' if adb else 'DroidPlay finds phones with adb, which comes with the tools: Get started, step 2')
-            i = self.phone.findData(keep); self.phone.setCurrentIndex(i if i >= 0 else 0); self.phone.blockSignals(False)
+            i = self.find_phone(keep); self.phone.setCurrentIndex(i if i >= 0 else 0); self.phone.blockSignals(False)
             self.phones.fill(r, adb); self.phone_changed(0); self.setup_changed()
         bg(look, got)
 
