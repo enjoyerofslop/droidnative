@@ -141,7 +141,7 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 
 ## Open
 
-- **Android: on the Adreno 730's own driver (V@0615.98) the mesh pass is two thirds of the GPU frame** (the Moto Razr Plus 2023, above), at the game's 30 fps in the first city view. Each fetch through the pools' array costs there. A vector is loaded in two fetches now, where the runs above made four (a test build with one fetch halved the vertex cost); that isn't measured on the phone yet, and a fuller city wasn't tried there.
+- **Android: on the Adreno 730's own driver (V@0615.98) the mesh pass is two thirds of the GPU frame** (the Moto Razr Plus 2023, above), at the game's 30 fps in the first city view. Each fetch through the pools' array costs there. A vector is loaded in two fetches now, where the runs above made four: per pass against the frame's terrain pass, the mesh pass went from about 12.6 to 11.2 and the frame from 19.4 to 17.7 (two launches each, the same picture). A test build that never made the second fetch reached 9.6 and 16.1 with the same picture, so a branch around it is the next step. A fuller city wasn't tried there.
 - **Android: the opening view's darker picture** and the sky shader's unbound uniform slot, above.
 - **Android: hull and domain shaders** (terrain, terrain shadow map, water and 8 `meshsolid` variants). None were seen in the first city view; a tessellated scene was not looked for.
 - **Mac: the two domain shaders' attribute clash and the 40 shaders without a texture slot**, above.
