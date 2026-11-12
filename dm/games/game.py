@@ -260,6 +260,7 @@ def header_one(g):
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
+         f'#define DM_GAME_MESH_LEAVE_OUT {q(" ".join(g.words("mesh_leave_out", "")))}',   # mesh shader keys whose task / mesh draws the player may leave out (Android, gfx_vk_mesh.inc; the launcher's Fewer plants): a game's vegetation
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',

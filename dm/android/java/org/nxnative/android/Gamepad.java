@@ -609,13 +609,24 @@ public final class Gamepad extends View {
     }
 
     // ---- The software keyboard's text box (front_text_input): shown on the UI thread, the caller blocks until it is confirmed (the text) or cancelled (null) ----
-    public static String ask(final Activity a, final String title, final String sub, final String guide, final String initial, final int maxChars) {
+    // Text comes and goes as UTF-8 bytes: a JNI string is modified UTF-8, which has no character outside the BMP (front_android.c text_input_thread).
+    // OK stays disabled while the text is shorter than minChars, as the console's keyboard keeps it: a game that set a minimum does not check the length itself.
+    // The form hosts built before that look up (an app can carry one, for a game kept on its tested host): strings, no minimum
+    public static String ask(Activity a, String title, String sub, String guide, String initial, int maxChars) {
+        byte[] r = ask(a, bytes(title), bytes(sub), bytes(guide), bytes(initial), maxChars, 0);
+        return r == null ? null : text(r);
+    }
+    static byte[] bytes(String s) { return s == null ? null : s.getBytes(java.nio.charset.StandardCharsets.UTF_8); }
+    static String text(byte[] b) { return b == null ? "" : new String(b, java.nio.charset.StandardCharsets.UTF_8); }
+    public static byte[] ask(final Activity a, byte[] title8, byte[] sub8, byte[] guide8, byte[] initial8, final int maxChars, int minChars) {
+        final String title = text(title8), sub = text(sub8), guide = text(guide8), initial = text(initial8);
+        final int min = maxChars > 0 ? Math.min(minChars, maxChars) : minChars;
         final String[] out = {null}; final CountDownLatch done = new CountDownLatch(1);
         new Handler(Looper.getMainLooper()).post(new Runnable() { public void run() {
             LinearLayout box = new LinearLayout(a); box.setOrientation(LinearLayout.VERTICAL); int pad = (int)(20 * a.getResources().getDisplayMetrics().density); box.setPadding(pad, pad / 2, pad, 0);
             if (sub != null && !sub.isEmpty()) { TextView t = new TextView(a); t.setText(sub); box.addView(t); }
-            final EditText in = new EditText(a); in.setSingleLine(true); in.setText(initial == null ? "" : initial); in.setSelection(in.getText().length());
-            if (guide != null) in.setHint(guide);
+            final EditText in = new EditText(a); in.setSingleLine(true); in.setText(initial); in.setSelection(in.getText().length());
+            if (!guide.isEmpty()) in.setHint(guide);
             if (maxChars > 0) in.setFilters(new InputFilter[]{new InputFilter.LengthFilter(maxChars)});
             box.addView(in);
             // the device's own dialog look, as the launcher's: the activity's theme (the game's fullscreen NoTitleBar) drew it in the old Holo style
@@ -625,12 +636,21 @@ public final class Gamepad extends View {
                 .setOnCancelListener(new android.content.DialogInterface.OnCancelListener() { public void onCancel(android.content.DialogInterface di) { done.countDown(); } }).create();
             d.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
             d.show(); in.requestFocus();
+            final android.widget.Button ok = d.getButton(AlertDialog.BUTTON_POSITIVE);   // there once the dialog is shown
+            ok.setEnabled(in.length() >= min);
+            in.addTextChangedListener(new android.text.TextWatcher() {
+                public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+                public void onTextChanged(CharSequence s, int start, int before, int count) { }
+                public void afterTextChanged(android.text.Editable s) { ok.setEnabled(s.length() >= min); }
+            });
             if ("2".equals(nativeEnv("DM_TEXT_TEST"))) {   // the check of the box (front_android.c): typed and confirmed as a person would, after a second
-                final AlertDialog dd = d;
-                new Handler(Looper.getMainLooper()).postDelayed(new Runnable() { public void run() { in.setText("Zelda"); dd.getButton(AlertDialog.BUTTON_POSITIVE).performClick(); } }, 1000);
+                new Handler(Looper.getMainLooper()).postDelayed(new Runnable() { public void run() {
+                    in.setText("Z"); nativeLog("text box check: minimum " + min + ", OK with 1 character " + (ok.isEnabled() ? "enabled" : "disabled"));
+                    in.setText("Zelda\uD83D\uDE00"); ok.performClick();
+                } }, 1000);
             }
         } });
         try { done.await(); } catch (InterruptedException e) { return null; }
-        return out[0];
+        return out[0] == null ? null : out[0].getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 }

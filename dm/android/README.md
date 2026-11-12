@@ -180,7 +180,7 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   (a write fault reaching the host's hook past ART, the save transaction's tree copy with xattrs and `renameat2(RENAME_EXCHANGE)`, an unmapped read).
 - In the app without a game, with switches in `env.txt`: `DM_PAD_TEST=1` sends made-up touches to the virtual gamepad (not to the screen) and checks every
   key, the D-pad, both sticks, two fingers and the game's touch screen (`gamepad check: 44 checks, 0 failed`); `DM_TEXT_TEST=2` opens the text box after the demo and
-  types and confirms "Zelda" itself (`DM_TEXT_TEST=1` waits for a person); `DM_RUMBLE_TEST=1` vibrates half a second (`dumpsys vibrator_manager` shows it).
+  types and confirms "Zelda" and an emoji itself, under a minimum of 2 characters (`text box check: … OK with 1 character disabled`, then `text "Zelda😀" (9 bytes)`; `DM_TEXT_TEST=1` waits for a person); `DM_RUMBLE_TEST=1` vibrates half a second (`dumpsys vibrator_manager` shows it).
 - `tests/t_audio`: the AAudio output at real time (a 440 Hz tone for two seconds: the frames rendered, the underruns), Stop and Start again.
 - `tests/t_media <h264> <aac>`: the movie decoders on clips ffmpeg makes (`ffmpeg -f lavfi -i color=c=0x2060c0:size=320x240:rate=30 -t 1 -c:v libx264 -profile:v high -bf 2
   -pix_fmt yuv420p -x264-params aud=1 -f h264 blue.h264`; `ffmpeg -f lavfi -i sine=frequency=1000:sample_rate=48000 -t 1 -ac 2 -c:a aac -f adts tone.aac`): every picture
