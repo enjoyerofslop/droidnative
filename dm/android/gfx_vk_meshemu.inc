@@ -6,13 +6,27 @@
 //   3. the mesh kernel, dispatched indirectly: each workgroup's records (one a vertex, or one a primitive corner when it has outputs per primitive) to vtx, its indices to idx
 //   4. the program's fragment shader under the mesh shader's pass-through vertex shader (record gl_VertexIndex from vtx): an indexed indirect draw
 // Without a task shader, 1 and 2 are left out: the mesh kernel runs count workgroups from first and the draw is count * ipw indices, both direct. An indirect draw's
-// {count, first} record is read on the CPU first (gfx_vk_mesh.inc vk_mesh_draw), so every count is known here. The buffers are ranges of one GPU-only arena that every
-// draw uses from its start: each step ends in a full barrier (cb_barrier) and a draw's pass ends before the next draw's dispatches (rp_end), so the outputs a draw read
-// are finished with when the next one writes them. A draw larger than the arena goes in parts: without a task by workgroups, with one by task workgroups, a part's mesh
-// workgroups up to DM_VK_MESH_MAX (the launches past it are dropped). The kernels' own bindings are the host's task and mesh stages', as gfx_vk_mesh.inc binds them
-// (stage_set), at set 0; the emulation's buffers are set 1 (spv_meshemu.MESH_SET); the pass-through vertex shader's vtx is its set 0.
+// {count, first} record is read on the CPU first (gfx_vk_mesh.inc vk_mesh_draw), so every count is known here. The buffers are ranges of one GPU-only arena. A draw larger
+// than the arena goes in parts: without a task by workgroups, with one by task workgroups, a part's mesh workgroups up to DM_VK_MESH_MAX (the launches past it are dropped).
+// The kernels' own bindings are the host's task and mesh stages', as gfx_vk_mesh.inc binds them (stage_set), at set 0; the emulation's buffers are set 1
+// (spv_meshemu.MESH_SET); the pass-through vertex shader's vtx is its set 0.
 // The same design as DeathKhan's nx2android fork's mesh emulation (github.com/DeathKhan/nx2android: 1f7e70b, 0e3285b, defd439), written anew for this replay.
-// DM_VK_MESH_EMU=0 (env.txt): the draws are skipped, as before. DM_VK_MESH_ARENA_MB (default 64), DM_VK_MESH_MAX (default 4096)
+//
+// The kernels ahead of the pass. Every draw used to end the pass (rp_end: its targets stored and loaded again, 70 to 90 us each at 1440x810 on an Adreno 830 / 840), run its
+// kernels inside full barriers on both sides from the arena's start, and begin the pass again for its draw: Ocarina of Time's Kokiri Forest draws about 65 task / mesh draws a
+// frame, so 44 to 62 single-draw pass pieces (2.6 ms of a 27 ms frame on a OnePlus Pad 3, 5.6 of 56 on a Galaxy S25 Edge) and about 200 barriers. Now, once a game has drawn
+// one such draw, every render pass is recorded in a command buffer of its own, the chunk's next (gfx_vk_draw.inc rp_start, pass_sec_on), and the kernels go into the one before it,
+// in the order the draws come, each draw's outputs in arena ranges of its own (a bump allocation, free again when the pass ends: memu_pass_done), so the pass is not cut and the
+// GPU runs the kernels first and the pass whole (a secondary command buffer executed inside the pass cost Samsung's Adreno 830 / 840 builds 5 to 10 % of their GPU time instead). The barriers follow the dependencies: one before meshlaunch.comp (it reads the task kernel's payloads) and before the mesh
+// kernel (it reads the launch list) always; before a task kernel, or a mesh kernel without one, only when the command before it is not one of these kernels (after a copy, a
+// pass or a game dispatch: a full barrier, as before; after another kernel none, their arena ranges are distinct and their guest reads were ordered before the run); and one
+// before the pass begins (rp_end closes the run, as cs_chain_close does for the game's dispatches: the kernels leave the run open, g_me_chain). The pass still ends first, as
+// before, when the kernels read what a draw of the open pass wrote in place (draw_view and fwd_hit note it: g_dv_pass_hit), when the arena has no room left for the draw's
+// ranges, or when the draw goes in parts. A draw with a task shader reserves room for DM_VK_MESH_LA_CAP mesh workgroups (its launches are known only on the GPU; meshlaunch.comp
+// drops those past the cap, as DM_VK_MESH_MAX did); one without reserves what it has. The same design as Banana Native's look-ahead (its docs/reference/rendering.md "Mesh
+// draws through compute"), written anew for this replay's chunks and recorder.
+// DM_VK_MESH_EMU=0 (env.txt): the draws are skipped, as before. DM_VK_MESH_ARENA_MB (default 64), DM_VK_MESH_MAX (default 4096), DM_VK_MESH_LA=1: the kernels ahead of the
+// pass (off by default: la_mode); DM_VK_MESH_LA_CAP=<n> (default 1024); DM_VK_MESH_STAT=1: each task draw's launch count read back (memu_stat_print)
 static const uint32_t MESHLAUNCH[] = {
 #include "shaders/meshlaunch_comp.inc"
 };
@@ -26,6 +40,27 @@ static VkPipeline g_me_launch; static VkPipelineLayout g_me_lpl; static int g_me
 static uint64_t g_me_draws, g_me_parts, g_me_skipped, g_me_left, g_me_kpipes, g_me_kbg, g_me_kcached;   // draws, their parts, skipped; left out while a kernel's pipeline was built; kernel pipelines made, of them in the background / from the driver's cache at once
 static _Atomic uint64_t g_me_kpipe_ns;
 static int memu_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_MESH_EMU"); on = !(e && *e == '0'); } return on && !g_mesh; }
+// ---- the kernels ahead of the pass (the comment above) ----
+// DM_VK_MESH_LA: 0 (default) every draw cuts the pass, as before; 1 the kernels ahead of the pass; 2 (a diagnostic) the passes in command buffers of their own but every draw cutting the pass as before.
+// Off by default: measured in Kokiri Forest it is worth about 0.5 ms of a OnePlus Pad 3's 27 ms GPU frame, and nothing or a loss on a Galaxy S25 Edge and Z Fold 8, where the pass
+// in a command buffer of its own costs their driver builds about as much as the pass breaks did (the numbers in docs/reference/rendering.md)
+static int la_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_MESH_LA"); v = !e ? 0 : atoi(e); if (v) LOG("[vk] DM_VK_MESH_LA=%d: %s", v, v == 1 ? "render passes in command buffers of their own, the compute form's kernels ahead of each" : "render passes in command buffers of their own, every task / mesh draw in compute form cutting the pass as before (diagnostic)"); } return v; }
+static int la_on(void) { return la_mode() == 1; }
+static uint32_t la_cap(void) { static uint32_t v; if (!v) { const char *e = getenv("DM_VK_MESH_LA_CAP"); v = e && atoi(e) > 0 ? (uint32_t)atoi(e) : 1024; } return v; }
+static int g_me_seen;   // a draw reached its kernels once: from then on every pass takes a command buffer of its own (gfx_vk_draw.inc rp_start, pass_sec_on); a game without such draws pays nothing
+static int pass_sec_on(void) { return g_me_seen && la_mode() != 0; }
+static VkDeviceSize g_me_cur;   // the arena's first free byte for the next draw's ranges; 0 again once the pass they are drawn in ended (every kernel after it is behind a barrier)
+static VkDeviceSize g_me_keep;   // the end of the ranges of a draw whose kernels are recorded and whose draw is not yet (0: none): a pass ending in between (a sync inside the draw's stage_set closed the chunk) must not free them, the draw's pass comes later
+static int g_me_wrote;   // a kernel of the open run writes guest memory, or reads raw global memory (which may store): the next draw's first kernel takes a barrier too
+static void memu_pass_done(void) { g_me_cur = g_me_keep; }
+static uint64_t g_me_la_draws, g_me_la_cut, g_me_la_breaks[3];   // draws whose kernels went ahead of their pass / that cut the pass as before; passes ended first for a dependency / for room in the arena / for a draw in parts
+static VkCommandBuffer cb_pre(void) {   // where a kernel goes: the command buffer before the open pass's own (g_cbk), or the chunk's current one when no pass is open; cb() when the chunk is not begun
+    if (P.active) return P.sec ? g_cbk : cb();   // (a pass in the chunk's current command buffer: it ends, as before)
+    if (C && C->open) return C->cb;   // (no pass open: the primary; cb() would close a run of the game's dispatches with a barrier, which memu_kernel's own rule puts)
+    return cb();
+}
+static int memu_chained(void) { if (!(g_cs_chain && C && C->seq == g_cs_chain_seq && g_me_chain)) g_me_wrote = 0; return g_cs_chain && C && C->seq == g_cs_chain_seq && g_me_chain; }   // the command before is one of these kernels (gfx_vk.c); a run closed by a barrier has nothing pending
+static void memu_chain(void) { g_cs_chain = 1; g_cs_chain_seq = C->seq; g_cs_gbar = 1; g_me_chain = 1; }   // the run stays open: the next kernel's own rule, a game dispatch (a barrier: g_cs_gbar) or a command of another kind (cs_chain_close) ends it
 static int memu_facts(vshader *s, const jv *e) {   // res.json mesh_emu (null: spv_meshemu.py could not make the compute form)
     if (!e || js_int(e, "pay", 0) <= 0) return 0;
     memu_t *m = calloc(1, sizeof *m); if (!m) return 0;
@@ -63,14 +98,15 @@ static int memu_arena(void) {
     if (g_me.b || g_me.bad) return !g_me.bad;
     g_me.bad = 1; const char *e = getenv("DM_VK_MESH_ARENA_MB"); VkDeviceSize mb = e && atoi(e) > 0 ? (VkDeviceSize)atoi(e) : 64;
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = mb << 20, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &g_me.b) != VK_SUCCESS) { g_me.b = VK_NULL_HANDLE; RED_ONCE(182, "task / mesh draws in compute form: no arena buffer: skipped"); return 0; }
     VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_vk.dev, g_me.b, &rq);
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = vkb_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
     if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ai, NULL, &g_me.m) != VK_SUCCESS || vkBindBufferMemory(g_vk.dev, g_me.b, g_me.m, 0) != VK_SUCCESS) {
         vkDestroyBuffer(g_vk.dev, g_me.b, NULL); g_me.b = VK_NULL_HANDLE; RED_ONCE(182, "task / mesh draws in compute form: no arena memory: skipped"); return 0; }
     g_me.size = mb << 20; g_me.bad = 0;
-    LOG("[vk] task / mesh draws in compute form (no VK_EXT_mesh_shader): a %llu MB arena for their outputs (DM_VK_MESH_ARENA_MB)", (unsigned long long)mb);
+    LOG("[vk] task / mesh draws in compute form (no VK_EXT_mesh_shader): a %llu MB arena for their outputs (DM_VK_MESH_ARENA_MB)%s", (unsigned long long)mb,
+        la_on() ? "; the kernels go ahead of the pass (DM_VK_MESH_LA)" : "");
     return 1;
 }
 static int memu_kernels(void) {   // the emulation's set layouts and meshlaunch.comp
@@ -169,10 +205,53 @@ static VkDescriptorSet memu_set(vshader *l, uint32_t n, uint32_t base, const VkD
         w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = base + i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[i]}; }
     vkUpdateDescriptorSets(g_vk.dev, n, w, 0, NULL); return set;
 }
+// DM_VK_MESH_STAT=1 (env.txt; a diagnostic): each task draw's launch list header (meshlaunch.comp: its mesh workgroups, and the launches there were when more than the cap)
+// copied into a host-visible ring after meshlaunch.comp ran, read with the statistics every 300 presents (memu_stat_print): per task / mesh pair, the draws, their task
+// workgroups, the mesh workgroups launched (in all, the most of a draw, the most per task workgroup) and the draws past the cap. The ring holds the last ME_STAT_N task draws
+enum { ME_STAT_N = 1024 };
+static struct { VkBuffer b; VkDeviceMemory m; uint32_t *p; int bad; } g_me_st;
+static struct { const char *tk, *mk; uint32_t n, cap; } g_me_st_rec[ME_STAT_N]; static uint32_t g_me_st_i;
+static int memu_stat_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_MESH_STAT"); v = e && *e == '1'; } return v; }
+static int memu_stat_buf(void) {
+    if (g_me_st.b || g_me_st.bad) return !g_me_st.bad;
+    g_me_st.bad = 1;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = ME_STAT_N * 16, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &g_me_st.b) != VK_SUCCESS) { g_me_st.b = VK_NULL_HANDLE; return 0; }
+    VkMemoryRequirements rq; vkGetBufferMemoryRequirements(g_vk.dev, g_me_st.b, &rq);
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = vkb_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+    void *p = NULL;
+    if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ai, NULL, &g_me_st.m) != VK_SUCCESS || vkBindBufferMemory(g_vk.dev, g_me_st.b, g_me_st.m, 0) != VK_SUCCESS ||
+        vkMapMemory(g_vk.dev, g_me_st.m, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, g_me_st.b, NULL); g_me_st.b = VK_NULL_HANDLE; return 0; }
+    g_me_st.p = p; memset(p, 0, ME_STAT_N * 16); g_me_st.bad = 0;
+    LOG("[vk] DM_VK_MESH_STAT=1: each task draw's launch count is read back (memu_stat_print)");
+    return 1;
+}
+static void memu_stat_copy(VkCommandBuffer c, VkDeviceSize launch, const vshader *ts, const vshader *ms, uint32_t n, uint32_t cap) {   // after meshlaunch.comp and the barrier behind it
+    if (!memu_stat_on() || !memu_stat_buf()) return;
+    uint32_t i = g_me_st_i++ % ME_STAT_N; g_me_st_rec[i].tk = ts->key; g_me_st_rec[i].mk = ms->key; g_me_st_rec[i].n = n; g_me_st_rec[i].cap = cap;
+    VkBufferCopy cp[2] = {{launch, (VkDeviceSize)i * 16, 4}, {launch + 36, (VkDeviceSize)i * 16 + 4, 4}};   // words 0 (the mesh dispatch's count) and 9 (the launches when past the cap)
+    vkCmdCopyBuffer(c, g_me.b, g_me_st.b, 2, cp);
+}
+static void memu_stat_print(void) {   // the statistics line (mtl_mem_stat): the ring's task draws by task / mesh pair, the most launched first
+    if (!memu_stat_on() || !g_me_st.p || !g_me_st_i) return;
+    struct { const char *tk, *mk; uint64_t draws, tasks, launches, most, over; double per; } a[64]; int na = 0;
+    uint32_t n = g_me_st_i < ME_STAT_N ? g_me_st_i : ME_STAT_N;
+    for (uint32_t i = 0; i < n; i++) { const char *tk = g_me_st_rec[i].tk, *mk = g_me_st_rec[i].mk; uint32_t m = g_me_st.p[i * 4], over = g_me_st.p[i * 4 + 1], launched = over ? over : m; int k = 0;
+        while (k < na && !(a[k].tk == tk && a[k].mk == mk)) k++;
+        if (k == na) { if (na == 64) continue; memset(&a[na], 0, sizeof a[na]); a[na].tk = tk; a[na].mk = mk; na++; }
+        a[k].draws++; a[k].tasks += g_me_st_rec[i].n; a[k].launches += launched; if (launched > a[k].most) a[k].most = launched; if (over) a[k].over++;
+        double per = g_me_st_rec[i].n ? (double)launched / g_me_st_rec[i].n : 0; if (per > a[k].per) a[k].per = per; }
+    for (int x = 0; x < na; x++) for (int y = x + 1; y < na; y++) if (a[y].launches > a[x].launches) { __typeof__(a[0]) t = a[x]; a[x] = a[y]; a[y] = t; }
+    LOG("[vk] task draws in compute form, the last %u (DM_VK_MESH_STAT): task / mesh pairs %d; per pair: draws, task workgroups, mesh workgroups launched (most of a draw, most per task workgroup), draws past the cap %u", n, na, la_cap());
+    for (int k = 0; k < na && k < 16; k++) LOG("[vk]   %s / %s: %llu draws, %llu tasks, %llu launched (most %llu, %.1f per task), %llu past the cap", a[k].tk, a[k].mk, (unsigned long long)a[k].draws, (unsigned long long)a[k].tasks,
+                                                 (unsigned long long)a[k].launches, (unsigned long long)a[k].most, a[k].per, (unsigned long long)a[k].over);
+}
 // one dispatch of a task or mesh kernel over the arena ranges r[4] (taskout, launch, vtx, idx): groups workgroups, or (0) the launch list header's counts at ind, at most
 // `most`. A kernel whose shared memory is past the GPU's limit has it in a storage buffer (spv_tgspill, s->tgs), a region a workgroup, which stage_set sizes by g_cdim
-// and takes from the compute form's arena at spill (g_tgs_b): scratch for this dispatch alone, where the chunk's arena would keep it for every dispatch of the chunk
-static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize r[8], uint32_t first, uint32_t groups, VkDeviceSize ind, uint32_t most, VkDeviceSize spill) {
+// and takes from the compute form's arena at spill (g_tgs_b): scratch for this dispatch alone, where the chunk's arena would keep it for every dispatch of the chunk.
+// la: ahead of the pass (cb_pre; dep: it reads the kernel before's outputs, so a barrier first, else one only after a command of another kind); 0: as before, in the
+// chunk's commands behind a full barrier on both sides
+static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize r[8], uint32_t first, uint32_t groups, VkDeviceSize ind, uint32_t most, VkDeviceSize spill, int la, int dep) {
     VkDescriptorSet set, es; uint32_t dyn[18]; int ok;
     g_cdim[0] = groups ? groups : most; g_cdim[1] = g_cdim[2] = 1;
     g_tgs_b = s->tgs ? g_me.b : VK_NULL_HANDLE; g_tgs_off = spill;
@@ -183,8 +262,8 @@ static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize
     }
     g_tgs_b = VK_NULL_HANDLE;
     if (!ok || !(es = memu_set(&g_me_kset, 4, ME_KBIND, r, r + 4))) return 0;
-    VkCommandBuffer c = cb(); if (!c) return 0;
-    cb_barrier();
+    VkCommandBuffer c = la ? cb_pre() : cb(); if (!c) return 0;
+    if (la) { if (dep || g_me_wrote || !memu_chained()) cb_barrier_to(c); } else cb_barrier();
     memu_t *m = s->memu; uint32_t pc[2] = {first, 0};
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->p);
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl, 0, 1, &set, s->ndyn, dyn);
@@ -198,17 +277,22 @@ static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize
         q->s0 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->pq, (uint32_t)q->s0); }
     uint32_t bcid = bc_on() ? bc_begin(c, s->key, g, C->seq) : 0;   // DM_VK_BC (gfx_vk_bc.inc)
     if (groups) vkCmdDispatch(c, groups, 1, 1); else vkCmdDispatchIndirect(c, g_me.b, ind);
+    crumb(groups ? 'c' : 'C', s->key, NULL, groups ? groups : most, 1);
     bc_end(c, bcid);
     if (pr_i >= 0) { g_prof[pr_i].s1 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->pq, (uint32_t)g_prof[pr_i].s1); }
-    cb_barrier(); g_dispatches++; C->ndraw++;
+    if (la) { memu_chain(); if (s->gm) g_me_wrote = 1; else for (int i = 0; i < s->nsb; i++) if (s->sb[i].flags & 1) g_me_wrote = 1; if (s->nim) g_me_wrote = 1; } else cb_barrier();
+    g_dispatches++; C->ndraw++;
     return 1;
 }
-static int memu_launch(const VkDeviceSize r[8], uint32_t ntask, const memu_t *ts, const memu_t *ms, uint32_t cap) {   // meshlaunch.comp over taskout and launch
+static int memu_launch(const VkDeviceSize r[8], uint32_t ntask, const memu_t *ts, const memu_t *ms, uint32_t cap, int la) {   // meshlaunch.comp over taskout and launch (it reads the task kernel's payloads: a barrier first)
     if (!cur()) return 0;
-    VkDescriptorSet set = memu_set(&g_me_lset, 2, 0, r, r + 4); VkCommandBuffer c = cb(); if (!set || !c) return 0;
+    VkDescriptorSet set = memu_set(&g_me_lset, 2, 0, r, r + 4); VkCommandBuffer c = la ? cb_pre() : cb(); if (!set || !c) return 0;
+    if (la) cb_barrier_to(c);
     uint32_t pc[4] = {ntask, (uint32_t)ts->pay, cap, (uint32_t)ms->ipw};
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_me_launch); vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_me_lpl, 0, 1, &set, 0, NULL);
-    vkCmdPushConstants(c, g_me_lpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, pc); vkCmdDispatch(c, 1, 1, 1); cb_barrier(); g_dispatches++;
+    vkCmdPushConstants(c, g_me_lpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, pc); vkCmdDispatch(c, 1, 1, 1);
+    if (la) memu_chain(); else cb_barrier();
+    g_dispatches++;
     return 1;
 }
 // the draw of a part: the fragment shader under the pass-through vertex shader, nidx indices (0: the launch list header's draw arguments)
@@ -239,6 +323,7 @@ static int memu_draw(memu_t *m, vshader *fs, const prog_t *fpr, int fpst, const 
     VkViewport v; VkRect2D sc; draw_dyn_state(c, &v, &sc, 0); (void)v; (void)sc;
     bf_ibuf(c, g_me.b, r[3], VK_INDEX_TYPE_UINT32);
     if (nidx) vkCmdDrawIndexed(c, nidx, 1, 0, 0, 0); else vkCmdDrawIndexedIndirect(c, g_me.b, r[1] + 16, 1, 20);
+    crumb(nidx ? 'd' : 'D', m->pvs->key, fs ? fs->key : NULL, nidx, 1);   // (named by the pass-through vertex shader's key: the mesh shader's with its digits moved to g..v)
     g_draws++; C->ndraw++;
     if (g_prof_cur >= 0) g_prof[g_prof_cur].draws++;
     return 1;
@@ -261,7 +346,9 @@ static int vk_memu_draw_(const p_draw *dw) {
     if (m->task && (!ts || !ts->memu)) { RED_ONCE(180, "mesh shader %s takes a task shader's payload, and its program has no task shader in compute form: draw skipped", ms->key); g_me_skipped++; return 0; }
     if (!m->task) ts = NULL;
     if (!memu_arena() || !memu_kernels()) { g_drop[2]++; g_me_skipped++; return 0; }
-    { vshader *vw[4] = {ms, fs, ts, NULL}; draw_view(vw, NULL, 0);   // what the stages read of guest memory: pending GPU writes to it land first
+    g_me_seen = 1;
+    { vshader *vw[4] = {ms, fs, ts, NULL};   // what the stages read of guest memory: pending GPU writes to it land first; and whether a draw of the open pass wrote it in place (pass_wb_check, fwd_hit)
+      g_dv_pass_chk = 1; g_dv_pass_hit = 0; draw_view(vw, NULL, 0); g_dv_pass_chk = 0;
       for (int i = 0; i < 3; i++) if (vw[i]) stage_textures(vw[i]);
       if (ms->pool || (fs && fs->pool) || (ts && ts->pool)) pool_sync(); }
     {   // the kernels' pipelines (memu_cpipe): from the driver's cache, else built in the background and the draw left out meanwhile; on a target a graphics pipeline would
@@ -287,15 +374,48 @@ static int vk_memu_draw_(const p_draw *dw) {
         if (ts->tgs && half / ts->tgs < tmax) tmax = (uint32_t)(half / ts->tgs);   // its shared memory in a storage buffer: where the mesh kernel's outputs go afterwards
         if (!tmax) { RED_ONCE(183, "task shader %s: one workgroup's shared memory exceeds the arena (DM_VK_MESH_ARENA_MB): draw skipped", ts->key); g_me_skipped++; return 0; } }
     uint32_t first = (uint32_t)dw->first, left = (uint32_t)dw->count;
-    while (left) {
+    int la = la_on() && (!P.active || P.sec);   // (a pass in the chunk's current command buffer, for lack of a free one: as before)
+    if (la && (ts ? left <= tmax : left <= cap)) {   // one part: its kernels ahead of the open pass (or before the one its draw opens), the draw inside it (the comment above)
+        if (P.active && P.sec && g_dv_pass_hit) {   // its kernels read what a draw of the open pass wrote in place: the pass ends first, as before
+            if (g_me_la_breaks[0]++ < 4) LOG("[vk] task / mesh draw in compute form (task %s mesh %s): its kernels read a draw's in-place write of the open pass, which ends first (%d draws in it)", ts ? ts->key : "-", ms->key, C ? C->ndraw : -1);
+            rp_end(); tc_clear(); }
+        uint32_t n = left, capv = ts ? (la_cap() < cap ? la_cap() : cap) : n;   // the mesh workgroups the ranges hold: a draw without a task has its count, one with reserves the cap
+        VkDeviceSize q[8], tsp = ts && ts->tgs ? me_up((VkDeviceSize)n * ts->tgs) : 0, msp = ms->tgs ? me_up((VkDeviceSize)capv * ms->tgs) : 0;
+        q[4] = ts ? me_up((VkDeviceSize)n * ts->memu->pay * 4) : ME_ALIGN; q[5] = ts ? me_up(((VkDeviceSize)ME_HDR + 2ull * capv) * 4) : ME_ALIGN;
+        q[6] = me_up((VkDeviceSize)capv * m->nrec * m->nout * 16); q[7] = me_up((VkDeviceSize)capv * m->ipw * 4);
+        VkDeviceSize need = q[4] + q[5] + q[6] + q[7] + tsp + msp;
+        if (g_me_cur + need > g_me.size) {   // no room left: the pass ends first (its draws read the arena; the kernels after it are behind a barrier), and the arena is free again
+            if (P.active) { rp_end(); tc_clear(); g_me_la_breaks[1]++; }
+            else if (g_me_cur > g_me_keep) { VkCommandBuffer c = cb_pre(); if (c) cb_barrier_to(c); g_me_cur = g_me_keep; } }   // (ranges of a draw that was not made, or of a pass that ended: free behind a barrier)
+        if (g_me_cur + need <= g_me.size) {
+            q[0] = g_me_cur; q[1] = q[0] + q[4]; q[2] = q[1] + q[5]; q[3] = q[2] + q[6]; VkDeviceSize at_t = q[3] + q[7], at_m = at_t + tsp; g_me_cur = g_me_keep = at_m + msp;
+            int ok = 1;
+            if (ts) {
+                ok = memu_kernel(ts, ppr[2], pst[2], q, first, n, 0, n, at_t, 1, 0) && memu_launch(q, n, ts->memu, m, capv, 1);
+                if (ok && memu_stat_on()) { VkCommandBuffer c = cb_pre(); if (c) { cb_barrier_to(c); memu_stat_copy(c, q[1], ts, ms, n, capv); } }
+                ok = ok && memu_kernel(ms, ppr[0], pst[0], q, 0, 0, q[1], capv, at_m, 1, 1);
+            } else ok = memu_kernel(ms, ppr[0], pst[0], q, first, n, 0, n, at_m, 1, 0);
+            ok = ok && memu_draw(m, fs, ppr[1], pst[1], q, ts ? 0 : n * (uint32_t)m->ipw);
+            g_me_keep = 0;   // (its draw is recorded, in the pass that will read its ranges; or it was not made)
+            if (!ok) { g_me_skipped++; return 0; }
+            g_me_parts++; g_me_draws++; g_me_la_draws++;
+            if (g_me_draws == 1) LOG("[vk] task / mesh draws in compute form: first draw, task %s mesh %s fragment %s, %d workgroups from %d (a part's most mesh workgroups %u), its kernels ahead of the pass",
+                                     ts ? ts->key : "-", ms->key, fs ? fs->key : "-", dw->count, dw->first, capv);
+            if (dump_on()) LOG("[dump] pass %d draw %llu: task %s mesh %s fs %s in compute form, %d workgroups from %d, kernels ahead of the pass", g_dump_pass + 1, (unsigned long long)g_draws,
+                               ts ? ts->key : "-", ms->key, fs ? fs->key : "-", dw->count, dw->first);
+            return 1;
+        }
+    } else if (la) g_me_la_breaks[2]++;
+    g_me_la_cut++;
+    while (left) {   // as before: the pass cut, the kernels from the arena's start behind full barriers, the draw in a pass begun again
         uint32_t n = ts ? (left < tmax ? left : tmax) : (left < cap ? left : cap);
         if (ts) r[4] = me_up((VkDeviceSize)n * ts->memu->pay * 4);
         r[0] = 0; r[1] = me_up(r[0] + r[4]); r[2] = me_up(r[1] + r[5]); r[3] = me_up(r[2] + r[6]);
         VkDeviceSize sp = me_up(r[3] + r[7]);   // the mesh kernel's shared memory, when it is in a storage buffer; the task kernel's lies where vtx will be
-        rp_end(); tc_clear();
+        rp_end(); tc_clear(); g_me_cur = g_me_keep = 0;
         if (ts) {
-            if (!memu_kernel(ts, ppr[2], pst[2], r, first, n, 0, n, r[2]) || !memu_launch(r, n, ts->memu, m, cap) || !memu_kernel(ms, ppr[0], pst[0], r, 0, 0, r[1], cap, sp)) { g_me_skipped++; return 0; }
-        } else if (!memu_kernel(ms, ppr[0], pst[0], r, first, n, 0, n, sp)) { g_me_skipped++; return 0; }
+            if (!memu_kernel(ts, ppr[2], pst[2], r, first, n, 0, n, r[2], 0, 0) || !memu_launch(r, n, ts->memu, m, cap, 0) || !memu_kernel(ms, ppr[0], pst[0], r, 0, 0, r[1], cap, sp, 0, 0)) { g_me_skipped++; return 0; }
+        } else if (!memu_kernel(ms, ppr[0], pst[0], r, first, n, 0, n, sp, 0, 0)) { g_me_skipped++; return 0; }
         if (!memu_draw(m, fs, ppr[1], pst[1], r, ts ? 0 : n * (uint32_t)m->ipw)) { g_me_skipped++; return 0; }
         first += n; left -= n; g_me_parts++;
     }

@@ -347,8 +347,10 @@ typedef struct { uint64_t src, dst, n; uint32_t value; int fill; } cop_t;   // a
 typedef struct ds_list { VkDescriptorSet *s; int n, used, cap; } ds_list;
 enum { CR_MAX = 1280 };   // a chunk's breadcrumbs (crumb): its passes, draws and dispatches, the last 1280 kept: a chunk of DM_VK_MID_DRAWS=512 (Breath of the Wild) with a pass each, and its
                          // dispatches (160 kept only the last 160 of such a chunk, which could leave out the draw that hung). About 40 KB a chunk
+enum { CB_MAX = 160 };   // command buffers a chunk holds: its first, and one more for each render pass recorded apart (gfx_vk_draw.inc rp_start); a chunk is cut every MID_DRAWS draws, and a pass has a draw
 typedef struct chunk {
-    VkCommandPool pool; VkCommandBuffer cb; VkFence fence; int open, busy, ts, ndraw, held; uint64_t seq, nvn_fence, hold;
+    VkCommandPool pool; VkCommandBuffer cb; VkFence fence; int open, busy, ts, ndraw, held; uint64_t seq, nvn_fence, hold;   // cb: the command buffer the replay records into now (cbs[ncb - 1])
+    VkCommandBuffer cbs[CB_MAX]; int ncbs, ncb;   // its command buffers, from its pool (reset with it), submitted together in this order (chunk_submit); ncb: begun in this recording
     int qd, td, pd, sd;   // queries of qp / tq / pq written since their last reset, [0, n): reset in the command buffer when the chunk next begins; sd: its two g_tsq slots (Query resets below)
     VkQueryPool qp; int nq; uint64_t qg[1024];   // occlusion queries begun in it: query i counts NVN samples-passed slot qg[i] (occl_* below)
     VkQueryPool pq; int npq;   // render pass timestamps of a profiled frame (prof_* in gfx_vk_draw.inc)
@@ -386,6 +388,7 @@ static _Atomic uint64_t g_chunk_wait_ns;   // the replay's time in cur() waiting
 static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ccv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_seq, g_seq_done; static _Atomic int g_inflight_wb, g_inflight_cop, g_inflight_fwd, g_inflight_ipw; static int g_drawing;   // g_drawing: a draw is being made (its resources are in C)
 static void rp_end(void); static void views_drop(VkImage img); static void draw_chunk_reset(chunk *c); static void bf_reset(void); static int ds_recycle(void);   // gfx_vk_draw.inc
+static int pass_sec_on(void); static void memu_pass_done(void);   // gfx_vk_meshemu.inc: render passes in command buffers of their own (rp_start), and the kernels' arena free again (rp_end)
 static void *chunk_thread(void *arg); static int stg_pool_on(void);
 // ---------------- Occlusion queries (NVN_COUNTER_TYPE_SAMPLES_PASSED) ----------------
 // NVN's samples passed is a counter on the queue: ResetCounter zeroes it, every draw after adds its samples, ReportCounter writes the sum at that point when the GPU gets
@@ -424,7 +427,10 @@ static int chunk_make(chunk *c) {
     if (g_qreset) { if (c->qp) g_qreset(g_vk.dev, c->qp, 0, 1024); if (c->tq) g_qreset(g_vk.dev, c->tq, 0, 256); if (c->pq) g_qreset(g_vk.dev, c->pq, 0, 512); }   // a new query's state is undefined
     else { c->qd = 1024; c->td = 256; c->pd = 512; }   // reset whole by the first begin
     c->sd = !g_qreset;   // g_tsq: reset whole on the host in chunks_init
-    return vkAllocateCommandBuffers(g_vk.dev, &ca, &c->cb) == VK_SUCCESS && vkCreateFence(g_vk.dev, &fc, NULL, &c->fence) == VK_SUCCESS;
+    ca.commandBufferCount = CB_MAX; c->ncbs = CB_MAX;
+    if (vkAllocateCommandBuffers(g_vk.dev, &ca, c->cbs) != VK_SUCCESS) { ca.commandBufferCount = 1; c->ncbs = 1; if (vkAllocateCommandBuffers(g_vk.dev, &ca, c->cbs) != VK_SUCCESS) return 0; }   // (one: every pass recorded in it, as before)
+    c->cb = c->cbs[0]; c->ncb = 1;
+    return vkCreateFence(g_vk.dev, &fc, NULL, &c->fence) == VK_SUCCESS;
 }
 // GPU time: each chunk's command buffer writes a timestamp at its start and its end; the completion thread adds up the differences (the chunks run one after
 // another on the queue, so the sum is the GPU's busy time). Logged with the memory line every 300 frames (mtl_mem_stat)
@@ -477,7 +483,7 @@ static chunk *cur(void) {   // the chunk being recorded: a free one is taken (wa
     uint64_t t0 = 0;
     for (;;) { for (int i = 0; i < g_nchunk && !C; i++) if (!g_ch[i].busy) C = &g_ch[i]; if (C) break; if (!t0) t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); pthread_cond_wait(&g_ccv, &g_cmu); }
     if (t0) atomic_fetch_add(&g_chunk_wait_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0);
-    C->busy = 1; C->seq = ++g_seq; C->nvn_fence = 0; C->ndraw = 0; C->ncr = 0;
+    C->busy = 1; C->seq = ++g_seq; C->nvn_fence = 0; C->ndraw = 0; C->ncr = 0; C->ncb = 1; C->cb = C->cbs[0];
     pthread_mutex_unlock(&g_cmu);
     return C;
 }
@@ -540,11 +546,14 @@ static VkCommandBuffer cb(void) {
 }
 // Every transfer / clear is ordered after everything before it (the images stay in GENERAL; one full barrier between operations; a chunk also ends with one, which
 // orders it before every later submission on the queue)
-static void cb_barrier(void) {
-    if (!C || !C->open) return;
+static int g_me_chain;   // the command recorded last ahead of the open pass is a task / mesh kernel of the compute form (gfx_vk_meshemu.inc memu_kernel; a barrier clears it)
+static VkCommandBuffer g_cbk;   // a render pass recorded in a command buffer of its own (gfx_vk_draw.inc rp_start): the one before it, where the compute form's kernels go, ahead of the pass (gfx_vk_meshemu.inc cb_pre); VK_NULL_HANDLE otherwise
+static void cb_barrier_to(VkCommandBuffer c) {   // into c: never inside a render pass
     VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
-    vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    g_me_chain = 0;
 }
+static void cb_barrier(void) { if (!C || !C->open) return; cb_barrier_to(g_cbk ? g_cbk : C->cb); }   // (a pass open in a command buffer of its own: into the one before it, ahead of the pass)
 // ---------------- Staging: slices of pooled blocks ----------------
 // A transfer's staging lives until its chunk completes: an upload's bytes are read by the GPU in the chunk's command buffer, a readback's (texture-to-buffer copies,
 // ReadTexels, linear write-backs) by the completion thread in chunk_done (wb_apply). Every request was a buffer of its own (stg_new: vkCreateBuffer, vkAllocateMemory,
@@ -715,12 +724,12 @@ static uint64_t chunk_submit(uint64_t nvn_fence) {
         VkMemoryBarrier hb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT};
         vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL, 0, NULL); }
     g_cs_chain = 0;   // (the chunk's end barrier closes a run of dispatches)
-    if (rec) { cb_barrier(); rb_record(C); if (C->ts) vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsq, 2 * (uint32_t)(C - g_ch) + 1); if (!deferred) vkEndCommandBuffer(C->cb); C->open = 0; }
+    if (rec) { cb_barrier(); rb_record(C); if (C->ts) vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsq, 2 * (uint32_t)(C - g_ch) + 1); if (!deferred) for (int i = 0; i < C->ncb; i++) vkEndCommandBuffer(C->cbs[i]); C->open = 0; }
     C->nvn_fence = nvn_fence;
     chunk *c = C; C = NULL;
-    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = rec ? 1u : 0u, .pCommandBuffers = &c->cb};
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = rec ? (uint32_t)c->ncb : 0u, .pCommandBuffers = c->cbs};   // its command buffers in order: a render pass recorded apart has one of its own (rp_start)
     VkResult r = VK_SUCCESS;
-    c->rq_ticket = 0; if (deferred) c->rq_ticket = rec_submit(rec ? c->cb : VK_NULL_HANDLE, c->fence);   // its failures are the recorder's to report (rq_make R_SUBMIT)
+    c->rq_ticket = 0; if (deferred) c->rq_ticket = rec_submit(c->cbs, rec ? (uint32_t)c->ncb : 0, c->fence);   // its failures are the recorder's to report (rq_make R_SUBMIT)
     else { pthread_mutex_lock(&g_vk.qmu); r = vkQueueSubmit(g_vk.q, 1, &si, c->fence); pthread_mutex_unlock(&g_vk.qmu); }
     if (r != VK_SUCCESS) { RED_ONCE(2, "vkQueueSubmit failed: %d", r); if (r == VK_ERROR_DEVICE_LOST) gpu_fault_log(r); }
     g_flushes++;
@@ -2716,6 +2725,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu; under rasterizer discard: made as dispatches %llu, left out (writing nothing) %llu, their storage buffer writes in place on a home copy %llu / through a scratch copy %llu, home copies made %llu (%llu from a chunk in flight on the GPU), home ranges learned %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig, (unsigned long long)g_rd_made, (unsigned long long)g_rd_none, (unsigned long long)g_rd_w[0], (unsigned long long)g_rd_w[1], (unsigned long long)g_rd_w[2], (unsigned long long)g_rd_w[3], (unsigned long long)g_rd_learned);
     if (memu_on()) LOG("[vk] task / mesh draws in compute form: %llu drawn in %llu parts, %llu skipped, %llu left out while a kernel's pipeline was built; kernel pipelines made %llu (%llu from the driver's cache at once, %llu in the background, %.0f ms of compiles) (cumulative; gfx_vk_meshemu.inc)",
                        (unsigned long long)g_me_draws, (unsigned long long)g_me_parts, (unsigned long long)g_me_skipped, (unsigned long long)g_me_left, (unsigned long long)g_me_kpipes, (unsigned long long)g_me_kcached, (unsigned long long)g_me_kbg, atomic_load(&g_me_kpipe_ns) / 1e6);
+    if (memu_on() && g_me_seen) LOG("[vk] task / mesh draws in compute form, kernels ahead of the pass: %llu draws drawn inside their pass, %llu with the pass cut as before; passes ended first for a dependency %llu, for room in the arena %llu, for a draw in parts %llu; render passes in a command buffer of their own %llu, in the chunk's current one for lack of a free one %llu (cumulative; DM_VK_MESH_LA, gfx_vk_meshemu.inc)",
+                                    (unsigned long long)g_me_la_draws, (unsigned long long)g_me_la_cut, (unsigned long long)g_me_la_breaks[0], (unsigned long long)g_me_la_breaks[1], (unsigned long long)g_me_la_breaks[2], (unsigned long long)g_sec_passes, (unsigned long long)g_sec_none);
+    memu_stat_print();
     pool_stats();
     shadow_line();
     LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu (%llu looked up as far as the write-back's end), other bindings %llu, written in place by a later dispatch %llu; bound on another binding's copy of the same shader %llu; draws' in-place writes read by a dispatch %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd, own_alias, fwd_hit)", (unsigned long long)g_fwd, (unsigned long long)g_stream_clip, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1], (unsigned long long)g_alias, (unsigned long long)g_ip_read);

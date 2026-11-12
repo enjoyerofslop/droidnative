@@ -262,10 +262,11 @@ static VkResult rec_vkBeginCommandBuffer(VkCommandBuffer cb, const VkCommandBuff
 // every call queued before, so the queue gets the chunks in the order the replay closed them. The replay does not wait: the completion thread waits for the fence, which
 // signals only once the recorder has submitted it. The front end blits a presented frame on the same queue, so mtl_present drains first (its chunks submitted before it)
 // → the submission's ticket: the completion thread waits for it (rec_wait_submitted) before it waits for the fence, since a fence not yet submitted is not one to wait on
-typedef struct { VkFence f; } a_submit;
+typedef struct { VkFence f; uint32_t n, pad; } a_submit;   // n: the chunk's command buffers after it, submitted together in that order (a render pass recorded apart has one of its own: gfx_vk_draw.inc rp_start)
 static uint64_t g_rq_subs_queued; static _Atomic uint64_t g_rq_subs_done; static _Atomic int g_rq_swait; static pthread_cond_t g_rq_csub = PTHREAD_COND_INITIALIZER;
-static uint64_t rec_submit(VkCommandBuffer cb, VkFence f) {
-    uint8_t *r = rq_take(R_SUBMIT, cb, sizeof(rq_hdr) + sizeof(a_submit)); *(a_submit *)(void *)(r + sizeof(rq_hdr)) = (a_submit){f}; rq_push(r);
+static uint64_t rec_submit(const VkCommandBuffer *cbs, uint32_t n, VkFence f) {   // n 0: a chunk never begun, the fence alone
+    uint8_t *r = rq_take(R_SUBMIT, VK_NULL_HANDLE, sizeof(rq_hdr) + sizeof(a_submit) + n * sizeof *cbs), *d = r + sizeof(rq_hdr) + sizeof(a_submit);
+    *(a_submit *)(void *)(r + sizeof(rq_hdr)) = (a_submit){f, n, 0}; RQ_ARR(d, cbs, n); rq_push(r);
     return ++g_rq_subs_queued;
 }
 static void rec_wait_submitted(uint64_t ticket) {   // the completion thread: until the recorder has submitted that one
@@ -349,10 +350,10 @@ static void rq_make(const uint8_t *rec) {   // one record's call
         case R_UPDDS: { const a_updds *a = (const void *)s; VkWriteDescriptorSet w[RD_MAX]; rd_unpack(s + sizeof *a, a->n, w); vkUpdateDescriptorSets(g_vk.dev, a->n, w, 0, NULL); break; }
         case R_BEGINCB: vkBeginCommandBuffer(cb, (const VkCommandBufferBeginInfo *)(const void *)s); break;
         case R_ENDCB: g_rq_end = vkEndCommandBuffer(cb); break;
-        case R_SUBMIT: { const a_submit *a = (const void *)s;
-                         // a command buffer that did not end is not submitted: its fence goes alone, so the chunk still completes (its work dropped) and no wait hangs on it
-                         if (cb) { VkResult e = vkEndCommandBuffer(cb); if (e != VK_SUCCESS) { RED_ONCE(150, "vkEndCommandBuffer failed on the recorder: %d (the chunk's work dropped)", e); if (e == VK_ERROR_DEVICE_LOST) gpu_fault_log(e); cb = VK_NULL_HANDLE; } }
-                         VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = cb ? 1u : 0u, .pCommandBuffers = &cb};
+        case R_SUBMIT: { const a_submit *a = (const void *)s; const VkCommandBuffer *cbs = (const VkCommandBuffer *)(const void *)(s + sizeof *a); uint32_t n = a->n;
+                         // a command buffer that did not end is not submitted: the fence goes alone, so the chunk still completes (its work dropped) and no wait hangs on it
+                         for (uint32_t i = 0; i < n; i++) { VkResult e = vkEndCommandBuffer(cbs[i]); if (e != VK_SUCCESS) { RED_ONCE(150, "vkEndCommandBuffer failed on the recorder: %d (the chunk's work dropped)", e); if (e == VK_ERROR_DEVICE_LOST) gpu_fault_log(e); n = 0; } }
+                         VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = n, .pCommandBuffers = cbs};
                          pthread_mutex_lock(&g_vk.qmu); VkResult q = vkQueueSubmit(g_vk.q, 1, &si, a->f); pthread_mutex_unlock(&g_vk.qmu);
                          if (q != VK_SUCCESS) { RED_ONCE(151, "vkQueueSubmit failed on the recorder: %d", q); if (q == VK_ERROR_DEVICE_LOST) gpu_fault_log(q); }
                          atomic_fetch_add(&g_rq_subs_done, 1);

@@ -1189,8 +1189,9 @@ static VkRenderPass rp_get(const rp_key *k) {
     return rp;
 }
 static struct { int active, layered; VkRenderPass rp; rp_key key; uint32_t w, h, layers; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8];
-                uint8_t *snap[8]; size_t snap_cap[8], snap_n[8]; uint8_t *snap_dst[8]; VkImage snap_img[8]; } P;   // snap: a linear target's guest bytes at rp_prepare (lsnap_take), until its write-back takes them
-static uint64_t g_passes;
+                uint8_t *snap[8]; size_t snap_cap[8], snap_n[8]; uint8_t *snap_dst[8]; VkImage snap_img[8];   // snap: a linear target's guest bytes at rp_prepare (lsnap_take), until its write-back takes them
+                VkCommandBuffer sec; int nwb0; } P;   // sec: the command buffer of its own it is recorded in (rp_start; VK_NULL_HANDLE: the chunk's current one), nwb0 the chunk's write-backs when it began
+static uint64_t g_passes, g_sec_passes, g_sec_none;   // passes; of them in a command buffer of their own, and in the chunk's current one for lack of a free one (pass_sec_on, rp_start)
 // DM_VK_DUMP=<frame>: every render pass of that frame (counted in presents from 1) has its colour targets copied out when it ends, written to
 // $DM_DUMP_DIR/f<frame>_p<pass>_a<attachment>_<w>x<h>_vk<format>_s<serial>.raw once the frame is presented, with a log line per draw (shaders, viewport, textures)
 typedef struct { stg_t s; uint32_t w, h; VkFormat f; int pass, att; uint64_t ser; } dump_t;   // att < 0: a texture the pass's draws read
@@ -1416,7 +1417,10 @@ static void lin_writeback(int i) {   // attachment i of the pass that ends
 }
 static void rp_end(void) {
     if (!P.active) return;
-    occl_end(); vkCmdEndRenderPass(C->cb); prof_pass_end(); P.active = 0; if (dump_on()) dump_pass_end();   // the profile's end timestamp after the pass: on a tiler the tiles' stores are part of it (a timestamp inside a pass is written per tile, and only the last tile's draws came before it)
+    occl_end(); vkCmdEndRenderPass(C->cb);
+    if (P.sec) {   // recorded in a command buffer of its own, the compute form's kernels in the one before it (g_cbk): their run is closed there with a barrier, which the pass's reads of their outputs come behind; the recording goes on in the pass's command buffer
+        cs_chain_close(); g_cbk = VK_NULL_HANDLE; P.sec = VK_NULL_HANDLE; memu_pass_done(); }
+    prof_pass_end(); P.active = 0; if (dump_on()) dump_pass_end();   // the profile's end timestamp after the pass: on a tiler the tiles' stores are part of it (a timestamp inside a pass is written per tile, and only the last tile's draws came before it)
     for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) {
         if (g_bcrt_pend[i].base->conv) bcd_decode(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly);   // decoded on the GPU into the image the game samples
         else bcrt_copy(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly, 1);
@@ -1578,6 +1582,15 @@ static int rp_prepare(void) { return rp_prepare_(0); }
 static int rp_start(void) {
     if (P.active) return 1;
     VkCommandBuffer c = cb(); if (!c) return 0;
+    // Once a game draws task / mesh work in compute form (pass_sec_on), the pass is recorded in a command buffer of its own, the next of the chunk's (submitted in order): the
+    // kernels of the draws met inside it go into the one before (g_cbk), ahead of the pass, so the pass is not cut for them (gfx_vk_meshemu.inc). In the chunk's current one, as
+    // before, otherwise, and when the chunk has no free one left. The commands after the pass go on in the pass's: a secondary command buffer executed inside the pass instead
+    // cost a Galaxy S25 Edge and a Z Fold 8 (Qualcomm's driver) 5 to 10 % of their GPU time
+    P.sec = VK_NULL_HANDLE;
+    if (pass_sec_on()) {
+        if (C->ncb < C->ncbs) { VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+            P.sec = C->cbs[C->ncb++]; vkBeginCommandBuffer(P.sec, &bi); g_cbk = C->cb; C->cb = c = P.sec; P.nwb0 = C->nwb; g_sec_passes++; }
+        else g_sec_none++; }
     VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = P.rp, .framebuffer = P.fb, .renderArea = {{0, 0}, {P.w, P.h}}};
     if (prof_on()) prof_pass_begin();
     vkCmdBeginRenderPass(c, &bi, VK_SUBPASS_CONTENTS_INLINE); bf_reset(); crumb('p', NULL, NULL, P.w, P.h);
@@ -2352,6 +2365,7 @@ static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, V
 // a dispatch, or a draw run as one (draw_view, stage_set, vk_dispatch's argument lookup). DM_VK_IP_READ=0 (env.txt): such reads wait, as before
 static int ip_read_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IP_READ"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_IP_READ=0: a dispatch reading a draw's in-place storage buffer write waits for the chunk"); } return v; }
 static int g_rd_cs; static uint64_t g_ip_read;   // reads bound so
+static int g_dv_pass_chk, g_dv_pass_hit;   // draw_view for a task / mesh draw in compute form (gfx_vk_meshemu.inc vk_memu_draw_): whether what its kernels read was written by a draw of the open pass (fwd_hit, pass_wb_check), which must end first then
 static int g_fwd_nwb = -1; static uint64_t g_fwd;   // the chunk's write-backs counted when the draw began (its own come after); streams bound so
 // A draw under rasterizer discard whose vertex or geometry stage writes memory runs as a dispatch does (rd_writes, vk_draw_): outside the targets' pass, with a full barrier
 // before and after it, so it may write in place and its write-backs are read on the GPU by later shaders, as a dispatch's are. Set for the one draw (vk_draw__ clears it)
@@ -2990,6 +3004,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
 static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o, int *res) {
     for (int k = 0; k < c->ncop; k++) if (c->cop[k].dst < hi && lo < c->cop[k].dst + c->cop[k].n) { *res = 0; return 1; }
     for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, hi)) continue;
+        if (c == C && g_dv_pass_chk && P.sec && i >= P.nwb0) g_dv_pass_hit = 1;   // written by a draw of the open pass, read by a kernel that would go ahead of it (gfx_vk_meshemu.inc)
         int ipr = !w->fwd && w->inpl && g_rd_cs && ip_read_on();   // a draw's in-place write, read by a dispatch
         *res = (w->fwd || ipr) && (w->st < 0 || w->inpl) && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes;   // (in place: read where it was written)
         if (*res) { *b = w->inpl ? w->ipb : c->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); if (ipr) g_ip_read++; }
@@ -3265,6 +3280,10 @@ static void dep_log(vshader *const sh[4], const rd_rng *r, const char *kd, const
 // the vertex streams, the index buffer, each stage's uniform slots and storage buffers, and its buffer textures and images. Called before anything of the draw is recorded.
 // A buffer texture's memory is the texture pool entry its handle names, looked up as stage_set's tbuf_view does. Synced on anything pending instead (cpu_view), it made every
 // such draw after one GPU write-back a round trip: Final Fantasy Resonance's opening reads buffer textures in most draws, ~100 syncs a frame, 15.5 fps on the Odin 2 and 10 on the Pad 3
+static void pass_wb_check(const rd_rng *r, int n) {   // the ranges a compute-form draw's kernels read, against the open pass's draws' in-place writes so far (g_dv_pass_chk)
+    if (!g_dv_pass_chk || g_dv_pass_hit || !C || !P.sec) return;
+    for (int i = P.nwb0; i < C->nwb; i++) for (int k = 0; k < n; k++) if (r[k].hi > r[k].lo && wb_hits(&C->wb[i], r[k].lo, r[k].hi)) { g_dv_pass_hit = 1; return; }
+}
 static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   // vtx: the vertex streams too (a draw; 0 for a dispatch)
     if (vk_safe()) { g_fwd_nwb = 0; cpu_view(); return; }
     if (!C && fwd_open_on()) cur();   // the chunk the draw is recorded in, before the lookups of pending writes in the chunks in flight (fwd_open_on)
@@ -3294,7 +3313,7 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
             if (sb->cb_slot == 0 && nst == 5 && off >= 0x210 && off < 0x310 && !((off - 0x210) % 16)) { const p_bind_buf *u = &D.ubo[5][(off - 0x210) / 16]; FWD(sb_fwd, u->addr, u->size, sb->flags & 1); }   // compute: its uniform buffer table (stage_set)
             else if (sb->cb_slot == 0 && base && off >= base && off - base < 0x100 && !((off - base) % 16)) { const p_bind_buf *u = &D.ssbo[nst][(off - base) / 16]; FWD(sb_fwd, u->addr, u->size, sb->flags & 1); } } }
     if (over) { cpu_view(); g_fwd_nwb = 0; return; }   // more ranges than r holds: anything pending lands
-    dep_log(sh, r, kd, ks, n);
+    dep_log(sh, r, kd, ks, n); pass_wb_check(r, n);
     int before = (int)(g_view_cur + g_view_fly); ranges_view(r, n);
     if ((int)(g_view_cur + g_view_fly) != before) { g_fwd_nwb = 0; return; }   // synced: everything landed (nothing to read on the GPU)
     n = 0; over = 0;   // storage buffers named by the game's own uniform buffers: their addresses are read from them (landed, as checked above)
@@ -3314,7 +3333,7 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
     #undef RNG
     #undef FWD
     if (over) { g_vs = 5; cpu_view(); g_fwd_nwb = 0; return; }   // more than r holds (a long array): anything pending lands
-    dep_log(sh, r, kd, ks, n);
+    dep_log(sh, r, kd, ks, n); pass_wb_check(r, n);
     if (n) { g_view_free--; before = (int)(g_view_cur + g_view_fly); ranges_view(r, n); if ((int)(g_view_cur + g_view_fly) != before) g_fwd_nwb = 0; }   // counted once
 }
 static int vk_draw(const p_draw *dw, const p_draw_idx *di) {
