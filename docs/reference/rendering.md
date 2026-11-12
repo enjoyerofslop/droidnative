@@ -1839,6 +1839,20 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - The rest came from one (`f632c6a1bc76cd19`) reading a 64 KB storage buffer the dispatch before wrote, then writing a 3D image.
   - The opening ran at 15.9 fps on an Ayn Odin 2 and 10.3 on a OnePlus Pad 3; it now runs at 40.6 and 41.0 (frame p50 24 ms). The Pad 3's GPU time per frame went from 28.7 to 15.5 ms.
 
+### Pending writes read on the GPU by the first draw of a submission (Android)
+
+- **Symptom:** Android only: a game whose draws read what an earlier dispatch (or a draw under rasterizer discard) wrote runs far below its GPU's rate, the GPU at a low clock. The `[vk] guest reads of draws` line counts waits for submissions in flight, about one for each submission sent in the middle of a frame.
+- **Cause:** reading a pending write on the GPU ([Buffer textures synced by their range, and dispatch outputs read on the GPU](#buffer-textures-synced-by-their-range-and-dispatch-outputs-read-on-the-gpu)) needs the chunk the draw is recorded in. The read binds the write-back's copy there and holds the chunk in flight that has it until the reading chunk completes (`fwd_find`).
+  - `draw_view` ran before anything of the draw had opened a chunk.
+  - So the first draw after each submission in the middle of a pass (`MID_DRAWS`, 64 draws, or new targets after 48) found no chunk. `buf_fwd` and `stream_fwd` refused, and the draw read the range on the CPU instead, which waits for every chunk in flight to complete.
+  - Xenoblade Chronicles 3's character draws met their skinning draws' write-backs that way about 6 times a frame. Each was a drain of the GPU at its lowest clock.
+- **Fix:** `draw_view` takes the chunk first (`cur`), as the draw itself would right after. `DM_VK_FWD_OPEN=0` leaves it as before.
+- **Check (2026-11-12):** Xenoblade Chronicles 3 1.0.0 on a Galaxy S25 Edge (Adreno 830, Android 16), its game app with only the host swapped, from a fresh start through the opening to the first battle and the field after it:
+  - Measured on top of the stream clip and the draw-write change (their own pull requests). Without this change: 6 waits for submissions in flight a frame, 5 of them character draws reading a skinning write-back as the first draw after a submission. The battle and the field ran at 13.1 fps (the median of 454 two-second windows, all at 160 MHz), frame p50 77 ms, GPU 48 ms a frame.
+  - With it: 1 such wait a frame (a draw's write in a submission in flight). The battle and the field run at 30 fps, frame p50 33.2 ms (the Switch's rate), GPU 25.4–26.1 ms a frame.
+  - The GPU's clock went from 160 MHz to 342–443 MHz. No longer starved, the GPU was clocked up by its governor, so this step has no comparison at one clock.
+- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md#android).
+
 ### Two bindings of the same memory in one shader
 
 - **Symptom:** Android only, nothing visible found yet: a shader that binds one guest buffer twice (two image slots, or two storage buffers) and writes it through one of them.

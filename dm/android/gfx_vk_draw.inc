@@ -2342,6 +2342,12 @@ static int g_vdisp;
 static int disp_like(const vshader *s) { return s->stage == SH_CS || g_vdisp; }
 static rd_homes g_rd_homes; static uint64_t g_rd_learned;   // (rd_home.h, rd_bind_w)
 enum { RD_HOME_MAX = 4 << 20 };   // a home range of more bytes is not learned: the copy is made for every chunk that writes it
+// Reading a pending write on the GPU needs the chunk the draw is recorded in: the read binds the write-back's copy there and holds the chunk in flight that holds it until
+// that one completes (fwd_find: hold = C->seq). draw_view ran before anything of the draw had opened a chunk, so the first draw after every submission in the middle of a
+// pass (64 draws, or new targets after 48) found none (buf_fwd, stream_fwd) and read the range on the CPU instead, waiting for every chunk in flight. Xenoblade Chronicles 3's
+// character draws met their skinning draws' write-backs that way about 6 times a frame, each a drain of the GPU at its lowest clock. draw_view now takes the chunk first
+// (cur), as the draw would right after. DM_VK_FWD_OPEN=0 (env.txt): as before
+static int fwd_open_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FWD_OPEN"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_FWD_OPEN=0: a draw before its chunk is open reads no pending write on the GPU"); } return v; }
 static int buf_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_BUF_FWD"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_BUF_FWD=0: a buffer a dispatch wrote syncs before a later shader reads it"); } return v; }
 static uint64_t g_buf_fwd[2];   // bindings read on the GPU from a pending write-back / written in place
 // al: the binding's offset alignment; write: the shader writes it too (a dispatch's only, in place on the current chunk's write-back)
@@ -3204,6 +3210,7 @@ static void dep_log(vshader *const sh[4], const rd_rng *r, const char *kd, const
 // such draw after one GPU write-back a round trip: Final Fantasy Resonance's opening reads buffer textures in most draws, ~100 syncs a frame, 15.5 fps on the Odin 2 and 10 on the Pad 3
 static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   // vtx: the vertex streams too (a draw; 0 for a dispatch)
     if (vk_safe()) { g_fwd_nwb = 0; cpu_view(); return; }
+    if (!C && fwd_open_on()) cur();   // the chunk the draw is recorded in, before the lookups of pending writes in the chunks in flight (fwd_open_on)
     if (gm_view(sh)) { g_fwd_nwb = 0; return; }   // raw global memory reads anything at the GPU's time: with DM_VK_RAW_GMEM_SYNC=1 every pending write-back landed (gfx_vk_gmem.inc)
     rd_rng r[16 + 1 + 4 * 32 + 4 * 32]; char kd[16 + 1 + 4 * 32 + 4 * 32], K = 'v'; signed char ks[16 + 1 + 4 * 32 + 4 * 32], KS = -1; int n = 0, over = 0;
     #define RNG(a, s) do { uintptr_t a_ = (uintptr_t)(a); uint64_t s_ = (s); if (a_ && s_) { if (n < (int)(sizeof r / sizeof *r)) { kd[n] = K; ks[n] = KS; r[n++] = (rd_rng){a_, a_ + (uintptr_t)s_}; } else over = 1; } } while (0)
