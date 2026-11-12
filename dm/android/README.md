@@ -227,6 +227,71 @@ python3 scripts/bench_android.py <NSP folder> [<NSP folder> ...] [-s <serial> ..
 - **Warm-up:** `--warmup` adds a first run, reported apart. The first launch after an install builds the driver's pipelines: Brilliant Diamond's first frame took 33 s there on a OnePlus Pad 3, against 10 s warm on an Odin 2.
 - **Installs:** install before a run, never during one, because an install stops the app.
 
+### Save sweeps
+
+A sweep starts games from saves people downloaded, so a run lands in late-game places that a scripted route from a new game never reaches: a 100 % Ocarina of Time file, Super Mario Odyssey's Metro and Sand kingdoms, Breath of the Wild after the main story. It's for regressions, performance and coverage after a merge.
+
+**A downloaded save never moves a game up a tier.** Playable needs hand play from a new game, or from a save made on Android.
+
+```
+python3 scripts/bench_android.py <NSP folder> [<NSP folder> ...] -s <serial> --sweep [--compare <earlier sweep>]
+python3 scripts/bench_android.py <NSP folder> -s <serial> --routes 'dl_metro,dl_sand'
+```
+
+- **Scene routes:** a game's `dl_*` routes in its `bench_android.tsv`. Each one:
+  - starts from a downloaded save in the game's `saves/dl-<name>/` folder;
+  - uses the keys that reach player control from the title's Continue;
+  - measures a 60–90 s window, standing or walking;
+  - has a ready pattern where the scene's files show one;
+  - has a description of where the save stands.
+
+  A save only gets a route once it has loaded on the game version we pack. A save from a newer update may not load, and is noted and left out.
+- **A save in its archive:** a downloaded save stays in the archive it came in (JKSV, Checkpoint and EdiZon folders, or its files bare). The route names the archive, then `//` and the folder inside it that holds the save's files:
+
+  `saves/dl-100pct/<archive>.zip//<folder inside>`
+
+  It's unpacked into the sweep's output folder (`dm/android/tools/bench_sweep.py`): zip by Python, or by Info-ZIP's `unzip` for Deflate64, which Python can't read (Breath of the Wild's save); rar and 7z by `bsdtar` (macOS's `tar`, and Windows 10's). Nothing is written beside the archive.
+- **`--sweep`** runs every `dl_*` route of each game given, once each unless `--runs` says otherwise. **`--routes`** takes comma-separated shell patterns instead.
+- **`sweep.md`** has one table per phone, and `sweep.json` has the same rows. The columns:
+  - route
+  - load to the scene: the ready pattern's time (– for a route without one)
+  - fps, frame p50 / p95, GPU p50
+  - PSS
+  - red lines, with how many kinds (numbers and addresses made alike)
+  - how it ended
+  - the end screenshot's path
+- **`--compare <earlier sweep folder or sweep.json>`** flags a route when:
+  - its fps fell 5 % or more;
+  - it has a red-line kind the earlier sweep didn't;
+  - it crashed or was killed where the earlier sweep didn't.
+
+  The flags go in a column of their own, with the count at the top of `sweep.md`.
+- **On an idle phone:** `device-sweep queue <NSP folder> <APK | installed>` adds a `sweep` job to device-watch's queue, which `device-watch match` lists like any other job, and `device-sweep run <serial> <job id>` runs it. The runner:
+  1. takes the device's claim as every job does, and refuses a held device;
+  2. pulls the app's APK;
+  3. installs the build (or keeps the installed app);
+  4. sweeps, comparing against the last sweep of that game on that phone;
+  5. puts the APK back, releases the claim, and marks the job done with the result line.
+
+  device-watch and device-sweep are the orchestration tooling on the test Mac, outside this repository.
+
+**The routes:** the 12 downloaded saves on the test Mac, each in its game's `saves/dl-<name>/` folder. Loads are measured from the launch, on a Galaxy Z Flip 7 (Xclipse 950) and a Retroid Pocket 5 (Adreno 650):
+
+| Game | Route | Where it stands | Load to scene |
+|---|---|---|---|
+| Breath of the Wild | `dl_main_story` | the Great Plateau, after the main story | 62 s |
+| Link's Awakening | `dl_eagles_tower` | Mabe Village, before Eagle's Tower | 27 s |
+| | `dl_turtle_rock` | Tal Tal Mountain Range, before Turtle Rock | 27 s |
+| Persona 3 Portable | `dl_final_day` | the Dark Hour at Tartarus, on 1/31 | (no ready pattern) |
+| Pokémon Shield | `dl_wyndon` | a Wyndon street, with all eight badges | 25 s |
+| | `dl_postgame` | a Pokémon Center, post-game | 26 s |
+| Skyward Sword HD | `dl_sand_sea` | by a bird statue in the Lanayru Sand Sea | 30 s |
+| Smash Bros. Ultimate | `dl_all_characters` | a battle against a random fighter, every fighter unlocked | (no ready pattern) |
+| Super Mario Odyssey | `dl_metro`, `dl_sand`, `dl_bowsers` | New Donk City, outside Tostarena, Bowser's Kingdom | 51 s |
+| Ocarina of Time | none yet | the 100 % save: killed for memory on the Flip before it loaded; it needs a phone with more memory | |
+
+Breath of the Wild's keys clear the "Downloaded DLC" notice first, so they work only when The Champions' Ballad is packed.
+
 ## What the GPU backend needs from this device
 
 The front end logs the Vulkan device's capabilities at start. The Adreno 619's driver (Vulkan 1.1.128) has no BC texture compression (every packaged
