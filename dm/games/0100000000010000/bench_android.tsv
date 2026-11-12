@@ -1,5 +1,9 @@
 # Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description [<TAB> KEY=VALUE;KEY=VALUE]
 # ready: the title's blank sound stream opens about when the Start menu shows (DM_FS=1 logs it)
+# ready (dl_*): the costume list opens when the kingdom loads after Continue (the kingdom's stage files open at the title already, for its background)
 boot	-	-	25	30	DummyBlank\.dspadpcm	the Joy-Con screen, then the Start menu idling: no input, a fresh save
 opening	25:A	-	40	30	DummyBlank\.dspadpcm	A fresh save: A at 25 s on the Start menu begins the game, and the real-time opening cutscene plays (Bowser's airship)
 make_save	f1000:A,f8200:RLeft~6,f9200:LUp~4	-	175	15	DummyBlank\.dspadpcm	A fresh save into play (the profile's route): Start, the opening, then the Look Around hint answered on the ship; the game saves at about frame 9,900. Run with --keep-save
+dl_metro	12:A*24/2	saves/dl-metro	75	60	SystemData/CostumeList\.szs	a downloaded save in the Metro Kingdom: A through the Joy-Con screen, the update notices (the save predates them; one A a page, some swallowed while a page slides in) and Continue, then Mario standing by the Odyssey in New Donk City
+dl_sand	12:A*24/2	saves/dl-sand	75	60	SystemData/CostumeList\.szs	a downloaded save in the Sand Kingdom: A through the Joy-Con screen, the update notices (the save predates them; one A a page, some swallowed while a page slides in) and Continue, then Mario (in the white tuxedo) standing on the dunes outside Tostarena
+dl_bowsers	12:A*24/2	saves/dl-bowsers	75	60	SystemData/CostumeList\.szs	a downloaded save in Bowser's Kingdom: A through the Joy-Con screen, the update notices (the save predates them; one A a page, some swallowed while a page slides in) and Continue, then Mario standing in a courtyard of Bowser's Kingdom (he lies down to idle after a while)
