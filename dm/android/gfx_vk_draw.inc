@@ -2239,6 +2239,13 @@ static void ds_chunk_done(chunk *c) {
 static const uint8_t c_bases[6] = {0x11, 0x51, 0x41, 0x67, 0x77, 0x31};   // c0 storage-buffer address table per NVN stage (×0x10): vertex 0x110, fragment 0x510, geometry 0x410, compute 0x310, NVN2 task 0x670 and mesh 0x770 (dmsh_abi.h)
 // The driver banks of a stage, made from the bound state: c0 (storage buffer addresses, base instance at 0x644) and c2 (texture, image and sampler handles)
 static uint32_t g_cdim[3];   // the current dispatch's group counts (c0 + 0x200 for compute)
+// An indirect dispatch whose arguments a dispatch before it wrote (a pending write-back) runs as vkCmdDispatchIndirect on that write's GPU copy, its group counts copied into its c0
+// bank on the GPU (bank_c0's words), instead of the replay submitting the chunk and waiting for the write to land so it can read the counts (ranges_view, ind_read): Ocarina of
+// Time's culling makes such dispatches about 1.4 times a frame, and each drain took the replay thread 7-10 ms a frame on a Galaxy Z Fold 8 in Kokiri Forest, the GPU idle
+// meanwhile. Not for a kernel with spilled shared memory (tgs: sized from the counts on the CPU) or the upscaler replacement. DM_VK_IND_FWD=0 (env.txt): as before
+static int ind_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IND_FWD"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_IND_FWD=0: an indirect dispatch's arguments written by the GPU are read on the CPU once landed"); } return v; }
+static VkBuffer g_c0_b; static VkDeviceSize g_c0_off;   // where stage_set put the compute c0 bank (the arena): the GPU writes the counts into it
+static uint64_t g_ind_gpu, g_ind_cpu, g_ind_cpu_wait, g_ind_seq;   // indirect dispatches run on the GPU's copy of their arguments / with the arguments read on the CPU / of them, after a wait
 static VkBuffer g_tgs_b; static VkDeviceSize g_tgs_off;   // where the dispatch's spilled shared memory lies when it is not the chunk's arena (stage_set; gfx_vk_meshemu.inc memu_kernel sets it for a kernel)
 static void bank_c0(int nst, uint8_t *b, uint32_t base_inst) {
     memset(b, 0, 0x800);
@@ -2773,6 +2780,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             memset(d + n, 0, q - n); for (; q + 4 <= aa; q += 4) memcpy(d + q, &nan, 4);
             al = aa; g_ext_checked++;
         } else if (!ucopy(src, n, al, &b, &off)) return 0;
+        if (slot == 0 && nst == 5) { g_c0_b = b; g_c0_off = off; }   // (vk_dispatch: an indirect dispatch's counts copied here on the GPU)
         int dy = s->cbdyn[i] != 0xff; if (dy) dyn[s->cbdyn[i]] = (uint32_t)off;   // a dynamic one's offset goes to the bind, its descriptor at 0
         bi[nbi] = (VkDescriptorBufferInfo){b, dy ? 0 : off, al};
         wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)s->cb[i].binding, 0, 1, dy ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &bi[nbi++], NULL};
@@ -3616,10 +3624,13 @@ static int vk_dispatch(const p_dispatch *dp) {
     if (!s) { RED_ONCE(107, "compute program without a translated compute shader"); return 0; }
     if (ndve_left_out(s->key)) { if (!g_ndve_skipped++) LOG("[vk] nn::ndve movie network: its dispatches are left out (its picture stayed black without the U-Net, which Qualcomm's compiler does not finish, and the rest cost up to 1.2 s a frame; DM_VK_NDVE=1 runs them): first %s", s->key); return 1; }
     uint32_t g[3] = {(uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z};
+    VkBuffer ib = VK_NULL_HANDLE; VkDeviceSize io = 0; int gpu_args = 0;   // the arguments read on the GPU from a pending write of them (ind_fwd_on)
+    if (dp->ind && ind_fwd_on() && !s->tgs && !s->upsq && cur()) { g_fwd_nwb = -1; gpu_args = fwd_find((uintptr_t)dp->ind, (uintptr_t)dp->ind + 12, &ib, &io) && !(io % 4); }
     { vshader *sh[4] = {s, NULL, NULL, NULL}; rd_rng r[1] = {{(uintptr_t)dp->ind, (uintptr_t)dp->ind + 12}};   // what the dispatch reads of guest memory lands first (draw_view), not everything pending
-      if (dp->ind) ranges_view(r, 1); draw_view(sh, NULL, 0); }
-    if (dp->ind && !ind_read(dp->ind, g, 12)) return 0;
-    if (!g[0] || !g[1] || !g[2]) return 1;
+      if (dp->ind && !gpu_args) { uint64_t w0 = g_view_cur + g_view_fly; ranges_view(r, 1); g_ind_cpu++; g_ind_cpu_wait += g_view_cur + g_view_fly != w0; } draw_view(sh, NULL, 0); }
+    if (dp->ind && !gpu_args && !ind_read(dp->ind, g, 12)) return 0;
+    if (!gpu_args && (!g[0] || !g[1] || !g[2])) return 1;
+    if (gpu_args) { g[0] = 0xFFFFFFFFu; g[1] = (uint32_t)++g_ind_seq; g[2] = 0; g_ind_gpu++; }   // a c0 bank of its own (ucopy shares equal banks): the GPU writes the counts into it below
     cpipe_t *cp = cpipe_get(s); if (!cp) return 0;
     stage_textures(s);
     if (s->pool) pool_sync();
@@ -3636,6 +3647,8 @@ static int vk_dispatch(const p_dispatch *dp) {
     if (g_e5_need) { cpipe_t *ce = cpipe_e5(s, g_e5_need); if (!ce) return 0; cp = ce; }   // E5B9G9R9 storage images: the pipeline that packs RGB9E5 into their R32_UINT views
     VkCommandBuffer c = cb(); if (!c) return 0;
     cb_barrier();
+    if (gpu_args) { VkBufferCopy cpy[2] = {{io, g_c0_off + DMSH_C0_DISPATCH, 12}, {io, g_c0_off + DMSH_C0_DISPATCH_NVN2, 12}};   // the group counts into the bank, where the shader reads them (bank_c0)
+        vkCmdCopyBuffer(c, ib, g_c0_b, dm_sdk_ounce() ? 2u : 1u, cpy); cb_barrier(); }
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p);
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pl, 0, 1, &set, s->ndyn, dyn);
     if (s->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pl)) return 0;
@@ -3644,7 +3657,8 @@ static int vk_dispatch(const p_dispatch *dp) {
     if (prof_on() && C->pq && C->npq + 2 <= 512 && g_nprof < 1024) { prof_rec *r = &g_prof[pr_i = g_nprof++]; memset(r, 0, sizeof *r); r->c = C; r->ncolor = -1; r->w = g[0]; r->h = g[1]; r->draws = (int)g[2]; r->seq = g_prof_seq++; r->bigfs = s->key;
         r->s0 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->pq, (uint32_t)r->s0); }
     uint32_t bcid = bc_on() ? bc_begin(c, s->key, g, C->seq) : 0;   // DM_VK_BC (gfx_vk_bc.inc)
-    vkCmdDispatch(c, g[0], g[1], g[2]); crumb(dp->ind ? 'C' : 'c', s->key, NULL, g[0], g[1] * g[2]);
+    if (gpu_args) vkCmdDispatchIndirect(c, ib, io); else vkCmdDispatch(c, g[0], g[1], g[2]);
+    crumb(dp->ind ? 'C' : 'c', s->key, NULL, g[0], g[1] * g[2]);
     bc_end(c, bcid);
     if (pr_i >= 0) { g_prof[pr_i].s1 = C->npq++; vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->pq, (uint32_t)g_prof[pr_i].s1); }
     cb_barrier();

@@ -1021,6 +1021,13 @@ The Vulkan replay has no side libraries: `dm/android/spv_alpha.h` rewrites the f
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) (its GPU-driven effects are indirect quads).
 - **Check:** `DM_NVN_IXCLOG=<n>` logs the first n conversions (record → arguments) once the GPU has run them.
 
+### An indirect dispatch's arguments written by the GPU read on the GPU (Android)
+
+- **Symptom:** Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8 and a Galaxy S25 Edge: the replay thread blocked a third of its wall time (13 ms a present at the frame step's hold 2, a wall-clock profile of the thread), the GPU idle meanwhile and its governor holding it at 500–600 MHz; "guest reads of draws: waited for the current submission" about 1.4 times a frame.
+- **Cause:** `vk_dispatch` read an indirect dispatch's group counts on the CPU (`ind_read`, into the shader's c0 bank: `bank_c0`), and a culling dispatch earlier in the same chunk had written them, so `ranges_view` submitted the chunk and waited for the whole ring to complete first: a GPU → CPU → GPU round trip for 12 bytes.
+- **Fix:** such a dispatch runs as `vkCmdDispatchIndirect` on the writer's GPU copy of the arguments (`fwd_find`, the forwardable write-back of a dispatch, in the chunk being recorded or one in flight, which is then held), and its counts are copied into its own c0 bank on the GPU by `vkCmdCopyBuffer` before it (the bank is made unique, since `ucopy` shares equal banks). Not for a kernel with spilled shared memory (sized from the counts on the CPU) or the upscaler replacement; a dispatch whose arguments no pending write holds reads them on the CPU as before. `DM_VK_IND_FWD=0` keeps the old path. The S25 Edge with hold 2 forced (`DM_FPS_TARGET=30 DM_FPS_HOLD=off`): 27.7 → 29.4 fps, frame p50 35.3 → 33.4 ms, the GPU at 832 MHz for 99 % of the window (774 before), the drains 7,326 → 4,262 a run; the Fold 25.3 → 27.3 fps. The dispatches whose arguments the forward does not find (18,600 of 25,600 a run on the S25; 2,100 of them waited) are the next thing to look at.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on the Galaxy Z Fold 8 and the Galaxy S25 Edge (DroidPlay Core).
+
 ### Indirect-count multi-draws
 
 - **Symptom:** an empty G-buffer pass (the title screen showed only the UI); later, the submitting thread waiting for the GPU before each such draw (36–54 fps in Kamura Village on an iPhone). MIO also reported missing level geometry with maxima of 4,594 and 8,192 draws.
