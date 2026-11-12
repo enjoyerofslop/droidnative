@@ -48,6 +48,7 @@
 #include "wb_promote.h"   // whether a read of a draw's pending storage buffer write takes its copy on the GPU after a barrier (gfx_vk_draw.inc wb_promote)
 #include "tex_aspect.h"   // which aspect of its image a texture slot reads: stencil mode (gfx_vk_draw.inc tex_aspect)
 #include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
+#include "stream_clip.h"   // where an indexed draw's stream is looked up to among forwardable write-backs (gfx_vk_draw.inc stream_clip)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
 #include "nvn_queue.h"   // the queue scheduler (hle_nvn.c nvn_queue.inc): event publication and GPU progress
 #include <stdatomic.h>
@@ -393,8 +394,23 @@ static void *chunk_thread(void *arg); static int stg_pool_on(void);
 // results into g_qres by slot first. The replay used to write 0: everything a game tests for visibility was fully hidden (nvn_mtl.m found culled lights the same way)
 enum { QRES = 1 << 16 };
 static uint64_t g_qres[QRES], g_qslot;   // results by slot (a ring), the next slot
-static int g_q_on = 0, g_q_act = -1; static uint64_t g_q_win;   // counting since a reset; the query open in the current pass (chunk-local index); the window's first slot
-static uint64_t g_q_reports, g_q_queries, g_ts_reports, g_qr_cmd; static _Atomic uint64_t g_qr_host;   // g_qr_*: queries reset in command buffers / on the host (Query resets below)
+static int g_q_on = 0, g_q_act = -1; static uint64_t g_q_win;   // counting since a reset; the query open in the current pass (chunk-local index; -2: a stretch counted with no query, occl_mode 0); the window's first slot
+static uint64_t g_q_reports, g_q_queries, g_q_noq, g_q_resets, g_ts_reports, g_qr_cmd; static _Atomic uint64_t g_qr_host;   // g_qr_*: queries reset in command buffers / on the host (Query resets below)
+// DM_VK_OCCLUSION (env.txt, or a game's android_defaults.txt): what a draw stretch between two samples-passed reports records. `precise` (the default): an occlusion query with
+// VK_QUERY_CONTROL_PRECISE_BIT where the GPU offers it, as before; `any`: one without it, whose result is zero when no sample passed and otherwise any nonzero count (Vulkan 1.3
+// "Occlusion Queries"), which is all a condition's equality needs; `0`: no query at all: every stretch counts as one sample passed, the report writes the number of stretches
+// since the reset, and every condition on such a report keeps drawing (rc_landed_on), so the game draws what its queries would have culled. The games whose conditions the host
+// evaluates compare a report with an earlier one of the same counter (render if equal / not equal, OP_RENDER_COND). Ocarina of Time resets its counter before every report, about
+// 530 queries a frame on binned 1440x810 passes, where Qualcomm's guidance puts them at 20-40 % of the command processor's time. OnePlus Pad 3 (Adreno 830 at 1,100 MHz), Kokiri
+// Forest: the queries themselves cost 5.25 ms of a 21.3 ms frame (24.8 ms with them and every condition drawing against 19.6 ms with neither), the culling they buy is worth
+// 3.5 ms (2,100 draws a frame instead of 2,420), and a query without the precise bit costs the same as one with it on Qualcomm's driver; so that game's android_defaults.txt sets
+// =0, GPU 21.3 -> 19.6 ms a frame (the reference entry Occlusion queries left out for a game whose culling costs more than it saves, rendering.md)
+static int occl_mode(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_OCCLUSION"); v = !e ? 2 : *e == '0' ? 0 : !strcmp(e, "any") ? 1 : 2;
+        if (v != 2) LOG("[vk] DM_VK_OCCLUSION=%s: %s", e, v ? "occlusion queries without the precise count" : "no occlusion queries: every draw stretch counts as one sample passed, every condition draws"); }
+    return v;
+}
 static int chunk_make(chunk *c) {
     VkCommandPoolCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = g_vk.qf};   // one pool per chunk: reset by the completion thread
     if (vkCreateCommandPool(g_vk.dev, &pc, NULL, &c->pool) != VK_SUCCESS) return 0;
@@ -2192,25 +2208,27 @@ static struct { uint64_t addr; int kind; } g_rc_pend[RC_PEND]; static int g_rc_n
 // DM_VK_RC_LANDED=0 (env.txt): every samples-passed condition keeps drawing, as before
 enum { RC_OCC_MIN = 4096, RC_OCC_MAX = 1u << 21 };
 #define RC_ANY UINT64_MAX
-static uint64_t *g_rc_occ, *g_rc_occf; static uint32_t g_rc_cap, g_rc_n;   // address, fence; the replay's thread alone (mtl_exec)
+static uint64_t *g_rc_occ, *g_rc_occf; static uint8_t *g_rc_occr; static uint32_t g_rc_cap, g_rc_n;   // address, fence, read by a condition since (the stats line: how many reports a condition ever reads); the replay's thread alone (mtl_exec)
+static uint64_t g_q_rep_read, g_q_rep_new;   // samples-passed reports to an address a condition has read before / to one none has
 static uint64_t g_rc_landed, g_rc_flying;   // samples-passed conditions read from memory / still in flight (drawn)
-static int rc_landed_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RC_LANDED"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RC_LANDED=0: every samples-passed condition keeps drawing"); } return v; }
+static int rc_landed_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RC_LANDED"); v = !(e && *e == '0') && occl_mode(); if (!v) LOG("[vk] %s: every samples-passed condition keeps drawing", occl_mode() ? "DM_VK_RC_LANDED=0" : "DM_VK_OCCLUSION=0"); } return v; }
 static uint32_t rc_occ_slot(const uint64_t *t, uint32_t cap, uint64_t a) { uint32_t i = (uint32_t)((a >> 4) * 0x9E3779B1u) & (cap - 1); while (t[i] && t[i] != a) i = (i + 1) & (cap - 1); return i; }
 static void rc_occ_add(uint64_t a, uint64_t fence) {
     if (!a) return;   // (0 is an empty slot)
     if (2 * (g_rc_n + 1) > g_rc_cap) {
         uint32_t nc = g_rc_cap ? 2 * g_rc_cap : RC_OCC_MIN; int clear = nc > RC_OCC_MAX; if (clear) nc = g_rc_cap;
-        uint64_t *nt = calloc(nc, sizeof *nt), *nf = calloc(nc, sizeof *nf); if (!nt || !nf) { free(nt); free(nf); return; }
+        uint64_t *nt = calloc(nc, sizeof *nt), *nf = calloc(nc, sizeof *nf); uint8_t *nr = calloc(nc, 1); if (!nt || !nf || !nr) { free(nt); free(nf); free(nr); return; }
         if (clear) { static int nl; if (nl++ < 4) LOG("[vk] conditional rendering: %u counter report addresses kept, the most it keeps: emptied", g_rc_n); g_rc_n = 0; }
-        else { for (uint32_t i = 0; i < g_rc_cap; i++) if (g_rc_occ[i]) { uint32_t k = rc_occ_slot(nt, nc, g_rc_occ[i]); nt[k] = g_rc_occ[i]; nf[k] = g_rc_occf[i]; }
+        else { for (uint32_t i = 0; i < g_rc_cap; i++) if (g_rc_occ[i]) { uint32_t k = rc_occ_slot(nt, nc, g_rc_occ[i]); nt[k] = g_rc_occ[i]; nf[k] = g_rc_occf[i]; nr[k] = g_rc_occr[i]; }
                if (nc >= 65536) LOG("[vk] conditional rendering: %u counter report addresses kept, room for %u now", g_rc_n, nc / 2); }
-        free(g_rc_occ); free(g_rc_occf); g_rc_occ = nt; g_rc_occf = nf; g_rc_cap = nc;
+        free(g_rc_occ); free(g_rc_occf); free(g_rc_occr); g_rc_occ = nt; g_rc_occf = nf; g_rc_occr = nr; g_rc_cap = nc;
     }
     uint32_t i = rc_occ_slot(g_rc_occ, g_rc_cap, a);
+    if (fence != RC_ANY) { if (g_rc_occ[i] && g_rc_occr[i]) g_q_rep_read++; else g_q_rep_new++; }
     if (!g_rc_occ[i]) { g_rc_occ[i] = a; g_rc_occf[i] = fence; g_rc_n++; }
     else if (g_rc_occf[i] != RC_ANY && (fence == RC_ANY || fence > g_rc_occf[i])) g_rc_occf[i] = fence;   // the latest report; unknown kinds for good
 }
-static int rc_occ_get(uint64_t a, uint64_t *fence) { if (!g_rc_cap || !a) return 0; uint32_t i = rc_occ_slot(g_rc_occ, g_rc_cap, a); if (g_rc_occ[i] != a) return 0; *fence = g_rc_occf[i]; return 1; }
+static int rc_occ_get(uint64_t a, uint64_t *fence) { if (!g_rc_cap || !a) return 0; uint32_t i = rc_occ_slot(g_rc_occ, g_rc_cap, a); if (g_rc_occ[i] != a) return 0; *fence = g_rc_occf[i]; g_rc_occr[i] = 1; return 1; }
 static void rc_note(uint64_t a, int kind) {   // kind 1 a timestamp, 2 a counter kind the host does not implement, 3 samples passed
     if (kind >= 2) rc_occ_add(a, kind == 3 && rc_landed_on() ? atomic_load(&g_fence) + 1 : RC_ANY);   // (the fence this submission completes: mtl_sub_commit)
     if (kind == 3) kind = 2;   // (in this submission: not landed)
@@ -2306,7 +2324,7 @@ void mtl_exec(const uint8_t *p) {
                 if (rc->mode >= 2) g_rc_skip = rc->mode == 3;
                 else { uint64_t x = 0, y = 0; int known = rc_value(rc->addr, &x) & rc_value(rc->addr + 16, &y); g_rc_skip = known && (rc->mode ? x == y : x != y); }
                 break; }
-            case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, a, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) { occl_end(); g_q_on = 1; g_q_win = g_qslot; } break; }
+            case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, a, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) { occl_end(); g_q_on = 1; g_q_win = g_qslot; g_q_resets++; } break; }
             case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = atomic_load(&g_fence) + 1; s->fenced = 1; break; }
             case OP_CLEAR_BUF: { const p_clear_buf *c = (const p_clear_buf *)a; mtl_sub_fill(c->addr, c->size, c->value); break; }
             case OP_COPY_B2B: { uint64_t s, d, n; memcpy(&s, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8); mtl_sub_copy(s, d, n); break; }
@@ -2668,8 +2686,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
       if (frame > f0) LOG("[vk] GPU busy %.2f ms per frame over the last %llu frames (%llu command buffers in all); the replay waited %.2f ms per frame for a free one of %d", (double)(g - g0) / 1e6 / (double)(frame - f0), frame - f0,
                           (unsigned long long)atomic_load(&g_gpu_chunks), (double)(w - w0) / 1e6 / (double)(frame - f0), g_nchunk);
       f0 = frame; g0 = g; w0 = w; }
-    LOG("[vk] occlusion queries %llu, samples-passed reports %llu, timestamp reports %llu, queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu; shaders with binding numbers made dense %llu (%llu bindings; spv_bind.h) (cumulative)",
-        (unsigned long long)g_q_queries, (unsigned long long)g_q_reports, (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
+    LOG("[vk] occlusion queries %llu (%s; %llu stretches counted with none), samples-passed reports %llu (%llu to an address a condition had read, %llu to one none had), counter resets %llu, timestamp reports %llu, queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu; shaders with binding numbers made dense %llu (%llu bindings; spv_bind.h) (cumulative)",
+        (unsigned long long)g_q_queries, occl_mode() == 2 ? "precise" : occl_mode() ? "any count" : "none", (unsigned long long)g_q_noq, (unsigned long long)g_q_reports, (unsigned long long)g_q_rep_read, (unsigned long long)g_q_rep_new, (unsigned long long)g_q_resets,
+        (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
         (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6,
         (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)g_bind_shaders, (unsigned long long)g_bind_entries);
     LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu; under rasterizer discard: made as dispatches %llu, left out (writing nothing) %llu, their storage buffer writes in place on a home copy %llu / through a scratch copy %llu, home copies made %llu (%llu from a chunk in flight on the GPU), home ranges learned %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig, (unsigned long long)g_rd_made, (unsigned long long)g_rd_none, (unsigned long long)g_rd_w[0], (unsigned long long)g_rd_w[1], (unsigned long long)g_rd_w[2], (unsigned long long)g_rd_w[3], (unsigned long long)g_rd_learned);
@@ -2677,7 +2696,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
                        (unsigned long long)g_me_draws, (unsigned long long)g_me_parts, (unsigned long long)g_me_skipped, (unsigned long long)g_me_left, (unsigned long long)g_me_kpipes, (unsigned long long)g_me_kcached, (unsigned long long)g_me_kbg, atomic_load(&g_me_kpipe_ns) / 1e6);
     pool_stats();
     shadow_line();
-    LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu, other bindings %llu, written in place by a later dispatch %llu; bound on another binding's copy of the same shader %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd, own_alias)", (unsigned long long)g_fwd, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1], (unsigned long long)g_alias);
+    LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu (%llu looked up as far as the write-back's end), other bindings %llu, written in place by a later dispatch %llu; bound on another binding's copy of the same shader %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd, own_alias)", (unsigned long long)g_fwd, (unsigned long long)g_stream_clip, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1], (unsigned long long)g_alias);
     LOG("[vk] render passes with every layer of their targets attached (a draw writes the layer): %llu (cumulative; gfx_vk_draw.inc rp_prepare_)", (unsigned long long)g_layered_passes);
     if (slot0_fill_on()) LOG("[vk] render passes given a scratch target in their empty colour slot 0: %llu (cumulative; gfx_vk_draw.inc slot0_fill_on)", (unsigned long long)g_slot0_fills);
     if (dup_slots_on()) LOG("[vk] render passes attaching an image once that two colour slots name: %llu, draws whose write to the slot left unused was lost: %llu (cumulative; gfx_vk_draw.inc dup_slots)", (unsigned long long)g_dup_passes, (unsigned long long)g_dup_lost);

@@ -1253,9 +1253,11 @@ static void dump_write(void) {   // after the dumped frame's commands completed
 }
 static void occl_end(void) { if (g_q_act >= 0 && C && C->open) vkCmdEndQuery(C->cb, C->qp, (uint32_t)g_q_act); g_q_act = -1; }   // the pass's open occlusion query (gfx_vk.c)
 static void occl_begin(void) {   // a draw while samples passed are counted: inside a query of this pass
-    if (!g_q_on || g_q_act >= 0 || !C || !C->qp || C->nq >= 1024) return;
+    if (!g_q_on || g_q_act != -1 || !C || !C->qp || C->nq >= 1024) return;
+    int mode = occl_mode();
+    if (!mode) { g_qres[g_qslot++ % QRES] = 1; g_q_act = -2; g_q_noq++; return; }   // the stretch's slot reads 1 with no query (DM_VK_OCCLUSION=0; the completion thread reads only the slots of queries)
     g_q_act = C->nq++; C->qg[g_q_act] = g_qslot++; g_q_queries++;
-    vkCmdBeginQuery(C->cb, C->qp, (uint32_t)g_q_act, g_vk_feat.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+    vkCmdBeginQuery(C->cb, C->qp, (uint32_t)g_q_act, mode == 2 && g_vk_feat.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
 }
 // ---- GPU time per render pass: a file named prof_now beside $DM_DUMP_DIR profiles the frame two presents later (the log lists its passes, costliest first) ----
 typedef struct { chunk *c; int s0, s1, draws, ncolor, depth, cont; uint32_t w, h; VkFormat f0; uint64_t t0, t1, seq, verts, big; const char *bigvs, *bigfs; VkFramebuffer fb; } prof_rec;   // verts: vertices drawn (indices × instances); big: the largest draw's, and its shaders (a dispatch: groups in w, h, draws; its compute shader in bigfs); cont: a piece of the pass before it (the same framebuffer, begun again after a chunk was sent in its middle)
@@ -2342,6 +2344,12 @@ static int g_vdisp;
 static int disp_like(const vshader *s) { return s->stage == SH_CS || g_vdisp; }
 static rd_homes g_rd_homes; static uint64_t g_rd_learned;   // (rd_home.h, rd_bind_w)
 enum { RD_HOME_MAX = 4 << 20 };   // a home range of more bytes is not learned: the copy is made for every chunk that writes it
+// Reading a pending write on the GPU needs the chunk the draw is recorded in: the read binds the write-back's copy there and holds the chunk in flight that holds it until
+// that one completes (fwd_find: hold = C->seq). draw_view ran before anything of the draw had opened a chunk, so the first draw after every submission in the middle of a
+// pass (64 draws, or new targets after 48) found none (buf_fwd, stream_fwd) and read the range on the CPU instead, waiting for every chunk in flight. Xenoblade Chronicles 3's
+// character draws met their skinning draws' write-backs that way about 6 times a frame, each a drain of the GPU at its lowest clock. draw_view now takes the chunk first
+// (cur), as the draw would right after. DM_VK_FWD_OPEN=0 (env.txt): as before
+static int fwd_open_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FWD_OPEN"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_FWD_OPEN=0: a draw before its chunk is open reads no pending write on the GPU"); } return v; }
 static int buf_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_BUF_FWD"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_BUF_FWD=0: a buffer a dispatch wrote syncs before a later shader reads it"); } return v; }
 static uint64_t g_buf_fwd[2];   // bindings read on the GPU from a pending write-back / written in place
 // al: the binding's offset alignment; write: the shader writes it too (a dispatch's only, in place on the current chunk's write-back)
@@ -3011,12 +3019,31 @@ static void stream_rng(int s, uintptr_t *lo, uintptr_t *hi) {
     if (h > r->size) h = r->size;
     *lo = (uintptr_t)(r->address + l); *hi = (uintptr_t)(r->address + h);
 }
+// An indexed draw's stream that starts in a forwardable write-back and runs past its end is looked up only as far as that end (stream_clip.h says when), so its overrun
+// neither misses the write-back nor teaches a home range two buffers wide. Only the newest write-back holding the stream's first byte counts. DM_VK_STREAM_CLIP=0 (env.txt):
+// such streams are looked up as bound, as before
+static int stream_clip_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_STREAM_CLIP"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_STREAM_CLIP=0: an indexed draw's stream is looked up as bound, past a write-back's end"); } return v; }
+static uint64_t g_stream_clip;   // streams looked up as far as the end of the write-back they start in
+static uintptr_t wb_clip(const chunk *c, int nwb, uintptr_t lo, uintptr_t hi, int *found) {   // (stream_clip_end) in c's write-backs; *found: one of them holds lo
+    for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, lo + 1)) continue;
+        *found = 1; return stream_clip_end(lo, hi, (uintptr_t)w->dst, w->row_bytes, w->fwd && w->rows == 1); }
+    return 0;
+}
+static void stream_clip(uintptr_t lo, uintptr_t *hi) {   // the current chunk's write-backs from before the draw, then the chunks in flight, newest first (as fwd_find)
+    if (!C || !stream_clip_on()) return;
+    int n = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb, found = 0; uintptr_t e = wb_clip(C, n, lo, *hi, &found);
+    if (!found && atomic_load(&g_inflight_wb)) { pthread_mutex_lock(&g_cmu);
+        for (int f = g_fifo_n - 1; f >= 0 && !found; f--) e = wb_clip(g_fifo[f], g_fifo[f]->nwb, lo, *hi, &found);
+        pthread_mutex_unlock(&g_cmu); }
+    if (e) { *hi = e; g_stream_clip++; }
+}
 static int stream_fwd(const vshader *vs, int s, VkBuffer *b, VkDeviceSize *o) {   // *o: where the stream's address is in the copy (bind_vbufs adds its first vertex's offset)
     if (vk_safe()) return 0;
     const NVNbufferRange *r = &D.vbuf[s]; if (!r->address || !r->size) return 0;
     if (fwd_early() && (!C || (!C->nfwd && !atomic_load(&g_inflight_fwd)))) { g_fwd_early++; return 0; }
     if (!stream_direct(vs, s)) return 0;
     g_fwd_look++; uintptr_t lo, hi; stream_rng(s, &lo, &hi);
+    if (g_vr1 <= g_vr0 || g_vr0 < 0) stream_clip(lo, &hi);   // indexed: the bound range (before fwd_find, which would learn its overrun as a home range)
     if (!fwd_find(lo, hi, b, o)) return 0;
     VkDeviceSize back = (VkDeviceSize)(lo - (uintptr_t)r->address); if (*o < back) return 0;   // (a copy that starts past the stream's address: its binding cannot start there)
     *o -= back; return 1;
@@ -3220,6 +3247,7 @@ static void dep_log(vshader *const sh[4], const rd_rng *r, const char *kd, const
 // such draw after one GPU write-back a round trip: Final Fantasy Resonance's opening reads buffer textures in most draws, ~100 syncs a frame, 15.5 fps on the Odin 2 and 10 on the Pad 3
 static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   // vtx: the vertex streams too (a draw; 0 for a dispatch)
     if (vk_safe()) { g_fwd_nwb = 0; cpu_view(); return; }
+    if (!C && fwd_open_on()) cur();   // the chunk the draw is recorded in, before the lookups of pending writes in the chunks in flight (fwd_open_on)
     if (gm_view(sh)) { g_fwd_nwb = 0; return; }   // raw global memory reads anything at the GPU's time: with DM_VK_RAW_GMEM_SYNC=1 every pending write-back landed (gfx_vk_gmem.inc)
     rd_rng r[16 + 1 + 4 * 32 + 4 * 32]; char kd[16 + 1 + 4 * 32 + 4 * 32], K = 'v'; signed char ks[16 + 1 + 4 * 32 + 4 * 32], KS = -1; int n = 0, over = 0;
     #define RNG(a, s) do { uintptr_t a_ = (uintptr_t)(a); uint64_t s_ = (s); if (a_ && s_) { if (n < (int)(sizeof r / sizeof *r)) { kd[n] = K; ks[n] = KS; r[n++] = (rd_rng){a_, a_ + (uintptr_t)s_}; } else over = 1; } } while (0)
