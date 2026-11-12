@@ -480,6 +480,20 @@ static size_t spv_fit_tgs(const uint32_t *code, size_t nw, const char *what, uin
     static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("[vk] the GPU takes %lld bytes of shared memory a compute shader: shaders that declare more take it from a storage buffer, a region a workgroup (spv_tgspill). First: %s, %u bytes", tgs_limit(), what, b);
     *out = o; return k;
 }
+// The vertex shader with its outputs started as (0,0,0,1) (spv_vsinit.h), in *out (to free); 0 when it is no vertex shader or has no output to start.
+// On every GPU: an unwritten component is undefined in Vulkan and reads 0 on the Adreno 840 and the Mali-G715, where the hardware gives (0,0,0,1).
+// DM_SPV_VSINIT=0 (env.txt): modules as translated
+static size_t spv_fit_vsinit(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_VSINIT"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_VSINIT=0: vertex shader outputs are not started as (0,0,0,1)"); }
+    *out = NULL;
+    if (!on || nw < 5 || !spv_vsinit_wanted(code, nw)) return 0;
+    size_t cap = nw + 15 + 3 * SPV_VSINIT_MAX; uint8_t *s = malloc(2 * (size_t)code[3]); uint32_t *o = malloc(cap * 4);
+    size_t k = s && o ? spv_vsinit(code, nw, s, o, cap) : 0; free(s);
+    if (!k) { free(o); return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1)) LOG("[vk] vertex shader outputs start as (0,0,0,1), as on the hardware, where Vulkan leaves an unwritten component undefined (DM_SPV_VSINIT=0: as translated). First: %s", what);
+    *out = o; return k;
+}
 static size_t spv_fit_layer(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LAYER"); on = !(e && *e == '0'); }
     *out = NULL;
@@ -826,9 +840,18 @@ static void gc_release(gc_ent *e) {   // its region back to its class's list, fo
     gc_reg *r = malloc(sizeof *r); if (!r) return;
     *r = (gc_reg){e->blk, e->off, e->seq, g_gc_free[e->cls]}; g_gc_free[e->cls] = r; g_gc_bytes -= 256ull << e->cls;
 }
-static void gc_evict(void) {   // the kept copies no draw used in the last few seconds
-    uint64_t now = atomic_load(&g_presents);
-    for (uint32_t i = 0; i < g_gc.cap; i++) { gc_ent *e = g_gc.vals[i]; if (e && e->state == 1 && e->seen + 120 < now) { gc_release(e); e->state = 0; e->dirty = 0; } }
+// The kept copies no draw used in the last few seconds are let go when a new one finds no room. The walk covers the whole table (tens of thousands of entries), so it is
+// made at most once a present, and after one that freed nothing only every 60th: Mario Kart World's race asked 16 to 43 times a frame with the cache full, and the walks
+// were 3 to 9 ms of the replay's frame on a Galaxy S25 Edge (gc_evict under gc_alloc). DM_VK_GC_EVICT_PACE=0 (env.txt): a walk at every request, as before
+static uint64_t g_gc_evicts, g_gc_evicted, g_gc_evict_skips;   // walks made, copies they let go, requests that found a walk not due
+static int gc_evict(void) {   // → 1 when it walked
+    uint64_t now = atomic_load(&g_presents); static uint64_t next; static int pace = -1;
+    if (pace < 0) { const char *e = getenv("DM_VK_GC_EVICT_PACE"); pace = !(e && *e == '0'); }
+    if (pace && now < next) { g_gc_evict_skips++; return 0; }
+    uint64_t n = 0;
+    for (uint32_t i = 0; i < g_gc.cap; i++) { gc_ent *e = g_gc.vals[i]; if (e && e->state == 1 && e->seen + 120 < now) { gc_release(e); e->state = 0; e->dirty = 0; n++; } }
+    g_gc_evicts++; g_gc_evicted += n; next = now + (n ? 1 : 60);
+    return 1;
 }
 static uint8_t *gc_alloc(int cls, int *blk, VkDeviceSize *off) {
     uint64_t done = __atomic_load_n(&g_seq_done, __ATOMIC_ACQUIRE);
@@ -848,7 +871,7 @@ static uint8_t *gc_alloc(int cls, int *blk, VkDeviceSize *off) {
             vkBindBufferMemory(g_vk.dev, b->b, b->m, 0); vkMapMemory(g_vk.dev, b->m, 0, GC_BLOCK, 0, (void **)&b->p); g_gc_nblk++;
             continue;
         }
-        if (pass == 0) { gc_evict(); for (gc_reg **pp = &g_gc_free[cls]; *pp; pp = &(*pp)->next) if ((*pp)->seq <= done) {
+        if (pass == 0) { if (!gc_evict()) return NULL; for (gc_reg **pp = &g_gc_free[cls]; *pp; pp = &(*pp)->next) if ((*pp)->seq <= done) {
             gc_reg *r = *pp; *pp = r->next; *blk = r->blk; *off = r->off; free(r); return g_gc_blk[*blk].p + *off; } }
     }
     return NULL;
@@ -1234,7 +1257,7 @@ static void occl_begin(void) {   // a draw while samples passed are counted: ins
     vkCmdBeginQuery(C->cb, C->qp, (uint32_t)g_q_act, g_vk_feat.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
 }
 // ---- GPU time per render pass: a file named prof_now beside $DM_DUMP_DIR profiles the frame two presents later (the log lists its passes, costliest first) ----
-typedef struct { chunk *c; int s0, s1, draws, ncolor, depth; uint32_t w, h; VkFormat f0; uint64_t t0, t1, seq, verts, big; const char *bigvs, *bigfs; } prof_rec;   // verts: vertices drawn (indices × instances); big: the largest draw's, and its shaders (a dispatch: groups in w, h, draws; its compute shader in bigfs)
+typedef struct { chunk *c; int s0, s1, draws, ncolor, depth, cont; uint32_t w, h; VkFormat f0; uint64_t t0, t1, seq, verts, big; const char *bigvs, *bigfs; VkFramebuffer fb; } prof_rec;   // verts: vertices drawn (indices × instances); big: the largest draw's, and its shaders (a dispatch: groups in w, h, draws; its compute shader in bigfs); cont: a piece of the pass before it (the same framebuffer, begun again after a chunk was sent in its middle)
 static prof_rec g_prof[1024]; static int g_nprof, g_prof_cur = -1; static long g_prof_at = -1; static uint64_t g_prof_seq;
 static int prof_on(void) { return g_prof_at > 0 && (long)atomic_load(&g_presents) + 1 == g_prof_at; }
 static void prof_poll(uint64_t presents) {
@@ -1246,7 +1269,8 @@ static void prof_pass_begin(void) {
     if (!prof_on() || !C || !C->pq || C->npq + 2 > 512 || g_nprof >= 1024) return;
     prof_rec *r = &g_prof[g_nprof]; memset(r, 0, sizeof *r); r->c = C; r->s0 = C->npq++; r->s1 = -1; r->w = P.w; r->h = P.h; r->ncolor = (int)P.key.ncolor; r->depth = P.key.depth != 0;
     for (uint32_t i = 0; i < P.key.ncolor; i++) if (P.key.color[i]) { r->f0 = P.key.color[i]; break; }
-    r->seq = g_prof_seq++;
+    r->seq = g_prof_seq++; r->fb = P.fb;
+    for (int i = g_nprof - 1; i >= 0; i--) if (g_prof[i].ncolor >= 0) { r->cont = g_prof[i].fb == P.fb && g_prof[i].seq + 1 == r->seq; break; }   // the record before it is a pass of the same framebuffer: a piece
     vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->pq, (uint32_t)r->s0); g_prof_cur = g_nprof++;
 }
 static void prof_pass_end(void) {
@@ -1268,11 +1292,23 @@ static void prof_write(void) {
     for (int i = 0; i < g_nprof; i++) if (g_prof[i].t1 > g_prof[i].t0) { sum += (g_prof[i].t1 - g_prof[i].t0) * per / 1e3; if (g_prof[i].t0 < lo) lo = g_prof[i].t0; if (g_prof[i].t1 > hi) hi = g_prof[i].t1; n++; }
     int unclosed = 0, unread = 0, ncs = 0; double cs = 0;
     for (int i = 0; i < g_nprof; i++) { if (g_prof[i].s1 < 0) unclosed++; else if (g_prof[i].c) unread++; if (g_prof[i].ncolor < 0 && g_prof[i].t1 > g_prof[i].t0) { ncs++; cs += (g_prof[i].t1 - g_prof[i].t0) * per / 1e3; } }
-    LOG("[prof] frame %ld: %d records (%d not closed, %d not read), %d timed, %.0f us in them (%d dispatches %.0f us), first start to last end %.0f us", g_prof_at, g_nprof, unclosed, unread, n, sum, ncs, cs, hi > lo ? (hi - lo) * per / 1e3 : 0.0);
+    int npieces = 0; double pieces = 0;   // passes begun again on the same framebuffer after a chunk was sent in their middle (gfx_vk.c MID_DRAWS): each loads and stores its targets again
+    for (int i = 0; i < g_nprof; i++) if (g_prof[i].ncolor >= 0 && g_prof[i].cont && g_prof[i].t1 > g_prof[i].t0) { npieces++; pieces += (g_prof[i].t1 - g_prof[i].t0) * per / 1e3; }
+    LOG("[prof] frame %ld: %d records (%d not closed, %d not read), %d timed, %.0f us in them (%d dispatches %.0f us; %d passes continued after a cut, %.0f us in them), first start to last end %.0f us",
+        g_prof_at, g_nprof, unclosed, unread, n, sum, ncs, cs, npieces, pieces, hi > lo ? (hi - lo) * per / 1e3 : 0.0);
+    // each pass with its pieces, costliest first: a target drawn again later in the frame is another pass
+    { struct { VkFramebuffer fb; uint64_t seq, verts; int draws, pieces; double us; uint32_t w, h; } g[256]; int ng = 0;
+      for (int i = 0; i < g_nprof; i++) { prof_rec *r = &g_prof[i]; if (r->ncolor < 0 || r->t1 <= r->t0) continue;
+          if (r->cont && ng && g[ng - 1].fb == r->fb) { g[ng - 1].draws += r->draws; g[ng - 1].pieces++; g[ng - 1].us += (r->t1 - r->t0) * per / 1e3; g[ng - 1].verts += r->verts; continue; }
+          if (ng == 256) break;
+          g[ng].fb = r->fb; g[ng].seq = r->seq; g[ng].draws = r->draws; g[ng].pieces = 1; g[ng].us = (r->t1 - r->t0) * per / 1e3; g[ng].verts = r->verts; g[ng].w = r->w; g[ng].h = r->h; ng++; }
+      for (int a = 0; a < ng; a++) for (int b = a + 1; b < ng; b++) if (g[b].us > g[a].us) { __typeof__(g[0]) t = g[a]; g[a] = g[b]; g[b] = t; }
+      for (int i = 0; i < ng && i < 16; i++) LOG("[prof] whole pass from #%llu: %7.0f us  %ux%u  %d pieces  draws %d  vertices %llu", (unsigned long long)g[i].seq, g[i].us, g[i].w, g[i].h, g[i].pieces, g[i].draws, (unsigned long long)g[i].verts); }
     qsort(g_prof, (size_t)g_nprof, sizeof *g_prof, prof_cmp);
-    for (int i = 0; i < g_nprof && i < 40; i++) { prof_rec *r = &g_prof[i]; if (r->t1 <= r->t0) continue;
+    static int top = -1; if (top < 0) { const char *e = getenv("DM_VK_PROF_TOP"); top = e ? atoi(e) : 1024; }   // every record, costliest first; DM_VK_PROF_TOP=<n>: the first n
+    for (int i = 0; i < g_nprof && i < top; i++) { prof_rec *r = &g_prof[i]; if (r->t1 <= r->t0) continue;
         if (r->ncolor < 0) LOG("[prof] %7.0f us  dispatch #%llu  %ux%ux%u groups  cs %s", (r->t1 - r->t0) * per / 1e3, (unsigned long long)r->seq, r->w, r->h, (unsigned)r->draws, r->bigfs ? r->bigfs : "-");
-        else LOG("[prof] %7.0f us  pass #%llu  %ux%u  colour %d (vk%d) depth %d  draws %d  vertices %llu (largest draw %llu: vs %s fs %s)", (r->t1 - r->t0) * per / 1e3, (unsigned long long)r->seq, r->w, r->h,
+        else LOG("[prof] %7.0f us  pass #%llu%s  %ux%u  colour %d (vk%d) depth %d  draws %d  vertices %llu (largest draw %llu: vs %s fs %s)", (r->t1 - r->t0) * per / 1e3, (unsigned long long)r->seq, r->cont ? " (piece)" : "", r->w, r->h,
                  r->ncolor, r->f0, r->depth, r->draws, (unsigned long long)r->verts, (unsigned long long)r->big, r->bigvs ? r->bigvs : "-", r->bigfs ? r->bigfs : "-"); }
     g_nprof = 0; g_prof_at = -1;
 }
@@ -1377,7 +1413,7 @@ static void lin_writeback(int i) {   // attachment i of the pass that ends
 }
 static void rp_end(void) {
     if (!P.active) return;
-    occl_end(); prof_pass_end(); vkCmdEndRenderPass(C->cb); P.active = 0; if (dump_on()) dump_pass_end();
+    occl_end(); vkCmdEndRenderPass(C->cb); prof_pass_end(); P.active = 0; if (dump_on()) dump_pass_end();   // the profile's end timestamp after the pass: on a tiler the tiles' stores are part of it (a timestamp inside a pass is written per tile, and only the last tile's draws came before it)
     for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) {
         if (g_bcrt_pend[i].base->conv) bcd_decode(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly);   // decoded on the GPU into the image the game samples
         else bcrt_copy(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly, 1);
@@ -2027,7 +2063,7 @@ static void *apipe_thread(void *arg) {
         VkResult pr = pipe_make(&q.k, &tmp, &ns, &nva, &tp);
         double ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6;
         pthread_mutex_lock(&g_bk);
-        if (pr == VK_SUCCESS) { *q.pp = tmp; pk_record(&q.k); pcache_made(); g_apq_built++; } else { q.pp->pl = VK_NULL_HANDLE; g_apq_failed++; }   // (failed: never made again, as at once)
+        if (pr == VK_SUCCESS) { *q.pp = tmp; pk_record(&q.k); pcache_made(); g_apq_built++; } else { q.pp->pl = VK_NULL_HANDLE; g_apq_failed++; vk_start_pipe_failed(q.k.sh[0] ? q.k.sh[0]->key : NULL, q.k.sh[1] ? q.k.sh[1]->key : "-"); }   // (failed: never made again, as at once)
         uint64_t built = g_apq_built, queued = g_apq_queued, left = g_apq_left;
         pthread_mutex_unlock(&g_bk);
         if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] pipeline creation failed in the background: VkResult %d (shaders %s %s; %u stages, %u vertex attributes, %u colour targets, topology %d)",
@@ -2076,6 +2112,7 @@ static pipe_t *pipe_get(const pipe_key *k) {
     if (pr != VK_SUCCESS) {
         static int n; if (n++ < 16) LOG("[RED] [vk] pipeline creation failed: VkResult %d (shaders %s%s %s; %u stages, %u vertex attributes, %u colour targets, topology %d, %u samples)", pr, k->sh[0] ? k->sh[0]->key : "-",
             k->z && k->sh[0] && k->sh[0]->modz ? " (.z)" : "", k->sh[1] ? k->sh[1]->key : "-", ns, nva, k->ncolor, (int)tp, k->rk.samples);
+        vk_start_pipe_failed(k->sh[0] ? k->sh[0]->key : NULL, k->sh[1] ? k->sh[1]->key : "-");   // the start record's count, which the desktop app reads
         pp->p = VK_NULL_HANDLE; return NULL;
     }
     if (vk_debug()) LOG("[vk] pipeline %u for shaders %s %s", g_pipes.n, k->sh[0] ? k->sh[0]->key : "-", k->sh[1] ? k->sh[1]->key : "-");
@@ -3392,7 +3429,7 @@ static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); VkResult pr = lm_pipeline(NULL, &pc, &pc.stage, mod, 1, &cp->p);
     pb_end(pb);
     atomic_fetch_add(&g_cpso_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); atomic_fetch_add(&g_cpso_made, 1);
-    if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] compute pipeline of shader %s failed", s->key); cp->p = VK_NULL_HANDLE; return NULL; }
+    if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] compute pipeline of shader %s failed", s->key); vk_start_pipe_failed(s->key, NULL); cp->p = VK_NULL_HANDLE; return NULL; }
     if (vk_debug()) LOG("[vk] compute pipeline for shader %s", s->key);
     return cp;
 }
