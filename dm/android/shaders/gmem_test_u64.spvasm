@@ -1,0 +1,87 @@
+; Raw global memory's self-test on a driver that takes the pools' descriptor array (gfx_vk_gmem_check.inc gm_selftest, DM_VK_RAW_GMEM_TEST=1; gfx_vk_gmem_noptr.inc):
+; gmem_test.comp with its pointer made exactly as the translator's raw helper makes one: the address plus the table entry's delta in two 32-bit halves, a v2uint
+; bitcast to ulong, OpConvertUToPtr to a pointer to the vector itself, and a load aligned as words. Assembly because GLSL's buffer references make a pointer to a
+; block and reach the vector by an access chain, which spv_noptr leaves alone. The module is never built as it is: spv_noptr rewrites it at run time as it rewrites
+; the game's shaders, so the test reads through the very accesses they do (a vector load in two fetches, at addresses that are multiples of 4 and not of 16 too).
+; glslc assembles a .spvasm as SPIR-V 1.0 whatever --target-env says, hence the storage-class extension.
+; set 0 binding 0: the pool table; binding 1: req[64] (the address's low and high words, the table entry), then got[64]
+               OpCapability Shader
+               OpCapability PhysicalStorageBufferAddresses
+               OpCapability Int64
+               OpExtension "SPV_KHR_physical_storage_buffer"
+               OpExtension "SPV_KHR_storage_buffer_storage_class"
+               OpMemoryModel PhysicalStorageBuffer64 GLSL450
+               OpEntryPoint GLCompute %main "main" %lid
+               OpExecutionMode %main LocalSize 64 1 1
+               OpDecorate %lid BuiltIn LocalInvocationId
+               OpDecorate %words ArrayStride 4
+               OpMemberDecorate %tab_t 0 Offset 0
+               OpMemberDecorate %tab_t 0 NonWritable
+               OpDecorate %tab_t Block
+               OpDecorate %tab DescriptorSet 0
+               OpDecorate %tab Binding 0
+               OpDecorate %vec64 ArrayStride 16
+               OpMemberDecorate %io_t 0 Offset 0
+               OpMemberDecorate %io_t 1 Offset 1024
+               OpDecorate %io_t Block
+               OpDecorate %io DescriptorSet 0
+               OpDecorate %io Binding 1
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+       %bool = OpTypeBool
+     %v2uint = OpTypeVector %uint 2
+     %v3uint = OpTypeVector %uint 3
+     %v4uint = OpTypeVector %uint 4
+      %ulong = OpTypeInt 64 0
+     %p_in_3 = OpTypePointer Input %v3uint
+        %lid = OpVariable %p_in_3 Input
+      %words = OpTypeRuntimeArray %uint
+      %tab_t = OpTypeStruct %words
+    %p_tab_t = OpTypePointer StorageBuffer %tab_t
+        %tab = OpVariable %p_tab_t StorageBuffer
+   %p_sb_uint = OpTypePointer StorageBuffer %uint
+    %uint_64 = OpConstant %uint 64
+      %vec64 = OpTypeArray %v4uint %uint_64
+       %io_t = OpTypeStruct %vec64 %vec64
+     %p_io_t = OpTypePointer StorageBuffer %io_t
+         %io = OpVariable %p_io_t StorageBuffer
+    %p_sb_v4 = OpTypePointer StorageBuffer %v4uint
+  %p_phys_v4 = OpTypePointer PhysicalStorageBuffer %v4uint
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+     %uint_4 = OpConstant %uint 4
+     %uint_5 = OpConstant %uint 5
+     %uint_8 = OpConstant %uint 8
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+        %lv3 = OpLoad %v3uint %lid
+          %i = OpCompositeExtract %uint %lv3 0
+      %p_req = OpAccessChain %p_sb_v4 %io %int_0 %i
+        %req = OpLoad %v4uint %p_req
+      %a_lo = OpCompositeExtract %uint %req 0
+      %a_hi = OpCompositeExtract %uint %req 1
+        %ent = OpCompositeExtract %uint %req 2
+          %e = OpIMul %uint %ent %uint_8
+         %e4 = OpIAdd %uint %e %uint_4
+         %e5 = OpIAdd %uint %e %uint_5
+      %p_dlo = OpAccessChain %p_sb_uint %tab %int_0 %e4
+        %dlo = OpLoad %uint %p_dlo
+      %p_dhi = OpAccessChain %p_sb_uint %tab %int_0 %e5
+        %dhi = OpLoad %uint %p_dhi
+         %lo = OpIAdd %uint %a_lo %dlo
+      %carry = OpULessThan %bool %lo %a_lo
+         %c1 = OpSelect %uint %carry %uint_1 %uint_0
+        %hi0 = OpIAdd %uint %a_hi %dhi
+         %hi = OpIAdd %uint %hi0 %c1
+       %both = OpCompositeConstruct %v2uint %lo %hi
+       %addr = OpBitcast %ulong %both
+        %ptr = OpConvertUToPtr %p_phys_v4 %addr
+        %val = OpLoad %v4uint %ptr Aligned 4
+      %p_got = OpAccessChain %p_sb_v4 %io %int_1 %i
+               OpStore %p_got %val
+               OpReturn
+               OpFunctionEnd

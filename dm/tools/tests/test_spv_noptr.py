@@ -228,6 +228,16 @@ class SpvNoPtr(unittest.TestCase):
             if env == 'vulkan1.2': ep = [x for op, x in o if op == 15][0]; self.assertTrue(set(views) <= set(ep[3:]))
             self.assertNotIn(11, {x[0] for op, x in o if op == 17})
 
+    def test_the_self_tests_module_is_rewritten(self):   # shaders/gmem_test_u64.spvasm as the build assembles it (glslc: SPIR-V 1.0): a form spv_noptr takes, or the test never runs
+        src = (REPO / 'dm/android/shaders/gmem_test_u64.spvasm').read_text()
+        data = self.asm(src, 'selftest', 'spv1.0'); self.assertTrue(self.wanted(data))
+        for nu, fetches in ((3, 2), (1, 4)):   # its one uvec4 load: two fetches of the uvec4 view, or four of a word
+            out, why = self.run_on(data, set_=1, nu=nu); self.assertIsNotNone(out, why); assert out is not None
+            self.valid(out, f'selftest{nu}'); o = ops(out)
+            self.assertFalse([x for op, x in o if op == 120])
+            sets = {x[0]: x[2] for op, x in o if op == 71 and x[1] == 34}; views = [v for v, st in sets.items() if st == 1]
+            self.assertEqual(len([x for op, x in o if op == 65 and x[2] in views]), fetches)
+
     def test_without_nonuniform_decorations(self):   # the diagnostic form: the same accesses, none decorated
         out, why = self.run_on(self.asm(CS, 'nonu'), nu=0); self.assertIsNotNone(out, why); assert out is not None
         self.valid(out, 'nonu'); o = ops(out)

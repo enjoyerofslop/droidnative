@@ -6,7 +6,7 @@ static const uint32_t k_gm_test_cs[] =
 #include "shaders/gmem_test.comp.inc"
 ;
 static const uint32_t k_gm_test_u64_cs[] =   // without physical pointers: rewritten by spv_noptr as the game's shaders are, the pools' descriptor array at set 1 (gfx_vk_gmem_noptr.inc)
-#include "shaders/gmem_test_u64.comp.inc"
+#include "shaders/gmem_test_u64.spvasm.inc"
 ;
 static void gm_selftest(void) {
     const char *e = getenv("DM_VK_RAW_GMEM_TEST"); if (!e || *e != '1' || !g_ngm) return;

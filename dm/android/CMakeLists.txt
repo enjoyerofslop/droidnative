@@ -43,7 +43,7 @@ foreach(s ${DM}/host/entry.S ${DM}/gfx/nvn/nvn_entry.S ${DM}/gfx/nvn/nvn_thunks.
 endforeach()
 
 # The Vulkan replay's own shaders (shaders/*.vert, *.frag, *.comp: gfx_vk_dscopy.inc's depth-stencil copies, gfx_vk_bcdec.inc's BC decode), compiled by the NDK's glslc into the SPIR-V words gfx_vk.c
-# includes (-mfmt=c writes a C initializer)
+# includes (-mfmt=c writes a C initializer). A .spvasm is SPIR-V assembly, which glslc assembles as it is (raw global memory's self-test in the translator's form)
 file(GLOB GLSLC ${ANDROID_NDK}/shader-tools/*/glslc ${ANDROID_NDK}/shader-tools/*/glslc.exe)
 if(NOT GLSLC)
   message(FATAL_ERROR "no glslc in ${ANDROID_NDK}/shader-tools: the NDK's shader tools build the Vulkan replay's shaders")
@@ -51,7 +51,7 @@ endif()
 list(GET GLSLC 0 GLSLC)
 file(MAKE_DIRECTORY ${GEN}/shaders)
 set(SHADER_INC)
-foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag bc_decode.comp gmem_test.comp gmem_test_u64.comp gmem_probe.comp upscale_square.comp)
+foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag bc_decode.comp gmem_test.comp gmem_test_u64.spvasm gmem_probe.comp upscale_square.comp)
   add_custom_command(OUTPUT ${GEN}/shaders/${s}.inc
     COMMAND ${GLSLC} --target-env=vulkan1.1 -O -mfmt=c ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s} -o ${GEN}/shaders/${s}.inc
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s})
