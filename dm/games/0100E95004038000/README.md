@@ -288,8 +288,12 @@ Both in handheld mode, driven over adb with `DM_CTL`.
     Crustip), all drawn, a steady 30 fps (battle frame p50 33.3 ms, p95 33.9 ms, GPU 27.1 ms), no red line.
   - **Galaxy S25 Edge**, with the fix: the same route, all three drawn, a steady 30 fps (battle frame p50 33.2 ms, GPU 22.1 ms), no red line.
   - The Z Flip 7 was not run with the fix.
-- **Open:** with the fix, on both phones, the characters' skin, hair and clothes show dark, blocky speckles in close-ups (Rex in the opening's
-  dialogue); the world around them doesn't. Not the texture swizzle (the replay applies it); not looked into yet.
+- **Resolved, a dark stipple and stripes (2026-11-12):** with the characters drawn, their skin, hair and clothes showed dark, blocky speckles in close-ups,
+  and much of the world (crates, walls, the rock spires on the deck) carried the same pattern; the Mac's frames are clean. The deferred lighting classifies
+  pixels by stencil bits 3 and 4 (`3a65a75970c5ac32`, `68bd4ad78d01642b`), read through a stencil-mode view of the depth-stencil buffer, and the Vulkan replay
+  read its depth there ([Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android)).
+  It wasn't Adreno-only: the Pixel 9 Pro XL's Mali-G715 drew the same. With the fix, the S25 Edge's battle frames and the Pixel's rock spires are clean, 30 fps.
+  The Pixel draws no characters either way (no `vertexPipelineStoresAndAtomics` on the Mali, so the skinning draws are left out).
 - **Frame rate:** 30 fps (the target), every 60 s window 29.6–30.1 on the S25 Edge over 12.5 minutes, frame p50 33.2 ms; GPU 18–23 ms on the S25 Edge, 12.5–13 ms on the Z Flip 7.
 - **Sound:** a stereo `AudioOut`, no underrun on either phone. The `DM_AUDIO_DUMP` has signal (RMS about 640–1,360). Not listened to by a person.
 - **Memory:** 2.38 GB PSS on the S25 Edge (0.77 GB graphics) and 2.31 GB on the Z Flip 7. Neither was killed.
@@ -305,4 +309,5 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own): the light probe lists; see [Rendering](#rendering).
 - [Ordering barriers before a draw that writes](../../../docs/reference/rendering.md#ordering-barriers-before-a-draw-that-writes): the skinning draws; see [Rendering](#rendering).
 - [Draws under rasterizer discard that write memory](../../../docs/reference/rendering.md#draws-under-rasterizer-discard-that-write-memory-android): the skinning draws on Android; see [Android](#android).
+- [Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android): the deferred lighting's stipple on Android; see [Android](#android).
 - [Present thread rescues a silent display link](../../../docs/reference/frame-rate.md#present-thread-rescues-a-silent-display-link): the motion review's windowed timing comparison is confounded by repeated stalls; see [Controller motion review](#controller-motion-review).
