@@ -339,6 +339,29 @@ public class UnzipCheck { public static void main(String[] a) throws Exception {
         self.assertFalse((self.tmp / 'outside.spv').exists())
 
 
+class Cartridges(unittest.TestCase):   # a cartridge with several games (Batman: Arkham Trilogy): --title-id / TITLE_ID names the one to pack, as build_ipa_from_nsp.py's does
+    def test_title_id_is_parsed(self):
+        self.assertIsNone(ba.title_id(''))
+        self.assertEqual(ba.title_id(' 0100E870163CA000 '), 0x0100E870163CA000)
+        for bad in ('Asylum', '0100E870163CA00', '1100E870163CA000'):
+            with self.assertRaises(ba.BuildError): ba.title_id(bad)
+
+    def test_scan_passes_the_choice_to_the_folder_scan(self):
+        seen = []
+        class Reader:
+            contents = None
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def check_keys(self, fam): pass
+        def scan_nsps(folder, contents_of, want=None): seen.append(want); return want, {'base': None, 'updates': [], 'dlc': []}
+        with mock.patch.object(ba.bi, 'nup_file', return_value=None), mock.patch.object(ba.bi, 'dump_folder', return_value=False), \
+             mock.patch.object(ba.bi, 'package_reader', lambda *a, **k: Reader()), mock.patch.object(ba.bi, 'scan_nsps', scan_nsps):
+            _, app, _, kind = ba.scan(Path(tempfile.gettempdir()), Path('prod.keys'), {}, nsz=False, want=0x0100E870163CA000)
+            ba.scan(Path(tempfile.gettempdir()), Path('prod.keys'), {}, nsz=False)
+        self.assertEqual((app, kind), (0x0100E870163CA000, None))
+        self.assertEqual(seen, [0x0100E870163CA000, None])
+
+
 class Setup(unittest.TestCase):   # --setup (dm/android/tools/host_setup.py): what --check finds missing, installed where the script looks; nothing is downloaded here
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
