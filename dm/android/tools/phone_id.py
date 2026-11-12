@@ -31,12 +31,24 @@ def mdns_serialno(name):   # the ro.serialno an mDNS service name carries, or No
     return m[1] if m and m[1].lower() not in PLACEHOLDERS else None
 
 
-def mdns_services(out):   # `adb mdns services` → [(a phone's serial number, 'ip:port')] for each phone offering a connection (not a pairing)
+def serialno_of(name):   # the serial number in adbd's service name, with or without its type (adb-<serial number>-<suffix>[._adb-tls-….tcp]), or None
+    m = re.match(r'^adb-(.+)-[^-.]+(?:\._adb(?:-tls-(?:connect|pairing))?\._tcp\.?)?$', name or '')
+    return m[1] if m and m[1].lower() not in PLACEHOLDERS else None
+
+
+KINDS = {'_adb-tls-pairing._tcp': 'pairing', '_adb-tls-connect._tcp': 'connect', '_adb._tcp': 'tcp'}   # mDNS service types: a pairing code's, wireless debugging's, adb tcpip's
+
+
+def services(out):   # `adb mdns services` → [(name, kind, 'ip:port')]: name as adb-<serial number>-<suffix> (a QR code's pairing service is studio-…), kind from KINDS
     found = []
     for line in (out or '').splitlines():
-        m = re.match(r'(\S+?)(?:\._adb-tls-connect\._tcp\.?)?\s+_adb-tls-connect\._tcp\.?\s+(\S+:\d+)\s*$', line.strip())
-        if m and (sn := mdns_serialno(m[1] + '._adb-tls-connect._tcp')): found.append((sn, m[2]))
+        p = line.split()
+        if len(p) >= 3 and p[1].rstrip('.') in KINDS and re.fullmatch(r'\S+:\d+', p[2]): found.append((p[0].split('._adb')[0], KINDS[p[1].rstrip('.')], p[2]))
     return found
+
+
+def mdns_services(out):   # `adb mdns services` → [(a phone's serial number, 'ip:port')] for each phone offering a connection (not a pairing)
+    return [(sn, addr) for name, kind, addr in services(out) if kind == 'connect' and (sn := mdns_serialno(name + '._adb-tls-connect._tcp'))]
 
 
 def stable_id(serialno, android_id=''):   # → the phone's ID, or None when it gives neither a real serial number nor an Android ID

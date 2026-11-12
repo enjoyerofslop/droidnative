@@ -84,6 +84,35 @@ If the phone drops off during an install (it slept, Wi-Fi roamed, wireless debug
 three minutes for it to come back, finds it again by its serial number (over Wi-Fi it connects to it again by itself) and goes on: the game data, the shaders
 and large DLC carry on from what the phone already holds, and the other steps run again. Wake the phone, or plug it back in, while the Builds page says it is waiting.
 
+### Over Wi-Fi
+
+DroidPlay can install and play over Wi-Fi instead of a cable, through Android's wireless debugging (Android 11 and later):
+
+1. On the phone, turn on **Settings › Developer options › Wireless debugging**, allow it on your network, and tap **Pair device with pairing code**. Keep that
+   screen open.
+2. On the **Phones** page, click **Pair over Wi-Fi…**. It finds the phone on the network by itself and fills in its address: type the six-digit code the phone shows,
+   then **Pair**. DroidPlay then connects to the phone (adb usually does it by itself within a few seconds), and the phone appears in the list at the top.
+   If the phone isn't listed (some networks don't pass the multicast that finds it), type the address shown with the code; if the connection isn't found after
+   pairing, it asks for the address on the Wireless debugging screen itself.
+3. Install and play as over a cable. A phone already allowed over USB can skip pairing: **Connect…** with the address on its Wireless debugging screen.
+
+The phone and this computer must be on the same network: a guest network keeps devices apart. A failed pairing says why (a wrong code, the pairing screen closed,
+another network) in place of adb's own words.
+
+**Discover** lists every phone offering wireless debugging on the network (a phone already connected, over Wi-Fi or its cable, is shown as such) and connects to
+the ones you tick. **Disconnect** drops the phone picked in the list (or at the top): a phone connected by address is disconnected at once. A phone adb connected
+by itself over the network would be connected again while Wireless debugging is on, so for that one DroidPlay offers to turn Wireless debugging off on the phone.
+A phone on its cable is unplugged to disconnect it.
+
+When the phone picked at the top drops off Wi-Fi (it slept, roamed, or Wireless debugging restarted on a new port), the list at the top says **Reconnecting to
+<phone> over Wi-Fi…** and DroidPlay looks for it every 20 seconds for ten minutes, by its serial number on the network and at its last address, and connects to
+it again. If the phone's Wi-Fi itself went off, Android turns Wireless debugging off with it: turn it on again on the phone. The Performance page's log carries
+on once the phone is back.
+
+**Use over Wi-Fi…** (Phones page) takes a phone connected by its cable onto Wi-Fi with no pairing, on Android 10 as well: DroidPlay restarts adb on the phone in
+network mode (`adb tcpip 5555`) and connects to it at its Wi-Fi address, and then the cable can come out. That connection is **not encrypted** (the phone still
+accepts only computers it has allowed) and lasts until the phone restarts; on Android 11 and later, Pair over Wi-Fi gives an encrypted one.
+
 ### From source
 
 On Linux or a Mac, or on Windows without Setup, `uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the
