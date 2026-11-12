@@ -105,13 +105,17 @@ static void *pcache_save_thread(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-pcache"); setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
     vkb_pipeline_cache_save(); atomic_store(&g_pc_busy, 0); return NULL;
 }
-static void pcache_made(void) {   // pipe_get made a pipeline (under g_bk)
-    if (atomic_fetch_add(&g_pc_new, 1) + 1 < PC_EVERY) return;
+// n: what the pipeline counts as. A compile that took long counts as PC_EVERY, so it alone asks for the file (gfx_vk_meshemu.inc: a task / mesh kernel's compute pipeline
+// takes 2 to 9 s on a Galaxy Z Flip 7, and a scene's 30 to 40 of them were made again at every start that was stopped before 64 more pipelines); 0: a present, which
+// writes what a request inside the gap left waiting
+static void pcache_made_n(int n) {   // under g_bk
+    if (atomic_fetch_add(&g_pc_new, n) + n < PC_EVERY) return;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); if (g_pc_last && now - g_pc_last < PC_GAP_NS) return;
     int idle = 0; if (!atomic_compare_exchange_strong(&g_pc_busy, &idle, 1)) return;
     g_pc_last = now; atomic_store(&g_pc_new, 0);
     pthread_t th; if (pthread_create(&th, NULL, pcache_save_thread, NULL)) atomic_store(&g_pc_busy, 0); else pthread_detach(th);
 }
+static void pcache_made(void) { pcache_made_n(1); }   // pipe_get made a pipeline (under g_bk)
 
 // ---------------- Shaders ----------------
 typedef struct { int binding, slot; uint32_t ext; } rb_cbuf;   // ext: bytes the shader reads of it (cb_ext_pick: res.json's or spv_cb_ext2's; 0 = all)
@@ -146,7 +150,9 @@ typedef struct {
     uint64_t e5[2]; void *cpe5[2];   // compute: sets of storage image bindings bound to E5B9G9R9 textures, and its pipeline for each with those packed (cpipe_e5, spv_e5.h)
     uint8_t upsq;   // a compute shader DM_VK_UPSCALER_SQUARE_CS lists: its dispatches are replaced (gfx_vk_upsq.inc)
     const spv_bmap *bmap;   // its set's binding numbers compacted (spv_bind.h): NULL when none is at SPV_BIND_FROM or past it; its modules and its layout take it
+    struct memu_t *memu;   // a task or mesh shader's compute form, on a GPU without VK_EXT_mesh_shader (gfx_vk_meshemu.inc: its facts, pipeline and pass-through vertex shader)
 } vshader;
+static int memu_on(void); static int memu_facts(vshader *s, const jv *e); static int memu_ready(vshader *s); static vshader *memu_pvs_get(const char *key);   // gfx_vk_meshemu.inc
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
 // never matched the draw before, and stage_set wrote every set of every stage: Breath of the Wild about 7,500 a frame, vkUpdateDescriptorSets 3.4 ms a frame of the
 // replay on an Ayn Odin 2. With the constant buffers dynamic uniform buffers, their offsets go to vkCmdBindDescriptorSets, and what a set holds (buffer, range, views,
@@ -675,6 +681,7 @@ static void sh_bind_apply(vshader *s) {
     for (int i = 0; i < s->nim; i++) s->im[i].binding = (int32_t)spv_bmap_get(m, (uint32_t)s->im[i].binding);
 }
 static vshader *sh_get(const char *key) {
+    if (key[0] >= 'g' && key[0] <= 'v') return memu_pvs_get(key);   // a mesh shader's pass-through vertex shader (gfx_vk_meshemu.inc memu_pvs_key)
     char k[16]; memcpy(k, key, 16);
     vshader *s = nvn_hm_get(&g_sh, k); if (s) return s->ok ? s : NULL;
     s = calloc(1, sizeof *s); memcpy(s->key, key, 16); nvn_hm_put(&g_sh, k, s);
@@ -690,7 +697,10 @@ static vshader *sh_get(const char *key) {
                : s->stage == SH_MS ? VK_SHADER_STAGE_MESH_BIT_EXT : s->stage == SH_TK ? VK_SHADER_STAGE_TASK_BIT_EXT : VK_SHADER_STAGE_VERTEX_BIT;
     s->set = js_int(&r, "set", s->stage == SH_PS ? 1 : s->stage == SH_GS || s->stage == SH_TK ? 2 : 0);
     s->io_prim = (uint32_t)js_int(&r, "prim_locs", 0);
-    if ((s->stage == SH_MS || s->stage == SH_TK) && !g_mesh) { js_free(&r); RED_ONCE(161, "task / mesh shader %s on a GPU without VK_EXT_mesh_shader: its draws are skipped", s->key); return NULL; }
+    if ((s->stage == SH_MS || s->stage == SH_TK) && !g_mesh) {   // its compute form (gfx_vk_meshemu.inc): the kernel's own bindings at set 0 of a compute pipeline
+        if (!memu_on() || !memu_facts(s, js_get(&r, "mesh_emu"))) { js_free(&r); RED_ONCE(161, "task / mesh shader %s on a GPU without VK_EXT_mesh_shader, and no compute form of it (DM_VK_MESH_EMU, res.json mesh_emu): its draws are skipped", s->key); return NULL; }
+        s->vkstage = VK_SHADER_STAGE_COMPUTE_BIT; s->set = 0;
+    }
     const jv *a = js_get(&r, "cbufs"); uint32_t rext[CB_MAX] = {0};   // rext: res.json's extents (cb_ext_pick)
     for (int i = 0; a && i < a->n && s->ncb < CB_MAX; i++) { rext[s->ncb] = (uint32_t)js_int(&a->kid[i], "ext", 0); s->cb[s->ncb++] = (rb_cbuf){js_int(&a->kid[i], "binding", 0), js_int(&a->kid[i], "slot", 0), 0}; }
     a = js_get(&r, "sbufs");
@@ -719,11 +729,11 @@ static vshader *sh_get(const char *key) {
     js_free(&r);
     sh_bind_map(s);   // before its modules: they and the layout below take the same numbers
     t_pool_info = 0;
-    snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(s, p, &s->b0);
+    snprintf(p, sizeof p, s->memu ? "%s/%s.cs.spv" : "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(s, p, &s->b0);   // (a task / mesh shader in compute form: its kernel, through the same rewrites and binding map)
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
-      if (w) { if (s->stage == SH_CS) s->tgs = tgs_bytes(w, nw, s->key); if (has_tf && nw > 1) { tf_outs = spv_tff_outs(w, nw); tf_ver = w[1]; } spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
+      if (w) { if (s->stage == SH_CS || s->memu) s->tgs = tgs_bytes(w, nw, s->key); if (has_tf && nw > 1) { tf_outs = spv_tff_outs(w, nw); tf_ver = w[1]; } spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
     sh_bind_apply(s);   // the layout and stage_set's writes from here on: the numbers the modules have (the matching above read the file's)
-    if (s->stage == SH_VS || s->stage == SH_MS) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(s, p, &s->b0); }
+    if (s->stage == SH_VS || (s->stage == SH_MS && !s->memu)) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(s, p, &s->b0); }
     if (has_tf && s->stage == SH_VS && tf_frag()) {   // the fragment-stage capture; if it cannot be made, the .tf.spv below (which tf_capture refuses on such a GPU, RED 115)
         snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->modtf = lm_new_t(p, s->bmap, &s->b0);
         if (s->modtf) s->modtff = tff_fs_mod(s, &tfl, tf_outs, tf_ver);
@@ -755,6 +765,7 @@ static vshader *sh_get(const char *key) {
         if (vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &s->dsl_tf) != VK_SUCCESS) s->modtf = s->modtff = NULL;
         if (!ds_fits(b, nb)) s->dsbig |= 2;
     }
+    if (s->memu && !memu_ready(s)) return NULL;   // a mesh shader's pass-through vertex shader
     s->ok = 1;
     if (vk_debug()) LOG("[vk] shader %s stage %d: %d constant buffers, %d storage buffers, %d textures, %d images%s%s", s->key, s->stage, s->ncb, s->nsb, s->ntx, s->nim, s->modz ? ", depth -1..1 variant" : "", s->b0 ? ", reads the support buffer" : "");
     return s;
@@ -2038,7 +2049,8 @@ static void pipe_prep(const pipe_key *k) {   // under the lock: what pipe_make w
 // (prewarm_thread). DM_VK_ASYNC_PIPE=0 (env.txt): every pipeline built at once, on the replay thread
 enum { APQ = 256 };
 #define APQ_PENDING ((uintptr_t)1)   // a queued pipeline's pl until its thread fills it in (or, the build failed, clears it): never a layout of its own
-typedef struct { pipe_key k; pipe_t *pp; } apq_t;
+typedef struct { pipe_key k; pipe_t *pp; vshader *kern; } apq_t;   // kern: a task / mesh kernel's compute pipeline instead (gfx_vk_meshemu.inc memu_cpipe_bg)
+static void memu_cpipe_bg(vshader *s);
 static apq_t g_apq[APQ]; static unsigned g_apq_h, g_apq_t; static int g_apq_on;   // under g_apq_mu: the queue (head, tail), its threads started
 static pthread_mutex_t g_apq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_apq_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_apq_queued, g_apq_built, g_apq_failed, g_apq_left;   // under g_bk: pipelines queued, built, failed; draws left out waiting for one
@@ -2047,6 +2059,7 @@ static void *apipe_thread(void *arg) {
     for (;;) {
         pthread_mutex_lock(&g_apq_mu); while (g_apq_h == g_apq_t) pthread_cond_wait(&g_apq_cv, &g_apq_mu);
         apq_t q = g_apq[g_apq_t % APQ]; g_apq_t++; pthread_mutex_unlock(&g_apq_mu);
+        if (q.kern) { memu_cpipe_bg(q.kern); continue; }
         pipe_t tmp; memset(&tmp, 0, sizeof tmp); uint32_t ns = 0, nva = 0; VkPrimitiveTopology tp = 0; uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
         VkResult pr = pipe_make(&q.k, &tmp, &ns, &nva, &tp);
         double ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6;
@@ -2061,27 +2074,30 @@ static void *apipe_thread(void *arg) {
     }
     return NULL;
 }
-static int apipe_ok(const pipe_key *k) {   // under g_bk, right after rp_prepare (P is the draw's pass): whether a new pipeline may be built in the background
+static int apipe_any(void) {   // DM_VK_ASYNC_PIPE: pipelines may be built in the background at all
     static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_ASYNC_PIPE"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_VK_ASYNC_PIPE=0: pipelines met for the first time are built at once, on the replay thread"); }
-    if (!on || k->tf) return 0;
+    return on;
+}
+static int apipe_ok(const pipe_key *k) {   // under g_bk, right after rp_prepare (P is the draw's pass): whether a new pipeline may be built in the background
+    if (!apipe_any() || k->tf) return 0;
     int n = 0;
     for (int i = 0; i < 8; i++) { const vtex *v = P.cv[i]; if (!v) continue; n++; if (v->rt_runs < 3 || (v->desc.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) return 0; }
     if (P.dv) { n++; if (P.dv->rt_runs < 3) return 0; }
     return n > 0;
 }
-static int apipe_queue(const pipe_key *k, pipe_t *pp) {   // under g_bk: 1 = queued (pp stays without a pipeline until a thread has built it)
+static int apipe_queue(const pipe_key *k, pipe_t *pp, vshader *kern) {   // under g_bk: 1 = queued (pp stays without a pipeline until a thread has built it; kern: that kernel's pipeline instead)
     (void)pcache();   // made here, under the lock: pcache makes it on first use, which a build outside the lock must not race
     pthread_mutex_lock(&g_apq_mu);
     if (!g_apq_on) { g_apq_on = 1; for (int i = 0; i < 2; i++) { pthread_t th; if (!pthread_create(&th, NULL, apipe_thread, NULL)) pthread_detach(th); } }
-    int ok = g_apq_h - g_apq_t < APQ; if (ok) { g_apq[g_apq_h % APQ] = (apq_t){*k, pp}; g_apq_h++; pthread_cond_signal(&g_apq_cv); }
+    int ok = g_apq_h - g_apq_t < APQ; if (ok) { apq_t *q = &g_apq[g_apq_h % APQ]; memset(q, 0, sizeof *q); if (kern) q->kern = kern; else { q->k = *k; q->pp = pp; } g_apq_h++; pthread_cond_signal(&g_apq_cv); }
     pthread_mutex_unlock(&g_apq_mu);
-    if (ok) g_apq_queued++;
+    if (ok && !kern) g_apq_queued++;
     return ok;
 }
 static pipe_t *pipe_get(const pipe_key *k) {
     pipe_t *pp = nvn_hm_get(&g_pipes, k); if (pp) { if (!pp->p && pp->pl == (VkPipelineLayout)APQ_PENDING) g_apq_left++; return pp->p ? pp : NULL; }
     pp = calloc(1, sizeof *pp); nvn_hm_put(&g_pipes, k, pp);
-    if (apipe_ok(k)) { pipe_prep(k); pp->pl = (VkPipelineLayout)APQ_PENDING; if (apipe_queue(k, pp)) { g_apq_left++; return NULL; } pp->pl = VK_NULL_HANDLE; }
+    if (apipe_ok(k)) { pipe_prep(k); pp->pl = (VkPipelineLayout)APQ_PENDING; if (apipe_queue(k, pp, NULL)) { g_apq_left++; return NULL; } pp->pl = VK_NULL_HANDLE; }
     uint32_t ns, nva; VkPrimitiveTopology tp; VkResult pr = pipe_make(k, pp, &ns, &nva, &tp);
     if (pr == VK_SUCCESS) { pk_record(k); pcache_made(); }
     {   // which fields set a new pipeline apart from the last one with the same shaders and pass (the first 40): key churn
@@ -2221,6 +2237,7 @@ static void ds_chunk_done(chunk *c) {
 static const uint8_t c_bases[6] = {0x11, 0x51, 0x41, 0x67, 0x77, 0x31};   // c0 storage-buffer address table per NVN stage (×0x10): vertex 0x110, fragment 0x510, geometry 0x410, compute 0x310, NVN2 task 0x670 and mesh 0x770 (dmsh_abi.h)
 // The driver banks of a stage, made from the bound state: c0 (storage buffer addresses, base instance at 0x644) and c2 (texture, image and sampler handles)
 static uint32_t g_cdim[3];   // the current dispatch's group counts (c0 + 0x200 for compute)
+static VkBuffer g_tgs_b; static VkDeviceSize g_tgs_off;   // where the dispatch's spilled shared memory lies when it is not the chunk's arena (stage_set; gfx_vk_meshemu.inc memu_kernel sets it for a kernel)
 static void bank_c0(int nst, uint8_t *b, uint32_t base_inst) {
     memset(b, 0, 0x800);
     if (nst == 5) { memcpy(b + DMSH_C0_DISPATCH, g_cdim, 12);   // compute: the group counts, then the uniform buffer table (0x210 + 16 r)
@@ -2788,7 +2805,9 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
     if (s->tgs) {   // the dispatch's shared memory (spv_tgspill): a region of the arena for each workgroup of it (g_cdim: indirect counts already read)
         VkDeviceSize sz = (VkDeviceSize)s->tgs * g_cdim[0] * g_cdim[1] * g_cdim[2];
         if (!sz || sz > g_vk.props.limits.maxStorageBufferRange) { RED_ONCE(179, "compute shader %s: %u x %u x %u workgroups of %u bytes of shared memory pass the GPU's largest storage buffer: skipped", s->key, g_cdim[0], g_cdim[1], g_cdim[2], s->tgs); g_bind_bad = 1; }
-        else { VkDeviceSize to; if (!ar_alloc(sz, &b, &to)) return 0;
+        else { VkDeviceSize to;
+            if (g_tgs_b) { b = g_tgs_b; to = g_tgs_off; }   // a task / mesh kernel in compute form: a range of that arena (gfx_vk_meshemu.inc memu_kernel)
+            else if (!ar_alloc(sz, &b, &to)) return 0;
             bi[nbi] = (VkDescriptorBufferInfo){b, to, sz}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, SPV_TGS_BINDING, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL}; }
     }
     size_t nel = 0; for (int i = 0; i < s->ntx; i++) nel += s->tx[i].array > 1 ? (size_t)(s->tx[i].array > 1024 ? 1024 : s->tx[i].array) : 1;

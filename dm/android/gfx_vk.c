@@ -71,6 +71,7 @@ static VkPhysicalDeviceFeatures g_vk_feat; static int g_divisor;   // what the d
 static int g_div_first0;
 // NVN2 task and mesh shaders (gfx_vk_mesh.inc): VK_EXT_mesh_shader with its task stage, the draw calls, and the most workgroups a draw's X may launch (task, mesh)
 static int g_mesh; static PFN_vkCmdDrawMeshTasksEXT g_draw_mesh; static uint32_t g_mesh_max[2];
+static int memu_on(void);   // gfx_vk_meshemu.inc: their draws in compute form without it
 static int g_fmt_list;   // VK_KHR_image_format_list enabled (vt_create)
 static void pb_dump(void);   // gfx_vk_draw.inc: the pipelines being built, for a crash dump
 static int g_stencil_export;   // VK_EXT_shader_stencil_export enabled: a fragment shader writes the stencil test's value (gfx_vk_dscopy.inc)
@@ -238,7 +239,7 @@ static int vk_try(char *why, size_t nwhy) {
     vkGetDeviceQueue(g_vk.dev, g_vk.qf, 0, &g_vk.q);
     if (mesh) { g_draw_mesh = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdDrawMeshTasksEXT");
         g_mesh = g_draw_mesh != NULL && g_mesh_max[0] && g_mesh_max[1]; }
-    LOG("[vk] task / mesh shaders: %s", g_mesh ? "on (VK_EXT_mesh_shader)" : mesh ? "[RED] VK_EXT_mesh_shader enabled but vkCmdDrawMeshTasksEXT was not found: their draws are skipped" : "no VK_EXT_mesh_shader (or DM_VK_MESH=0): their draws are skipped");
+    LOG("[vk] task / mesh shaders: %s", g_mesh ? "on (VK_EXT_mesh_shader)" : mesh ? "[RED] VK_EXT_mesh_shader enabled but vkCmdDrawMeshTasksEXT was not found: their draws are skipped" : memu_on() ? "no VK_EXT_mesh_shader (or DM_VK_MESH=0): their draws run in compute form (gfx_vk_meshemu.inc)" : "no VK_EXT_mesh_shader (or DM_VK_MESH=0), and DM_VK_MESH_EMU=0: their draws are skipped");
     if (hqr && !(g_qreset = (PFN_vkResetQueryPoolEXT)vkGetDeviceProcAddr(g_vk.dev, "vkResetQueryPoolEXT"))) LOG("[RED] [vk] VK_EXT_host_query_reset is enabled but vkResetQueryPoolEXT was not found");
     if (dfault) g_fault_info = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetDeviceFaultInfoEXT");
     if (smid && !(g_smid = (PFN_vkGetShaderModuleCreateInfoIdentifierEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetShaderModuleCreateInfoIdentifierEXT"))) LOG("[RED] [vk] VK_EXT_shader_module_identifier is enabled but vkGetShaderModuleCreateInfoIdentifierEXT was not found: modules made at once");
@@ -2088,6 +2089,7 @@ static int png_texels(const char *path, VkFormat f, int bpp, const uint8_t *p, u
 #include "gfx_vk_posrows.inc"   // the vertex shaders whose position reads its constant buffer rows at run time (vk_pos_rows)
 #include "gfx_vk_draw.inc"
 #include "gfx_vk_mesh.inc"
+#include "gfx_vk_meshemu.inc"   // the same draws in compute form, on a GPU without VK_EXT_mesh_shader
 
 // The front end's first window failed on a DM_VK_DRIVER driver (front_android.c vk_window_first), which has destroyed what it made: the device and instance are destroyed
 // too and made again on the system's driver. Only while nothing else holds objects of them, before the host starts: no texture, buffer, pipeline or cache yet. Here,
@@ -2315,7 +2317,7 @@ void mtl_exec(const uint8_t *p) {
                 if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
                 { p_draw t; const p_draw *dw = draw_rec(a, h.size, &t);   // short records: draw_rec (nvn_obj.h)
                   if (dw->prim == DM_PRIM_MESH_TASKS) {   // NVN2's DrawMeshTasks: on VK_EXT_mesh_shader (gfx_vk_mesh.inc); the Adreno 7xx drivers and Turnip have none, and no lowering is ported
-                      if (g_mesh) { if (!vk_mesh_draw(dw)) g_draws_dropped++; break; }
+                      if (g_mesh || memu_on()) { if (!vk_mesh_draw(dw)) g_draws_dropped++; break; }   // VK_EXT_mesh_shader, else their compute form (gfx_vk_meshemu.inc)
                       RED_ONCE(131, "task / mesh shader draws (NVN2 DrawMeshTasks) are skipped: no VK_EXT_mesh_shader on this GPU (Mario Kart World's roadside bushes and grass tufts)"); g_mesh_skipped++; break; }
                   if (!vk_draw(dw, NULL)) g_draws_dropped++; break; }
             case OP_DRAW_IDX: if (rc_skips() || shadow_skips()) break;
@@ -2487,6 +2489,7 @@ uint64_t mtl_present_slept_ns(uint64_t *end_ns) {
 static uint64_t g_pace_per; static int g_pace_due;   // the period of the present mtl_present_pace sleeps after (both on the replay thread)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     pthread_mutex_lock(&g_bk);
+    pcache_made_n(0);   // the driver's cache file, when a request for it came inside the gap after the last write (gfx_vk_draw.inc)
     vtex *v = vt_get(t); flush(); rec_drain();   // the frame's chunks on the queue before the front end's blit of it (rec_submit)
     vt_evict();   // images no draw has used for a while (gfx_vk_evict.inc)
     spare_sweep(atomic_load(&g_presents));   // spare image memory unused for a while (gfx_vk_spare.inc)
@@ -2657,6 +2660,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6,
         (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)g_bind_shaders, (unsigned long long)g_bind_entries);
     LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu; under rasterizer discard: made as dispatches %llu, left out (writing nothing) %llu, their storage buffer writes in place on a home copy %llu / through a scratch copy %llu, home copies made %llu (%llu from a chunk in flight on the GPU), home ranges learned %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig, (unsigned long long)g_rd_made, (unsigned long long)g_rd_none, (unsigned long long)g_rd_w[0], (unsigned long long)g_rd_w[1], (unsigned long long)g_rd_w[2], (unsigned long long)g_rd_w[3], (unsigned long long)g_rd_learned);
+    if (memu_on()) LOG("[vk] task / mesh draws in compute form: %llu drawn in %llu parts, %llu skipped, %llu left out while a kernel's pipeline was built; kernel pipelines made %llu (%llu from the driver's cache at once, %llu in the background, %.0f ms of compiles) (cumulative; gfx_vk_meshemu.inc)",
+                       (unsigned long long)g_me_draws, (unsigned long long)g_me_parts, (unsigned long long)g_me_skipped, (unsigned long long)g_me_left, (unsigned long long)g_me_kpipes, (unsigned long long)g_me_kcached, (unsigned long long)g_me_kbg, atomic_load(&g_me_kpipe_ns) / 1e6);
     pool_stats();
     shadow_line();
     LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu, other bindings %llu, written in place by a later dispatch %llu; bound on another binding's copy of the same shader %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd, own_alias)", (unsigned long long)g_fwd, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1], (unsigned long long)g_alias);

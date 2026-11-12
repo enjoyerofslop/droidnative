@@ -48,6 +48,7 @@ First run on Android, 2026-11-11, on a Galaxy S25 Edge (SM8750, Adreno 830 with 
 - **Memory:** 1.99 GB PSS (0.73 GB graphics). Not killed.
 - **Save:** the game saves only at a Prie Dieu, which wasn't reached. After a cold start the pilgrimage's slot 1 is still New Game, so saving and Continue are untested.
 - **Not Playable yet:** it's a real-time platformer, so the stretch (through the Faceless One, with a Prie Dieu save loaded after a cold start) needs a person with a controller.
+- **On an Ayn Odin 2 (SM8550, Adreno 740 with Qualcomm's driver 0x802a4000), with its built-in controller:** the same route from a new game into the statues' room and the sword, 60 fps in every 30 s window but one (58.6), GPU about 1 ms, no underrun, 1.32 GB PSS, the same single blend-mode red line. The game app stays installed there (no `env.txt`) for a person to play.
 - **Not tried:** the other devices.
 
 ## Found on this game

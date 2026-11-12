@@ -7,6 +7,7 @@
 // CPU once the GPU's writes to it have landed, as the other indirect draws are (vk_draw).
 static uint64_t g_mesh_draws, g_mesh_groups, g_mesh_indirect, g_mesh_nopipe;   // drawn, their workgroups, of them indirect; draws whose pipeline was still building (or failed)
 static int vk_mesh_draw_(const p_draw *dw);
+static int vk_memu_draw_(const p_draw *dw);   // gfx_vk_meshemu.inc: the same draw in compute form, without VK_EXT_mesh_shader
 static int vk_mesh_draw(const p_draw *dw) {
     p_draw d2;
     if (dw->ind) {   // {count, first}, read on the CPU once the GPU's writes to it have landed
@@ -15,7 +16,7 @@ static int vk_mesh_draw(const p_draw *dw) {
         d2 = *dw; d2.ind = 0; d2.count = (int32_t)a[0]; d2.first = (int32_t)a[1]; dw = &d2; g_mesh_indirect++;
     }
     if (dw->count <= 0) return 1;
-    int r = vk_mesh_draw_(dw); g_drawing = 0; g_fwd_nwb = -1; g_c1d_on = 0; tc_clear(); return r;
+    int r = g_mesh ? vk_mesh_draw_(dw) : vk_memu_draw_(dw); g_drawing = 0; g_fwd_nwb = -1; g_c1d_on = 0; tc_clear(); return r;
 }
 static int vk_mesh_draw_(const p_draw *dw) {
     if (!g_d_init) draw_state_reset();
