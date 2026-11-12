@@ -163,7 +163,11 @@ static int vk_try(char *why, size_t nwhy) {
     // NVN2's task and mesh shaders as Vulkan's (Adreno 840: Qualcomm's driver has it, Turnip and the Adreno 7xx drivers do not). Its modules are SPIR-V 1.4, which the
     // Vulkan 1.1 instance takes through VK_KHR_spirv_1_4 (and the float controls it builds on). DM_VK_MESH=0 (env.txt): the draws are skipped, as on GPUs without it
     int mesh = has_ext(de, nd, "VK_EXT_mesh_shader") && has_ext(de, nd, "VK_KHR_spirv_1_4") && has_ext(de, nd, "VK_KHR_shader_float_controls");
-    { const char *e = getenv("DM_VK_MESH"); if (e && *e == '0') mesh = 0; }
+    // On Qualcomm's own driver the native path draws them in the compute form by default (gfx_vk_meshemu.inc): Ocarina of Time's foliage, drawn by a mesh depth prepass and an
+    // EQUAL colour pass whose positions come from the same code and the same data, lands behind its own prepass depth through the Adreno 840's mesh pipeline (white tears across
+    // the canopy), and not in the compute form. DM_VK_MESH=1: the native path all the same (for an A/B); 0: neither (the draws skipped where the compute form is off too)
+    { const char *e = getenv("DM_VK_MESH"); if (e && *e == '0') mesh = 0;
+      else if (mesh && g_qcom_driver && !(e && *e == '1')) { mesh = 0; LOG("[vk] task / mesh shaders: Qualcomm's driver has VK_EXT_mesh_shader, but its draws run in compute form (DM_VK_MESH=1: the native path)"); } }
     // the texture pool by ID (gfx_vk_pool.inc): its indices differ between the lanes of a subgroup, and an ID not made yet reads 0 whatever type it is read as. DM_VK_POOL=0: neither
     { const char *e = getenv("DM_VK_POOL"); int pool = !(e && *e == '0'); g_nonuni = pool && has_ext(de, nd, "VK_EXT_descriptor_indexing"); g_null_desc = pool && has_ext(de, nd, "VK_EXT_robustness2"); }
     // pipelines from the driver's cache by their modules' identifiers, the modules made only when it lacks one (gfx_vk_lmod.inc). DM_VK_MODULE_ID=0: modules made at once

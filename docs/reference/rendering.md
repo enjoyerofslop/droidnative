@@ -2614,3 +2614,32 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Mario Kart World:** its 26 task and mesh shaders get compute forms too. On a Galaxy S25 Edge (Adreno 830) 18 of them ran through the title, the menus and a Mushroom Cup race with no failure, 85 draws a frame at the start grid, for a few ms of GPU. Nothing they draw shows in the picture there: the grass draws go to a 128x128 target, the 68 bush draws to a half-resolution screen-space target, and the game's terrain is black on Android with or without them. Read back from the GPU, the bush tasks launch no mesh workgroup at the start grid and 13 to 69 a frame along the course, and a launched workgroup's records are one small cluster near the horizon, none of them NaN.
 - **Build:** `spv_build.py` translates again a task or mesh output that has no `mesh_emu` in its `res.json`, alone, so a build made before this gets the compute forms without a chain change. All 520 of Ocarina of Time's (20 task, 500 mesh shaders, 4 of them with per-primitive outputs) are made, and spirv-val passes every module.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a OnePlus Pad 3 (Adreno 830, Qualcomm's driver); drawn there and on a Galaxy Z Flip 7 (Xclipse 950). The same design as DeathKhan's nx2android fork's mesh emulation (github.com/DeathKhan/nx2android: 1f7e70b, 0e3285b, defd439; `shader_meshwrap.py`, `meshlaunch.comp`), written anew for this replay.
+
+### Task and mesh draws in compute form on Qualcomm's driver, which has mesh shaders (Android)
+
+- **Symptom:** on the Adreno 840 with Qualcomm's driver (Galaxy Z Fold 8), Ocarina of Time's distant canopy in Kokiri Forest is torn by white shards with the native `VK_EXT_mesh_shader` path.
+- **Cause:** the foliage is drawn twice by different mesh shaders: a depth prepass (depth LESS with writes), then a colour pass (depth EQUAL without writes). Through the 840's mesh pipeline, the colour pass lands behind its own prepass depth, so EQUAL fails and the sky fill shows through.
+  - **The gap is real displacement:** thousands of depth steps. LEQUAL with a bias of −4096 still leaves shards, and only ALWAYS hides most of it.
+  - **Ruled out as the cause:**
+    - the position code (structurally identical in both shaders);
+    - the inputs (the same storage buffer, route and data, and the same constant buffers);
+    - float contraction (every Fma split into FMul + FAdd with NoContraction);
+    - subgroup width (`spv_wide` on task and mesh);
+    - raw memory timing (`DM_VK_RAW_GMEM_SYNC=1`, `DM_VK_INPLACE=0`);
+    - triangle vertex order;
+    - pipeline state (shared with the vertex path).
+  - **The same kernels draw clean in compute form**, so the fault is in the native mesh path: Qualcomm's driver, or something only the native wrapper does. Which one is open.
+- **Fix:** on Qualcomm's own driver, task and mesh draws run in compute form ([on a GPU without mesh shaders](#task-and-mesh-draws-in-compute-form-on-a-gpu-without-mesh-shaders-android)) even though the driver has `VK_EXT_mesh_shader`.
+  - **Scope:** other drivers keep the native path; Turnip and the Adreno 7xx and 830 drivers have none.
+  - **Switches:** `DM_VK_MESH=1` takes the native path again (for an A/B); `DM_VK_MESH=0` turns it off on every GPU.
+  - **The log** says which path is used: `task / mesh shaders: Qualcomm's driver has VK_EXT_mesh_shader, but its draws run in compute form`.
+- **Cost:** none measured. Fold 8, Kokiri at the save's opening view, each run started at thermal status 0, last 60 s:
+
+  | | native | compute form |
+  |---|---|---|
+  | fps | 17.2 | 17.3 |
+  | GPU p50 | 44.7 ms | 43.9 ms |
+  | frame p90 | 64.6 ms | 62.0 ms |
+  | submit CPU p50 | 30.2 ms | 32.6 ms |
+
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a Galaxy Z Fold 8 (Adreno 840, Qualcomm's driver).
