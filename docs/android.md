@@ -47,7 +47,8 @@ DroidPlay opens on **Get started**: four steps, each saying what it needs and wh
   [license](https://developer.android.com/studio/terms), which the app asks first; its usage metrics stay off. What the computer already has is kept.
   From a console: `build_android_from_nsp.py --setup --accept-android-licenses`.
 - **Your phone:** plug it in with USB debugging on; the step says when the phone is waiting for you to tap **Allow**.
-- **Your first game:** add the folder with its NSP or XCI files, then **Build and install**.
+- **Your first game:** add the folder with its NSP or XCI files, then **Build and install**. The build works beside the game's files, so their drive needs room:
+  a lot of it for a game with many shaders ([Free space](#free-space)).
 
 Until all four are done, a launch opens on the checklist and the top bar's **Setup 2 of 4** opens it; **Settings › Show the setup checklist** does any time.
 
@@ -252,6 +253,35 @@ python scripts/build_android_from_nsp.py --check       what the build needs on t
 ```
 
 The first build of a game takes a while (the shader translation and, on a hard disk, the RomFS image); later builds reuse what did not change.
+
+## Free space
+
+A build keeps its files in a `<title ID>_build` folder beside the game's files: the extracted game (its RomFS image is as large as the game), the game's shaders as
+one package (`shader/pkg`), and the shaders translated for Vulkan (`spv`). While the shaders translate, the translator's own copy of them sits in `<title ID>_build/tmp`
+too, and goes when the translation ends, however it ends. So everything is on the drive with the game's folder: moving that folder to a bigger drive moves all of it.
+
+The translated shaders take about 12 to 14 times the package's size, and the translation needs about 20 times it for a while:
+
+| Game | Shaders | Package | Translated | Needed while translating |
+|---|---|---|---|---|
+| Super Mario Odyssey | 27,984 | 0.16 GB | 1.9 GB | about 3 GB |
+| The Legend of Zelda: Ocarina of Time | 42,848 | 0.54 GB | 6.5 GB | about 12 GB |
+| Final Fantasy Resonance | 73,496 | 0.68 GB | 9.4 GB | about 17 GB |
+| [Pokémon Pokopia](../dm/games/0400A3A01EE4C000/README.md) | 131,426 | 4.4 GB | about 50 to 60 GB (estimated) | 90 GB or more |
+| [Hyrule Warriors: Age of Imprisonment](../dm/games/04003F40232DE000/README.md) | 101,860 | not measured | likely 40 GB or more | likely 70 GB or more, besides its 46 GB RomFS |
+
+Those are on top of the extracted game and the package. Yoshi and the Mysterious Book has over 100,000 shaders too (133,155), not measured.
+
+- **The build checks first.** Before it translates, it works out what the shaders left to translate need, and stops when the drive can't hold it:
+  `[RED] spv_build: not enough free space to translate … shaders`, with what the drive has and what it needs. Nothing has been translated then, and what the build
+  did before (the extraction, the shader split) is kept.
+- **If the disk fills anyway,** the build stops with `This computer ran out of disk space`, naming the drive. Free some space and build again: the shaders translated
+  so far are kept, and only the rest is translated. A game's `<title ID>_build` folder can be deleted once you don't build that game any more.
+- **Builds before DroidPlay Core 0.8.3** kept the translator's copy in the system's temp folder instead (`%TEMP%` on Windows, on C: whatever drive the game was on), and a
+  translation that failed left it there: folders named `spv_` and some letters, tens of GB each for a big game. Nothing uses them, so delete them: type `%TEMP%` into File
+  Explorer's address bar to get there.
+- **The phone needs room too:** the translated shaders and the RomFS image. The install checks the phone before each copy, and a copy that doesn't fit stops before it
+  starts.
 
 ## Games that compile their shaders while they run
 

@@ -67,7 +67,8 @@ open-source Turnip driver. Trying one needs no new build, and whether it helps d
 
 - **A computer to build on:** a Windows 10 (1809 or later) or Windows 11 PC, 64-bit, for DroidPlay for Windows; or a Mac with Apple silicon and macOS 15 or
   later for [DroidPlay on a Mac](https://github.com/enjoyerofslop/droidplay). On Windows, DroidPlay and the tools it installs take about 6 GB, and each game's
-  build needs room besides.
+  build needs room besides, on the drive with the game's files: about the game's size for its extracted files, plus what its shaders need while they translate,
+  up to about 20 GB for most games and 90 GB or more for one with over 100,000 shaders, such as Pokémon Pokopia ([Free space](docs/android.md#free-space)).
 - **An Android phone or handheld** with Android 10 or later ([the devices tested](#phones-and-handhelds)), a USB cable (or wireless debugging), and room for
   the game: its files are copied to the phone (6.7 GB for Danganronpa V3).
 - **Your own Switch, and the game and keys dumped from it:** the game as NSP or XCI files in one folder (the base game and, if you have them, its update and
