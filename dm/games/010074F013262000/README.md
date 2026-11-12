@@ -227,6 +227,10 @@ Both in handheld mode, driven over adb with `DM_CTL`.
   - **Picture:** the titans, the plain's ground and rocks, the spires and the Levnis are drawn with their textures, and the party, the soldiers and the enemies are drawn in battle and on the field. The log names the stencil-mode slot once (`531d637463e53486`, format 130).
   - **Frame rate:** the title and the opening's cutscenes 27–30 fps (GPU 17–24 ms). The first battle 5.6–5.8 fps (frames of 179–193 ms, GPU 63–66 ms, about 1,430 draws), the plain 6.4–7.1, the second battle 5.9–6.9. The GPU's clock was at its lowest step, 160 MHz, in 78% of the samples: it is busy for about a third of each frame, and the frame is bound by the replay's CPU side. Per gameplay frame: 117 discarded-draw dispatches, 76 writes through scratch copies, 45 home copies made, 45 waits on the current submission, 45 write-backs (about 45 MB) that take the completion thread about 16 ms, and 4 ms waiting for a free command buffer. The rasterizer-discard fix's first XC3 run measured the same battle at about 5 fps without the stencil-mode fix, so the stencil-mode fix doesn't change the speed.
   - **Red lines, memory:** the transform-feedback line above, once; PSS 3.44–3.51 GB with about 0.55 GB swapped; no crash or kill in 27 minutes.
+- **Gameplay speed (2026-11-12):** the 5.6–7 fps above were the replay waiting for the GPU.
+  - 53 of its 55 waits a frame were character draws reading a skinned vertex buffer as a storage buffer. The buffer sat inside a home range two buffers wide, learned from overrunning vertex streams, and 48 bytes off the storage buffer alignment in its copy ([An indexed draw's vertex stream read only as far as the write-back it starts in](../../../docs/reference/rendering.md#an-indexed-draws-vertex-stream-read-only-as-far-as-the-write-back-it-starts-in-android)).
+  - With that fixed, the first battle and the field run at about 12 fps at the same 160 MHz, and the replay thread's CPU time drops from 78 to 38 ms a frame.
+  - Still slow: draws' writes read by later draws, and the first draw after each submission, wait for the GPU (fixes in their own pull requests; with all three, 30 fps). The skinning draws' writes past the alignment still go through scratch copies.
 
 ## Found on this game
 
@@ -236,6 +240,7 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - [IMAGE usage does not split texture storage](../../../docs/reference/rendering.md#image-usage-does-not-split-texture-storage).
 - [Rasterizer discard preserves vertex storage writes](../../../docs/reference/rendering.md#rasterizer-discard-preserves-vertex-storage-writes).
 - [Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android): the world's zebra stripes on Android; see [Android](#android).
+- [An indexed draw's vertex stream read only as far as the write-back it starts in](../../../docs/reference/rendering.md#an-indexed-draws-vertex-stream-read-only-as-far-as-the-write-back-it-starts-in-android): the skinned buffers' storage buffer reads, 53 waits a frame; see [Android](#android).
 - [Primitive barriers order vertex storage writes](../../../docs/reference/rendering.md#primitive-barriers-order-vertex-storage-writes).
 - [Transform feedback captured by a vertex entry point](../../../docs/reference/rendering.md#transform-feedback-captured-by-a-vertex-entry-point): interleaved outputs and geometry capture.
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff): contended native decoder waits must release a handoff.
