@@ -51,7 +51,8 @@
 // grace whatever the cost at k says (the cost at k holds the longer hold's own waits): Ocarina of Time on a OnePlus Pad 3 at hold 3 measured 2.15 vsyncs of cost with
 // 1.3 of GPU, and at hold 2 its frames were 2.0–2.1 (27.5 fps, 32 ms of GPU-bound pipeline); the fit trial (cost ≤ 1.7) and the probe (to hold 1) never tried 2. Three such
 // trials failing in a row stop them until the hold changes
-#define FSTEP_LATE_SOFT 0.3   // 5 ms at 60 Hz: a frame later than that at a hold its GPU fits steps up as before (the debt pays the rest back; the worst case before a step up is 13 % of slow motion)
+#define FSTEP_LATE_SOFT 0.5   // 8 ms at 60 Hz: a frame later than that at a hold its GPU fits steps up as before (the debt pays the rest back). Ocarina of Time's Kokiri frames at hold 2 on the Pad 3 are 2.0–2.4 vsyncs with a p95 of 2.65; at 0.3 three of 2.32–2.39 in a row stepped up after 22 s
+#define FSTEP_GFIT_MISS 10    // late frames a GPU-fit run of FSTEP_RUN may hold: at hold 3 one frame in ten is late there (the hold's own pacing), and FSTEP_MISS (3) ended every run
 
 typedef struct {
     int k, step;              // vsyncs each frame stays on screen; the step handed to the game for the next frame (k, or k + 1 while paying back)
@@ -74,7 +75,7 @@ typedef struct {
     double kheld[FSTEP_MAX + 1];     // the cost of the frames on time at each hold above kmin, once FSTEP_RUN of them held it (0 = none or forgotten)
     int mtrial, mfail;        // the trial in progress is one by kheld; such trials failed in a row
     double gpu;               // set by the caller before each call: the frame's GPU time in vsyncs (0 = not known), for the soft-late rule and the GPU-fit trial
-    int gfit_run, gfit_miss, gtrial, gfail;   // frames whose GPU time fits k − 1 (a run; late frames in it, at most FSTEP_MISS, as a fit run tolerates heavier frames); the trial in progress is one by the GPU fit; such trials failed in a row
+    int gfit_run, gfit_miss, gtrial, gfail;   // frames whose GPU time fits k − 1 (a run; late frames in it, at most FSTEP_GFIT_MISS); the trial in progress is one by the GPU fit; such trials failed in a row
     int fit_miss, settle;     // frames of the current fit run that fit k but not k − 1; frames left of a trial's settling (FSTEP_SETTLE)
     uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
 } nvn_fstep;
@@ -122,7 +123,8 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (late) { s->late++; s->late_run = grace || settling || soft ? 0 : s->late_run + 1; s->fit_run = s->fit_miss = 0; } else s->late_run = 0;
     if (!(s->k > kmin && s->gpu > 0 && s->gpu <= FSTEP_FIT * (s->k - 1))) s->gfit_run = s->gfit_miss = 0;   // the GPU does not fit the shorter hold (or none known): no run
     else if (!late || soft) s->gfit_run++;
-    else if (++s->gfit_miss > FSTEP_MISS) s->gfit_run = s->gfit_miss = 0;   // a hitch: a few are tolerated (Ocarina of Time's Kokiri Forest has one in about 20 frames, which ended every run of 30)
+    else if (++s->gfit_miss > FSTEP_GFIT_MISS) s->gfit_run = s->gfit_miss = 0;   // a late frame: up to FSTEP_GFIT_MISS of them in a run (Ocarina of Time's Kokiri Forest at hold 3: one in ten)
+    else s->gfit_run++;   // (a late frame does not end the run: the GPU fitted it)
     // The cost of the frames on time (a hitch is not what the scene costs): at kmin, and at the longer hold
     if (kmin != s->ckmin) {   // another cap: its run starts over, and what held it before comes back
         if (s->ckmin >= 1 && s->ckmin <= FSTEP_MAX) {

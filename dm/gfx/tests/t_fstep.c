@@ -408,15 +408,15 @@ int main(void) {
         check(at3 && waited >= 0 && waited < 120 && m.s.k == 2 && m.s.failed == 0, b);
     }
     {   // The pipeline's lateness at a hold the GPU fits (FSTEP_LATE_SOFT): Ocarina of Time on a OnePlus Pad 3, GPU 1.3 vsyncs, frames of 2.2 at hold 2 (late by 0.2)
-        sim m = {0}; m.gpu = 1.3; run(&m, 120, 0.5, 1, 3, 0); run(&m, 60, 2.2, 1, 3, 0);
-        check(m.s.k == 2 && m.s.ups == 1, "soft late: frames of 2.2 with 1.3 of GPU step from 1 to 2 and stay at 2 (not 3)");
-        run(&m, 1200, 2.2, 1, 3, 0); check(m.s.k == 2 && m.s.ups == 1, "  they hold 2 through 1,200 frames, late by 0.2 each, paid by the debt");
-        run(&m, 60, 2.4, 1, 3, 0); check(m.s.ups == 2, "  frames of 2.4 (later than FSTEP_LATE_SOFT) step up to 3 as before");
-        run(&m, 3000, 2.4, 1, 3, 0); check(m.s.k == 3 && m.s.gfail == 3, "  and settle at 3 once three GPU-fit trials back to 2 have failed");
-        sim c = {0}; c.gpu = 2.5; run(&c, 120, 0.5, 1, 3, 0); run(&c, 60, 2.2, 1, 3, 0);
-        check(c.s.k == 3, "  frames of 2.2 whose GPU is 2.5 (the GPU itself does not fit 2) step up to 3 as before");
-        sim u = {0}; run(&u, 120, 0.5, 1, 3, 0); run(&u, 60, 2.2, 1, 3, 0);
-        check(u.s.k == 3, "  without a GPU time known, frames of 2.2 step up to 3 as before");
+        sim m = {0}; m.gpu = 1.3; run(&m, 120, 0.5, 1, 3, 0); run(&m, 60, 2.4, 1, 3, 0);
+        check(m.s.k == 2 && m.s.ups == 1, "soft late: frames of 2.4 with 1.3 of GPU step from 1 to 2 and stay at 2 (not 3)");
+        run(&m, 1200, 2.4, 1, 3, 0); check(m.s.k == 2 && m.s.ups == 1, "  they hold 2 through 1,200 frames, late by 0.4 each, paid by the debt");
+        run(&m, 60, 2.7, 1, 3, 0); check(m.s.ups == 2, "  frames of 2.7 (later than FSTEP_LATE_SOFT) step up to 3 as before");
+        run(&m, 3000, 2.7, 1, 3, 0); check(m.s.k == 3 && m.s.gfail == 3, "  and settle at 3 once three GPU-fit trials back to 2 have failed");
+        sim c = {0}; c.gpu = 2.5; run(&c, 120, 0.5, 1, 3, 0); run(&c, 60, 2.4, 1, 3, 0);
+        check(c.s.k == 3, "  frames of 2.4 whose GPU is 2.5 (the GPU itself does not fit 2) step up to 3 as before");
+        sim u = {0}; run(&u, 120, 0.5, 1, 3, 0); run(&u, 60, 2.4, 1, 3, 0);
+        check(u.s.k == 3, "  without a GPU time known, frames of 2.4 step up to 3 as before");
     }
     {   // The GPU-fit trial: at hold 3 with a cost of 2.15 (the longer hold's own waits) and a GPU of 1.3, hold 2 is tried after the hold-off and held when its frames are 2.15
         sim m = {0}; m.gpu = 1.3; run(&m, 120, 0.5, 1, 3, 0); run(&m, 10, 2.5, 1, 3, 0); check(m.s.k == 3, "GPU-fit trial: frames of 2.5 step to hold 3");
@@ -425,10 +425,13 @@ int main(void) {
         sim h = {0}; h.gpu = 1.3; run(&h, 120, 0.5, 1, 3, 0); run(&h, 10, 2.5, 1, 3, 0);   // at hold 3 with a hitch (3.4) every 12 frames, as Kokiri Forest has: the GPU-fit run tolerates them
         for (int i = 0; i < 20; i++) { run(&h, 11, 2.15, 1, 3, 0); run(&h, 1, 3.4, 1, 3, 0); }
         check(h.s.downs >= 1 && h.s.k == 2, "  a hitch every 12 frames at hold 3 does not stop the GPU-fit trial to 2");
-        sim f = {0}; f.gpu = 1.3; run(&f, 120, 0.5, 1, 3, 0); run(&f, 3000, 2.5, 1, 3, 0);
-        snprintf(b, sizeof b, "  frames of 2.5 with a GPU of 1.3: three GPU-fit trials fail, then no more (downs %llu, failed %llu, k %d)", (unsigned long long)f.s.downs, (unsigned long long)f.s.failed, f.s.k);
+        sim t = {0}; t.gpu = 1.3; run(&t, 120, 0.5, 1, 3, 0); run(&t, 10, 2.5, 1, 3, 0);   // at hold 3 with a late frame in every 4 (the Pad 3 read one in ten): still tried
+        for (int i = 0; i < 60; i++) { run(&t, 3, 2.15, 1, 3, 0); run(&t, 1, 3.4, 1, 3, 0); }
+        check(t.s.downs >= 1, "  a late frame in every 4 at hold 3 does not stop it either");
+        sim f = {0}; f.gpu = 1.3; run(&f, 120, 0.5, 1, 3, 0); run(&f, 3000, 2.7, 1, 3, 0);
+        snprintf(b, sizeof b, "  frames of 2.7 with a GPU of 1.3: three GPU-fit trials fail, then no more (downs %llu, failed %llu, k %d)", (unsigned long long)f.s.downs, (unsigned long long)f.s.failed, f.s.k);
         check(f.s.k == 3 && f.s.downs == 3 && f.s.failed == 3 && f.s.gfail == 3, b);
-        unsigned long long l0 = f.s.late; run(&f, 3000, 2.5, 1, 3, 0); check(f.s.downs == 3 && f.s.late == l0, "    and 3,000 more such frames bring no trial and no late frame");
+        unsigned long long l0 = f.s.late; run(&f, 3000, 2.7, 1, 3, 0); check(f.s.downs == 3 && f.s.late == l0, "    and 3,000 more such frames bring no trial and no late frame");
     }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
