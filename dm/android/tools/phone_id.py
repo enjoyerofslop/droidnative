@@ -31,6 +31,26 @@ def mdns_serialno(name):   # the ro.serialno an mDNS service name carries, or No
     return m[1] if m and m[1].lower() not in PLACEHOLDERS else None
 
 
+def serialno_of(name):   # the serial number in adbd's service name, with or without its type (adb-<serial number>-<suffix>[._adb-tls-….tcp]), or None
+    m = re.match(r'^adb-(.+)-[^-.]+(?:\._adb(?:-tls-(?:connect|pairing))?\._tcp\.?)?$', name or '')
+    return m[1] if m and m[1].lower() not in PLACEHOLDERS else None
+
+
+KINDS = {'_adb-tls-pairing._tcp': 'pairing', '_adb-tls-connect._tcp': 'connect', '_adb._tcp': 'tcp'}   # mDNS service types: a pairing code's, wireless debugging's, adb tcpip's
+
+
+def services(out):   # `adb mdns services` → [(name, kind, 'ip:port')]: name as adb-<serial number>-<suffix> (a QR code's pairing service is studio-…), kind from KINDS
+    found = []
+    for line in (out or '').splitlines():
+        p = line.split()
+        if len(p) >= 3 and p[1].rstrip('.') in KINDS and re.fullmatch(r'\S+:\d+', p[2]): found.append((p[0].split('._adb')[0], KINDS[p[1].rstrip('.')], p[2]))
+    return found
+
+
+def mdns_services(out):   # `adb mdns services` → [(a phone's serial number, 'ip:port')] for each phone offering a connection (not a pairing)
+    return [(sn, addr) for name, kind, addr in services(out) if kind == 'connect' and (sn := mdns_serialno(name + '._adb-tls-connect._tcp'))]
+
+
 def stable_id(serialno, android_id=''):   # → the phone's ID, or None when it gives neither a real serial number nor an Android ID
     s, a = (serialno or '').strip(), (android_id or '').strip()
     if s.lower() not in PLACEHOLDERS and safe(s) == s: return s
@@ -57,3 +77,10 @@ def find(serials, keys, ids):   # the index in serials (a picker's entries; None
         for i, s in enumerate(serials):
             if k and s and k in (s, ids.get(s)): return i
     return -1
+
+
+def current(serial, ready, seen):   # ready: [{'serial', 'id'}] adb lists as ready now; seen: serial → ID, all known this session → the serial that phone is on now
+    # (serial itself while it is listed; else one with the ID it had, over the cable first), or None
+    if any(d['serial'] == serial for d in ready): return serial
+    same = [d for d in ready if seen.get(serial) and d.get('id') == seen[serial]]
+    return one_per_phone(same)[0]['serial'] if same else None

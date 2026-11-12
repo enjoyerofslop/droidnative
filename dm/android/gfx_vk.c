@@ -40,7 +40,9 @@
 #include "spv_noptr.h"   // raw global memory through a descriptor array, for drivers that refuse OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
 #include "spv_precise.h"   // Maxwell's FMUL and FADD unfused in the shaders that place vertices (gfx_vk_draw.inc spv_fit_precise)
 #include "spv_bind.h"   // a set's far-apart binding numbers made dense, for drivers that size a layout by its highest (gfx_vk_draw.inc sh_get, gfx_vk_lmod.inc lm_code)
+#include "spv_tffrag.h"   // transform feedback captured in the fragment stage on a GPU without vertex-stage storage writes (gfx_vk_draw.inc tf_capture)
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
+#include "rec_desc.h"   // a descriptor set's writes packed for the recorder (gfx_vk_rec.inc R_UPDDS)
 #include "sb_reuse.h"   // a read-only storage buffer's copy bound again while its pages are unwritten (gfx_vk_sbcopy.inc)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
 #include "nvn_queue.h"   // the queue scheduler (hle_nvn.c nvn_queue.inc): event publication and GPU progress
@@ -2148,18 +2150,48 @@ static int g_rc_skip;   // a render-enable block evaluated false is active
 static uint64_t g_rc_skipped;   // clears and draws dropped by it (the first is logged)
 #define RC_PEND 256
 static struct { uint64_t addr; int kind; } g_rc_pend[RC_PEND]; static int g_rc_npend;   // reports replayed in this submission: kind 1 = timestamp (counter 0), 2 = another counter (unknown)
-static uint64_t g_rc_occ[4096];   // addresses ever written by a non-timestamp report (open addressing): conditions on them keep drawing
-static void rc_occ_add(uint64_t a) { for (uint32_t i = (uint32_t)(a >> 4) & 4095, k = 0; k < 4096; k++, i = (i + 1) & 4095) { if (g_rc_occ[i] == a) return; if (!g_rc_occ[i]) { g_rc_occ[i] = a; return; } } }
-static int rc_occ_has(uint64_t a) { for (uint32_t i = (uint32_t)(a >> 4) & 4095, k = 0; k < 4096; k++, i = (i + 1) & 4095) { if (g_rc_occ[i] == a) return 1; if (!g_rc_occ[i]) return 0; } return 0; }
-static void rc_note(uint64_t a, int kind) {
-    if (kind == 2) rc_occ_add(a);
+// Addresses ever written by a non-timestamp report, each with the NVN fence of the submission its last samples-passed report is in (RC_ANY: a counter kind the host does not
+// implement, unknown for good). A samples-passed result is written when its chunk completes (post_apply, before the fence: chunk_thread), so a condition on it reads memory once
+// that fence has completed, and keeps drawing while it is in flight, as the Mac does ([Occlusion conditions read once landed]): every such condition drew before, and Ocarina of
+// Time reports its queries a submission ahead of the conditional draws (on the Mac, 42% of Kokiri Forest's 1.48 million conditions were false). An open-addressing table grown
+// at half full. It was a fixed 4,096 slots, which Kokiri Forest filled (its counter reports go to ever new addresses), and once full every report and every condition probed all
+// 4,096: 37% of the replay thread on a Galaxy Z Fold 8. Past RC_OCC_MAX slots it is emptied and filled again (logged): a condition on an address forgotten so reads its memory.
+// DM_VK_RC_LANDED=0 (env.txt): every samples-passed condition keeps drawing, as before
+enum { RC_OCC_MIN = 4096, RC_OCC_MAX = 1u << 21 };
+#define RC_ANY UINT64_MAX
+static uint64_t *g_rc_occ, *g_rc_occf; static uint32_t g_rc_cap, g_rc_n;   // address, fence; the replay's thread alone (mtl_exec)
+static uint64_t g_rc_landed, g_rc_flying;   // samples-passed conditions read from memory / still in flight (drawn)
+static int rc_landed_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RC_LANDED"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RC_LANDED=0: every samples-passed condition keeps drawing"); } return v; }
+static uint32_t rc_occ_slot(const uint64_t *t, uint32_t cap, uint64_t a) { uint32_t i = (uint32_t)((a >> 4) * 0x9E3779B1u) & (cap - 1); while (t[i] && t[i] != a) i = (i + 1) & (cap - 1); return i; }
+static void rc_occ_add(uint64_t a, uint64_t fence) {
+    if (!a) return;   // (0 is an empty slot)
+    if (2 * (g_rc_n + 1) > g_rc_cap) {
+        uint32_t nc = g_rc_cap ? 2 * g_rc_cap : RC_OCC_MIN; int clear = nc > RC_OCC_MAX; if (clear) nc = g_rc_cap;
+        uint64_t *nt = calloc(nc, sizeof *nt), *nf = calloc(nc, sizeof *nf); if (!nt || !nf) { free(nt); free(nf); return; }
+        if (clear) { static int nl; if (nl++ < 4) LOG("[vk] conditional rendering: %u counter report addresses kept, the most it keeps: emptied", g_rc_n); g_rc_n = 0; }
+        else { for (uint32_t i = 0; i < g_rc_cap; i++) if (g_rc_occ[i]) { uint32_t k = rc_occ_slot(nt, nc, g_rc_occ[i]); nt[k] = g_rc_occ[i]; nf[k] = g_rc_occf[i]; }
+               if (nc >= 65536) LOG("[vk] conditional rendering: %u counter report addresses kept, room for %u now", g_rc_n, nc / 2); }
+        free(g_rc_occ); free(g_rc_occf); g_rc_occ = nt; g_rc_occf = nf; g_rc_cap = nc;
+    }
+    uint32_t i = rc_occ_slot(g_rc_occ, g_rc_cap, a);
+    if (!g_rc_occ[i]) { g_rc_occ[i] = a; g_rc_occf[i] = fence; g_rc_n++; }
+    else if (g_rc_occf[i] != RC_ANY && (fence == RC_ANY || fence > g_rc_occf[i])) g_rc_occf[i] = fence;   // the latest report; unknown kinds for good
+}
+static int rc_occ_get(uint64_t a, uint64_t *fence) { if (!g_rc_cap || !a) return 0; uint32_t i = rc_occ_slot(g_rc_occ, g_rc_cap, a); if (g_rc_occ[i] != a) return 0; *fence = g_rc_occf[i]; return 1; }
+static void rc_note(uint64_t a, int kind) {   // kind 1 a timestamp, 2 a counter kind the host does not implement, 3 samples passed
+    if (kind >= 2) rc_occ_add(a, kind == 3 && rc_landed_on() ? atomic_load(&g_fence) + 1 : RC_ANY);   // (the fence this submission completes: mtl_sub_commit)
+    if (kind == 3) kind = 2;   // (in this submission: not landed)
     for (int i = 0; i < g_rc_npend; i++) if (g_rc_pend[i].addr == a) { g_rc_pend[i].kind = kind; return; }
     if (g_rc_npend == RC_PEND) { memmove(g_rc_pend, g_rc_pend + RC_PEND / 2, sizeof *g_rc_pend * (RC_PEND / 2)); g_rc_npend = RC_PEND / 2; }   // the older half has landed by now
     g_rc_pend[g_rc_npend].addr = a; g_rc_pend[g_rc_npend++].kind = kind;
 }
 static int rc_value(uint64_t a, uint64_t *v) {   // 0 = unknown at replay
-    if (rc_occ_has(a)) return 0;
-    for (int i = g_rc_npend - 1; i >= 0; i--) if (g_rc_pend[i].addr == a) { if (g_rc_pend[i].kind != 1) return 0; *v = 0; return 1; }
+    for (int i = g_rc_npend - 1; i >= 0; i--) if (g_rc_pend[i].addr == a) { if (g_rc_pend[i].kind != 1) return 0; *v = 0; return 1; }   // a report of this submission first: not landed
+    uint64_t f;
+    if (rc_occ_get(a, &f)) {
+        if (f == RC_ANY || atomic_load(&g_done) < f) { if (f != RC_ANY) g_rc_flying++; return 0; }
+        g_rc_landed++;
+    }
     *v = *(const volatile uint64_t *)a; return 1;
 }
 static int rc_skips(void) {   // the clear or draw at hand is dropped
@@ -2228,7 +2260,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8); mtl_exec((const uint8_t *)t); break; }
             case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, a + 8, 4); memcpy(&v, a + 12, 4); mtl_sub_event(val, m, v); break; }
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8);
-                if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : 2);
+                if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 3 : 2);
                 if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) { occl_end(); g_q_reports++; post((post_op){3, NULL, 0, 0, ad, (uint32_t)t, g_q_on ? g_q_win : g_qslot, g_qslot}); }
                 else if (C && C->tq && C->ntq < 256 && (t == 0 || t == 0x10)) {   // a timestamp: written by the GPU at this point of the commands, so two of them time the GPU work between
                     // (Super Mario Bros. Wonder times its frame's GPU work for its dynamic resolution; the host used to write every report of a chunk with one time, its completion)
@@ -2547,6 +2579,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     atomic_load(&g_lwb_ns) / 1e6, (unsigned long long)atomic_load(&g_ab_taken), (unsigned long long)atomic_load(&g_ab_noted), (unsigned long long)atomic_load(&g_ab_clean), (unsigned long long)atomic_load(&g_ab_differ), (unsigned long long)atomic_load(&g_ab_refused));
     ev_stat(); spare_stat(); fb_stat();
     if (wb_revert_on()) rv_stat(frame);
+    if (DM_GAME_RENDER_COND) LOG("[vk] conditional rendering: %llu clears and draws dropped, samples-passed conditions %llu read once landed / %llu in flight (drawn), %u counter report addresses kept "
+                                 "(cumulative)", (unsigned long long)g_rc_skipped, (unsigned long long)g_rc_landed, (unsigned long long)g_rc_flying, g_rc_n);
     {   static unsigned long long f0; static uint64_t n0, b0, r0, t0;   // since the last line, a frame on average
         uint64_t n = atomic_load(&g_awb_n), b = atomic_load(&g_awb_bytes), r = atomic_load(&g_awb_rb), t = atomic_load(&g_wb_ns); double fr = frame > f0 ? (double)(frame - f0) : 1;
         LOG("[vk] arena write-backs (storage buffers, buffer images, transform feedback), frames %llu to %llu: %.1f a frame, %.0f KB a frame, %.0f%% read through the GPU's cached copy (%s); landing every write-back took the completion thread %.2f ms a frame",
@@ -2562,7 +2596,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     sbc_stat();
     LOG("[vk] support buffer: %llu stages wrote it, %llu left it unwritten (no module reads binding 0) (cumulative; gfx_vk_draw.inc stage_set)", (unsigned long long)g_sup_written, (unsigned long long)g_sup_skipped);
     gm_stat();   // raw global memory (gfx_vk_gmem.inc), with DM_VK_RAW_GMEM=1
-    if (g_rq) LOG("[vk] recorder: %llu calls queued, %llu drains, %llu made directly; the replay waited %.1f ms for it (cumulative; gfx_vk_rec.inc)", (unsigned long long)g_rq_records, (unsigned long long)g_rq_drains, (unsigned long long)g_rq_direct, atomic_load(&g_rq_waits_ns) / 1e6);
+    if (g_rq) LOG("[vk] recorder: %llu calls queued (%llu of them descriptor set writes, %llu more written directly after a drain), %llu drains, %llu made directly; the replay waited %.1f ms for it (cumulative; gfx_vk_rec.inc)",
+                  (unsigned long long)g_rq_records, (unsigned long long)g_rq_desc, (unsigned long long)g_rq_desc_direct, (unsigned long long)g_rq_drains, (unsigned long long)g_rq_direct, atomic_load(&g_rq_waits_ns) / 1e6);
     if (set_reuse()) { static unsigned long long f0; static uint64_t h0, m0;   // per frame since the last line
         if (frame > f0) { double nf = (double)(frame - f0), h = (double)(g_sr_hit - h0) / nf, m = (double)(g_sr_miss - m0) / nf;
             LOG("[vk] descriptor sets a frame over the last %llu frames: %.0f bound again with the same descriptors, %.0f written (%.1f%% bound again); %llu too large to keep "

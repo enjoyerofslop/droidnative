@@ -2137,8 +2137,10 @@ _OODLE = None
 def oodle_ask(comp, n):
     """The game's own decoder: OodleLZ_Decompress (Trinity's packs are Oodle Mermaid, Pokémon Legends: Arceus's GFPAK entries Oodle Kraken, and Oodle is linked into main), or LZ5_decompress_safe (DRAGON QUEST XI S's legacy Unreal paks):
     one Mac host per worker process in its tool mode (dm/host/hle_oodle.c, DM_OODLE_SERVE), fed over a pipe. DM_OODLE_HOST = the host, DM_OODLE_MODULES = the rewritten modules it loads
-    (the NSP script sets both for a game with Trinity packs, Oodle PKZ or GFPAK entries, or legacy Unreal paks, profile_guess.py shader_sources). → (the decoded bytes or None, the host is gone)"""
+    (the NSP script sets both for a game with Trinity packs, Oodle PKZ or GFPAK entries, or legacy Unreal paks, profile_guess.py shader_sources). → (the decoded bytes or None, the host is gone)
+    With DM_OODLE_CACHE, the streams come from the decoder run before the split instead (oodle_cached)"""
     global _OODLE
+    if os.environ.get('DM_OODLE_CACHE'): return oodle_cached(comp, n)
     if _OODLE is None:
         import tempfile
         host, mods = os.environ.get('DM_OODLE_HOST'), os.environ.get('DM_OODLE_MODULES')
@@ -2153,8 +2155,36 @@ def oodle_ask(comp, n):
     if got == n: return p.stdout.read(n), False
     return None, got != 0   # 0: the decoder refused the stream, and the host goes on
 
+_CACHED = None
+def oodle_cached(comp, n):
+    """DM_OODLE_CACHE=<folder>: the game's decoder ran before the split, where it takes only batched jobs (the game's Android host on a phone, scripts/android_oodle.py Cache).
+    Each <name>.idx there has a line per stream: blake2b-128 of the compressed bytes in hex, the raw length, and the decoded bytes' offset in <name>.pack (-1: the decoder refused
+    the stream). A stream not there is red, unless DM_OODLE_RECORD=<folder>: then it is listed in that folder's want.<pid> (u32 compressed length, u32 raw length, the bytes) and
+    zeros stand in for it, so one run names the streams the next job decodes. → as oodle_ask"""
+    global _CACHED
+    d = os.environ['DM_OODLE_CACHE']
+    if _CACHED is None:
+        _CACHED = {}
+        for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            if f.endswith('.idx'):
+                with open(os.path.join(d, f), encoding='ascii') as t:
+                    for ln in t: h, raw, at = ln.split('\t'); _CACHED[h, int(raw)] = (os.path.join(d, f[:-4] + '.pack'), int(at))
+    k = (hashlib.blake2b(comp, digest_size=16).hexdigest(), n)
+    pack, at = _CACHED.get(k, ('', -2))
+    if at >= 0:
+        with open(pack, 'rb') as f: f.seek(at); s = f.read(n)
+        if len(s) != n: red(f'{pack} ends inside the {n}-byte stream at {at:#x}: delete {d}, then build again')
+        return s, False
+    if at == -1: return None, False   # refused, as the Mac host's 0
+    rec = os.environ.get('DM_OODLE_RECORD')
+    if not rec: red(f'a {len(comp)} → {n} byte stream of the game\'s Oodle is not among the streams decoded before the split ({d}; a run with DM_OODLE_RECORD lists them)')
+    if at == -2:   # listed once per process
+        with open(os.path.join(rec, f'want.{os.getpid()}'), 'ab') as f: f.write(struct.pack('<II', len(comp), n) + bytes(comp))
+        _CACHED[k] = ('', -3)
+    return bytes(n), False
+
 def oodle_said():   # what the host wrote so far
-    assert _OODLE
+    if _OODLE is None: return f'(no host here: the game\'s decoder ran before the split and refused this stream; DM_OODLE_CACHE={os.environ.get("DM_OODLE_CACHE")})'
     _OODLE[1].seek(0)
     return _OODLE[1].read().decode(errors='replace')
 

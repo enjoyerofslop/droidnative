@@ -89,7 +89,7 @@ class Lock(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('build_android_from_nsp', REPO / 'scripts/build_android_from_nsp.py')
         assert spec and spec.loader
         ba = importlib.util.module_from_spec(spec); spec.loader.exec_module(ba)
-        def adb(serial, *a, log=None, check=True):
+        def adb(serial, *a, log=None, check=True, timeout=None):
             self.assertEqual(a, ('shell', ba.phone_id.ID_CMD)); return props.get(serial, '')
         cm = mock.patch.object(ba, 'adb', adb); cm.start(); self.addCleanup(cm.stop)
         return ba
