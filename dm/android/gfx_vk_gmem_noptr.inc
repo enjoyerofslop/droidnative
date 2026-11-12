@@ -50,8 +50,9 @@ static int gm_np_env(void) {
     static int v = -2;
     if (v == -2) { const char *e = getenv("DM_VK_RAW_GMEM_NOPTR"); v = e && *e == '2' ? 2 : e && *e == '1' ? 1 : e && *e == '0' ? 0 : -1;
         if (e && !strcmp(e, "auto")) { uint64_t mib = gm_np_memtotal_mib(); v = mib >= (uint64_t)GM_NP_AUTO_GIB * 1024 - 512 ? -1 : 0;
-            if (!v) LOG("[vk] raw global memory: DM_VK_RAW_GMEM_NOPTR=auto and the device has %llu MiB of RAM, under %d GiB: on a driver that refuses the shaders' pointers they stay refused (the pipelines "
-                        "they bring back do not fit; =2 in env.txt tries the table of pointers)", (unsigned long long)mib, GM_NP_AUTO_GIB); } }
+            if (!v) LOG("[vk] raw global memory: DM_VK_RAW_GMEM_NOPTR=auto and the device has %llu MiB of RAM, under %d GiB: no table of pointers or descriptor array, so on a driver that refuses "
+                        "the shaders' pointers (not one that builds them, as the Adreno 830 and 840 do) their pipelines would stay refused: what they bring back does not fit (=2 in env.txt tries the table)",
+                        (unsigned long long)mib, GM_NP_AUTO_GIB); } }
     return v;
 }
 // After the device's features are read (vk_try): the table needs nothing more; whether the device has what the array needs (d: the descriptor indexing features, NULL where the
