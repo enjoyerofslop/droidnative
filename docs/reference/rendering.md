@@ -2456,6 +2456,22 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - Moto Razr Plus 2023 (Adreno 730, V@0615.98): main and this change draw the same frames, the capture in the vertex stage (frame p50 42–46 ms, GPU p50 25.4–27.7 ms in both). With `DM_VK_TF_FRAG=1` the fragment-stage capture draws the same characters at the same speed.
 - **Found on:** [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md) on the Pixel 9 Pro XL: its 5 capture shaders (`a3fe02b2f67c772e` and others) write skinned positions (output 0, xyz) and the normal's and tangent's packed bits (outputs 1 and 2, x only) into three buffers.
 
+### Draws under rasterizer discard that write memory (Android)
+
+- **Symptom:** Android only: characters skinned on the GPU are not drawn while the world, the cutscene cameras and the HUD around them are; no `[RED]` line. On an Adreno 830 logcat may also have Adreno's `Failed to link shaders` / `Pipeline create failed` and `Shader compilation failed for shaderType: 4`, but those are the shader module identifiers' cache misses (`VK_PIPELINE_COMPILE_REQUIRED`, as many as the `[vk] occlusion queries …` line's "needed the modules after all"; see [Shader modules made only for pipelines the driver's cache lacks](#shader-modules-made-only-for-pipelines-the-drivers-cache-lacks)), seen in games that draw right too.
+- **Cause:** a draw under `SetRasterizerDiscard` still runs its vertex and geometry shaders, with their storage buffer and image writes and atomics. The replay made such a draw only as a transform feedback capture (`tf_capture`), so one without feedback did nothing: the same bug [Rasterizer discard preserves vertex storage writes](#rasterizer-discard-preserves-vertex-storage-writes) fixed for Metal. Xenoblade Chronicles 2 skins each character that way (no transform feedback in the game): a vertex-only draw writes the blended bone matrices, 48 bytes at `gl_VertexIndex`, into slot 0 of one 384,000-byte storage buffer, which the character's draws read, and a variant updates vertex buffers that later draws read as streams.
+- **Fix:**
+  - `rd_draw` runs a discarded draw whose vertex or geometry stage writes memory (a storage buffer with `BufferUsageFlags.Write`, an image with `TextureUsageFlags.ImageStore`, raw global memory's write log) as a dispatch runs (`vk_dispatch`): the targets' pass ended before its bindings, its vertex (and geometry) stage alone in a pipeline with rasterization off in the pass without attachments (`rd_key`, key `tf` 2, never in the start-up list), a full barrier before and after it. Its storage buffer writes are forwardable write-backs (`g_vdisp`, `disp_like`), so later shaders read them on the GPU as they read a dispatch's (`buf_fwd`, `fwd_find`). A discarded draw that writes nothing still draws nothing; a GPU without `vertexPipelineStoresAndAtomics` leaves it out with `[RED] … rasterizer discard writes memory from its vertex stage` once.
+  - Forwarding needs one write-back that covers every byte a shader binds, and XC2 binds the bone buffer differently on the two sides: each skinning draw from the character's slot to the buffer's end, the character's draws the whole buffer. Run as plain dispatches, the skinning draws drew the characters but about 11 reads a frame met a write-back that didn't cover them and waited for the GPU: 24 fps on a Moto Razr Plus 2023 where the game holds 30. A read that meets a discarded draw's write-back it overlaps but isn't inside now learns the union as a home range (`dm/android/rd_home.h`, at most 16 ranges of up to 4 MB). Such a draw's write then goes on the chunk's copy of the whole range (`rd_bind_w`): made once per chunk (`rd_home_copy`), from the newest copy of a chunk in flight on the GPU (that chunk held, as `fwd_find` holds one) or else from guest memory, in place when its offset there keeps the storage buffer alignment, else through a scratch copy copied in before the draw and back after it (`rd_close`; XC2's 48-byte slots against the Adreno's 64-byte alignment).
+  - A draw that isn't indexed now reads a vertex stream's bytes from its first vertex to the end of its last vertex's attributes (`stream_rng`), not the stream's whole bound range: XC2 binds each attribute of a buffer as a stream of its own, 32 bytes further on per attribute and as long as the buffer, so the bound ranges ran past the write-back and into the next buffer. Learned from those, a home range grew 32 bytes at a time, swallowed the neighbouring vertex buffers and a uniform buffer, and every draw reading that uniform buffer waited.
+  - `DM_VK_RAST_DISCARD=0` leaves every discarded draw without transform feedback out, as before; `DM_VK_RD_HOME=0` gives each write a copy of its own range (the plain-dispatch form). The `[vk] draws not made` line counts the discarded draws made and left out, where their writes went and the home ranges learned.
+- **Check (2026-11-11):** `dm/tools/tests/test_rd_home.py` (the range table: learning, chained merges, the size cap, the least recently used range given up, lookups). Moto Razr Plus 2023 (Adreno 730, V@0615.98, Android 16), XC2 2.1.0's game app, the same route each time (New Game on Easy, the opening, King Crustip's tutorial battle), one host with the switches:
+  - `DM_VK_RAST_DISCARD=0`: Rex, Gramps and King Crustip missing in the opening and the battle, as on main; battle frame p50 33.3 ms, NVN submit+present 17.3 ms, GPU 23.5 ms.
+  - Discarded draws as plain dispatches (`DM_VK_RD_HOME=0`, without the stream ranges): all three drawn, 42 ms frames (submit+present 41.5 ms), 154,000 waits in 9 minutes.
+  - This change: all three drawn in the opening (Rex diving in the salvage suit, on deck with Gramps) and the battle (Rex auto-attacking King Crustip), a steady 30 fps (frame p50 33.3, p95 33.9 ms), submit+present 22.5 ms, GPU 27.1 ms; 2 waits on the current submission and about one on a chunk in flight a frame; 343,000 discarded draws made in 12 minutes (about 50 a game frame), no `[RED]` line, no crash.
+  - Galaxy S25 Edge (Adreno 830, Android 16), with this change: all three drawn on the same route, a steady 30 fps (battle frame p50 33.2, p95 34.1 ms), submit+present 22.6 ms, GPU 22.1 ms, about one wait a frame, no `[RED]` line.
+- **Found on:** [Xenoblade Chronicles 2](../../dm/games/0100E95004038000/README.md#android): every character in the opening and the tutorial battle on a Galaxy S25 Edge (Adreno 830) and the Razr (Adreno 730). Skinning shaders `fa456dcb6b05c2ce`, `0cf988e8a8ea2aee`, `bce3419b07cb2f3d`, `3fb8ebc13eb37ad7` (`shd_post.wishp` var122, the bone buffer) and `bd4b7f58c16f180f` (it updates a vertex buffer whose bytes it also reads as vertex streams).
+
 ### Subgroup operations rewritten for stages the GPU runs none in
 
 - **Symptom:** Android only: a crash in the driver's shader compiler on every launch, as the first pipelines are built (`CRASH sig=11 addr=0x48 pc=…(libllvm-qgl.so+0x2dcef0)`, thread `NVN queue repla`); the pipeline being built names a fragment shader whose module uses `OpGroupNonUniformShuffle`, and the log's `subgroup operations in stages 0x20` leaves fragment shaders out.
@@ -2718,3 +2734,32 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Mario Kart World:** its 26 task and mesh shaders get compute forms too. On a Galaxy S25 Edge (Adreno 830) 18 of them ran through the title, the menus and a Mushroom Cup race with no failure, 85 draws a frame at the start grid, for a few ms of GPU. Nothing they draw shows in the picture there: the grass draws go to a 128x128 target, the 68 bush draws to a half-resolution screen-space target, and the game's terrain is black on Android with or without them. Read back from the GPU, the bush tasks launch no mesh workgroup at the start grid and 13 to 69 a frame along the course, and a launched workgroup's records are one small cluster near the horizon, none of them NaN.
 - **Build:** `spv_build.py` translates again a task or mesh output that has no `mesh_emu` in its `res.json`, alone, so a build made before this gets the compute forms without a chain change. All 520 of Ocarina of Time's (20 task, 500 mesh shaders, 4 of them with per-primitive outputs) are made, and spirv-val passes every module.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a OnePlus Pad 3 (Adreno 830, Qualcomm's driver); drawn there and on a Galaxy Z Flip 7 (Xclipse 950). The same design as DeathKhan's nx2android fork's mesh emulation (github.com/DeathKhan/nx2android: 1f7e70b, 0e3285b, defd439; `shader_meshwrap.py`, `meshlaunch.comp`), written anew for this replay.
+
+### Task and mesh draws in compute form on Qualcomm's driver, which has mesh shaders (Android)
+
+- **Symptom:** on the Adreno 840 with Qualcomm's driver (Galaxy Z Fold 8), Ocarina of Time's distant canopy in Kokiri Forest is torn by white shards with the native `VK_EXT_mesh_shader` path.
+- **Cause:** the foliage is drawn twice by different mesh shaders: a depth prepass (depth LESS with writes), then a colour pass (depth EQUAL without writes). Through the 840's mesh pipeline, the colour pass lands behind its own prepass depth, so EQUAL fails and the sky fill shows through.
+  - **The gap is real displacement:** thousands of depth steps. LEQUAL with a bias of −4096 still leaves shards, and only ALWAYS hides most of it.
+  - **Ruled out as the cause:**
+    - the position code (structurally identical in both shaders);
+    - the inputs (the same storage buffer, route and data, and the same constant buffers);
+    - float contraction (every Fma split into FMul + FAdd with NoContraction);
+    - subgroup width (`spv_wide` on task and mesh);
+    - raw memory timing (`DM_VK_RAW_GMEM_SYNC=1`, `DM_VK_INPLACE=0`);
+    - triangle vertex order;
+    - pipeline state (shared with the vertex path).
+  - **The same kernels draw clean in compute form**, so the fault is in the native mesh path: Qualcomm's driver, or something only the native wrapper does. Which one is open.
+- **Fix:** on Qualcomm's own driver, task and mesh draws run in compute form ([on a GPU without mesh shaders](#task-and-mesh-draws-in-compute-form-on-a-gpu-without-mesh-shaders-android)) even though the driver has `VK_EXT_mesh_shader`.
+  - **Scope:** other drivers keep the native path; Turnip and the Adreno 7xx and 830 drivers have none.
+  - **Switches:** `DM_VK_MESH=1` takes the native path again (for an A/B); `DM_VK_MESH=0` turns it off on every GPU.
+  - **The log** says which path is used: `task / mesh shaders: Qualcomm's driver has VK_EXT_mesh_shader, but its draws run in compute form`.
+- **Cost:** none measured. Fold 8, Kokiri at the save's opening view, each run started at thermal status 0, last 60 s:
+
+  | | native | compute form |
+  |---|---|---|
+  | fps | 17.2 | 17.3 |
+  | GPU p50 | 44.7 ms | 43.9 ms |
+  | frame p90 | 64.6 ms | 62.0 ms |
+  | submit CPU p50 | 30.2 ms | 32.6 ms |
+
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a Galaxy Z Fold 8 (Adreno 840, Qualcomm's driver).
