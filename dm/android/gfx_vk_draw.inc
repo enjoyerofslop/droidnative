@@ -1414,7 +1414,7 @@ static void lin_writeback(int i) {   // attachment i of the pass that ends
 }
 static void rp_end(void) {
     if (!P.active) return;
-    g_rpe[g_rpe_why >= 0 && g_rpe_why < 10 ? g_rpe_why : 0]++;
+    g_rpe[g_rpe_why >= 0 && g_rpe_why < 12 ? g_rpe_why : 0]++;
     occl_end(); vkCmdEndRenderPass(C->cb); prof_pass_end(); P.active = 0; if (dump_on()) dump_pass_end();   // the profile's end timestamp after the pass: on a tiler the tiles' stores are part of it (a timestamp inside a pass is written per tile, and only the last tile's draws came before it)
     for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) {
         if (g_bcrt_pend[i].base->conv) bcd_decode(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly);   // decoded on the GPU into the image the game samples
@@ -1581,7 +1581,7 @@ static int rp_start(void) {
     VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = P.rp, .framebuffer = P.fb, .renderArea = {{0, 0}, {P.w, P.h}}};
     if (prof_on()) prof_pass_begin();
     vkCmdBeginRenderPass(c, &bi, VK_SUBPASS_CONTENTS_INLINE); bf_reset(); crumb('p', NULL, NULL, P.w, P.h);
-    P.active = 1; g_passes++;
+    P.active = 1; g_passes++; g_pass_swrite = 0; g_bar_check = 0;
     return 1;
 }
 // a completed chunk's draw resources (the completion thread, after its fence, before busy = 0): arena blocks kept for reuse, texel buffer views destroyed, and its descriptor
@@ -3365,6 +3365,14 @@ static void draw_dyn_state(VkCommandBuffer c, VkViewport *ov, VkRect2D *osc, int
 static int rd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAST_DISCARD"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAST_DISCARD=0: draws under rasterizer discard are left out unless transform feedback captures them"); } return v; }
 static uint64_t g_rd_made, g_rd_none;   // discarded draws made as dispatches; left out (nothing they write)
 static int g_rd_open;   // the pass without attachments of the discarded draw being made is open (rd_open; vk_draw__ closes it, whatever the draw's outcome)
+// a draw's textures, as stage_textures resolved them, against the open pass's targets (a BC target's shadow stands for its base): the game's barrier before it promised what the pass stored
+static int bar_samples_target(vshader *const sh[4]) {
+    for (int i = 0; i < 4; i++) { if (!sh[i]) continue; const tc_stage *c = &g_tc[tc_slot(sh[i]->stage)]; if (c->s != sh[i]) continue;
+        for (int e = 0; e < c->n; e++) { const vtex *v = c->e[e].v; if (!v) continue;
+            if (v == P.dv) return 1;
+            for (int j = 0; j < 8; j++) if (P.cv[j] && (P.cv[j] == v || g_bcrt_pend[j].base == v)) return 1; } }
+    return 0;
+}
 static int rd_writes(const vshader *s) {   // the stage writes memory: a storage buffer (or atomics on one: Ryujinx's BufferUsageFlags.Write), an image (TextureUsageFlags.ImageStore), raw global memory (its write log)
     if (!s) return 0;
     for (int i = 0; i < s->nsb; i++) if (s->sb[i].flags & 1) return 1;
@@ -3443,6 +3451,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     draw_view(k.sh, di, 1);   // what this draw reads of guest memory: pending GPU writes to it land first
     if (D.rast_discard && !rd) return tf_capture(k.sh[0], pprog[0], pst[0], dw, di);   // the vertex stage only: a capture, or nothing
     for (int i = 0; i < 4; i++) if (k.sh[i]) stage_textures(k.sh[i]);
+    if (!rd && P.active && g_bar_check && bar_samples_target(k.sh)) rp_end_why(10);   // after a kept game barrier: a draw sampling one of the pass's own targets reads what the pass stored up to there (gfx_vk.c bar_keep_on)
     int pool = (k.sh[0] && k.sh[0]->pool) || (k.sh[1] && k.sh[1]->pool) || (k.sh[2] && k.sh[2]->pool) || (k.sh[3] && k.sh[3]->pool);
     if (pool) pool_sync();   // the IDs read since made, before the pass begins (their uploads would end it)
     if (!rd && !rp_prepare_((k.sh[0] && k.sh[0]->wlayer) || (k.sh[2] && k.sh[2]->wlayer) || (k.sh[3] && k.sh[3]->wlayer))) { g_drop[1]++; return 0; }
@@ -3464,7 +3473,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_bind_bad) { g_drop[4]++; static int nb; if (nb < 10) { nb++; LOG("[RED] [vk] draw skipped: a binding has no valid descriptor (shaders %s %s)", k.sh[0]->key, k.sh[1] ? k.sh[1]->key : "-"); } return 0; }
     if (rd ? !rd_open() : !rp_start()) { g_drop[5]++; return 0; }   // after the textures: their uploads end a pass begun before (it is begun again on the same targets); it only takes cur(), so the sets' chunk is the one they are bound in below
     VkCommandBuffer c = C->cb;
-    if (!rd) occl_begin();
+    if (!rd) { occl_begin(); if (!g_pass_swrite) for (int i = 0; i < 4; i++) if (k.sh[i] && rd_writes(k.sh[i])) { g_pass_swrite = 1; break; } }   // (a game barrier after it ends the pass: bar_keep_on)
     else if (!g_rd_made++) LOG("[vk] rasterizer discard: a draw whose vertex stage writes memory runs as a dispatch, in a pass of its own (vertex %s, %u %s; DM_VK_RAST_DISCARD=0 leaves it out)", k.sh[0]->key, dw ? (unsigned)dw->count : (unsigned)di->count, dw ? "vertices" : "indices");
     bf_pipeline(c, pp->p);   // binds the command buffer already holds are left out (bf_*)
     if (pp->alpha) vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof D.alpha_ref, &D.alpha_ref);   // the alpha test's reference, data rather than a key (spv_alpha.h)

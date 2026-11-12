@@ -388,7 +388,17 @@ static void rp_end(void); static void rp_end_why(int why); static void views_dro
 static void *chunk_thread(void *arg); static int stg_pool_on(void);
 // Why a render pass ended (rp_end_why; the stats line): 1 a command between draws that is not made on the CPU (by op, g_rpe_op), 2 a chunk sent in the middle of the pass (g_mid_draws),
 // 3 new render targets, 4 a transfer or upload, 5 a compute dispatch, 6 a draw under rasterizer discard, 7 a sync or the submission's end, 8 a draw writing the layer, 9 the mesh compute form
-static uint64_t g_rpe[10], g_rpe_op[64], g_rt_kept; static int g_rpe_why;   // g_rt_kept: OP_SET_RT naming the pass's own targets, the pass kept open (rt_keep_on)
+// 10 a draw after a kept game barrier that samples one of the pass's targets (bar_keep_on)
+static uint64_t g_rpe[12], g_rpe_op[64], g_rt_kept; static int g_rpe_why;   // g_rt_kept: OP_SET_RT naming the pass's own targets, the pass kept open (rt_keep_on)
+// DM_VK_BARRIER_KEEP=0 (env.txt): a game barrier (nvnCommandBufferBarrier, OP_BARRIER) between the draws of a render pass ends the pass, as before. By default the pass goes on,
+// as the Metal replay's does (nvn_mtl.m: a game barrier splits a draw pass only after shader writes): NVN's ORDER_FRAGMENTS orders later fragment work after earlier, which a
+// Vulkan render pass gives its attachments by itself, and INVALIDATE_TEXTURE reaches textures that other work wrote, which ended the pass before it. What the pass alone does
+// not give: a draw of the pass that wrote memory (a storage buffer, an image, raw stores: rd_writes) is made visible by ending the pass at an ordering barrier, as before, and
+// a draw after a kept barrier that samples one of the pass's own targets gets the pass ended before it (bar_samples_target), so it reads what the pass stored up to there, as
+// the barrier promised. Ocarina of Time's barriers between draws (mostly 0x12, ORDER_FRAGMENTS | INVALIDATE_TEXTURE) ended about 24 passes a frame in Kokiri Forest, more than
+// the 64-draw chunks did; the stats line counts the kept ones and the draws that ended a pass after one
+static int g_pass_swrite, g_bar_check; static uint64_t g_bar_kept;   // a draw of the open pass writes memory; a barrier was kept in the open pass: its draws check their textures against the targets
+static int bar_keep_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_BARRIER_KEEP"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_BARRIER_KEEP=0: a game barrier between the draws of a render pass ends the pass"); } return v; }
 // DM_VK_RT_KEEP=0 (env.txt): OP_SET_RT ends the open render pass even when it names the targets the pass draws into, as before. By default such a pass goes on (rt_same.h), as the
 // Metal replay's does: Ocarina of Time sets its scene targets again between the draws of a pass, and each end loaded and stored the 1440x810 colour and depth targets again
 static int rt_keep_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RT_KEEP"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RT_KEEP=0: a render pass ends at every SetRenderTargets, the same targets included"); } return v; }
@@ -2292,7 +2302,7 @@ void mtl_exec(const uint8_t *p) {
         int cpu_op = h.op == OP_UPDATE_UB || h.op == OP_SIGNAL_EVENT || h.op == OP_REPORT_COUNTER || h.op == OP_FENCE_SYNC || h.op == OP_COPY_STRIDE || h.op == OP_CALL
                      || h.op == OP_CLEAR_BUF || h.op == OP_COPY_B2B
                      || h.op == OP_CLEAR_COLOR || h.op == OP_CLEAR_DS || h.op == OP_RESET_COUNTER || h.op == OP_RENDER_COND;   // clears of the bound targets are made in their pass when they can be (clear_color); the others end it themselves (cb())
-        if (P.active && h.op != OP_DRAW && h.op != OP_DRAW_IDX && h.op != OP_SCISSOR && h.op != OP_JUMP && h.op != OP_END && h.op != OP_SET_RT && !cpu_op && !draw_state_is(h.op)) { g_rpe_op[h.op & 63]++; rp_end_why(1); }
+        if (P.active && h.op != OP_DRAW && h.op != OP_DRAW_IDX && h.op != OP_SCISSOR && h.op != OP_JUMP && h.op != OP_END && h.op != OP_SET_RT && h.op != OP_BARRIER && !cpu_op && !draw_state_is(h.op)) { g_rpe_op[h.op & 63]++; rp_end_why(1); }
         switch (h.op) {
             case OP_END: return;
             case OP_JUMP: memcpy(&p, a, 8); continue;
@@ -2346,7 +2356,11 @@ void mtl_exec(const uint8_t *p) {
                 if (C && C->ndraw >= g_mid_draws && !vk_safe()) { g_rpe_why = 2; flush(); g_rpe_why = 0; }
                 { p_draw_idx t; if (!vk_draw(NULL, draw_idx_rec(a, h.size, &t))) g_draws_dropped++; break; }
             case OP_DISPATCH: if (!vk_dispatch((const p_dispatch *)a)) g_draws_dropped++; break;
-            case OP_BARRIER: case OP_VP_SWIZZLE: case OP_BEGIN: break;   // the replay's own syncs stand for barriers; viewport swizzles are not replayed (as before the unhandled-op line)
+            case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4);   // the replay's own syncs stand for barriers; inside a pass, one ends it only after shader writes (bar_keep_on)
+                if (P.active) { int order = bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_ORDER_INDIRECT_DATA_BIT);
+                    if (!bar_keep_on() || !tex_once() || (order && g_pass_swrite)) { g_rpe_op[OP_BARRIER & 63]++; rp_end_why(1); } else { g_bar_kept++; g_bar_check = 1; } }
+                break; }
+            case OP_VP_SWIZZLE: case OP_BEGIN: break;   // viewport swizzles are not replayed (as before the unhandled-op line)
             default: if (!draw_state_op(h.op, a) && h.op < 64 && !(g_op_warned & 1ull << h.op)) { g_op_warned |= 1ull << h.op; LOG("[RED] [vk] command op %u is not replayed on Vulkan: skipped", h.op); }
                 break;   // state for draws (programs, bindings, render state)
         }
@@ -2693,7 +2707,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
           "a command between draws %llu (op %d: %llu, op %d: %llu, op %d: %llu), a draw writing the layer %llu, a draw under rasterizer discard %llu, the mesh compute form %llu, other %llu (cumulative; rp_end_why)",
           g_mid_draws, (unsigned long long)g_rpe[2], (unsigned long long)g_rpe[3], (unsigned long long)g_rt_kept, rt_keep_on(), (unsigned long long)g_rpe[5], (unsigned long long)g_rpe[4], (unsigned long long)g_rpe[7],
           (unsigned long long)g_rpe[1], top[0], (unsigned long long)g_rpe_op[top[0] & 63], top[1], (unsigned long long)g_rpe_op[top[1] & 63], top[2], (unsigned long long)g_rpe_op[top[2] & 63],
-          (unsigned long long)g_rpe[8], (unsigned long long)g_rpe[6], (unsigned long long)g_rpe[9], (unsigned long long)g_rpe[0]); }
+          (unsigned long long)g_rpe[8], (unsigned long long)g_rpe[6], (unsigned long long)g_rpe[9], (unsigned long long)g_rpe[0]);
+      LOG("[vk] game barriers between the draws of a pass kept %llu, draws after one that sampled a target of the pass and ended it %llu (cumulative; DM_VK_BARRIER_KEEP %d)", (unsigned long long)g_bar_kept, (unsigned long long)g_rpe[10], bar_keep_on()); }
     if (slot0_fill_on()) LOG("[vk] render passes given a scratch target in their empty colour slot 0: %llu (cumulative; gfx_vk_draw.inc slot0_fill_on)", (unsigned long long)g_slot0_fills);
     if (dup_slots_on()) LOG("[vk] render passes attaching an image once that two colour slots name: %llu, draws whose write to the slot left unused was lost: %llu (cumulative; gfx_vk_draw.inc dup_slots)", (unsigned long long)g_dup_passes, (unsigned long long)g_dup_lost);
     if (stg_stat()) { static unsigned long long f0; static uint64_t a0, r0, s0; uint64_t a = atomic_load(&g_stg_allocs), r = atomic_load(&g_stg_frees), sl = g_sp_slices; double nf = frame > f0 ? (double)(frame - f0) : 1;
