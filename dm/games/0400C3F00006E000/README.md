@@ -146,6 +146,19 @@ Packed for Android as its own game app (`--game-apk`, the 21.9 GB RomFS as the d
   - **Memory in the race with it on:** 4.09 GB resident, 1.41 GB swapped, 1.32 GB available on the phone. No red line from raw global memory.
   - **The picture** is right in the race both ways.
   - **Whole pools were what failed before:** on the OnePlus Pad 3, before pools were placed in chunks, raw global memory placed 1.3 GB and the faster runs were killed.
+- **The same on the OnePlus Pad 3, 2026-11-11** (Adreno 830, Qualcomm's driver, 12 GB, the AHardwareBuffer route, the tablet where whole pools were killed). The game app built with `main`'s host and the profile's default in its `defaults.txt`, so with no switch in `env.txt`; the same race, five launches. Against it, two launches with `DM_VK_RAW_GMEM=0`. Each number is over the race's 300-frame windows:
+
+  | | Off (2 launches, 11 windows) | On, the default (5 launches, 31 windows) |
+  |---|---|---|
+  | The race | 14.7–22.1 fps, median 18.4 | 19.8–29.0 fps, median 22.8 |
+  | Where a frame has 1,800 draws or more | median 15.1 fps | median 21.7 fps |
+  | The replay's CPU a frame | median 42.6 ms | median 32.1 ms |
+  | GPU p50 | median 26.8 ms | median 24.3 ms |
+  | Placed | none | 462–485 pieces, 126–128 MiB of the pools' 1,160–1,443 MiB |
+  | Low-memory kills of the game | none | none |
+
+  - **Memory is tight either way:** the tablet's MemAvailable fell to 0.21–0.32 GB at some point in every launch with it on and to 0.29–0.31 GB with it off, with 5.8–8.0 GB of swap free. Nothing was killed, and raw global memory logged no red line.
+  - **The picture** is the race as before: the kart, the other racers, the scenery, the track's surface untextured.
 - **Frame times on Turnip:** menus and the movie 28–41 ms a frame; 3D scenes, the race included, 300–500 ms, of which the GPU is 21–45 ms and the replay's submit and present the rest. The track's surface is untextured (15 sparse images over the image limit), roadside bushes are missing (mesh draws skipped), and "virtual pool remap … failed" is logged several thousand times a run (Android cannot alias the private memory a virtual pool maps).
 
 ## Open
