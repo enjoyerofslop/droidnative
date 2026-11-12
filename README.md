@@ -87,7 +87,7 @@ On Windows:
    - **Tools for building:** **Install tools** downloads the JDK, the .NET SDK and Google's Android SDK (about 1.5 GB to download). DroidPlay asks
      before accepting the Android SDK's license.
    - **Your phone:** turn on USB debugging, plug the phone in and tap **Allow** on it. **Set up my phone** shows the steps for your phone's brand.
-   - **Your first game:** add the folder with its NSP or XCI files, then **Build and install**. The first build of a game takes about 10 to 20 minutes;
+   - **Your first game:** add the folder with its NSP or XCI files (a Switch 2 game: the folder that holds its `.nup` or its dump), then **Build and install**. The first build of a game takes about 10 to 20 minutes;
      later builds reuse what didn't change.
 3. **Play.** Press **Play** in DroidPlay's Library, or open the DroidPlay app on the phone and pick the game. The first start of a game takes a minute or
    more while the phone prepares its shaders; later starts take a few seconds.
@@ -419,7 +419,7 @@ For a game without a profile, the script writes a survey and tries a provisional
 
 ## How to play
 
-Switch 2 games are built from one `.nup` file or a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
+Switch 2 games are built from one `.nup` file or a folder of their files, not from NSPs, and need no `prod.keys`: see [Switch 2 games](#switch-2-games). On Android they are at an early stage ([Game Status](#game-status)); in DroidPlay for Windows, **+ Build game** picks the folder that holds the `.nup` or the dump.
 
 ### Build from the command line
 

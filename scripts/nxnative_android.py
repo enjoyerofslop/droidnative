@@ -307,7 +307,7 @@ class Hero(QWidget):   # the picked game, large: its art's wash behind, the art 
         elif g:
             bits = [g.id, f'v{g.display}' if g.display else None, (g.info.get('table') or {}).get('engine'), 'played on Android' if g.tested else 'not played on Android yet']
             self.meta.setText('   ·   '.join(b for b in bits if b))
-        else: self.meta.setText('Pick the folder with your game\'s NSP files and your prod.keys: + Build game, at the top right')
+        else: self.meta.setText('Pick the folder with your game\'s NSP or XCI files and your prod.keys, or with a Switch 2 game\'s .nup or dump (no keys): + Build game, at the top right')
         self.update()
 
     def resizeEvent(self, e):
@@ -396,7 +396,7 @@ class LibraryPage(QWidget):
         self.prev = QPushButton(); self.prev.setObjectName('arrow'); self.prev.setIcon(icon('left', TEXT, 20)); self.prev.clicked.connect(lambda: self.slide(-1))
         sl.addWidget(self.next, 0, 0, Qt.AlignRight | Qt.AlignTop); sl.addWidget(self.prev, 0, 0, Qt.AlignLeft | Qt.AlignTop)
         self.next.setStyleSheet(f'margin-top: {Card.H // 2 - 22}px'); self.prev.setStyleSheet(f'margin-top: {Card.H // 2 - 22}px')
-        bl.addWidget(strip); self.empty = label('No games yet. + Build game adds the folder with a game\'s NSP files.', 'muted'); bl.addWidget(self.empty)
+        bl.addWidget(strip); self.empty = label('No games yet. + Build game adds the folder with a game\'s NSP or XCI files, or with a Switch 2 game\'s .nup or dump.', 'muted'); bl.addWidget(self.empty)
         outer.addWidget(body, 0)
         self.scroll.horizontalScrollBar().valueChanged.connect(self.arrows); self.scroll.horizontalScrollBar().rangeChanged.connect(lambda *_: self.arrows())
         self.reload()
@@ -1643,7 +1643,7 @@ class Window(QMainWindow):
         else: self.search.clear()
     def filter_games(self, t): self.library.filter = t; self.library.render()
     def add_game(self):
-        d = QFileDialog.getExistingDirectory(self, 'The folder with your game\'s NSP / XCI files')
+        d = QFileDialog.getExistingDirectory(self, 'The folder with your game: its NSP / XCI files, or a Switch 2 game\'s .nup or dump')
         if not d: return
         fs = [f for f in (self.st.value('folders', []) or []) if f]
         if d not in fs: self.st.setValue('folders', fs + [d])
