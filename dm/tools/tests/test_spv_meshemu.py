@@ -96,6 +96,32 @@ class SpvMeshEmu(unittest.TestCase):
         info = mesh_info(False, True); info['primitive'] = [(0, 0)]
         with self.assertRaises(ValueError): me.facts(info)
 
+    def test_the_post_pass_makes_them_in_one_process_and_in_several(self):   # spv_android.py: a pool job (a spawned process, as on Windows) imports spv_mesh and spv_meshemu itself
+        infos = [mesh_info(False, False), mesh_info(True, True), {'kind': 'ts', 'threads': 32, 'payload': 256}]
+        made = [kernel(i) for i in infos]
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d, 'src'); src.mkdir(); keys = {}
+            for n in range(36):   # three pool jobs' worth (sa.CHUNK a job)
+                info = infos[n % 3]; data, lay = made[n % 3]; k = f'{n:016x}'; keys[k] = info
+                (src / f'{k}.spv').write_bytes(data)
+                (src / f'{k}.res.json').write_text(json.dumps({'stage': 'cs', 'mesh': {'info': info, 'lay': lay}}), encoding='utf-8')
+            outs = {}
+            for j in (1, 3):
+                dst = Path(d, f'out{j}')
+                r = subprocess.run([sys.executable, sa.__file__, '-j', str(j), str(src), str(dst)], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn(f'spv_android: {len(keys)} shaders', r.stdout); self.assertIn(f'; {len(keys)} task / mesh shaders in compute form too', r.stdout)
+                outs[j] = {p.name: p.read_bytes() for p in dst.iterdir()}
+            self.assertEqual(outs[1], outs[3], 'the same files from one process and from three')
+            for k, info in keys.items():
+                ms = info['kind'] == 'ms'
+                self.assertEqual({n for n in outs[1] if n.startswith(k)}, {f'{k}.spv', f'{k}.cs.spv', f'{k}.res.json'} | ({f'{k}.z.spv', f'{k}.pvs.spv', f'{k}.pvs.z.spv'} if ms else set()))
+                res = json.loads(outs[1][f'{k}.res.json'])
+                self.assertEqual(res['stage'], info['kind']); self.assertNotIn('mesh', res)
+                self.assertEqual(res['mesh_emu'], json.loads(json.dumps(me.facts(info))))
+                self.valid(outs[1][f'{k}.cs.spv'])
+                if ms: self.valid(outs[1][f'{k}.pvs.spv']); self.valid(outs[1][f'{k}.pvs.z.spv'])
+
     @unittest.skipUnless(os.environ.get('DM_SPV_MESH_DIR'), 'DM_SPV_MESH_DIR not set')
     def test_translated_shaders(self):   # the translator's outputs of a game's task / mesh jobs
         d = Path(os.environ['DM_SPV_MESH_DIR'])
