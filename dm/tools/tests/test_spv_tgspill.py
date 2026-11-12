@@ -138,7 +138,7 @@ class SpvTgSpill(unittest.TestCase):
         for n, info in enumerate((tm.mesh_info(False, False), tm.mesh_info(True, False), {'kind': 'ts', 'threads': 32, 'payload': 256})):   # a mesh shader without and with a task, a task shader
             with self.subTest(kind=info['kind'], n=n):
                 data, lay = te.kernel(info)
-                out, keep = te.me.compute(data, info, lay)
+                out, keep = te.me.compute(data, info, lay)[:2]   # (bytes, kept ids, pack, direct): the pack and direct choice go to facts(), not this check
                 hdr, ins = te.sa.process(out, 'cs', None, keep)[:2]; cs = te.sa.emit(hdr, ins)
                 self.assertGreater(self.bytes_of(cs), 0)
                 sp = self.run_on(cs); self.assertIsNotNone(sp); assert sp is not None
