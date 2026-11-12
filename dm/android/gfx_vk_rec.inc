@@ -20,7 +20,7 @@
 #include <sched.h>
 enum { RQ_SIZE = 8u << 20 };   // about 25,000 records a frame of 30 to 200 bytes: several frames' worth
 enum { R_BEGINQ = 1, R_BEGINRP, R_BINDDS, R_BINDIB, R_BINDP, R_BINDVB, R_BLIT, R_CLRATT, R_CLRCOL, R_CLRDS, R_CPB2I, R_CPI, R_CPI2B, R_DISPATCH, R_DRAW, R_DRAWIDX, R_ENDQ, R_ENDRP,
-       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB, R_UPDDS, R_DISPIND, R_DRAWIDXIND };
+       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB, R_UPDDS, R_DISPIND, R_DRAWIDXIND, R_DRAWMESH };
 typedef struct { uint32_t fn, n; VkCommandBuffer cb; } rq_hdr;   // n: the record's bytes, header included, a multiple of 16
 static uint8_t *g_rq;
 static _Atomic uint64_t g_rq_w, g_rq_r;   // bytes written / made since the start (the ring offset is the count modulo RQ_SIZE)
@@ -169,6 +169,12 @@ typedef struct { uint32_t vc, ic, fv, fi; } a_draw;
 static void rec_vkCmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) {
     if (!rec_on()) { vkCmdDraw(cb, vc, ic, fv, fi); return; }
     uint8_t *r = rq_take(R_DRAW, cb, sizeof(rq_hdr) + sizeof(a_draw)); *(a_draw *)(void *)(r + sizeof(rq_hdr)) = (a_draw){vc, ic, fv, fi}; rq_push(r);
+}
+// vkCmdDrawMeshTasksEXT (gfx_vk_mesh.inc), which the device gives by name (gfx_vk.c g_draw_mesh): there is no name of the loader's to redirect, so the replay calls this
+typedef struct { uint32_t x, y, z; } a_drawmesh;
+static void rec_draw_mesh(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
+    if (!rec_on()) { g_draw_mesh(cb, x, y, z); return; }
+    uint8_t *r = rq_take(R_DRAWMESH, cb, sizeof(rq_hdr) + sizeof(a_drawmesh)); *(a_drawmesh *)(void *)(r + sizeof(rq_hdr)) = (a_drawmesh){x, y, z}; rq_push(r);
 }
 typedef struct { uint32_t xc, ic, fx; int32_t vo; uint32_t fi; } a_drawidx;
 static void rec_vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t xc, uint32_t ic, uint32_t fx, int32_t vo, uint32_t fi) {
@@ -323,6 +329,7 @@ static void rq_make(const uint8_t *rec) {   // one record's call
         case R_DRAW: { const a_draw *a = (const void *)s; vkCmdDraw(cb, a->vc, a->ic, a->fv, a->fi); break; }
         case R_DRAWIDX: { const a_drawidx *a = (const void *)s; vkCmdDrawIndexed(cb, a->xc, a->ic, a->fx, a->vo, a->fi); break; }
         case R_DRAWIDXIND: { const a_drawidxind *a = (const void *)s; vkCmdDrawIndexedIndirect(cb, a->b, a->o, a->n, a->stride); break; }
+        case R_DRAWMESH: { const a_drawmesh *a = (const void *)s; g_draw_mesh(cb, a->x, a->y, a->z); break; }
         case R_ENDQ: { const a_endq *a = (const void *)s; vkCmdEndQuery(cb, a->p, a->q); break; }
         case R_ENDRP: vkCmdEndRenderPass(cb); break;
         case R_BARRIER: { const a_barrier *a = (const void *)s; const uint8_t *p = s + sizeof *a; const VkMemoryBarrier *m = RQ_GET(p, VkMemoryBarrier, a->nm);
