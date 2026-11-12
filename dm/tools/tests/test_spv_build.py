@@ -2,18 +2,21 @@
 .spv and .res.json, or what a test asks for); spv_android.py's post-pass runs as it does in a build, on a minimal fragment shader. Checked: the temporary folder (the code
 areas, the job lists and the translator's output) is made under WORK, the build's <id>_build/tmp, and removed however the run ends, a full disk included
 (droidplay-core#307: three failed Pokémon Pokopia runs each left tens of GB in the system's temp folder); a full disk, in the translator's lines or in this script's own
-writes, stops the run with a plain line before the post-pass, which stopped at the first empty .spv. No game files, no translator, no spirv-as."""
+writes, stops the run with a plain line before the post-pass, which stopped at the first empty .spv; and a run the drives can't hold stops before it translates anything.
+No game files, no translator, no spirv-as."""
 import contextlib
 import errno
 import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -73,7 +76,8 @@ class Harness(unittest.TestCase):
         buf = io.StringIO()
         try:
             with mock.patch.object(sys, 'argv', argv), mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf):
-                if 'WORK' not in env: os.environ.pop('WORK', None)
+                for name in ('WORK', 'DM_SPV_SPACE_CHECK'):
+                    if name not in env: os.environ.pop(name, None)
                 sb.main()
         finally: self.text = buf.getvalue()
         return self.text
@@ -155,6 +159,59 @@ class DiskFull(Harness):
         self.assertTrue(sb.DISK_FULL.search('[RED] spv_build: the disk is full: a file could not be written'))
         self.assertTrue(sb.DISK_FULL.search('OSError: [Errno 28] No space left on device'))
         self.assertFalse(sb.DISK_FULL.search('[RED] 0123456789abcdef: IndexOutOfRangeException: Index was outside the bounds of the array.'))
+
+
+class FreeSpace(Harness):   # spv_build.py room: 20 bytes free for each byte of the records it translates (sb.OUT_PER_BYTE + sb.TEMP_PER_BYTE), plus ROOM_SPARE
+    REC = len(record(0))
+
+    def free(self, n, *where):   # disk_usage reporting n bytes free (on every drive, or only on those under the folders given; 1 TB elsewhere)
+        def usage(p): return SimpleNamespace(total=1 << 40, used=0, free=n if not where or any(Path(p) == w or w in Path(p).parents for w in where) else 1 << 40)
+        return mock.patch.object(sb.shutil, 'disk_usage', side_effect=usage)
+
+    def need(self, n): return n * self.REC * (sb.OUT_PER_BYTE + sb.TEMP_PER_BYTE) + sb.ROOM_SPARE
+
+    def keys(self): return sorted(sb.key_of(*reversed(sb.split(record(i)))) for i in range(self.N))
+
+    def old_output(self, k, chain, size=100):   # a shader an earlier run translated
+        self.out.mkdir(exist_ok=True); (self.out / f'{k}.spv').write_bytes(bytes(size)); (self.out / f'{k}.res.json').write_text(json.dumps({'key': k, 'android': chain}))
+
+    def test_a_run_that_cannot_fit_stops_before_it_translates(self):
+        with self.free(self.need(self.N) - 1), self.assertRaises(SystemExit) as e: self.build()
+        self.assertEqual(e.exception.code, 1)
+        self.assertRegex(self.text, rf'\[RED\] spv_build: not enough free space to translate {self.N} shaders \(0 MB in the package\): the drive with .+ has 2\.1 GB free, and they '
+                         r"need about 2\.1 GB there: 0\.0 GB for the translated shaders and 0\.0 GB for the translator's temporary copy of them until the end, and 2\.1 GB to spare\. "
+                         r'Free 0\.0 GB more there')
+        self.assertIn('Nothing was translated (DM_SPV_SPACE_CHECK=0 translates anyway)', self.text)
+        self.assertEqual(self.touts, []); self.assertFalse(any(self.out.iterdir())); self.assertEqual(self.left(), [])
+
+    def test_a_run_that_fits_goes_on(self):
+        with self.free(self.need(self.N)): self.build()
+        self.assertEqual(len(list(self.out.glob('*.res.json'))), self.N)
+
+    def test_the_switch_skips_it(self):
+        with self.free(0): self.build({'WORK': str(self.work), 'DM_SPV_SPACE_CHECK': '0'})
+        self.assertEqual(len(list(self.out.glob('*.res.json'))), self.N)
+
+    def test_only_the_shaders_left_to_translate_count(self):   # a run after one that stopped: the shaders done are skipped, and need no room
+        for k in self.keys()[:2]: self.old_output(k, sa.ANDROID_CHAIN)
+        with self.free(self.need(3)): self.build()
+        self.assertIn('spv_build: 3 translated, 2 already there', self.text)
+        shutil.rmtree(self.out)
+        for k in self.keys()[:2]: self.old_output(k, sa.ANDROID_CHAIN)
+        with self.free(self.need(3) - 1), self.assertRaises(SystemExit): self.build()   # the same run with a byte less: it counts the 3, not the 5
+        self.assertIn('not enough free space to translate 3 shaders', self.text)
+
+    def test_an_older_chains_files_are_room_it_reuses(self):   # after an ANDROID_CHAIN bump every shader is translated again, over its old files
+        for k in self.keys(): self.old_output(k, sa.ANDROID_CHAIN - 1, size=self.REC * sb.OUT_PER_BYTE)
+        with self.free(self.N * self.REC * sb.TEMP_PER_BYTE + sb.ROOM_SPARE): self.build()   # room for the temporary copy alone
+        self.assertIn(f'spv_build: {self.N} translated, 0 already there', self.text)
+
+    def test_each_drive_is_checked_for_its_own_part(self):   # WORK on another drive than the out folder: the temporary copy there, the translated files beside out
+        with mock.patch.object(sb, 'same_drive', return_value=False):
+            with self.free(self.N * self.REC * sb.TEMP_PER_BYTE + sb.ROOM_SPARE - 1, self.work), self.assertRaises(SystemExit): self.build()
+            self.assertRegex(self.text, rf"the drive with {re.escape(str(self.work))}.spv_\w+ has .*: 0\.0 GB for the translator's temporary copy of them until the end, and")
+            with self.free(self.N * self.REC * sb.TEMP_PER_BYTE + sb.ROOM_SPARE, self.work): self.build()   # the out folder's drive has 1 TB
+        self.assertEqual(len(list(self.out.glob('*.res.json'))), self.N)
 
 
 if __name__ == '__main__':

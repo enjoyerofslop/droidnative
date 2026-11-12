@@ -113,6 +113,17 @@ class BuildShaders(unittest.TestCase):
             with self.assertRaises(ba.BuildError) as cm: self.build(self.registered, lambda *a, **k: None)
         self.assertNotIn('disk space', str(cm.exception)); self.assertIn('Shader translation failed', str(cm.exception))
 
+    def test_too_little_room_says_the_shaders_were_not_translated(self):   # spv_build.py's free-space check stopped it before it started
+        self.translation_stops = True
+        line = ("[RED] spv_build: not enough free space to translate 131,426 shaders (4,400 MB in the package): the drive with C:\\g\\0400A3A01EE4C000_build\\spv has 61.0 GB free, "
+                "and they need about 90.1 GB there")
+        self.log_text = line + '\n'
+        with mock.patch.object(ba.shutil, 'disk_usage', return_value=SimpleNamespace(total=1 << 40, used=0, free=61 << 30)):
+            with self.assertRaises(ba.BuildError) as cm: self.build(self.registered, lambda *a, **k: None)
+        msg = str(cm.exception)
+        self.assertIn(line[6:], msg); self.assertIn('The game is not packed: its shaders were not translated.', msg)
+        self.assertNotIn('Shader translation failed', msg); self.assertNotIn('ran out of disk space', msg)
+
     def test_a_translation_with_red_lines_still_packs(self):   # a shader the translator can't handle is a line in the log, and spv_build.py exits 0
         (out, g), _ = self.build(self.registered, lambda *a, **k: None)
         self.assertEqual(out, self.work / 'spv'); self.assertIs(g, self.registered)

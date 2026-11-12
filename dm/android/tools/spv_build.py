@@ -171,6 +171,36 @@ def stop_if_full(failed, tout, step):   # after a translation pass: the translat
         if k not in full: print(f'[RED] {k}: {why}')   # its other failures, lost otherwise
     disk_full(tout, f"the translator could not write {len(full):,} shaders' output in its {step} ({full[0]}: {failed[full[0]]})")
 
+# The room a run needs, per byte of the package records it translates (header, code area, control section), measured on the Mac from three games' finished
+# <id>_build/spv folders against their shader/pkg, as allocated on disk. Their translated files: Ocarina of Time 12.1 bytes per package byte (42,848 shaders, 149 KiB
+# each), Final Fantasy Resonance 13.9 (73,496, 125 KiB), Super Mario Odyssey 11.9 (27,984, 67 KiB). The translator's output, in the temporary folder until the run ends,
+# is about their .spv and .res.json files: 0.80, 0.80 and 0.70 of that, so the peak is 21.8, 25.0 and 20.2. Per shader it varies far more than per byte: Pokémon Pokopia's
+# records are 33 KiB each (4.4 GB for 131,426 shaders), 3 to 6 times theirs, and one of its runs on Windows had left a 45.7 GB temporary folder when the disk filled,
+# 10.4 per byte for that half alone (OoT's 9.7 plus its code areas) though unfinished (droidplay-core#307). The lowest peak is taken, rounded down: 20, so the check
+# stops a run that can't fit, as Pokopia's (88 GB and the spare) on the reporter's 70 GB, without stopping one that can
+OUT_PER_BYTE, TEMP_PER_BYTE = 12, 8
+ROOM_SPARE = 2 << 30   # left free besides: the log, the app, the copy to the phone's 256 MiB pieces
+
+def same_drive(a, b):
+    return os.stat(a).st_dev == os.stat(b).st_dev
+
+def room(out, tmp, n, nbytes, reused):
+    """Stop before translating n shaders (nbytes of records) when the drives can't hold what the run makes: their translated files beside out, less reused (the files of an
+    older chain they overwrite), and the translator's output in tmp until the run ends (the code areas are written already). Pokopia's disk filled about 12 minutes into
+    the translation, and with nothing checked the run went on for 20 more (droidplay-core#307). DM_SPV_SPACE_CHECK=0 skips it"""
+    if not n or os.environ.get('DM_SPV_SPACE_CHECK') == '0': return
+    need_out, need_tmp = max(0, nbytes * OUT_PER_BYTE - reused), nbytes * TEMP_PER_BYTE
+    gb = lambda b: f'{b / 1e9:.1f} GB'
+    parts = {'out': f'{gb(need_out)} for the translated shaders', 'tmp': f"{gb(need_tmp)} for the translator's temporary copy of them until the end"}
+    for d, need, what in ([(out, need_out + need_tmp, f"{parts['out']} and {parts['tmp']}")] if same_drive(out, tmp) else
+                          [(out, need_out, parts['out']), (tmp, need_tmp, parts['tmp'])]):
+        free = shutil.disk_usage(d).free
+        if free >= need + ROOM_SPARE: continue
+        print(f'[RED] spv_build: not enough free space to translate {n:,} shaders ({nbytes / 1e6:,.0f} MB in the package): the drive with {d} has {gb(free)} free, and they need '
+              f'about {gb(need + ROOM_SPARE)} there: {what}, and {gb(ROOM_SPARE)} to spare. Free {gb(need + ROOM_SPARE - free)} more there, or move the game\'s folder to a drive '
+              'with more room, then build again. Nothing was translated (DM_SPV_SPACE_CHECK=0 translates anyway)', flush=True)
+        raise SystemExit(1)
+
 def work_dir():
     """Where the run's temporary folder goes: WORK, which build_android_from_nsp.py sets to <id>_build/tmp, else the system's temp folder (a run by hand). On Windows
     that one is on C: whatever drive the game is on, and out of sight: droidplay-core#307's three failed Pokémon Pokopia runs each left tens of GB in %TEMP%.
@@ -198,7 +228,7 @@ def translate(w):
     if a.facts and os.path.exists(a.facts):
         for ln in open(a.facts, encoding='utf-8'):
             if ln.strip() and not ln.startswith('#'): k, v = ln.rstrip('\n').split('\t', 1); facts[k] = json.loads(v)
-    jobs, skipped, have, tfs, upg = {}, {}, 0, {}, 0
+    jobs, skipped, have, tfs, upg, nbytes, reused = {}, {}, 0, {}, 0, 0, 0
     for f in sorted(Path(a.package).glob('*.bin')):
         stage = f.name[:2]
         if stage not in ('vs', 'ps', 'gs', 'tc', 'te', 'cs', 'ts', 'ms'): continue
@@ -208,7 +238,8 @@ def translate(w):
             key = key_of(ctl, code)
             if key in jobs: continue
             rp = out / f'{key}.res.json'   # translated by an earlier run of this chain version (the key covers the shader's bytes)
-            if (out / f'{key}.spv').exists() and rp.exists():
+            prev = (out / f'{key}.spv').exists() and rp.exists()
+            if prev:
                 rj = json.loads(rp.read_text(encoding='utf-8')); ch = rj.get('android')
                 if ch == sa.EXT_FROM and sa.ANDROID_CHAIN == sa.EXT_FROM + 1: sa.upgrade(out, key); ch = sa.EXT_FROM + 1; upg += 1   # (its .spv files are chain EXT_FROM + 1's: only res.json's extents were missing; after a later bump of ANDROID_CHAIN, translated again)
                 # a task or mesh shader made before spv_android.py wrote their compute form (res.json mesh_emu: its facts, or null when it could not be made) is translated
@@ -216,8 +247,10 @@ def translate(w):
                 if ch == sa.ANDROID_CHAIN and not (stage in ('ts', 'ms') and (rj.get('mesh_emu', {}) or {'v': 0}).get('v') != meshemu_v()): have += 1; continue
             j, why = job(key, stage, code, ctl, w, facts)
             if not j: skipped[key] = why; continue
-            jobs[key] = j
+            jobs[key] = j; nbytes += len(rec)
+            if prev: reused += sum(f.stat().st_size for f in (out / f'{key}.spv', out / f'{key}.z.spv', rp) if f.exists())   # an older chain's files, which this run overwrites
             if stage == 'vs' and not dmsh_ampere.is_nvn2(ctl) and (tf := tf_layout(key, ctl)): tfs[key] = tf
+    room(out, Path(w), len(jobs), nbytes, reused)
     keys = sorted(jobs); chunks = [keys[i::a.j] for i in range(a.j)]
     xl = [a.xlate] if not a.xlate.endswith('.dll') else ['dotnet', a.xlate]
     tout = Path(w) / 'out'; tout.mkdir()
