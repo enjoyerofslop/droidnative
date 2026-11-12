@@ -72,6 +72,7 @@ ANDROID_TESTED = {
     '01006F8002326000',   # Animal Crossing: New Horizons (Playable – major issues through the first night)
     '0100ECD018EBE000',   # Paper Mario: The Thousand-Year Door (Playable – minor issues through the first battle; 1.0.0 from a derived profile)
     '0100000000010000',   # Super Mario Odyssey
+    '01004AB00A260000',   # DARK SOULS: REMASTERED (In-game into the Asylum cell at 30 fps; Playable needs a person; 1.0.0 from a derived profile)
     '0100B1C0249B4000',   # Frostpunk (Playable – major issues through day 1 into the first night)
     '0100152000022000',   # Mario Kart 8 Deluxe (Playable – minor issues through the first 50cc race)
     '01006A800016E000',   # Super Smash Bros. Ultimate
