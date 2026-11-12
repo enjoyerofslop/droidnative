@@ -18,6 +18,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / 'gfx/tools')); import dmsh_ampere, dmsh_meshstage   # noqa: E402  NVN2 control sections and task / mesh facts, as dmsh_build.py reads them
 GFX_MAGIC, CS_MAGIC, CTL_MAGIC = bytes.fromhex('78563412'), bytes.fromhex('79563412'), bytes.fromhex('34127698')
 
+def meshemu_v():   # spv_meshemu.VERSION, the compute form's (a res.json mesh_emu of null, a shader it could not be made for, counts as this version)
+    import spv_meshemu
+    return spv_meshemu.VERSION
+
+
 def records(d):
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
     return [d[x:(r[k + 1] if k + 1 < len(r) else len(d))] for k, x in enumerate(r)]
@@ -163,9 +168,11 @@ def main():
             if key in jobs: continue
             rp = out / f'{key}.res.json'   # translated by an earlier run of this chain version (the key covers the shader's bytes)
             if (out / f'{key}.spv').exists() and rp.exists():
-                ch = json.loads(rp.read_text(encoding='utf-8')).get('android')
+                rj = json.loads(rp.read_text(encoding='utf-8')); ch = rj.get('android')
                 if ch == sa.EXT_FROM and sa.ANDROID_CHAIN == sa.EXT_FROM + 1: sa.upgrade(out, key); ch = sa.EXT_FROM + 1; upg += 1   # (its .spv files are chain EXT_FROM + 1's: only res.json's extents were missing; after a later bump of ANDROID_CHAIN, translated again)
-                if ch == sa.ANDROID_CHAIN: have += 1; continue
+                # a task or mesh shader made before spv_android.py wrote their compute form (res.json mesh_emu: its facts, or null when it could not be made) is translated
+                # again, alone: the other shaders keep their chain
+                if ch == sa.ANDROID_CHAIN and not (stage in ('ts', 'ms') and (rj.get('mesh_emu', {}) or {'v': 0}).get('v') != meshemu_v()): have += 1; continue
             j, why = job(key, stage, code, ctl, w, facts)
             if not j: skipped[key] = why; continue
             jobs[key] = j

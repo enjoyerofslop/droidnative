@@ -20,7 +20,7 @@
 #include <sched.h>
 enum { RQ_SIZE = 8u << 20 };   // about 25,000 records a frame of 30 to 200 bytes: several frames' worth
 enum { R_BEGINQ = 1, R_BEGINRP, R_BINDDS, R_BINDIB, R_BINDP, R_BINDVB, R_BLIT, R_CLRATT, R_CLRCOL, R_CLRDS, R_CPB2I, R_CPI, R_CPI2B, R_DISPATCH, R_DRAW, R_DRAWIDX, R_ENDQ, R_ENDRP,
-       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB, R_UPDDS, R_DRAWMESH };
+       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB, R_UPDDS, R_DRAWMESH, R_DISPIND, R_DRAWIDXIND };
 typedef struct { uint32_t fn, n; VkCommandBuffer cb; } rq_hdr;   // n: the record's bytes, header included, a multiple of 16
 static uint8_t *g_rq;
 static _Atomic uint64_t g_rq_w, g_rq_r;   // bytes written / made since the start (the ring offset is the count modulo RQ_SIZE)
@@ -158,6 +158,13 @@ static void rec_vkCmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32
     if (!rec_on()) { vkCmdDispatch(cb, x, y, z); return; }
     uint8_t *r = rq_take(R_DISPATCH, cb, sizeof(rq_hdr) + sizeof(a_dispatch)); *(a_dispatch *)(void *)(r + sizeof(rq_hdr)) = (a_dispatch){x, y, z}; rq_push(r);
 }
+// The indirect forms (a task or mesh draw in compute form, gfx_vk_meshemu.inc): the GPU reads their arguments from the buffer when the command runs, so the record
+// is the buffer and the place in it. Made on the replay thread they went into the command buffer ahead of the binds queued for them, beside the recorder's own calls
+typedef struct { VkBuffer b; VkDeviceSize o; } a_dispind;
+static void rec_vkCmdDispatchIndirect(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o) {
+    if (!rec_on()) { vkCmdDispatchIndirect(cb, b, o); return; }
+    uint8_t *r = rq_take(R_DISPIND, cb, sizeof(rq_hdr) + sizeof(a_dispind)); *(a_dispind *)(void *)(r + sizeof(rq_hdr)) = (a_dispind){b, o}; rq_push(r);
+}
 typedef struct { uint32_t vc, ic, fv, fi; } a_draw;
 static void rec_vkCmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) {
     if (!rec_on()) { vkCmdDraw(cb, vc, ic, fv, fi); return; }
@@ -173,6 +180,11 @@ typedef struct { uint32_t xc, ic, fx; int32_t vo; uint32_t fi; } a_drawidx;
 static void rec_vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t xc, uint32_t ic, uint32_t fx, int32_t vo, uint32_t fi) {
     if (!rec_on()) { vkCmdDrawIndexed(cb, xc, ic, fx, vo, fi); return; }
     uint8_t *r = rq_take(R_DRAWIDX, cb, sizeof(rq_hdr) + sizeof(a_drawidx)); *(a_drawidx *)(void *)(r + sizeof(rq_hdr)) = (a_drawidx){xc, ic, fx, vo, fi}; rq_push(r);
+}
+typedef struct { VkBuffer b; VkDeviceSize o; uint32_t n, stride; } a_drawidxind;
+static void rec_vkCmdDrawIndexedIndirect(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t stride) {
+    if (!rec_on()) { vkCmdDrawIndexedIndirect(cb, b, o, n, stride); return; }
+    uint8_t *r = rq_take(R_DRAWIDXIND, cb, sizeof(rq_hdr) + sizeof(a_drawidxind)); *(a_drawidxind *)(void *)(r + sizeof(rq_hdr)) = (a_drawidxind){b, o, n, stride}; rq_push(r);
 }
 typedef struct { VkQueryPool p; uint32_t q; } a_endq;
 static void rec_vkCmdEndQuery(VkCommandBuffer cb, VkQueryPool p, uint32_t q) {
@@ -313,8 +325,10 @@ static void rq_make(const uint8_t *rec) {   // one record's call
         case R_CPI: { const a_cpi *a = (const void *)s; vkCmdCopyImage(cb, a->s, a->sl, a->d, a->dl, a->n, (const VkImageCopy *)(const void *)(s + sizeof *a)); break; }
         case R_CPI2B: { const a_cpi2b *a = (const void *)s; vkCmdCopyImageToBuffer(cb, a->i, a->l, a->b, a->n, (const VkBufferImageCopy *)(const void *)(s + sizeof *a)); break; }
         case R_DISPATCH: { const a_dispatch *a = (const void *)s; vkCmdDispatch(cb, a->x, a->y, a->z); break; }
+        case R_DISPIND: { const a_dispind *a = (const void *)s; vkCmdDispatchIndirect(cb, a->b, a->o); break; }
         case R_DRAW: { const a_draw *a = (const void *)s; vkCmdDraw(cb, a->vc, a->ic, a->fv, a->fi); break; }
         case R_DRAWIDX: { const a_drawidx *a = (const void *)s; vkCmdDrawIndexed(cb, a->xc, a->ic, a->fx, a->vo, a->fi); break; }
+        case R_DRAWIDXIND: { const a_drawidxind *a = (const void *)s; vkCmdDrawIndexedIndirect(cb, a->b, a->o, a->n, a->stride); break; }
         case R_DRAWMESH: { const a_drawmesh *a = (const void *)s; g_draw_mesh(cb, a->x, a->y, a->z); break; }
         case R_ENDQ: { const a_endq *a = (const void *)s; vkCmdEndQuery(cb, a->p, a->q); break; }
         case R_ENDRP: vkCmdEndRenderPass(cb); break;
@@ -381,8 +395,10 @@ static void *rq_thread(void *arg) {
 #define vkCmdCopyImage rec_vkCmdCopyImage
 #define vkCmdCopyImageToBuffer rec_vkCmdCopyImageToBuffer
 #define vkCmdDispatch rec_vkCmdDispatch
+#define vkCmdDispatchIndirect rec_vkCmdDispatchIndirect
 #define vkCmdDraw rec_vkCmdDraw
 #define vkCmdDrawIndexed rec_vkCmdDrawIndexed
+#define vkCmdDrawIndexedIndirect rec_vkCmdDrawIndexedIndirect
 #define vkCmdEndQuery rec_vkCmdEndQuery
 #define vkCmdEndRenderPass rec_vkCmdEndRenderPass
 #define vkCmdPipelineBarrier rec_vkCmdPipelineBarrier
