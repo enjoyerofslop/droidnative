@@ -1,0 +1,4 @@
+# Android benchmark routes for scripts/bench_android.py: name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description [<TAB> KEY=VALUE;KEY=VALUE]
+# No ready patterns: the game reads its data from packed archives opened once at boot, so a scene loads without a file open the host could log
+boot	-	-	20	30	-	no input, no save (the route a game without a routes file gets)
+dl_final_day	15:A,22:A,28:A,32:Down*9/0.5,39:A,42:A,45:A	saves/dl-final-day/p3p-final-day-boss-ng.zip//JKSV/Persona 3 Portable/Vip - 2023.01.22 @ 15.10.11	50	60	-	a downloaded JKSV save on the last day, 1/31 (read from its archive; slot 10 of 6, 9, 10, 11 and the clear data in 13): A through the title and Load, nine Downs to slot 10, Yes, then the player standing in the Dark Hour at the entrance of Tartarus

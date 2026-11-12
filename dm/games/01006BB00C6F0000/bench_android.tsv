@@ -2,3 +2,5 @@
 # ready (boot): the opening movie opens; (ruins): the overworld's level loads after the file select (DM_FS=1 logs both)
 boot	-	-	30	30	movie/opening\.webm	a fresh save: the opening movie (VP9, decoded into the game's texture); no input
 ruins	8:A*3/2,16:L+R~0.4*2/5,18.5:A*2/5	saves/ruins	35	30	level/Field/Field\.lvb	a save at the Ancient Ruins after the fifth dungeon (techhit's save, GBAtemp thread 549404): A skips the opening movie, L+R at the title, A for File 1, then Link standing in the overworld
+dl_eagles_tower	8:A*3/2,16:L+R~0.4*2/5,18.5:A*2/5	saves/dl-before-eagles-tower/la-before-eagles-tower.rar//Zelda Link's Awakening	35	60	level/Field/Field\.lvb	a downloaded save before Eagle's Tower, the seventh dungeon (read from its archive): the ruins keys, then Link standing in Mabe Village
+dl_turtle_rock	8:A*3/2,16:L+R~0.4*2/5,18.5:A*2/5	saves/dl-before-turtle-rock/la-before-turtle-rock.zip//saves/01006BB00C6F0000/20220320_225347	35	60	level/Field/Field\.lvb	a downloaded save before Turtle Rock, the eighth dungeon (read from its archive): the ruins keys, then Link standing on Tal Tal Mountain Range

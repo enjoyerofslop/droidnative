@@ -23,3 +23,11 @@ DM_VK_UPSCALER_SQUARE=1
 # It writes about 1.1 GB to flash at each area load and about 0.7 GB an hour in play. On the 16 GB Pixel 9 Pro XL, which never swapped, it only cost frame rate (9.0 -> 6.3 fps),
 # hence auto (2026-11-11, q207)
 DM_VK_POOL_FILEBACK=auto
+# DM_VK_RECORDER=1: the replay's vkCmd* calls, descriptor set writes and submissions on a thread of their own (gfx_vk_rec.inc), as Breath of the Wild has them. Kokiri
+# Forest is about 2,100 draws a frame. There on an Ayn Odin 2 (Adreno 740; one run each, 2026-11-11): the replay thread 18.8 ms of CPU a frame instead of 30.2, the same
+# picture, 6.2 GB either way, and 14.9 fps instead of 14.5, as its GPU is busy 50 ms a frame either way. The recorder thread's work is new: the whole process 120 ms of
+# CPU a frame instead of 106. On a OnePlus Pad 3 (Adreno 830), the recorder together with the growing report address set (#182) and its descriptor writes (#301), against
+# main before them: the replay 14 ms instead of 34 and the GPU 21.4 ms instead of 34.9, its clock at 1,100 MHz, but 19.9 fps as before while the frame step holds
+# 3 vsyncs; with 2 held by hand (DM_FPS_TARGET=30 DM_FPS_HOLD=off), 27.5 fps. On a Galaxy S25 Edge the same three gave 19.0 fps instead of 17.6: its GPU clock stays
+# low (41 ms a frame). =0 in env.txt makes the calls on the replay thread
+DM_VK_RECORDER=1
