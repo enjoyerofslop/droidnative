@@ -253,6 +253,9 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
     failure of a registered profile's split stops the build: packed without shaders, AI: The Somnium Files played its sound over a black screen (droidplay-core#218).
     derived: why main packs from a profile derived from a registered one ('' for a registered or provisional profile). Its split failing stops the build too, though the profile
     is outside dm/games: its game has the shaders the registered tables list (Pokémon Pokopia's split failed on Windows, and the build packed it without them, droidplay-core#307).
+    A translation that stops (spv_build.py's exit code) stops the build for every profile: the shaders done by then are an arbitrary part of the game's, and packed with
+    them the game would draw some scenes and play others' sound over a black screen, as #218's did. Pokémon Pokopia's build went on to the install after its translation
+    stopped on a full disk (droidplay-core#307). A shader the translator can't handle is a [RED] line in the log, not a stop.
     oodle: build_ipa_from_nsp.py split_shaders' (a Mac host for the game's Oodle, mac_decoder), which puts the host in the split's inputs"""
     if not sv: return None, g
     sh = work / 'shader'
@@ -278,7 +281,9 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
     out = work / 'spv'
     try: bi.run([sys.executable, REPO / 'dm/android/tools/spv_build.py', sh / 'pkg', out, '--xlate', REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.dll',
                  '--facts', g.table('shader_facts.tsv')], logs / 'spv_build.log', env=env)
-    except BuildError as e: bi.PROG.end(str(e), ok=False); say(f'[RED] shader translation failed (see {logs / "spv_build.log"}): the game is packed with the shaders translated so far'); return (out if out.is_dir() else None), g
+    except BuildError as e:
+        raise BuildError(f'{e}\nShader translation failed, so the game is not packed: with only the shaders translated so far, some of its scenes would draw nothing. '
+                         f'The shaders that were translated are kept for the next build. Report this build with {logs / "spv_build.log"}') from e
     last = [l for l in (logs / 'spv_build.log').read_text(errors='replace').splitlines() if l.startswith('spv_build:')]
     bi.PROG.end(last[-1][11:] if last else str(out))
     return out, g

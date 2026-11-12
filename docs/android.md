@@ -267,7 +267,7 @@ translate, so the first build has none (`[RED] the game is packed without shader
 A scene reached later (or a DLC) can compile more shaders: repeat until the log shows no `no translated shader`. This is done for games packed from a provisional
 profile; a registered profile's shader tables name the captures they were made from. DLC in the NSP folder is extracted and copied to the phone with the game.
 
-A game packed from a registered profile has its shaders in its tables, so a shader split that fails there stops the build rather than pack the game without them ([why](reference/packing.md#an-android-build-packs-a-registered-game-without-shaders-after-a-split-error-and-succeeds)).
+A game packed from a registered profile has its shaders in its tables, so a shader split that fails there stops the build rather than pack the game without them ([why](reference/packing.md#an-android-build-packs-a-registered-game-without-shaders-after-a-split-error-and-succeeds)). A shader translation that stops ends the build for every game, rather than pack it with part of its shaders ([why](reference/packing.md#an-android-build-packs-the-shaders-translated-so-far-after-the-translation-stops)): the shaders translated by then are kept, and the next build translates the rest.
 
 ## Seeing what a game draws
 

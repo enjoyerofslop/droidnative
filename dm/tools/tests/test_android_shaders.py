@@ -1,7 +1,8 @@
 """The Android packing script's shader stage (scripts/build_android_from_nsp.py build_shaders) around the shader split (build_ipa_from_nsp.py split_shaders, stubbed here):
 a registered profile's split error stops the build instead of packing the game without shaders, as a profile derived from a registered one's does (droidplay-core#307), a
 provisional profile's still packs without them, and compute kernels a newer reader decodes, or DLC-only shaders, take the shader-only derived profile the iPhone build takes,
-whose shader facts the translation then reads (droidplay-core#218)."""
+whose shader facts the translation then reads (droidplay-core#218). A translation that stops (spv_build.py, stubbed too) stops the build for every profile, instead of packing
+the shaders translated so far (droidplay-core#307)."""
 import contextlib
 import hashlib
 from pathlib import Path
@@ -32,9 +33,13 @@ class BuildShaders(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()); self.work = self.tmp / 'work'; self.logs = self.work / 'logs'; self.logs.mkdir(parents=True)
         self.registered = Profile(REPO / 'dm/games' / GID)
         self.provisional = Profile(self.tmp / 'profile' / GID)
-        self.ran = []
-        def run(cmd, log, env=None):   # spv_build.py: its output folder and its last line
-            self.ran.append([str(c) for c in cmd]); (self.work / 'spv').mkdir(exist_ok=True); Path(log).write_text('spv_build: 3 translated\n')
+        self.ran = []; self.translation_stops = False
+        def run(cmd, log, env=None):   # spv_build.py: its output folder and its last line, or what bi.run raises for its exit code
+            self.ran.append([str(c) for c in cmd]); (self.work / 'spv').mkdir(exist_ok=True)
+            if self.translation_stops:   # the post-pass stopped at an empty .spv after a few shaders were done (Pokopia's log)
+                (self.work / 'spv' / '0123456789abcdef.spv').write_bytes(b'\3\2\x23\7'); Path(log).write_text('IndexError: list index out of range\n')
+                raise ba.BuildError(f'spv_build.py exit code 1 (full output: {log})')
+            Path(log).write_text('spv_build: 3 translated\n')
         for p in (mock.patch.object(ba.bi, 'run', side_effect=run), mock.patch.object(ba.bi, 'PROG', mock.MagicMock()),
                   mock.patch.object(ba.bi.rfs, 'source', side_effect=lambda p: p), mock.patch.object(ba, 'say')):
             p.start(); self.addCleanup(p.stop)
@@ -69,6 +74,23 @@ class BuildShaders(unittest.TestCase):
         self.assertIn('WinError 87', msg); self.assertIn('not packed', msg); self.assertIn(why, msg); self.assertIn('--package', msg); self.assertIn('shader_split.log', msg)
         self.assertEqual(self.ran, [])   # no translation, and no shaderless pack
         self.assertFalse(any('packed without shaders' in str(c) for c in ba.say.call_args_list))
+
+    def test_a_translation_that_stops_stops_the_build_for_every_profile(self):   # #307: Pokopia's derived build packed "the shaders translated so far" and went on to the install
+        derived = Profile(self.work / 'profile' / GID)
+        self.translation_stops = True
+        for name, g, why in (('registered', self.registered, ''), ('derived', derived, f'v65536 is not a version game profile {GID} registers'), ('provisional', self.provisional, '')):
+            with self.subTest(profile=name):
+                ba.say.reset_mock()
+                with self.assertRaises(ba.BuildError) as cm: self.build(g, lambda *a, **k: None, derived=why)
+                msg = str(cm.exception)
+                self.assertIn('spv_build.py exit code 1', msg); self.assertIn('Shader translation failed, so the game is not packed', msg)
+                self.assertIn(str(self.logs / 'spv_build.log'), msg)
+                self.assertFalse(any('translated so far' in str(c) and 'packed with' in str(c) for c in ba.say.call_args_list), ba.say.call_args_list)
+                self.assertTrue((self.work / 'spv' / '0123456789abcdef.spv').exists())   # the shaders done are kept: the next build skips them
+
+    def test_a_translation_with_red_lines_still_packs(self):   # a shader the translator can't handle is a line in the log, and spv_build.py exits 0
+        (out, g), _ = self.build(self.registered, lambda *a, **k: None)
+        self.assertEqual(out, self.work / 'spv'); self.assertIs(g, self.registered)
 
     def test_compute_kernels_a_newer_reader_decodes_take_the_derived_profile(self):
         derived = Profile(self.work / 'profile' / GID); reasons = []
