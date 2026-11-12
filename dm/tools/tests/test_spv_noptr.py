@@ -1,7 +1,8 @@
-"""dm/android/spv_noptr.h (raw global memory without physical pointers: each OpConvertUToPtr of the translator's raw helper, and the loads, stores and atomics through it, made
-accesses into a runtime array of storage buffers indexed by the address's high word, for drivers that reject OpConvertUToPtr: the Ayn Odin 2's Adreno 740, the Razr's 730),
-built for the PC and run on modules assembled with the NDK's spirv-as; spirv-val checks each result. Skipped without the NDK.
-With DM_SPV_DIR=<a game's packed spv folder>, also run over every module there that declares physical pointers: each must be rewritten and pass spirv-val."""
+"""dm/android/spv_noptr.h (raw global memory without physical pointers made from integers: each OpConvertUToPtr of the translator's raw helper, and the loads, stores and
+atomics through it, made accesses through a pointer loaded from a table of the pieces' addresses, or into a runtime array of storage buffers, indexed by the address's high
+word, for drivers that reject OpConvertUToPtr: the Ayn Odin 2's Adreno 740, the Razr's 730), built for the PC and run on modules assembled with the NDK's spirv-as; spirv-val
+checks each result. Skipped without the NDK.
+With DM_SPV_DIR=<a game's packed spv folder>, also run over every module there that declares physical pointers: each must be rewritten, both ways, and pass spirv-val."""
 import ctypes
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_spv_readonly import NDK, HOST, EXE, REPO   # noqa: E402
 
 FORM, USE, TYPE = 1, 2, 3   # spv_noptr.h's reasons
+ARRAY, TABLE = 0, 1   # its forms
 ENV = {0x103: 'vulkan1.1', 0x104: 'vulkan1.1spv1.4', 0x105: 'vulkan1.2', 0x106: 'vulkan1.3'}   # spirv-val's environment for a module's SPIR-V version
 
 # A compute shader in the translator's raw-memory form (Ocarina of Time's fog shader, local disassembly): a helper function adds the table entry's delta to the address in two
@@ -134,7 +136,7 @@ class SpvNoPtr(unittest.TestCase):
         cls.bin = NDK / 'toolchains/llvm/prebuilt' / HOST / 'bin'
         src = cls.tmp / 't.c'
         export = '__declspec(dllexport)' if os.name == 'nt' else '__attribute__((visibility("default")))'
-        src.write_text(f'#include "spv_noptr.h"\n{export} size_t run(const uint32_t *w, size_t n, uint32_t set, int nu, uint32_t *sc, uint32_t *o, size_t cap, int *why) {{ return spv_noptr(w, n, set, nu, sc, o, cap, why); }}\n'
+        src.write_text(f'#include "spv_noptr.h"\n{export} size_t run(const uint32_t *w, size_t n, uint32_t set, int nu, int form, uint32_t *sc, uint32_t *o, size_t cap, int *why) {{ return spv_noptr(w, n, set, nu, form, sc, o, cap, why); }}\n'
                        f'{export} int wanted(const uint32_t *w, size_t n) {{ return spv_noptr_wanted(w, n); }}\n')
         env = dict(os.environ, MSYS_NO_PATHCONV='1')
         if os.name == 'nt':   # no C library: a DLL linked by lld alone
@@ -146,7 +148,7 @@ class SpvNoPtr(unittest.TestCase):
             cc = ['xcrun', 'clang'] if sys.platform == 'darwin' else [shutil.which('clang') or cls.bin / 'clang']
             subprocess.run([*cc, '-shared', '-fPIC', '-O1', '-Wall', '-Wextra', '-Werror', '-I', REPO / 'dm/android', src, '-o', cls.tmp / 't.so'], check=True)
             cls.lib = ctypes.CDLL(str(cls.tmp / 't.so'))
-        cls.lib.run.restype = ctypes.c_size_t; cls.lib.run.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+        cls.lib.run.restype = ctypes.c_size_t; cls.lib.run.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
         cls.lib.wanted.argtypes = [ctypes.c_void_p, ctypes.c_size_t]   # (typed: untyped size_t arguments crashed test_spv_pool on the Linux runner)
 
     @classmethod
@@ -164,11 +166,33 @@ class SpvNoPtr(unittest.TestCase):
 
     def wanted(self, data): n = len(data) // 4; return self.lib.wanted((ctypes.c_uint32 * n).from_buffer_copy(data), n)
 
-    def run_on(self, data, cap=None, set_=5, nu=1):   # → (the rewritten module or None, why)
+    def run_on(self, data, cap=None, set_=5, nu=1, form=ARRAY):   # → (the rewritten module or None, why)
         n = len(data) // 4; w = (ctypes.c_uint32 * n).from_buffer_copy(data); cap = cap or 4 * n + 1024; o = (ctypes.c_uint32 * cap)()
         sc = (ctypes.c_uint32 * (3 * words(data)[3]))(); why = ctypes.c_int(-1)
-        k = self.lib.run(w, n, set_, nu, sc, o, cap, ctypes.byref(why))
+        k = self.lib.run(w, n, set_, nu, form, sc, o, cap, ctypes.byref(why))
         return (bytes(o)[:4 * k] if k else None), why.value
+
+    def check_table(self, out, nacc, set_=5):   # what every module rewritten to the table of pointers has
+        o = ops(out)
+        self.assertFalse([x for op, x in o if op == 120])   # no OpConvertUToPtr
+        caps = {x[0] for op, x in o if op == 17}
+        self.assertIn(5347, caps); self.assertFalse({5301, 5302, 5308} & caps)   # physical addressing stays; no descriptor indexing
+        self.assertEqual([x[0] for op, x in o if op == 14], [5348])   # PhysicalStorageBuffer64 addressing
+        self.assertIn(b'SPV_KHR_physical_storage_buffer', out); self.assertNotIn(b'SPV_EXT_descriptor_indexing', out)
+        sets = {x[0]: x[2] for op, x in o if op == 71 and x[1] == 34}; binds = {x[0]: x[2] for op, x in o if op == 71 and x[1] == 33}
+        tabs = [v for v, s in sets.items() if s == set_]; self.assertEqual(len(tabs), 1); self.assertEqual(binds[tabs[0]], 0)   # the set asked for, binding 0
+        self.assertFalse([x for op, x in o if op == 71 and x[1] == 5300])   # nothing NonUniform
+        ptrs = {x[0] for op, x in o if op == 32 and x[1] == 5349}   # the PhysicalStorageBuffer pointer types: to a piece and to a word
+        entries = [x for op, x in o if op == 65 and x[2] == tabs[0]]   # table.p[slot], one a conversion
+        loads = [x for op, x in o if op == 61 and x[0] in ptrs]   # the pointers loaded
+        self.assertEqual(len(loads), len(entries))
+        acc = [x for op, x in o if op == 65 and x[2] in {l[1] for l in loads}]   # piece->d[word]
+        self.assertEqual(len(acc), nacc)
+        accs = {a[1] for a in acc}
+        for op, x in o:   # every load and store through a piece is Aligned 4
+            if op == 61 and x[2] in accs: self.assertEqual(x[3:], (2, 4))
+            if op == 62 and x[0] in accs: self.assertEqual(x[2:], (2, 4))
+        return o
 
     def check_rewritten(self, out, nacc, set_=5):   # what every rewritten module has
         o = ops(out)
@@ -197,6 +221,25 @@ class SpvNoPtr(unittest.TestCase):
         self.assertEqual(len([x for op, x in o if op == 234]), 1)   # the atomic stays, on the access
         self.assertEqual(len([x for op, x in o if op == 194]), 4)   # a word index per conversion (main's one, the helper's three)
         self.assertNotIn(b'_ptr_PhysicalStorageBuffer_uint', out); self.assertIn(b'raw_load', out)   # the pointer type's name goes with it, others stay
+
+    def test_pointer_accesses_go_through_a_table_of_pointers(self):   # the form the Odin 2's and the Razr's drivers take: a pointer loaded, never made from an integer
+        data = self.asm(CS, 'cst')
+        out, why = self.run_on(data, form=TABLE); self.assertIsNotNone(out, why); assert out is not None
+        self.valid(out, 'cst')
+        o = self.check_table(out, 2 + 1 + 4 + 4 + 4)
+        self.assertNotIn(11, {x[0] for op, x in o if op == 17})   # Int64 goes with the bitcasts
+        self.assertFalse([x for op, x in o if op == 21 and x[1] == 64])
+        self.assertEqual(len([x for op, x in o if op == 234]), 1)   # the atomic stays, on the access
+        self.assertEqual(len([x for op, x in o if op == 194]), 4)
+        self.assertNotIn(b'_ptr_PhysicalStorageBuffer_uint', out); self.assertIn(b'raw_load', out)
+
+    def test_spirv_1_5_puts_the_table_in_the_interface(self):
+        data = self.asm(CS.replace('OpEntryPoint GLCompute %main "main" %lid', 'OpEntryPoint GLCompute %main "main" %lid %o'), 'cst15', 'vulkan1.2')
+        out, why = self.run_on(data, form=TABLE); self.assertIsNotNone(out, why); assert out is not None
+        self.valid(out, 'cst15', 'vulkan1.2')
+        o = self.check_table(out, 2 + 1 + 4 + 4 + 4)
+        ep = [x for op, x in o if op == 15][0]; sets = {x[0]: x[2] for op, x in o if op == 71 and x[1] == 34}
+        self.assertIn([v for v, s in sets.items() if s == 5][0], ep)
 
     def test_spirv_1_5_puts_the_array_in_the_interface(self):
         data = self.asm(CS.replace('"main" %lid', '"main" %lid %o'), 'cs15', 'vulkan1.2')   # (from SPIR-V 1.4 every global the entry point uses is in its interface)
@@ -256,20 +299,22 @@ OpFunctionEnd
         data = self.asm(plain, 'plain'); self.assertFalse(self.wanted(data)); self.assertEqual(self.run_on(data), (None, 0))
 
     @unittest.skipUnless(os.environ.get('DM_SPV_DIR'), 'DM_SPV_DIR (a game\'s packed spv folder) not set')
-    def test_a_games_shaders(self):   # each module with physical pointers is rewritten and passes spirv-val
-        d = Path(os.environ['DM_SPV_DIR']); n = 0; left = {}; bad = []
-        for f in sorted(d.glob('*.spv')):
-            data = f.read_bytes()
-            if not self.wanted(data): continue
-            out, why = self.run_on(data)
-            if out is None: left.setdefault(why, []).append(f.name); continue
-            env = ENV.get(words(data)[1] >> 8 & 0xffff, 'vulkan1.3')   # the module's own SPIR-V version
-            (self.tmp / 'g.spv').write_bytes(out)
-            r = subprocess.run([self.spv_val, '--target-env', env, self.tmp / 'g.spv'], capture_output=True, text=True)
-            if r.returncode: bad.append((f.name, (r.stdout + r.stderr).strip()[:300])); continue
-            n += 1
-        print(f'{n} modules with physical pointers rewritten and valid, left as they are: {dict((k, (len(v), v[:3])) for k, v in left.items())}, invalid: {len(bad)} {bad[:3]}', file=sys.stderr)
-        self.assertFalse(left); self.assertFalse(bad)
+    def test_a_games_shaders(self):   # each module with physical pointers is rewritten, both ways, and passes spirv-val
+        d = Path(os.environ['DM_SPV_DIR']); forms = [int(x) for x in os.environ.get('DM_NOPTR_FORMS', '0,1').split(',')]
+        for form in forms:
+            n = 0; left = {}; bad = []
+            for f in sorted(d.glob('*.spv')):
+                data = f.read_bytes()
+                if not self.wanted(data): continue
+                out, why = self.run_on(data, form=form)
+                if out is None: left.setdefault(why, []).append(f.name); continue
+                env = ENV.get(words(data)[1] >> 8 & 0xffff, 'vulkan1.3')   # the module's own SPIR-V version
+                (self.tmp / 'g.spv').write_bytes(out)
+                r = subprocess.run([self.spv_val, '--target-env', env, self.tmp / 'g.spv'], capture_output=True, text=True)
+                if r.returncode: bad.append((f.name, (r.stdout + r.stderr).strip()[:300])); continue
+                n += 1
+            print(f'{"the table" if form else "the array"}: {n} modules with physical pointers rewritten and valid, left as they are: {dict((k, (len(v), v[:3])) for k, v in left.items())}, invalid: {len(bad)} {bad[:3]}', file=sys.stderr)
+            self.assertFalse(left); self.assertFalse(bad)
 
 
 if __name__ == '__main__':

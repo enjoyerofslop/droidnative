@@ -227,7 +227,7 @@ static int vk_try(char *why, size_t nwhy) {
     smid = smid && smq.shaderModuleIdentifier && pcq.pipelineCreationCacheControl;
     if (smid) { dext[nde++] = "VK_EXT_pipeline_creation_cache_control"; dext[nde++] = "VK_EXT_shader_module_identifier"; }
     if (gm) gm = gm_feat_take(dext, &nde);
-    if (gm && gmdi) gm_np_take(&diq, dix, dext, &nde);   // the pools' descriptor array, for a driver that refuses OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
+    if (gm) gm_np_take(gmdi ? &diq : NULL, dix, dext, &nde);   // the table of pointers or the pools' descriptor array, for a driver that refuses OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT dve = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT, .vertexAttributeInstanceRateDivisor = dv.vertexAttributeInstanceRateDivisor};
     VkPhysicalDeviceHostQueryResetFeaturesEXT hqe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT, .pNext = divisor ? &dve : NULL, .hostQueryReset = VK_TRUE};
     VkPhysicalDeviceShaderDrawParametersFeatures dpe = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES, .pNext = hqr ? (void *)&hqe : divisor ? (void *)&dve : NULL, .shaderDrawParameters = dp.shaderDrawParameters};
