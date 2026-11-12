@@ -90,6 +90,7 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
   - Ayn Odin 2 (Adreno 740): 40.1 ms on main before them, 30.2 with the address set, 18.8 with the recorder as well; 13.2, 14.5 and 14.9 fps. Its GPU is busy 50 ms a frame throughout, so the frame rate is now the GPU's.
   - OnePlus Pad 3 (Adreno 830): 34 → 14 ms with both, and the GPU 34.9 → 21.4 ms as its clock went from about 650 to 1,100 MHz. The frame rate stayed at 19.9 fps, because the frame step holds 3 vsyncs; with 2 held by hand (`DM_FPS_TARGET=30 DM_FPS_HOLD=off`) it ran at 27.5 fps.
   - Galaxy S25 Edge (Adreno 830): 38 → 17 ms with both, 17.6 → 19.0 fps; its GPU clock stays at 525 MHz, 41 ms a frame.
+- **Compute dispatches ordered by the game's barriers (2026-11-12):** a full barrier before and after each ran the frame's 140 dispatches one at a time ([Compute dispatches that wait for each other](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other-android)). OnePlus Pad 3 (Adreno 830 at 1,100 MHz), the `kokiri` route: {{M3R}}
 - **Open:**
   - the frame rate;
   - a stall of about 10 s at the first start, and after a shader-chain update, while Kokiri Forest's pipelines build.
@@ -176,6 +177,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Compute dispatches that wait for each other](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other-android): Android, Kokiri Forest's 140 dispatches a frame each behind a full barrier. {{M3F}}
 - [Task and mesh draws in compute form on Qualcomm's driver, which has mesh shaders](../../../docs/reference/rendering.md#task-and-mesh-draws-in-compute-form-on-qualcomms-driver-which-has-mesh-shaders-android): resolved on Android: white tears across Kokiri Forest's distant canopy on the Galaxy Z Fold 8. The foliage's mesh colour pass landed behind its own depth prepass through Qualcomm's mesh pipeline and not in compute form, which is now the default there, at no measured cost.
 - [Storage the CPU wrote before a texture's first use](../../../docs/reference/nvn-objects.md#storage-the-cpu-wrote-before-a-textures-first-use-android): resolved on Android: Kokiri Forest's terrain tiles were missing on the Galaxy Z Fold 8, seen as flat, pale water patches. The water and fog pass (`888c1068ac8f7043`) tinted the far depth it saw through them. The tiles' height, blend, hole and detail maps are filled from the CPU before their textures are made.
 - [Set layouts sized by their highest binding number](../../../docs/reference/rendering.md#set-layouts-sized-by-their-highest-binding-number): on a Galaxy Z Flip 7, its constant buffers at 1,048,576 and up cost 64 to 192 MB a layout, about 9 GB over Kokiri Forest.
