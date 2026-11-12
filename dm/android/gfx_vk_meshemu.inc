@@ -292,7 +292,7 @@ static int vk_memu_draw_(const p_draw *dw) {
         if (ts) r[4] = me_up((VkDeviceSize)n * ts->memu->pay * 4);
         r[0] = 0; r[1] = me_up(r[0] + r[4]); r[2] = me_up(r[1] + r[5]); r[3] = me_up(r[2] + r[6]);
         VkDeviceSize sp = me_up(r[3] + r[7]);   // the mesh kernel's shared memory, when it is in a storage buffer; the task kernel's lies where vtx will be
-        rp_end(); tc_clear();
+        rp_end_why(9); tc_clear();
         if (ts) {
             if (!memu_kernel(ts, ppr[2], pst[2], r, first, n, 0, n, r[2]) || !memu_launch(r, n, ts->memu, m, cap) || !memu_kernel(ms, ppr[0], pst[0], r, 0, 0, r[1], cap, sp)) { g_me_skipped++; return 0; }
         } else if (!memu_kernel(ms, ppr[0], pst[0], r, first, n, 0, n, sp)) { g_me_skipped++; return 0; }
