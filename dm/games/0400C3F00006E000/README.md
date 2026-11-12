@@ -133,6 +133,32 @@ Packed for Android as its own game app (`--game-apk`, the 21.9 GB RomFS as the d
   - A SIGSEGV in Qualcomm's driver at a chunk's submit on the Pad 3, and one in the replay's copy into an arena block on a Galaxy S25 Edge, both right after `virtual pool remap … failed` lines.
   - Every such request left a hole in the virtual pool's reservation, where later mappings landed and were then unmapped by the next request. The S25's log shows the faulting block inside a failed request's destination.
   - With requests that fail leaving the reservation whole, two more races on the S25 ran without a fault. On a Pixel 9 Pro XL (Mali-G715) 4 of 4 runs into a race failed without the change (three faults in Mali's driver and a freeze) and 4 of 4 ran the race out with it.
+- **Raw global memory on a Galaxy S25 Edge, 2026-11-11** (Adreno 830, Qualcomm's driver, 12 GB, the AHardwareBuffer route). The profile's [`android_defaults.txt`](android_defaults.txt) now turns it on (`DM_VK_RAW_GMEM=1`). None of the game's shaders read through the raw pool table (no table was built in any run), so what it gives is storage buffers bound in their placed pools instead of copied ([Raw global memory on the Vulkan replay](../../../docs/reference/rendering.md#raw-global-memory-on-the-vulkan-replay-android)). The same Mushroom Cup race at Mario Bros. Circuit, A held, on `main` at c03656cf with the dirty tracker above, plus that session's CPU sampler and counters, off and on (the q204 runs):
+
+  | | Off | On |
+  |---|---|---|
+  | The race | 14.5 fps | 19.5 fps |
+  | The replay's CPU a frame | 53.7 ms | 38.7 ms |
+  | Placed | none | 451 pieces, 155 MiB of the pools' 1,282 MiB: 598 chunks for bindings, none for pointers |
+  | Low-memory kills of the game | none | none |
+
+  - **In place:** 3.9 million read-only bindings and 453,000 written ones by the end of the measured race. Copied as before: 19 that crossed two pieces and 606,000 at an offset that isn't a multiple of 64.
+  - **Memory in the race with it on:** 4.09 GB resident, 1.41 GB swapped, 1.32 GB available on the phone. No red line from raw global memory.
+  - **The picture** is right in the race both ways.
+  - **Whole pools were what failed before:** on the OnePlus Pad 3, before pools were placed in chunks, raw global memory placed 1.3 GB and the faster runs were killed.
+- **The same on the OnePlus Pad 3, 2026-11-11** (Adreno 830, Qualcomm's driver, 12 GB, the AHardwareBuffer route, the tablet where whole pools were killed). The game app built with `main`'s host and the profile's default in its `defaults.txt`, so with no switch in `env.txt`; the same race, five launches. Against it, two launches with `DM_VK_RAW_GMEM=0`. Each number is over the race's 300-frame windows:
+
+  | | Off (2 launches, 11 windows) | On, the default (5 launches, 31 windows) |
+  |---|---|---|
+  | The race | 14.7–22.1 fps, median 18.4 | 19.8–29.0 fps, median 22.8 |
+  | Where a frame has 1,800 draws or more | median 15.1 fps | median 21.7 fps |
+  | The replay's CPU a frame | median 42.6 ms | median 32.1 ms |
+  | GPU p50 | median 26.8 ms | median 24.3 ms |
+  | Placed | none | 462–485 pieces, 126–128 MiB of the pools' 1,160–1,443 MiB |
+  | Low-memory kills of the game | none | none |
+
+  - **Memory is tight either way:** the tablet's MemAvailable fell to 0.21–0.32 GB at some point in every launch with it on and to 0.29–0.31 GB with it off, with 5.8–8.0 GB of swap free. Nothing was killed, and raw global memory logged no red line.
+  - **The picture** is the race as before: the kart, the other racers, the scenery, the track's surface untextured.
 - **Frame times on Turnip:** menus and the movie 28–41 ms a frame; 3D scenes, the race included, 300–500 ms, of which the GPU is 21–45 ms and the replay's submit and present the rest. The track's surface is untextured (15 sparse images over the image limit), roadside bushes are missing (mesh draws skipped), and "virtual pool remap … failed" is logged several thousand times a run (Android cannot alias the private memory a virtual pool maps).
 
 ## Open
