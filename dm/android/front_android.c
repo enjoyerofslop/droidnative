@@ -765,7 +765,7 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
 }
 
 // ---------- Lifecycle ----------
-static int g_started;
+static int g_started, g_job;
 // A start on a DM_VK_DRIVER driver counts as good (vk_driver.c vk_driver_ok) after 120 presented frames or 30 s of the game, or once the self test's picture check has drawn
 // on it, so a crash or hang before then makes the next start skip the driver once. A driver's first start compiles the game's pipelines with the status screen up, for over a
 // minute in Brilliant Diamond: that is not a failure, and so a hang in the driver after 30 s counts as good too (the records can't tell the two apart)
@@ -781,6 +781,7 @@ static void on_cmd(struct android_app *app, int32_t cmd) {
     int game = atomic_load(&g_state) == ST_GAME;
     switch (cmd) {
         case APP_CMD_INIT_WINDOW:
+            if (g_job) break;   // an Oodle job shows nothing and started without a window (android_main)
             // a window that comes back (Home and back to the game) has a new swapchain with nothing in it: the newest frame is shown again, which a game held by the
             // pause menu would not do itself (the picture behind the menu stayed black until Resume)
             if (app->window) { if (g_started) { vk_window_up(app->window); g_shown = 0; } else vk_window_first(app->window); }
@@ -813,6 +814,11 @@ void android_main(struct android_app *app) {
     vk_driver_dirs(g_ext, g_int);   // DM_VK_DRIVER: a driver beside env.txt, run from a copy in the internal files
     vk_driver_game(g_game, DM_GAME_ID);   // and its start records: games/<title ID>/vk_driver_result.txt
     vk_start_game(g_game);   // and vk_start.txt, whatever driver runs
+    // An Oodle job (DM_OODLE_JOB: hle_oodle.c decodes before nnMain and exits; scripts/android_oodle.py) draws nothing, so it starts now, not at the first window. A build
+    // starts it on a phone nobody is watching, and with the screen off or locked the activity gets no window until someone wakes and unlocks it: Pokémon Legends: Z-A's
+    // jobs, sent after a long build on Windows, waited the build's 600 s each with nothing in log.txt past the settings (issues #403, #415)
+    const char *job = getenv("DM_OODLE_JOB");
+    if (job && *job) { g_job = g_started = 1; LOG("Oodle job: started without waiting for a window"); start_host(); }
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &g_env, NULL);
     app->onAppCmd = on_cmd; app->onInputEvent = on_input;
     // The screen stays on while the game's window is up, as the launcher's does: Android counts only its own input events as activity, so a cutscene, a game

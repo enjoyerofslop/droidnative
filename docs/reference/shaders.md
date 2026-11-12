@@ -536,6 +536,18 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_android_oodle` (`PhoneTest`): a game gone without its last line is taken at its output, which needs no evidence; a gone game without output names the early stop and logs `ls -l` and logcat. Both fail on the code before the fix.
 - **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md) on an Ayn Odin 2 (Adreno 740, Android 13), built on a Mac with `DM_UE_DECODE=phone`. Before the fix the first job stopped the build; with it, three jobs decoded 74,244 shaders, and both archives and the stamp were byte-identical to the Mac host's. A tester's AYN Thor (Adreno 740, Android 13), building on Windows, hit it first (droidplay-core#228).
 
+### A phone's Oodle job waited for a window with the screen off
+
+- **Symptom:** the Android build stops at its Oodle decode after 600 s with `the Oodle job on the phone did not finish (no answer in 600 s)`, every try. The phone's `log.txt` in `logs/oodle_phone_1.log` holds only the start lines: `DroidPlay on Android: …`, `env.txt: DM_OODLE_JOB=…` and the `launcher.txt:` settings. No `[vk]` or `game in …` line follows. The game's process stays alive the whole time, so the build doesn't report it gone.
+- **Cause:** the Android front started the host at the activity's first window (`front_android.c` `on_cmd`, `APP_CMD_INIT_WINDOW`), and an Oodle job waited for that window like a game does, though it draws nothing (`hle_oodle.c` decodes before `nnMain` and exits). The build starts the job with `am start` after a long build on the computer, and by then the phone's screen is often off. Android still creates the activity and its process, so `android_main` logs its start lines. It gives the activity a window only once the screen is on and the keyguard is gone.
+- **Fix:** `android_main` starts the host at once when `DM_OODLE_JOB` is set. A window that comes later makes no Vulkan device, since a job draws nothing. The job's log says `Oodle job: started without waiting for a window`.
+- **Check:** a Retroid Pocket 5 (Adreno 650, Android 13, swipe keyguard), screen off, one Z-A job of 757 streams (64.3 MB decoded) with each host:
+  - On `main`, `log.txt` stayed at its 11 start lines for 90 s with the game's process alive. logcat had the process start at once and Vulkan only after the screen was woken, and the job then finished within 3 s.
+  - With the fix, the job finished 2 s after the launch with the screen off, and no Vulkan device was made.
+  - Both outputs were byte-identical to what the Ayn Odin 2 decoded with its screen on, before and after the fix.
+  - A full build with the fix then decoded all 162,769 of Z-A's Trinity streams (16 GB) on the Retroid in 65 jobs and 17 min 47 s, with the screen off throughout. Every stream matched the Odin 2's decode, and the split found 28,603 shaders, as it does with the Mac host's Oodle.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) 2.0.2, built on Windows for a Galaxy S23+ (droidplay-core#403, #415). On a Mac with `DM_UE_DECODE=phone`, the Ayn Odin 2 decoded every stream from `main` in 64 jobs (29 min 28 s). Its screen stays on while it charges, so the job itself works on Adreno 740, and only the screen made the difference.
+
 ### IoStore patch containers keep their shader groups in the base container
 
 - **Symptom:** `ValueError: …/Glow-Switch_0_P.utoc: shader group 0 has no chunk` from `uepak.py io_archive` while the NSP script decodes the shaders (`decode_ue_shaders`, after `[4/8] UE shader decode`).
