@@ -281,13 +281,25 @@ def disk_full(path):
     return text
 
 
+def filled(text):
+    """The path a full disk's lines in a log name, or None: the folder spv_build.py's own line says it couldn't write, else the file of the last error that names one
+    (Python's OSError, which doubles a Windows path's backslashes, and .NET's IOException end in : '<path>'). spv_build.py's temporary folder can be on another
+    drive than <id>_build: runner-a's check filled a small drive mounted at <id>_build/tmp, and the message named <id>_build's drive, with its 755 GB free"""
+    m = re.search(r'^\[RED\] spv_build: the disk is full: .* The drive with (.+?) has (?:[\d.]+ GB free|no free space it could read)', text, re.M)
+    if m: return m.group(1)
+    for ln in reversed(text.splitlines()):
+        if DISK_FULL.search(ln) and (q := re.search(r": '([^']+)'\s*$", ln)): return q.group(1).replace('\\\\', '\\') if '[Errno' in ln else q.group(1)
+    return None
+
+
 def translation_stopped(work, log):   # what build_shaders adds when spv_build.py stopped: its own reason (a [RED] spv_build: line), and a full disk's message when the disk filled
     try: text = log.read_text(errors='replace')
     except OSError: text = ''
     own = [l[6:] for l in text.splitlines() if l.startswith('[RED] spv_build: ')]
-    free = free_on(work)
+    where = filled(text) or work
+    free = free_on(where)
     full = DISK_FULL.search(text) or (free is not None and free < LOW_DISK)
-    return ''.join(f'{l}\n' for l in own[-1:]) + (f'{disk_full(work)}\n' if full else '')
+    return ''.join(f'{l}\n' for l in own[-1:]) + (f'{disk_full(where)}\n' if full else '')
 
 
 def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derived='', oodle=None):

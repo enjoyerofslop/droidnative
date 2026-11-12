@@ -4,7 +4,8 @@ areas, the job lists and the translator's output) is made under WORK, the build'
 (droidplay-core#307: three failed Pokémon Pokopia runs each left tens of GB in the system's temp folder); a full disk, in the translator's lines or in this script's own
 writes, stops the run with a plain line before the post-pass, which stopped at the first empty .spv; a run the drives can't hold stops before it translates anything; and
 an empty or cut-short output is a [RED] line, not a stop, the translator's failures come before the post-pass, and a shader's res.json is written last and whole, so one
-cut short is translated again. No game files, no translator, no spirv-as."""
+cut short is translated again; a run that had shaders to translate and translated none of them stops, unless the translator said why for each and earlier runs translated
+the game's others. No game files, no translator, no spirv-as."""
 import contextlib
 import errno
 import io
@@ -61,10 +62,13 @@ class Harness(unittest.TestCase):
                 if k.get('check') and r.returncode: raise subprocess.CalledProcessError(r.returncode, cmd, r.stdout, r.stderr)
                 return r
             jp, tout = Path(cmd[-2]), Path(cmd[-1]); self.touts.append(tout)
-            err = ''.join(self.translate(j, tout) for j in json.loads(jp.read_text(encoding='utf-8')))
-            return subprocess.CompletedProcess(cmd, 0, f'translated: {self.N}\n', err)
+            return self.process(cmd, json.loads(jp.read_text(encoding='utf-8')), tout)
         for p in (mock.patch.object(sb.subprocess, 'run', side_effect=run), mock.patch.object(tempfile, 'tempdir', str(self.sysdir))):   # the system's temp folder, watched too
             p.start(); self.addCleanup(p.stop)
+
+    def process(self, cmd, jobs, tout):   # one dmsh_xlate process over its job list: → what it printed, and its exit code
+        err = ''.join(self.translate(j, tout) for j in jobs)
+        return subprocess.CompletedProcess(cmd, 0, f'translated: {self.N}\n', err)
 
     def translate(self, job, tout):   # dmsh_xlate's output for one job: its .spv, then its .res.json; → its stderr lines
         k = job['key']
@@ -86,6 +90,11 @@ class Harness(unittest.TestCase):
 
     def left(self):   # temporary folders under WORK or in the system's temp folder after the run
         return sorted(str(p) for d in (self.work, self.sysdir) if d.exists() for p in d.glob('spv_*'))
+
+    def keys(self): return sorted(sb.key_of(*reversed(sb.split(record(i)))) for i in range(self.N))
+
+    def old_output(self, k, chain, size=100):   # a shader an earlier run translated
+        self.out.mkdir(exist_ok=True); (self.out / f'{k}.spv').write_bytes(bytes(size)); (self.out / f'{k}.res.json').write_text(json.dumps({'key': k, 'android': chain}))
 
 
 class TemporaryFolder(Harness):
@@ -172,11 +181,6 @@ class FreeSpace(Harness):   # spv_build.py room: 20 bytes free for each byte of 
 
     def need(self, n): return n * self.REC * (sb.OUT_PER_BYTE + sb.TEMP_PER_BYTE) + sb.ROOM_SPARE
 
-    def keys(self): return sorted(sb.key_of(*reversed(sb.split(record(i)))) for i in range(self.N))
-
-    def old_output(self, k, chain, size=100):   # a shader an earlier run translated
-        self.out.mkdir(exist_ok=True); (self.out / f'{k}.spv').write_bytes(bytes(size)); (self.out / f'{k}.res.json').write_text(json.dumps({'key': k, 'android': chain}))
-
     def test_a_run_that_cannot_fit_stops_before_it_translates(self):
         with self.free(self.need(self.N) - 1), self.assertRaises(SystemExit) as e: self.build()
         self.assertEqual(e.exception.code, 1)
@@ -228,8 +232,6 @@ class Unreadable(Harness):   # what a write that failed leaves: the translator's
         if res is not None: (tout / f'{k}.res.json').write_text(res, encoding='utf-8')
         return red
 
-    def keys(self): return sorted(sb.key_of(*reversed(sb.split(record(i)))) for i in range(self.N))
-
     def test_empty_or_cut_short_outputs_are_red_lines_and_the_rest_is_translated(self):
         k = self.keys(); good = json.dumps({'key': 'x', 'stage': 'ps', 'cbufs': []})
         self.bad = {k[0]: (b'', good, ''), k[1]: (FRAGMENT[:-4], good, ''), k[2]: (FRAGMENT, '', ''),   # empty; cut at an instruction's end; reflection empty
@@ -248,6 +250,76 @@ class Unreadable(Harness):   # what a write that failed leaves: the translator's
         text = self.build()
         self.assertIn(f'spv_build: {self.N} translated, 0 already there', text)
         self.assertEqual(json.loads((self.out / f'{k[0]}.res.json').read_text())['android'], sa.ANDROID_CHAIN)
+
+
+class NoneTranslated(Harness):
+    """A run that had shaders to translate and translated none (spv_build.py none_made). runner-a moved the translator's dll aside: dotnet printed why, wrote nothing,
+    and every shader got 'no output from the translator'; the run ended '0 translated, …, 30 failed' with exit code 0, and the build packed the game without shaders
+    (droidplay-core#307's follow-up). A shader the translator says it can't handle stays no stop, even when it is all a later run has left to translate"""
+    GONE = 'Could not execute because the specified command or file was not found.'   # dotnet's first line for a dll that isn't there
+    RED = 'NotSupportedException: Ampere instruction 481 at 0x0 (000000000000000000000000020c0481) is not implemented'   # Mario Kart World's 078997bf631992c5
+
+    def setUp(self):
+        super().setUp(); self.gone, self.red, self.mute = False, set(), set()   # the dll gone; keys failed with a [RED] line; keys left with nothing and no word
+
+    def process(self, cmd, jobs, tout):
+        if self.gone: return subprocess.CompletedProcess(cmd, 1, '', f'{self.GONE}\nPossible reasons for this include:\n')
+        r = super().process(cmd, jobs, tout)
+        return subprocess.CompletedProcess(cmd, 1 if any(j['key'] in self.red for j in jobs) else 0, r.stdout, r.stderr)   # dmsh_xlate exits 1 when one failed
+
+    def translate(self, job, tout):
+        k = job['key']
+        if k in self.red: return f'[RED] {k}: {self.RED}\n'
+        return '' if k in self.mute else super().translate(job, tout)
+
+    def stops(self, line):   # the run stops with exit code 1, its last line this [RED] spv_build line, before any post-pass, and leaves no temporary folder
+        with self.assertRaises(SystemExit) as e: self.build()
+        self.assertEqual(e.exception.code, 1)
+        self.assertRegex(self.text.rstrip().splitlines()[-1], r'^\[RED\] spv_build: no shader was translated: ' + line)
+        self.assertEqual(self.lines, ''); self.assertEqual(self.left(), [])
+
+    def test_a_translator_that_makes_nothing_stops_the_run(self):
+        self.gone = True
+        self.stops(rf'the translator made none of the {self.N} shaders it was given, and gave a reason for none of them \(exit code 1: {re.escape(self.GONE)}\)\. '
+                   r'Check that dmsh_xlate is there and runs, then build again')
+        self.assertIn(f'spv_build: 0 translated, 0 already there (0 given their constant buffer extents), {self.N} failed', self.text)
+        self.assertEqual(self.text.count('no output from the translator'), self.N); self.assertFalse(self.out.exists() and any(self.out.iterdir()))
+
+    def test_one_that_prints_nothing_either(self):   # a stand-in, or a runtime that starts and exits without a word
+        self.mute = set(self.keys())
+        self.stops(rf'the translator made none of the {self.N} shaders it was given, and gave a reason for none of them \(it printed nothing\)')
+
+    def test_it_stops_a_later_run_too(self):   # the shaders an earlier run translated are a part of the game's: packed alone, some scenes would draw nothing
+        for k in self.keys()[:2]: self.old_output(k, sa.ANDROID_CHAIN)
+        self.gone = True
+        self.stops(r'the translator made none of the 3 shaders it was given')
+        self.assertIn('spv_build: 0 translated, 2 already there', self.text)
+
+    def test_a_translator_that_fails_every_shader_of_a_new_build_stops_it(self):   # with its reasons, but the game would have no shader at all
+        self.red = set(self.keys())
+        self.stops(rf"the translator failed every one of the game's {self.N} shaders \(their \[RED\] lines above\), and none is there from an earlier run, so the game would have none")
+        self.assertEqual(self.text.count('Ampere instruction 481'), self.N)
+
+    def test_a_later_run_with_only_shaders_the_translator_cannot_handle_goes_on(self):   # Mario Kart World's builds after its first: '0 translated, 11576 already there, 1 failed'
+        k = self.keys()
+        for key in k[:3]: self.old_output(key, sa.ANDROID_CHAIN)
+        self.red = set(k[3:])
+        text = self.build()
+        self.assertIn('spv_build: 0 translated, 3 already there (0 given their constant buffer extents), 2 failed', text)
+        self.assertNotIn('no shader was translated', text); self.assertEqual(text.count('Ampere instruction 481'), 2)
+
+    def test_a_run_that_translated_some_goes_on_however_many_failed(self):   # 4 of 5, with reasons and without: how many a game can lose and still play isn't known
+        k = self.keys(); self.red, self.mute = {k[0], k[1]}, {k[2], k[3]}
+        text = self.build()
+        self.assertIn('spv_build: 1 translated, 0 already there (0 given their constant buffer extents), 4 failed', text)
+        self.assertEqual(text.count('no output from the translator'), 2); self.assertNotIn('no shader was translated', text)
+        self.assertEqual(sorted(p.name[:16] for p in self.out.glob('*.res.json')), [k[4]])
+
+    def test_a_run_with_nothing_to_translate_goes_on(self):   # every shader there already: the translator doesn't run
+        for key in self.keys(): self.old_output(key, sa.ANDROID_CHAIN)
+        self.gone = True
+        text = self.build()
+        self.assertIn(f'spv_build: 0 translated, {self.N} already there', text); self.assertEqual(self.touts, [])
 
 
 class PostPass(unittest.TestCase):   # spv_android.py post_one in this process

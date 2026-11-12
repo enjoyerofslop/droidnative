@@ -11,6 +11,7 @@
 # Vertex shaders in two parts (VertexA + VertexB, Catherine: Full Body's GLSLC) are merged into one program first, as dmsh_build.py vertex_ab does.
 # The code areas, the job lists and the translator's output go in a temporary folder under WORK (build_android_from_nsp.py sets it to <id>_build/tmp), which the run
 # removes however it ends: for a big game it holds tens of GB, so it stays on the game's drive, beside its other files, and a failed run leaves nothing behind.
+# A run that had shaders to translate and translated none of them stops (none_made): the build must not pack the game without them.
 # Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N]
 import spv_android as sa   # beside this file
 import argparse, concurrent.futures as cf, errno, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile
@@ -173,6 +174,34 @@ def stop_if_full(failed, tout, step):   # after a translation pass: the translat
         if k not in full: print(f'[RED] {k}: {why}')   # its other failures, lost otherwise
     disk_full(tout, f"the translator could not write {len(full):,} shaders' output in its {step} ({full[0]}: {failed[full[0]]})")
 
+def take(r, failed, said, other, prefix='', cut=160):
+    """One translator process's output: its `[RED] <key>: <why>` lines into failed, and their keys into said (the shaders it gave a reason for); once, the first
+    of its other lines with its exit code into other: what a translator that made nothing printed instead (dotnet's "Could not execute because the specified
+    command or file was not found." for a dll that isn't there)"""
+    reds = 0
+    for ln in r.stderr.splitlines() + r.stdout.splitlines():
+        m = re.match(r'\[RED\] (\w+): (.*)', ln)
+        if m: failed[m.group(1)] = prefix + m.group(2)[:cut]; said.add(m.group(1)); reds += 1
+        elif ln.strip() and not ln.startswith('translated: ') and not other: other.append(f'exit code {r.returncode}: {ln.strip()[:200]}')   # not its own summary line
+    if r.returncode and not reds and not other: other.append(f'exit code {r.returncode}, nothing printed')
+
+def none_made(keys, said, have, other, xlate):
+    """Stop when this run had shaders to translate and translated none of them. A translator that didn't run or wrote nothing (its dll moved aside) gave every
+    shader 'no output from the translator', and the run ended '0 translated, …, 30 failed' with exit code 0, so build_android_from_nsp.py packed the game without
+    shaders (droidplay-core#307's follow-up). One such run goes on: every shader in it is one the translator said it can't handle, and earlier runs translated the
+    game's others: Mario Kart World's 078997bf631992c5 ('Ampere instruction 481 at 0x0') fails on every build, and a later build reads '0 translated, 11576
+    already there, 1 failed'. A run that translated some goes on, however many failed: no build has shown how many a game can lose and still play"""
+    silent = [k for k in keys if k not in said]
+    if not silent and have: return
+    if silent:
+        print(f'[RED] spv_build: no shader was translated: the translator made none of the {len(keys):,} shaders it was given, and gave a reason for '
+              f'{f"only {len(keys) - len(silent):,}" if len(silent) < len(keys) else "none"} of them ({other[0] if other else "it printed nothing"}). Check that {xlate} '
+              f'is there and runs{" with dotnet" if xlate.endswith(".dll") else ""}, then build again: a file missing from its folder does this', flush=True)
+    else:
+        print(f'[RED] spv_build: no shader was translated: the translator failed every one of the game\'s {len(keys):,} shaders (their [RED] lines above), and none is '
+              'there from an earlier run, so the game would have none', flush=True)
+    raise SystemExit(1)
+
 # The room a run needs, per byte of the package records it translates (header, code area, control section), measured on the Mac from three games' finished
 # <id>_build/spv folders against their shader/pkg, as allocated on disk. Their translated files: Ocarina of Time 12.1 bytes per package byte (42,848 shaders, 149 KiB
 # each), Final Fantasy Resonance 13.9 (73,496, 125 KiB), Super Mario Odyssey 11.9 (27,984, 67 KiB). The translator's output, in the temporary folder until the run ends,
@@ -261,20 +290,14 @@ def translate(w):
     def run(ch):
         jp = Path(w) / f'job_{abs(hash(ch[0]))}.json'; jp.write_text(json.dumps([jobs[k] for k in ch]), encoding='utf-8')
         return subprocess.run(xl + [str(jp), str(tout)], capture_output=True, text=True, errors='replace')
-    failed = {}
+    failed, said, other = {}, set(), []
     with cf.ThreadPoolExecutor(a.j) as ex:
-        for r in ex.map(run, [c for c in chunks if c]):
-            for ln in r.stderr.splitlines() + r.stdout.splitlines():
-                m = re.match(r'\[RED\] (\w+): (.*)', ln)
-                if m: failed[m.group(1)] = m.group(2)[:160]
+        for r in ex.map(run, [c for c in chunks if c]): take(r, failed, said, other)
     stop_if_full(failed, tout, 'first pass')
     again = int_input_jobs(keys, jobs, tout, a.j)
     if again:
         with cf.ThreadPoolExecutor(a.j) as ex:
-            for r in ex.map(run, [c for c in [again[i::a.j] for i in range(a.j)] if c]):
-                for ln in r.stderr.splitlines() + r.stdout.splitlines():
-                    m = re.match(r'\[RED\] (\w+): (.*)', ln)
-                    if m: failed[m.group(1)] = 'integer-input retranslation: ' + m.group(2)[:130]
+            for r in ex.map(run, [c for c in [again[i::a.j] for i in range(a.j)] if c]): take(r, failed, said, other, 'integer-input retranslation: ', 130)
         print(f'spv_build: {len(again)} vertex shaders translated again with integer inputs')
         stop_if_full(failed, tout, 'integer-input pass')   # it rewrites good .spv files in place, so a disk that fills here cuts them short
     done = sorted(p.name[:-4] for p in tout.glob('*.spv') if not p.name.endswith('.reader.spv'))
@@ -294,7 +317,9 @@ def translate(w):
     if done: subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
     lost = [k for k in done if not (out / f'{k}.res.json').exists()]   # outputs the post-pass couldn't read (its [RED] lines): res.json, written last, makes a shader translated
     for k in lost: failed.setdefault(k, "the post-pass couldn't read its output")
-    print(f'spv_build: {len(done) - len(lost)} translated, {have} already there ({upg} given their constant buffer extents), {len(failed)} failed, {len(skipped)} skipped, {sum(1 for k in jobs if jobs[k].get("no_facts"))} without facts')
+    made = len(done) - len(lost)
+    print(f'spv_build: {made} translated, {have} already there ({upg} given their constant buffer extents), {len(failed)} failed, {len(skipped)} skipped, {sum(1 for k in jobs if jobs[k].get("no_facts"))} without facts')
+    if keys and not made: none_made(keys, said, have, other, a.xlate)
 
 if __name__ == '__main__':
     main()
