@@ -874,8 +874,10 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0}; return 1; }
 NVN(nvnSyncFinalize, void, NVNsync *s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->magic = 0; }
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
+__attribute__((weak)) void mtl_gap_ev(int kind, uint64_t a, uint64_t b) { (void)kind; (void)a; (void)b; }   // the Android replay's frame timeline (gfx_vk_gap.inc); nothing elsewhere
+__attribute__((weak)) uint64_t mtl_completed_fence(void) { return 0; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)c; (void)f; nvn_queue_fence((queue_t *)q,(sync_t *)s); }
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)c; (void)f; nvn_queue_fence((queue_t *)q,(sync_t *)s); mtl_gap_ev(20, ((queue_t *)q)->submits, 0); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // Queue dependencies capture the current logical receipt; later re-fencing or finalizing the sync cannot retarget work already queued.
 NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { nvn_queue_wait_sync((queue_t *)q,(const sync_t *)s); return 1; }
@@ -889,11 +891,11 @@ static _Atomic uint64_t g_sync_ns;
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
-    if(o->fenced==3) { if(nvn_sync_wait(o,0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; uint64_t t0=now_ns(); dm_host_work++; int ok=nvn_sync_wait(o,timeout); dm_host_work--; atomic_fetch_add(&g_sync_ns,now_ns()-t0); return ok?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
+    if(o->fenced==3) { if(nvn_sync_wait(o,0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; uint64_t t0=now_ns(); mtl_gap_ev(3, 3, mtl_last_fence()); dm_host_work++; int ok=nvn_sync_wait(o,timeout); dm_host_work--; atomic_fetch_add(&g_sync_ns,now_ns()-t0); mtl_gap_ev(4, mtl_completed_fence(), now_ns()-t0); return ok?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
     // A blocking wait for the GPU is a kernel wait on the Switch: the thread is off its core meanwhile (dm_host_work: a thread it holds back runs, hle_thread.c thr_runnable)
-    uint64_t t0 = now_ns(); dm_host_work++; int ok = w(o->fence, timeout); dm_host_work--; atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
+    uint64_t t0 = now_ns(); mtl_gap_ev(3, o->fenced, o->fence); dm_host_work++; int ok = w(o->fence, timeout); dm_host_work--; atomic_fetch_add(&g_sync_ns, now_ns() - t0); mtl_gap_ev(4, mtl_completed_fence(), now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
     { static _Atomic uint64_t n, ns, acq, lag; uint64_t d = now_ns() - t0, k = atomic_fetch_add(&n, 1) + 1; atomic_fetch_add(&ns, d); if (o->fenced == 2) atomic_fetch_add(&acq, 1);
       atomic_fetch_add(&lag, mtl_last_fence() - o->fence);   // submissions made since the fence: 0 = waits for the newest
       if (!(k & 255)) LOG("[nvn] SyncWait blocked %llu times: mean %.2f ms, window acquires %llu, mean submissions behind the newest %.2f", (unsigned long long)k, (double)atomic_load(&ns) / 1e6 / (double)k,
@@ -1496,6 +1498,7 @@ _Atomic uint64_t dm_game_vsyncs, dm_game_present_ns;
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     ((queue_t *)q)->submits++;
     nvn_queue_submit((queue_t *)q,n,(const uint64_t *)h);
+    mtl_gap_ev(1, ((queue_t *)q)->submits, (uint64_t)n);
 }
 
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
@@ -1657,6 +1660,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }
 #endif   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
+    mtl_gap_ev(5, (uint64_t)*idx, pace_ns);
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 // The older API (NVN 53, Super Mario 3D World + Bowser's Fury): the queue waits for the texture on the GPU and no sync object is handed out. The host replays in submission order, so later commands already come after earlier presents; the same as WindowAcquireTexture without a sync object
@@ -2214,7 +2218,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
     return lc;
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
-    (void)q; win_t *o = (win_t *)w; o->presents++;
+    (void)q; win_t *o = (win_t *)w; o->presents++; mtl_gap_ev(2, o->presents, (uint64_t)idx);
     dm_ue_cvar_tick();
     dm_ue_dynres_tick();
     if (fps_high()) high_cap_tick();

@@ -80,6 +80,7 @@ static int g_stencil_export;   // VK_EXT_shader_stencil_export enabled: a fragme
 static int g_nonuni, g_null_desc;   // for the texture pool by ID (gfx_vk_pool.inc): VK_EXT_descriptor_indexing's non-uniform sampled image indexing; VK_EXT_robustness2's null descriptors
 static int g_pool_texn;   // the IDs of the game's texture pools in the host table (mtl_set_tex_pool_n, hle_nvn.c): the pool set's image count (gfx_vk_pool.inc)
 static vkb_ctx g_vk; static pthread_mutex_t g_vk_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic int g_vk_made; static int g_vk_ok;   // vkb; vkb_fallback makes it again
+#include "gfx_vk_gap.inc"   // a frame timeline of the pipeline (gap_now; oot-clock, a test switch)
 #include "gfx_vk_rec.inc"   // the vkCmd* calls below go through its wrappers (DM_VK_RECORDER)
 // Query resets (the chunks' query pools, "Query resets" below). DM_VK_QRESET_USED=0 (env.txt): every pool is reset whole in the command buffer at every chunk begin, as before
 // (no host resets either); DM_VK_HOST_QRESET=0: VK_EXT_host_query_reset is not enabled, and the used queries are reset in the command buffer at the chunk's next begin
@@ -144,9 +145,10 @@ static int vk_try(char *why, size_t nwhy) {
           LOG("[vk] driver ID %d: %s, %s", (int)id, dp.driverName, dp.driverInfo); }
       g_driver_id = (int)id;
       g_qcom_driver = id ? id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY : g_vk.props.vendorID == 0x5143 && (g_vk.props.driverVersion & 0x80000000u); }
-    const char *dext[19]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
+    const char *dext[20]; uint32_t nde = 0;   // every extension below at once: swapchain, divisor, stencil export, format list, memory report, host query reset, device fault, descriptor indexing, robustness2,
                                               // shader module identifier, pipeline creation cache control, display timing and the three of task / mesh shaders; raw global memory's (gm_feat_take, gm_np_take) take what of the 19 is left
     if (has_ext(de, nd, "VK_KHR_swapchain")) { dext[nde++] = "VK_KHR_swapchain"; g_vk.has_swapchain = 1; }
+    int calib = has_ext(de, nd, "VK_EXT_calibrated_timestamps"); if (calib) dext[nde++] = "VK_EXT_calibrated_timestamps";   // the gap timeline (gfx_vk_gap.inc)
     // A DM_VK_DRIVER driver must offer what the window needs (front_android.c vk_init refuses a device without it); the system's driver goes on without, as before
     if (vk_driver_name() && ((forced = vk_driver_fail("extensions")) || !g_vk.has_surface || !g_vk.has_swapchain)) {
         free(de); return vk_failed(why, nwhy, forced ? "no window extensions" : !g_vk.has_surface ? "no VK_KHR_android_surface" : "no VK_KHR_swapchain", NULL, VK_SUCCESS, forced); }
@@ -254,6 +256,7 @@ static int vk_try(char *why, size_t nwhy) {
     LOG("[vk] task / mesh shaders: %s", g_mesh ? "on (VK_EXT_mesh_shader)" : mesh ? "[RED] VK_EXT_mesh_shader enabled but vkCmdDrawMeshTasksEXT was not found: their draws are skipped" : memu_on() ? "no VK_EXT_mesh_shader (or DM_VK_MESH=0): their draws run in compute form (gfx_vk_meshemu.inc)" : "no VK_EXT_mesh_shader (or DM_VK_MESH=0), and DM_VK_MESH_EMU=0: their draws are skipped");
     if (hqr && !(g_qreset = (PFN_vkResetQueryPoolEXT)vkGetDeviceProcAddr(g_vk.dev, "vkResetQueryPoolEXT"))) LOG("[RED] [vk] VK_EXT_host_query_reset is enabled but vkResetQueryPoolEXT was not found");
     if (dfault) g_fault_info = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetDeviceFaultInfoEXT");
+    if (calib) g_gap_calib = (PFN_vkGetCalibratedTimestampsEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetCalibratedTimestampsEXT");
     if (smid && !(g_smid = (PFN_vkGetShaderModuleCreateInfoIdentifierEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetShaderModuleCreateInfoIdentifierEXT"))) LOG("[RED] [vk] VK_EXT_shader_module_identifier is enabled but vkGetShaderModuleCreateInfoIdentifierEXT was not found: modules made at once");
     LOG("[vk] shader modules: %s", g_smid ? "made only for a pipeline the driver's cache does not have, which takes their identifiers (VK_EXT_shader_module_identifier; DM_VK_MODULE_ID=0: made at once)" : "made as each shader loads");
     if (gm) gm_device_made();
@@ -392,6 +395,11 @@ static void *chunk_thread(void *arg); static int stg_pool_on(void);
 // results into g_qres by slot first. The replay used to write 0: everything a game tests for visibility was fully hidden (nvn_mtl.m found culled lights the same way)
 enum { QRES = 1 << 16 };
 static uint64_t g_qres[QRES], g_qslot;   // results by slot (a ring), the next slot
+// The sum of the results up to each slot (a ring like g_qres, kept by the completion thread as the results arrive, in slot order): a report's samples passed since the reset is
+// a difference of two entries. Summing the slots of the window at each report cost 350 us a chunk on a Galaxy Z Fold 8 in Ocarina of Time's Kokiri Forest (about 410 reports
+// a frame, each over a window of thousands of slots: the game resets its counter rarely), 90% of the completion thread's work, which then retired chunks slower than the GPU
+// finished them (0.39 ms against about 0.35), so the ring of 8 filled and the GPU went idle between chunks
+static uint64_t g_qcum[QRES];
 static int g_q_on = 0, g_q_act = -1; static uint64_t g_q_win;   // counting since a reset; the query open in the current pass (chunk-local index); the window's first slot
 static uint64_t g_q_reports, g_q_queries, g_ts_reports, g_qr_cmd; static _Atomic uint64_t g_qr_host;   // g_qr_*: queries reset in command buffers / on the host (Query resets below)
 static int chunk_make(chunk *c) {
@@ -458,8 +466,8 @@ static chunk *cur(void) {   // the chunk being recorded: a free one is taken (wa
     if (!chunks_init()) return NULL;
     pthread_mutex_lock(&g_cmu);
     uint64_t t0 = 0;
-    for (;;) { for (int i = 0; i < g_nchunk && !C; i++) if (!g_ch[i].busy) C = &g_ch[i]; if (C) break; if (!t0) t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); pthread_cond_wait(&g_ccv, &g_cmu); }
-    if (t0) atomic_fetch_add(&g_chunk_wait_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0);
+    for (;;) { for (int i = 0; i < g_nchunk && !C; i++) if (!g_ch[i].busy) C = &g_ch[i]; if (C) break; if (!t0) { t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); gap_ev(GAP_R_CWAIT0, g_seq, 0); } pthread_cond_wait(&g_ccv, &g_cmu); }
+    if (t0) { atomic_fetch_add(&g_chunk_wait_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); gap_ev(GAP_R_CWAIT1, g_seq, 0); }
     C->busy = 1; C->seq = ++g_seq; C->nvn_fence = 0; C->ndraw = 0; C->ncr = 0;
     pthread_mutex_unlock(&g_cmu);
     return C;
@@ -685,8 +693,8 @@ static uint64_t chunk_submit(uint64_t nvn_fence) {
     chunk *c = C; C = NULL;
     VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = rec ? 1u : 0u, .pCommandBuffers = &c->cb};
     VkResult r = VK_SUCCESS;
-    c->rq_ticket = 0; if (deferred) c->rq_ticket = rec_submit(rec ? c->cb : VK_NULL_HANDLE, c->fence);   // its failures are the recorder's to report (rq_make R_SUBMIT)
-    else { pthread_mutex_lock(&g_vk.qmu); r = vkQueueSubmit(g_vk.q, 1, &si, c->fence); pthread_mutex_unlock(&g_vk.qmu); }
+    c->rq_ticket = 0; if (deferred) c->rq_ticket = rec_submit(rec ? c->cb : VK_NULL_HANDLE, c->fence, c->seq, (uint64_t)c->ndraw);   // its failures are the recorder's to report (rq_make R_SUBMIT)
+    else { pthread_mutex_lock(&g_vk.qmu); r = vkQueueSubmit(g_vk.q, 1, &si, c->fence); pthread_mutex_unlock(&g_vk.qmu); gap_ev(GAP_Q_SUBMIT, c->seq, (uint64_t)c->ndraw); }
     if (r != VK_SUCCESS) { RED_ONCE(2, "vkQueueSubmit failed: %d", r); if (r == VK_ERROR_DEVICE_LOST) gpu_fault_log(r); }
     g_flushes++;
     pthread_mutex_lock(&g_cmu);
@@ -998,7 +1006,7 @@ static void chunk_done(chunk *c) {
         if (!o->fill) memmove((void *)(uintptr_t)o->dst, (const void *)(uintptr_t)o->src, o->n);
         else { uint8_t *d = (uint8_t *)(uintptr_t)o->dst; for (uint64_t k = 0; k + 4 <= o->n; k += 4) memcpy(d + k, &o->value, 4); }
     }
-    rb_invalidate(c);   // before any write-back is read from the GPU's copies
+    gap_ev(21, c->seq, 1); rb_invalidate(c);   // before any write-back is read from the GPU's copies
     uint64_t wt0 = c->nwb ? clock_gettime_nsec_np(CLOCK_MONOTONIC) : 0, an = 0, ab = 0, ar = 0;
     for (int i = 0; i < c->nwb; i++) { const wb_t *w = &c->wb[i];
         if (w->inpl) { gm_ip_done(c, i); continue; }   // the GPU wrote guest memory itself: its pages count as written (and are writable) from now on (gfx_vk_gmem_inplace.inc)
@@ -1011,12 +1019,13 @@ static void chunk_done(chunk *c) {
         if (w->lin) atomic_fetch_add(&g_lwb_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0);
         snap_give(w->snap, w->snap_cap); snap_give(w->dsnap, w->snap_cap); }   // a storage buffer's snapshot: snap_cap 0, freed
     if (c->nwb) { atomic_fetch_add(&g_wb_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - wt0); atomic_fetch_add(&g_awb_n, an); atomic_fetch_add(&g_awb_bytes, ab); atomic_fetch_add(&g_awb_rb, ar); }
-    c->rb.used = 0;
+    c->rb.used = 0; gap_ev(21, c->seq, 2);
     if (c->npq) prof_collect(c);
     if (c->nq) { uint64_t r[1024]; memset(r, 0, sizeof r);
-        if (vkGetQueryPoolResults(g_vk.dev, c->qp, 0, (uint32_t)c->nq, sizeof r, r, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS)
-            for (int i = 0; i < c->nq; i++) g_qres[c->qg[i] % QRES] = r[i];
+        int ok = vkGetQueryPoolResults(g_vk.dev, c->qp, 0, (uint32_t)c->nq, sizeof r, r, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS;
+        for (int i = 0; i < c->nq; i++) { uint64_t q = c->qg[i]; if (ok) g_qres[q % QRES] = r[i]; g_qcum[q % QRES] = (q ? g_qcum[(q - 1) % QRES] : 0) + g_qres[q % QRES]; }   // (a failed read keeps the slot's last result, as before)
         c->nq = 0; }
+    gap_ev(21, c->seq, 3);
     if (c->ntq) { uint64_t r[256]; memset(r, 0, sizeof r);
         int ok = c->t_end && vkGetQueryPoolResults(g_vk.dev, c->tq, 0, (uint32_t)c->ntq, sizeof r, r, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS;
         uint64_t g = guest_ns(), base = g ? g : clock_gettime_nsec_np(CLOCK_MONOTONIC);
@@ -1024,8 +1033,8 @@ static void chunk_done(chunk *c) {
             uint64_t back = ok && o->q0 < (uint64_t)c->ntq && r[o->q0] && r[o->q0] <= c->t_end ? (uint64_t)((double)(c->t_end - r[o->q0]) * g_vk.props.limits.timestampPeriod) : 0;
             o->q1 = nvn_timestamp_from_ns(back < base ? base - back : base); }
         c->ntq = 0; }
-    for (int i = 0; i < c->npost; i++) post_apply(&c->post[i]);
-    for (int i = 0; i < c->nstg; i++) stg_free(&c->stg[i]);
+    gap_ev(21, c->seq, 4); for (int i = 0; i < c->npost; i++) post_apply(&c->post[i]);
+    gap_ev(21, c->seq, 5); for (int i = 0; i < c->nstg; i++) stg_free(&c->stg[i]);
     if (c->ngml) gm_chunk_done(c);   // its raw stores' write logs, before its dead objects (a table they index may be one)
     sp_done(c);   // after the write-backs, which read its blocks
     for (int i = 0; i < c->ndead; i++) {
@@ -1034,9 +1043,9 @@ static void chunk_done(chunk *c) {
                                    case 3: vkDestroyImage(g_vk.dev, (VkImage)h, NULL); break; case 4: vkFreeMemory(g_vk.dev, (VkDeviceMemory)h, NULL); break;
                                    case 5: vkDestroyBuffer(g_vk.dev, (VkBuffer)h, NULL); break; case 7: spare_put((spare_mem *)(uintptr_t)h); break; }
     }
-    draw_chunk_reset(c);
-    vkResetCommandPool(g_vk.dev, c->pool, 0); vkResetFences(g_vk.dev, 1, &c->fence);
-    c->nstg = c->npost = c->ndead = 0;
+    gap_ev(21, c->seq, 6); draw_chunk_reset(c);
+    gap_ev(21, c->seq, 7); vkResetCommandPool(g_vk.dev, c->pool, 0); gap_ev(21, c->seq, 8); vkResetFences(g_vk.dev, 1, &c->fence);
+    c->nstg = c->npost = c->ndead = 0; gap_ev3(21, c->seq, 9, (uint64_t)c->nq | (uint64_t)c->ntq << 16 | (uint64_t)c->nwb << 32 | (uint64_t)c->npost << 48);
 }
 static _Atomic uint64_t g_fence, g_done, g_presents;
 static pthread_mutex_t g_fmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_fcv = PTHREAD_COND_INITIALIZER;
@@ -1047,24 +1056,27 @@ static void *chunk_thread(void *arg) {
     void dm_android_place_thread(int done); dm_android_place_thread(1);   // the placement experiment (DM_VK_PIN_DONE, DM_VK_UCLAMP_MIN), off by default
     for (;;) {
         pthread_mutex_lock(&g_cmu); while (!g_fifo_n) pthread_cond_wait(&g_ccv, &g_cmu); chunk *c = g_fifo[0]; pthread_mutex_unlock(&g_cmu);
+        gap_ev(GAP_D_WAIT0, c->seq, c->rq_ticket);
         rec_wait_submitted(c->rq_ticket);   // a deferred submission reached the queue first (gfx_vk_rec.inc); before w0, so the recorder's lag is not taken for GPU time
         uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
         VkResult fr = vkWaitForFences(g_vk.dev, 1, &c->fence, VK_TRUE, UINT64_MAX);
         uint64_t waited = clock_gettime_nsec_np(CLOCK_MONOTONIC) - w0; int cut = 0;   // the chunk's time on the GPU (the one before had completed), at most (gpu_slow)
         int ts = c->ts, nq = c->nq, ntq = c->ntq, npq = c->npq;   // the queries it used, reset once read (qr_done): the counts are zeroed on the way
-        c->t_end = 0; uint64_t busy = 0;
+        c->t_end = 0; uint64_t busy = 0; gap_ev(21, c->seq, 0);
         if (c->ts) { uint64_t t[2]; c->ts = 0;
             VkResult tr = vkGetQueryPoolResults(g_vk.dev, g_tsq, 2 * (uint32_t)(c - g_ch), 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT); cut = tr == VK_NOT_READY && fr == VK_SUCCESS;
             if (tr == VK_SUCCESS && t[1] > t[0])
                 { atomic_fetch_add(&g_gpu_ns, (uint64_t)((double)(t[1] - t[0]) * g_vk.props.limits.timestampPeriod)); atomic_fetch_add(&g_gpu_chunks, 1); c->t_end = t[1];
                   uint64_t s = t[1] > last && t[0] < last ? last : t[0];   // from the previous chunk's end when it started before it; an end at or before that one (the counter started again) counts the whole span
                   busy = (uint64_t)((double)(t[1] - s) * g_vk.props.limits.timestampPeriod); last = t[1]; } }
+        gap_ev3(GAP_D_FENCE, c->seq, c->t_end ? c->t_end - (uint64_t)(busy / g_vk.props.limits.timestampPeriod) : 0, c->t_end);   // (b: the span counted, from the previous chunk's end)
         if (waited >= GPU_SLOW_NS || fr != VK_SUCCESS) gpu_slow(c, fr, waited, cut);
         int had_wb = c->nwb != 0 || (c->gm_st && gm_store_wait()), had_cop = c->ncop != 0, had_fwd = c->nfwd != 0;   // (gm_st: chunk_done clears it)
         chunk_done(c); c->nwb = c->ncop = c->nfwd = 0;
         if (c->nvn_fence) { pthread_mutex_lock(&g_fmu); if (atomic_load(&g_done) < c->nvn_fence) atomic_store(&g_done, c->nvn_fence); pthread_cond_broadcast(&g_fcv); pthread_mutex_unlock(&g_fmu);
                             nvn_queue_gpu_progress(); }   // the queue scheduler's waits on GPU progress (nvn_queue.inc), as nvn_mtl.m post_complete
-        qr_done(c, fr == VK_SUCCESS, ts, nq, ntq, npq);   // after every read of them, after the NVN fence (the game waits on it), before busy = 0
+        gap_ev3(21, c->seq, 10, (uint64_t)nq | (uint64_t)ntq << 16 | (uint64_t)npq << 32); qr_done(c, fr == VK_SUCCESS, ts, nq, ntq, npq);   // after every read of them, after the NVN fence (the game waits on it), before busy = 0
+        gap_ev(21, c->seq, 11);
         pthread_mutex_lock(&g_cmu);
         memmove(g_fifo, g_fifo + 1, --g_fifo_n * sizeof *g_fifo);
         if (had_wb) atomic_fetch_sub(&g_inflight_wb, 1);
@@ -1076,6 +1088,7 @@ static void *chunk_thread(void *arg) {
         for (int i = 0; i < g_nchunk; i++) if (g_ch[i].held && g_ch[i].hold <= g_seq_done) { g_ch[i].held = 0; g_ch[i].hold = 0; g_ch[i].busy = 0; }
         pthread_cond_broadcast(&g_ccv);
         pthread_mutex_unlock(&g_cmu);
+        gap_ev(GAP_D_DONE, c->seq, c->nvn_fence);
         sp_trim();   // after the fence and g_seq_done: no sync waits for a trim's frees
     }
     return NULL;
@@ -2232,7 +2245,7 @@ static int rc_skips(void) {   // the clear or draw at hand is dropped
     return 1;
 }
 void mtl_sub_begin(void) {
-    pthread_mutex_lock(&g_bk); t_bk_sub = 1; hint_note();
+    pthread_mutex_lock(&g_bk); t_bk_sub = 1; hint_note(); gap_ev(GAP_R_SUB0, atomic_load(&g_cur_frame), g_seq);
     gm_lazy_tick();   // chunks of large pools placed between submissions (gfx_vk_gmem_lazy.inc)
     static __thread int placed; if (!placed) { placed = 1; void dm_android_place_thread(int done); dm_android_place_thread(0); }
     if (place_log_on()) { int c = sched_getcpu(); g_place_cpu[c >= 0 && c < 16 ? c : 15]++; g_place_n++; }
@@ -2272,6 +2285,14 @@ static void mid_poll(uint64_t presents) {
     char p[700]; snprintf(p, sizeof p, "%s/../vk_mid", dir); FILE *f = fopen(p, "r"); if (!f) return;
     int v = 0; if (fscanf(f, "%d", &v) == 1 && v > 0 && v != g_mid_draws) { LOG("[vk] chunks sent in the middle of a pass after %d draws (was %d)", v, g_mid_draws); g_mid_draws = v; }
     fclose(f);
+}
+// DM_VK_MID_IDLE=<n> (a test switch, oot-clock): a chunk is sent in the middle of a pass only while fewer than n chunks are in flight (closed and not retired; 1: none). On a tiler
+// the cut costs a store and a load of the pass's targets; it is worth it only when the GPU would otherwise wait for the pass to end
+static uint64_t g_mid_cuts, g_mid_skips;
+static int mid_cut_ok(void) {
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_MID_IDLE"); v = e ? atoi(e) : 0; if (v) LOG("[vk] DM_VK_MID_IDLE=%d: chunks sent in the middle of a pass only with fewer than %d in flight", v, v); }
+    if (!v || g_fifo_n < v) { g_mid_cuts++; return 1; }
+    g_mid_skips++; return 0;
 }
 static uint64_t g_op_warned;   // ops this replay does not handle, logged once each
 static uint64_t g_mesh_skipped;   // task / mesh draws skipped (OP_DRAW with DM_PRIM_MESH_TASKS)
@@ -2326,14 +2347,14 @@ void mtl_exec(const uint8_t *p) {
             case OP_CLEAR_DS: if (!rc_skips()) clear_ds((const p_clear_ds *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
             case OP_DRAW: if (rc_skips() || shadow_skips()) break;
-                if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
+                if (C && C->ndraw >= g_mid_draws && !vk_safe() && mid_cut_ok()) flush();
                 { p_draw t; const p_draw *dw = draw_rec(a, h.size, &t);   // short records: draw_rec (nvn_obj.h)
                   if (dw->prim == DM_PRIM_MESH_TASKS) {   // NVN2's DrawMeshTasks: on VK_EXT_mesh_shader (gfx_vk_mesh.inc); the Adreno 7xx drivers and Turnip have none, and no lowering is ported
                       if (g_mesh || memu_on()) { if (!vk_mesh_draw(dw)) g_draws_dropped++; break; }   // VK_EXT_mesh_shader, else their compute form (gfx_vk_meshemu.inc)
                       RED_ONCE(131, "task / mesh shader draws (NVN2 DrawMeshTasks) are skipped: no VK_EXT_mesh_shader on this GPU (Mario Kart World's roadside bushes and grass tufts)"); g_mesh_skipped++; break; }
                   if (!vk_draw(dw, NULL)) g_draws_dropped++; break; }
             case OP_DRAW_IDX: if (rc_skips() || shadow_skips()) break;
-                if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
+                if (C && C->ndraw >= g_mid_draws && !vk_safe() && mid_cut_ok()) flush();
                 { p_draw_idx t; if (!vk_draw(NULL, draw_idx_rec(a, h.size, &t))) g_draws_dropped++; break; }
             case OP_DISPATCH: if (!vk_dispatch((const p_dispatch *)a)) g_draws_dropped++; break;
             case OP_BARRIER: case OP_VP_SWIZZLE: case OP_BEGIN: break;   // the replay's own syncs stand for barriers; viewport swizzles are not replayed (as before the unhandled-op line)
@@ -2345,21 +2366,25 @@ void mtl_exec(const uint8_t *p) {
     }
 }
 static void post_apply(const post_op *o) {   // the completion thread, when the GPU has done the commands before it
-    if (o->kind == 1) { nvn_event_publish_gpu(o->val, o->mode, o->v, o->q0); return; }   // writes the word and releases the queues waiting on it (nvn_queue.inc)
+    gap_ev(22, (uint64_t)o->kind, 0);
+    if (o->kind == 1) { nvn_event_publish_gpu(o->val, o->mode, o->v, o->q0); gap_ev(22, 1, 5); return; }   // writes the word and releases the queues waiting on it (nvn_queue.inc)
     // render_cond: a timestamp report's counter field is 0, as on the GPU, which the conditions after it compare (rc_value); without the key it holds the time, as before
     int ts = (o->type == 0 || o->type == 0x10) && !DM_GAME_RENDER_COND;
     uint64_t now = gpu_ticks(), rec[2] = {o->type == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 0 : ts ? now : 0, now};
+    gap_ev(22, (uint64_t)o->kind, 1);
     if (o->kind == 4) { rec[0] = ts ? o->q1 : 0; rec[1] = o->q1; }   // a timestamp the GPU wrote where the report was (gfx_vk.c OP_REPORT_COUNTER)
-    if (o->kind == 3) { uint64_t sum = 0, a = o->q1 - o->q0 > QRES ? o->q1 - QRES : o->q0; for (uint64_t q = a; q < o->q1; q++) sum += g_qres[q % QRES]; rec[0] = sum; }
-    dm_guest_write_prepare((void *)(uintptr_t)o->addr, sizeof rec); memcpy((void *)(uintptr_t)o->addr, rec, sizeof rec);
+    if (o->kind == 3) { uint64_t a = o->q1 - o->q0 >= QRES ? o->q1 - QRES + 1 : o->q0;   // the slots [a, q1) of the window, the last QRES at most (the ring holds no older sum)
+        rec[0] = o->q1 > a ? g_qcum[(o->q1 - 1) % QRES] - (a ? g_qcum[(a - 1) % QRES] : 0) : 0; }
+    gap_ev(22, (uint64_t)o->kind, 2);
+    dm_guest_write_prepare((void *)(uintptr_t)o->addr, sizeof rec); gap_ev(22, (uint64_t)o->kind, 3); memcpy((void *)(uintptr_t)o->addr, rec, sizeof rec); gap_ev(22, (uint64_t)o->kind, 4);
 }
 static void bound_preserve(void);   // below, with the queue scheduler's hooks
 // A submission's end: its last chunk completes NVN fence f (the completion thread sets g_done); the GPU may still be at it on return
 uint64_t mtl_sub_commit(void) {
     bound_preserve();
     uint64_t f = atomic_fetch_add(&g_fence, 1) + 1;
-    if (!cur()) { t_bk_sub = 0; pthread_mutex_unlock(&g_bk); return f; }
-    chunk_submit(f);
+    if (!cur()) { t_bk_sub = 0; pthread_mutex_unlock(&g_bk); gap_ev(GAP_R_SUB1, f, 0); return f; }
+    chunk_submit(f); gap_ev(GAP_R_SUB1, f, g_seq);
     t_bk_sub = 0; pthread_mutex_unlock(&g_bk);
     return f;
 }
@@ -2500,12 +2525,12 @@ uint64_t mtl_present_slept_ns(uint64_t *end_ns) {
 }
 static uint64_t g_pace_per; static int g_pace_due;   // the period of the present mtl_present_pace sleeps after (both on the replay thread)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
-    pthread_mutex_lock(&g_bk);
+    pthread_mutex_lock(&g_bk); gap_ev(GAP_R_PRES0, atomic_load(&g_presents), g_seq);
     pcache_made_n(0);   // the driver's cache file, when a request for it came inside the gap after the last write (gfx_vk_draw.inc)
     vtex *v = vt_get(t); flush(); rec_drain();   // the frame's chunks on the queue before the front end's blit of it (rec_submit)
     vt_evict();   // images no draw has used for a while (gfx_vk_evict.inc)
     spare_sweep(atomic_load(&g_presents));   // spare image memory unused for a while (gfx_vk_spare.inc)
-    dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents));
+    dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents)); gap_poll(atomic_load(&g_presents));
     if (prof_on()) { all_wait(); prof_write(); }
     if (atomic_load(&g_presents) == 30) prewarm_start();   // the pipelines of earlier sessions (gfx_vk_draw.inc), once the game draws
     if (dump_on()) { if (v) LOG("[dump] frame %ld presents ser=%llu %ux%u vk%d", dump_frame(), (unsigned long long)v->serial, v->w, v->h, v->fmt); all_wait(); dump_write();
@@ -2526,6 +2551,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     void front_android_present(const tex_t *t, const int crop[4]); front_android_present(t, crop);
     // DM_HITCH_DUMP (hle_thread.c) times stalls from this; only nvn_mtl.m's present set it, so on Android the dump never fired
     extern _Atomic uint64_t dm_present_ns; atomic_store(&dm_present_ns, now_ns());
+    gap_ev(GAP_R_PRES1, atomic_load(&g_presents), g_seq);
     return atomic_fetch_add(&g_presents, 1) + 1;
 }
 // The present's sleep to its vsync grid, after the replay has let g_sub_mu go (nvn_obj.h)
@@ -2538,6 +2564,7 @@ void mtl_present_pace(void) {
     int locked = vs_snap(&next, g_pace_per);   // next on the display's vsyncs (gfx_vk_vsync.inc)
     if (next > now && next - now < 1000000000ull) { mach_wait_until(next); g_psleep_end = clock_gettime_nsec_np(CLOCK_MONOTONIC); g_psleep_ns = g_psleep_end - now; } else { next = now; g_psleep_ns = 0; }
     g_vs_start = locked ? next : 0;   // where the next frame's work starts: on the grid, or now when late
+    gap_ev(GAP_R_PACE, g_psleep_ns, (uint64_t)locked);
     next += g_pace_per; slept = clock_gettime_nsec_np(CLOCK_MONOTONIC);
 }
 void mtl_present_wait(uint64_t ticket) { (void)ticket; }

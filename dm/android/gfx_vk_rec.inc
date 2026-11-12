@@ -49,7 +49,7 @@ static void rq_wait_until(uint64_t r_at_least) {   // the replay: until the reco
         atomic_store(&g_rq_pwait, 0); pthread_mutex_unlock(&g_rq_mu); }
     atomic_fetch_add(&g_rq_waits_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0);
 }
-static void rec_drain(void) { if (g_rq) { g_rq_drains++; rq_wake_c(); rq_wait_until(atomic_load(&g_rq_w)); } }
+static void rec_drain(void) { if (g_rq) { g_rq_drains++; gap_ev(GAP_R_DRAIN0, atomic_load(&g_rq_w) - atomic_load(&g_rq_r), 0); rq_wake_c(); rq_wait_until(atomic_load(&g_rq_w)); gap_ev(GAP_R_DRAIN1, 0, 0); } }
 // room for a record of n bytes (header included) → where to write it; rq_push publishes it
 static uint8_t *rq_take(uint32_t fn, VkCommandBuffer cb, size_t n) {
     n = (n + 15) & ~(size_t)15;   // a multiple of the header's 16 bytes: what is left before the ring's end always holds a wrap record's header
@@ -262,10 +262,10 @@ static VkResult rec_vkBeginCommandBuffer(VkCommandBuffer cb, const VkCommandBuff
 // every call queued before, so the queue gets the chunks in the order the replay closed them. The replay does not wait: the completion thread waits for the fence, which
 // signals only once the recorder has submitted it. The front end blits a presented frame on the same queue, so mtl_present drains first (its chunks submitted before it)
 // → the submission's ticket: the completion thread waits for it (rec_wait_submitted) before it waits for the fence, since a fence not yet submitted is not one to wait on
-typedef struct { VkFence f; } a_submit;
+typedef struct { VkFence f; uint64_t seq, ndraw; } a_submit;   // seq, ndraw: the chunk's, for the gap timeline
 static uint64_t g_rq_subs_queued; static _Atomic uint64_t g_rq_subs_done; static _Atomic int g_rq_swait; static pthread_cond_t g_rq_csub = PTHREAD_COND_INITIALIZER;
-static uint64_t rec_submit(VkCommandBuffer cb, VkFence f) {
-    uint8_t *r = rq_take(R_SUBMIT, cb, sizeof(rq_hdr) + sizeof(a_submit)); *(a_submit *)(void *)(r + sizeof(rq_hdr)) = (a_submit){f}; rq_push(r);
+static uint64_t rec_submit(VkCommandBuffer cb, VkFence f, uint64_t seq, uint64_t ndraw) {
+    uint8_t *r = rq_take(R_SUBMIT, cb, sizeof(rq_hdr) + sizeof(a_submit)); *(a_submit *)(void *)(r + sizeof(rq_hdr)) = (a_submit){f, seq, ndraw}; rq_push(r);
     return ++g_rq_subs_queued;
 }
 static void rec_wait_submitted(uint64_t ticket) {   // the completion thread: until the recorder has submitted that one
@@ -355,6 +355,7 @@ static void rq_make(const uint8_t *rec) {   // one record's call
                          VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = cb ? 1u : 0u, .pCommandBuffers = &cb};
                          pthread_mutex_lock(&g_vk.qmu); VkResult q = vkQueueSubmit(g_vk.q, 1, &si, a->f); pthread_mutex_unlock(&g_vk.qmu);
                          if (q != VK_SUCCESS) { RED_ONCE(151, "vkQueueSubmit failed on the recorder: %d", q); if (q == VK_ERROR_DEVICE_LOST) gpu_fault_log(q); }
+                         gap_ev(GAP_Q_SUBMIT, a->seq, a->ndraw);
                          atomic_fetch_add(&g_rq_subs_done, 1);
                          if (atomic_load(&g_rq_swait)) { pthread_mutex_lock(&g_rq_mu); pthread_cond_broadcast(&g_rq_csub); pthread_mutex_unlock(&g_rq_mu); }
                          break; }
