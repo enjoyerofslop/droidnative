@@ -12,7 +12,7 @@ opening movies, the first enemy defeat, destination tutorials, walking and the
 engagement-area collision boundary work. All 27,055 base/update shaders compile
 for Mac and iOS. The unsigned IPA is built and its archive checks pass.
 
-On Android, the cartridge's base game 1.0.0 is Playable – major issues on the Galaxy Z Flip 7, from a new game through the opening, four battles and the Everblight Plain to a save and Continue, at 30 fps with dips on the plain by day; the Moto Razr Plus 2023 plays the same route at 17–28 fps in battle ([Android](#android)).
+On Android, the cartridge's base game 1.0.0 is Playable – major issues: from a new game through the opening, four battles and the Everblight Plain to a save and Continue, at 30 fps in every window on the Ayn Odin 2 and nearly every one on the Galaxy Z Flip 7; the Moto Razr Plus 2023 plays the same route at 17–28 fps in battle ([Android](#android)).
 
 iOS runtime testing, DLC gameplay and later-game allocation peaks remain open.
 The supplied four DLC packs are included; their additional shaders have not been
@@ -238,10 +238,15 @@ Both in handheld mode, driven over adb with `DM_CTL`.
     - The first battle matches the Mac's gallery frame (2.2.1): the terrain, the characters and the effects. Faces and hair in close-ups are right.
     - PSS 3.4–4.9 GB, up to 0.96 GB swapped; no crash or kill; no underruns (not listened to).
   - **Razr Plus 2023** (Adreno 730, V@0615.98): the cutscenes run at 30 fps; the battles and the plain at 17–28 fps (frame p50 36–60 ms).
+    - Its overnight update (Android 16, security patch 2026-09-01, build W1TZS36H.24-71-2-4) left the GPU driver as it was: 0x80267062, V@0615.98, Compiler EV031.36.08.33.
     - Its GPU is busy 37–41 ms a frame, with about one wait a frame left (a draw's write in a submission in flight), so the 730's GPU bounds it. Its clock isn't readable from the shell.
     - Menu presses need holding for 0.2 s there. PSS 2.5–3.1 GB, about 1–1.4 GB swapped; no crash; no underruns.
   - **Red lines:** one a session, `transform feedback with vertex shader <key>, which has no capture variant`, naming the first such shader (`0b8bcbe86791ef65` on the Razr, others on the Z Flip 7). What it leaves out isn't found.
   - **Saves:** the save slots' thumbnails are black.
+- **2026-11-12, the same route on the Ayn Odin 2 (q270):** a game app from `main` at `3d9f479c`, which has #367–#369 and the later replay changes (compute dispatches ordered by the game's barriers, 687b7358). Adreno 740, driver V@0676.0 (0x802a4000, Compiler E031.41.03.36).
+  - **Played:** the same: the opening, the four battles (arts, the Role Action and the Talent Art), the cutscene chain, the plain by day, System → Save to a new file (Chapter 1, 0:41), a cold start and Continue back at the same spot.
+  - **Frame rate:** 30 fps in every one of 276 ten-second windows, the battles included. GPU median 11.5 ms a frame, the clock at 680 MHz throughout.
+  - **Other:** one red line (`0b8bcbe86791ef65`, as above); PSS 2.9–3.3 GB, little swap; no crash; no underruns (not listened to).
 
 ## Found on this game
 
