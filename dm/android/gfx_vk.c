@@ -394,17 +394,19 @@ enum { QRES = 1 << 16 };
 static uint64_t g_qres[QRES], g_qslot;   // results by slot (a ring), the next slot
 static int g_q_on = 0, g_q_act = -1; static uint64_t g_q_win;   // counting since a reset; the query open in the current pass (chunk-local index; -2: a stretch counted with no query, occl_mode 0); the window's first slot
 static uint64_t g_q_reports, g_q_queries, g_q_noq, g_q_resets, g_ts_reports, g_qr_cmd; static _Atomic uint64_t g_qr_host;   // g_qr_*: queries reset in command buffers / on the host (Query resets below)
-// DM_VK_OCCLUSION (env.txt): what a draw stretch between two samples-passed reports records. `any` (the default): an occlusion query without VK_QUERY_CONTROL_PRECISE_BIT, whose
-// result is zero when no sample passed and otherwise any nonzero count (Vulkan 1.3 "Occlusion Queries"); `precise`: the exact count where the GPU offers it, as before; `0`: no
-// query at all (diagnostic): every stretch counts as one sample passed, the report writes the number of stretches since the reset, and every condition on such a report keeps
-// drawing (rc_landed_on). The games whose conditions the host evaluates compare a report with an earlier one of the same counter (render if equal / not equal, OP_RENDER_COND), so
-// the sums differ exactly when a stretch between them passed a sample, precise or not. Ocarina of Time records about 530 queries a frame on 1440x810 passes; Qualcomm's guidance
-// puts occlusion queries on a binned surface at 20-40 % of the command processor's time, and BananaNative measured 6.9 ms of a 42.7 ms Kokiri Forest frame on an Adreno 840
-// with its queries off. Measured here (OnePlus Pad 3, Adreno 830 at 1,100 MHz): see the reference entry Occlusion queries without the precise count (rendering.md)
+// DM_VK_OCCLUSION (env.txt, or a game's android_defaults.txt): what a draw stretch between two samples-passed reports records. `precise` (the default): an occlusion query with
+// VK_QUERY_CONTROL_PRECISE_BIT where the GPU offers it, as before; `any`: one without it, whose result is zero when no sample passed and otherwise any nonzero count (Vulkan 1.3
+// "Occlusion Queries"), which is all a condition's equality needs; `0`: no query at all: every stretch counts as one sample passed, the report writes the number of stretches
+// since the reset, and every condition on such a report keeps drawing (rc_landed_on), so the game draws what its queries would have culled. The games whose conditions the host
+// evaluates compare a report with an earlier one of the same counter (render if equal / not equal, OP_RENDER_COND). Ocarina of Time resets its counter before every report, about
+// 530 queries a frame on binned 1440x810 passes, where Qualcomm's guidance puts them at 20-40 % of the command processor's time. OnePlus Pad 3 (Adreno 830 at 1,100 MHz), Kokiri
+// Forest: the queries themselves cost 5.25 ms of a 21.3 ms frame (24.8 ms with them and every condition drawing against 19.6 ms with neither), the culling they buy is worth
+// 3.5 ms (2,100 draws a frame instead of 2,420), and a query without the precise bit costs the same as one with it on Qualcomm's driver; so that game's android_defaults.txt sets
+// =0, GPU 21.3 -> 19.6 ms a frame (the reference entry Occlusion queries left out for a game whose culling costs more than it saves, rendering.md)
 static int occl_mode(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_VK_OCCLUSION"); v = !e ? 1 : *e == '0' ? 0 : !strcmp(e, "precise") ? 2 : 1;
-        if (v != 1) LOG("[vk] DM_VK_OCCLUSION=%s: %s", e, v ? "occlusion queries with the precise count where the GPU offers it" : "no occlusion queries: every draw stretch counts as one sample passed, every condition draws (diagnostic)"); }
+    if (v < 0) { const char *e = getenv("DM_VK_OCCLUSION"); v = !e ? 2 : *e == '0' ? 0 : !strcmp(e, "any") ? 1 : 2;
+        if (v != 2) LOG("[vk] DM_VK_OCCLUSION=%s: %s", e, v ? "occlusion queries without the precise count" : "no occlusion queries: every draw stretch counts as one sample passed, every condition draws"); }
     return v;
 }
 static int chunk_make(chunk *c) {
