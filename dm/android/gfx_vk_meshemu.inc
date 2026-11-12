@@ -140,9 +140,10 @@ static int memu_cpipe_take(vshader *s) {   // under g_bk: the background build's
 static int memu_cpipe(vshader *s) {   // under g_bk; never waits
     memu_t *m = s->memu; if (m->p) return 1; if (m->bad) return 0; if (m->queued) return memu_cpipe_take(s);
     if (!m->pl) {
-        VkDescriptorSetLayout sl[POOL_SET + 1] = {s->dsl, g_me_kset.dsl, g_empty_dsl, g_empty_dsl, g_pool_dsl};
+        VkDescriptorSetLayout sl[SPV_NOPTR_SET + 1] = {s->dsl, g_me_kset.dsl, g_empty_dsl, g_empty_dsl, s->pool ? g_pool_dsl : g_empty_dsl, g_empty_dsl}; uint32_t nsl = s->pool ? POOL_SET + 1 : 2;
+        if (s->gm && g_gm_np && !gm_np_layout(sl, &nsl, g_empty_dsl)) { m->bad = 1; return 0; }   // raw memory through the pools' descriptor array, as cpipe_make (gfx_vk_gmem_noptr.inc)
         VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, ME_PC};
-        VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = s->pool ? POOL_SET + 1 : 2, .pSetLayouts = sl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+        VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nsl, .pSetLayouts = sl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
         if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &m->pl) != VK_SUCCESS) { m->pl = VK_NULL_HANDLE; m->bad = 1; return 0; }
     }
     { VkPipeline p = VK_NULL_HANDLE; if (memu_cpipe_cached(s, &p)) { memu_cpipe_done(s, p, 0); g_me_kcached++; return 1; } }
@@ -189,6 +190,7 @@ static int memu_kernel(vshader *s, const prog_t *pr, int pst, const VkDeviceSize
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl, 0, 1, &set, s->ndyn, dyn);
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl, 1, 1, &es, 0, NULL);
     if (s->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl)) return 0;
+    if (s->gm && g_gm_np) gm_np_bind(c, VK_PIPELINE_BIND_POINT_COMPUTE, m->pl);   // raw memory's pools as a descriptor array (gfx_vk_gmem_noptr.inc)
     vkCmdPushConstants(c, m->pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, ME_PC, pc);
     // a profiled frame's record and the breadcrumbs, as vk_dispatch's: the kernel by its key, x its workgroups (an indirect dispatch: the most it runs, z 0)
     uint32_t g[3] = {groups ? groups : most, 1, groups ? 1 : 0}; int pr_i = -1;
@@ -233,6 +235,7 @@ static int memu_draw(memu_t *m, vshader *fs, const prog_t *fpr, int fpst, const 
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, 0, 1, &vset, 0, NULL);
     if (fs) vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, (uint32_t)(fs->set & 3), 1, &fset, fs->ndyn, dyn);
     if (fs && fs->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { g_drop[3]++; return 0; }
+    if (fs && fs->gm && g_gm_np) gm_np_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl);   // (gfx_vk_gmem_noptr.inc)
     VkViewport v; VkRect2D sc; draw_dyn_state(c, &v, &sc); (void)v; (void)sc;
     bf_ibuf(c, g_me.b, r[3], VK_INDEX_TYPE_UINT32);
     if (nidx) vkCmdDrawIndexed(c, nidx, 1, 0, 0, 0); else vkCmdDrawIndexedIndirect(c, g_me.b, r[1] + 16, 1, 20);
