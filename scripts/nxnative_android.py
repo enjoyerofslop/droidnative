@@ -1,5 +1,5 @@
 # The desktop app of the Android port: pack your games for the nxnative app, install them on your phones and watch them run.
-#   uv run scripts/nxnative_android.py        (uv brings Python and the modules the block below names; or a Python that has them: pip install PySide6 lz4 capstone fonttools)
+#   uv run scripts/nxnative_android.py        (uv brings Python and the modules the block below names; or a Python that has them: pip install PySide6 lz4 capstone fonttools zbic)
 # It drives scripts/build_android_from_nsp.py (its --progress json events, --info, --check, --push-only, --apk-only, --migrate) and adb:
 #   Get started  a new player's four steps (keys, tools, phone, first game), each with its state: where a first launch and the empty Library land; the top bar's
 #                "Setup 2 of 4" opens it while a step is left (dm/android/desktop/first_run.py works the steps out)
@@ -13,7 +13,8 @@
 # # Below 3.15: lz4 has no wheels for it yet, and a player's computer has no compiler to build one. The packing script runs in this same Python.
 # # PySide6-Essentials has every Qt module the app uses (Core, Gui, Widgets, Svg) without PySide6's add-ons and web engine, a few hundred MB less to download.
 # requires-python = ">=3.12,<3.15"
-# dependencies = ["PySide6-Essentials", "lz4", "capstone>=5,<6", "fonttools", "backports.zstd; python_version < '3.14'"]
+# # zbic decodes the ZBIC (Nintendo zstd) segments of code modules built for system 22.0.0 on, which Switch 2 games such as Ocarina of Time ship (dm/tools/nso.py); it has Windows wheels.
+# dependencies = ["PySide6-Essentials", "lz4", "capstone>=5,<6", "fonttools", "zbic", "backports.zstd; python_version < '3.14'"]
 # ///
 import json, os, re, shutil, subprocess, sys, time, uuid
 from pathlib import Path

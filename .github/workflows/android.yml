@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: '3.14'
       - name: Python modules the packing script imports
-        run: python -m pip install lz4 capstone fonttools
+        run: python -m pip install lz4 capstone fonttools zbic
       - name: NDK and CMake
         run: |
           sdk="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -104,7 +104,7 @@ jobs:
         with:
           python-version: '3.14'
       - name: Python modules the packing script imports
-        run: python -m pip install lz4 capstone fonttools
+        run: python -m pip install lz4 capstone fonttools zbic
       - name: NDK and CMake
         run: |
           $sdk = "$env:ANDROID_HOME\cmdline-tools\latest\bin\sdkmanager.bat"

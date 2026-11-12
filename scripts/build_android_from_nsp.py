@@ -29,7 +29,7 @@
 #      RomFS.img), any DLC and the translated shaders to files/games/<title ID>/, with its icon, control data, default game language (defaults.txt) and game.json.
 #      A one-game install of the same game (files/game, the layout before the launcher) is moved there instead of copied again, and its save is copied by the app
 # The picture comes from the Vulkan replay of NVN (dm/android/gfx_vk.c).
-# Needs: Python with lz4, capstone, fonttools and backports.zstd (not on Python 3.14), the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
+# Needs: Python with lz4, capstone, fonttools, zbic and backports.zstd (not on Python 3.14), the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
 import argparse, atexit, contextlib, datetime, errno, functools, hashlib, json, os, platform, re, shutil, struct, subprocess, sys, tarfile, tempfile, threading, time
 from pathlib import Path
 
@@ -1301,7 +1301,7 @@ def check(sdk_arg):
     def row(name, ok, detail, fix=''):
         if os.name == 'nt' and fix and not name.startswith('Python'): fix = "Install what's missing (the desktop app's Settings), or build_android_from_nsp.py --setup"
         rows.append({'name': name, 'ok': bool(ok), 'detail': detail, 'fix': '' if ok else fix})
-    for m, pip in (('lz4.block', 'lz4'), ('capstone', 'capstone'), ('fontTools', 'fonttools'), ('PySide6', 'PySide6')):
+    for m, pip in (('lz4.block', 'lz4'), ('capstone', 'capstone'), ('fontTools', 'fonttools'), ('zbic', 'zbic'), ('PySide6', 'PySide6')):
         row(f'Python module {pip}', bi._importable(m), sys.executable, f'{sys.executable} -m pip install {pip}')
     z = bi._importable('compression.zstd') or bi._importable('backports.zstd')
     row('Python zstd', z, sys.executable, f'{sys.executable} -m pip install backports.zstd (or Python 3.14+)')
@@ -1523,8 +1523,9 @@ def main(argv):
     src, keys = Path(a.nsp_dir).expanduser().resolve(), Path(a.keys).expanduser().resolve() if a.keys else None
     if not src.exists(): raise BuildError(f'not a folder: {src}')
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
-    missing = [m for m in ('lz4.block', 'capstone') if not bi._importable(m)]
-    if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 capstone)')
+    # zbic: a code module built for system 22.0.0 on (Switch 2 games such as Ocarina of Time) has ZBIC segments, which stop the build at its first read without it (droidplay#16)
+    missing = [m for m in ('lz4.block', 'capstone', 'zbic') if not bi._importable(m)]
+    if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 capstone zbic)')
     if not (bi._importable('compression.zstd') or bi._importable('backports.zstd')):   # the shader split decompresses zstd files (Python 3.14's compression.zstd, or its backport)
         raise BuildError(f'the current Python ({sys.executable}) has no zstd module: pip install backports.zstd (or use Python 3.14 or newer)')
     sys.path.insert(0, str(REPO / 'dm/games')); import game as gamemod
