@@ -16,6 +16,8 @@
 #   for a vertex shader, the constant buffer reads its position is made of can read their row through a value known only at run time (pos_rows), after cb_extents,
 #     which these reads would otherwise make the whole buffer: Qualcomm's Adreno 740 driver lost those rows in the position-only copy of a shader it bins with.
 #     A specialization constant the host sets only where it is needed turns them on; off, the rows are the constant ones.
+#   a task or mesh shader (res.json "mesh", spv_build.py), translated as compute, made a Vulkan task or mesh module (spv_mesh.py), a mesh shader's .z.spv with the depth
+#   -1..1 mapping as a vertex shader's; res.json stage 'ts' / 'ms' and prim_locs, the locations it writes per primitive.
 # Usage: spv_android.py [-j N] <dmsh_xlate output dir> <out dir> [key ...]   (all keys of the input dir by default); prints a line for each shader with a problem, and a summary
 #   The shaders are done in N processes (default: one per CPU), each writing its own shaders' files: a shader's files depend only on its own inputs, so they are the same as one
 #   process makes, and the lines come out in key order. This is pure Python, about 20 shaders a second on one core (most of it cb_extents), so in one process it was most of a
@@ -29,7 +31,7 @@ ANDROID_CHAIN = 6   # res.json 'android': bumped when this post-pass or spv_buil
                     #    (StructuredProgram.GetSourceVarType), so a layer no longer goes through float locals (#135 and #147 shipped together)
 EXT_FROM = 3   # 4 added res.json cbufs[].ext (cb_extents) and nothing else: spv_build.py brings an output of chain 3 up to date from its .spv (add_ext), without the translator,
                # only while ANDROID_CHAIN is EXT_FROM + 1 (upgrade stamps that chain, so a later bump for a change to the .spv translates chain 3's outputs again)
-SET_OF = {'vs': 0, 'ps': 1, 'gs': 2, 'tc': 3, 'te': 3, 'cs': 0}
+SET_OF = {'vs': 0, 'ps': 1, 'gs': 2, 'tc': 3, 'te': 3, 'cs': 0, 'ms': 0, 'ts': 2}   # a mesh pipeline: mesh in the vertex shader's set, task in the geometry shader's
 OP_CAP, OP_EXT, OP_EXECMODE, OP_ENTRY, OP_DECORATE, OP_MEMBERDECORATE = 17, 10, 16, 15, 71, 72
 OP_FUNCTION, OP_FUNCTIONEND, OP_RETURN, OP_VARIABLE, OP_TYPEPOINTER, OP_TYPEINT, OP_TYPEFLOAT, OP_TYPEVECTOR, OP_CONSTANT = 54, 56, 253, 59, 32, 21, 22, 23, 43
 OP_ACCESSCHAIN, OP_LOAD, OP_STORE, OP_COMPOSITEEXTRACT, OP_COMPOSITEINSERT, OP_FADD, OP_FMUL, OP_LABEL = 65, 61, 62, 81, 82, 129, 133, 248
@@ -877,7 +879,19 @@ def post_one(src, dst, k):
     res = json.loads((src / f'{k}.res.json').read_text(encoding='utf-8'))
     stage = res.get('stage', 'vs'); lines = []; nz = bad = ncs = nrows = 0
     cs = next((c['binding'] for c in res.get('cbufs') or [] if c.get('slot') == CBSIZE_BANK), None)
-    hdr, ins, interlock, stripped = process((src / f'{k}.spv').read_bytes(), stage, cs)
+    data = (src / f'{k}.spv').read_bytes()
+    if res.get('mesh'):   # a task or mesh shader translated as compute (spv_build.py): the stage module, and a mesh shader's depth -1..1 variant
+        import spv_mesh
+        mesh = res.pop('mesh'); stage = res['stage'] = mesh['info']['kind']
+        try:
+            plain, res['prim_locs'] = spv_mesh.wrap(data, mesh['info'], mesh['lay'])
+            zdata = spv_mesh.wrap(data, mesh['info'], mesh['lay'], gl=True)[0] if stage == 'ms' else None
+        except ValueError as e:
+            return (0, 1, 0, 0, 0, 0), [f'[RED] {k}: {e}: no {"task" if stage == "ts" else "mesh"} module']
+        data = plain
+        if zdata:
+            zh, zi, _, _ = process(zdata, stage, cs); (dst / f'{k}.z.spv').write_bytes(emit(zh, zi)); nz = 1
+    hdr, ins, interlock, stripped = process(data, stage, cs)
     if interlock: res.setdefault('notes', []).append('android: fragment shader interlock removed (no ordering of overlapping fragments)')
     if stripped: res['cbufs'] = [c for c in res['cbufs'] if c.get('slot') != CBSIZE_BANK]; ncs = 1
     elif stripped is False: lines.append(f'[RED] {k}: the uniform slots\' size table (c{CBSIZE_BANK}) is used other than the translator\'s bound tests use it: left in (it loses the device on Adreno 830)')
