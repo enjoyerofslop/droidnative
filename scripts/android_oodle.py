@@ -7,7 +7,11 @@
 # A job is one launch of the game, so the decodes uepak.py asks for one at a time are batched (Rounds): uepak runs with a decoder that answers from what the phone decoded so far
 # and records the rest, the records go to the phone as one job, and uepak runs again until it asks for nothing new. An IoStore container takes two or three rounds (its blocks,
 # then the shader groups inside them).
-import hashlib, struct, time
+# The shader split's own Oodle-compressed archives (profile_guess.py oodle_packs: Pokémon Legends: Arceus's GFPAK entries, Legends: Z-A's Trinity packs, Bayonetta 3's PKZ entries,
+# Batman: Arkham Knight's Unreal Engine 3 chunks, EA SPORTS FC 27's Frostbite items) go the same way across the split's worker processes (fill, issue #310): the split runs with
+# DM_OODLE_RECORD, its workers list the streams the cache lacks, the phone decodes them into the cache (Cache, which the split reads with DM_OODLE_CACHE), and the split runs again
+# until it lists nothing new; then the real split reads the cache alone, so a stream still missing is red there, never zeros.
+import hashlib, shutil, struct, time
 from pathlib import Path
 
 JOB_SECS = 600   # the longest a job may take: FINAL FANTASY RESONANCE's 5,919 shader groups (707 MB decoded) took three jobs of 2 to 3 s each on a OnePlus Pad 3, the boot up to nnMain included
@@ -105,7 +109,7 @@ class Phone:
         need, free = local.stat().st_size + out_size(records) + SPARE, free_bytes(self.sh(f'df -k {self.remote}', check=False))
         if free is not None and free < need:
             local.unlink(missing_ok=True)
-            raise ValueError(f'the phone has {mb(free)} free, and decoding the game\'s Unreal shaders there needs about {mb(need)} at a time: free up space on the phone, then build again')
+            raise ValueError(f'the phone has {mb(free)} free, and decoding with the game\'s Oodle there needs about {mb(need)} at a time: free up space on the phone, then build again')
         env_before = self.sh(f'cat {renv} 2>/dev/null', check=False)   # the player's env.txt, put back after the job
         try:
             self.sh(f'am force-stop {self.pkg}; rm -f {rjob} {rjob}.out {rlog}')
@@ -173,3 +177,69 @@ def decode(uepak, romfs, main, jd, out, phone):
         (Path(jd) / 'oodle.job.out').write_bytes(bytes(res))
     uepak.finish(str(jd), str(out))
     return listing, n
+
+
+def stream_key(comp, n): return hashlib.blake2b(comp, digest_size=16).hexdigest(), n   # a stream as shader_split.py oodle_cached looks it up
+
+
+class Cache:
+    """The streams the game's decoder answered, for shader_split.py oodle_cached (DM_OODLE_CACHE): per batch, <n>.pack holds the decoded bytes back to back and <n>.idx a line per
+    stream (blake2b-128 of the compressed bytes in hex, raw length, offset in the pack or -1 for a stream the decoder refused). The index is written last, so a batch cut short is
+    not taken. stamp names the decoder (the main it is in): a cache another one made is emptied. done(key) / finish(key): the split's inputs the last fill ended on with nothing
+    new, so a build from the same files runs no record split"""
+    def __init__(self, folder, stamp):
+        self.d = Path(folder)
+        if not (self.d / 'stamp').is_file() or (self.d / 'stamp').read_text() != stamp: shutil.rmtree(self.d, ignore_errors=True)
+        self.d.mkdir(parents=True, exist_ok=True); (self.d / 'stamp').write_text(stamp)
+        self.keys = {(h, int(raw)) for f in self.d.glob('*.idx') for h, raw, _ in (ln.split('\t') for ln in f.read_text(encoding='ascii').splitlines())}
+    def __contains__(self, k): return k in self.keys
+    def __len__(self): return len(self.keys)
+    def add(self, items):   # [(key, decoded bytes or None)], one batch
+        n, lines, at = 1 + max((int(f.stem) for f in self.d.glob('*.idx')), default=0), [], 0
+        with open(self.d / f'{n}.pack', 'wb') as f:
+            for (h, raw), d in items:
+                if d is None or len(d) != raw: lines.append(f'{h}\t{raw}\t-1\n'); continue   # refused (a job record of length 0)
+                lines.append(f'{h}\t{raw}\t{at}\n'); f.write(d); at += raw
+        part = self.d / f'{n}.idx.partial'; part.write_text(''.join(lines), encoding='ascii'); part.replace(self.d / f'{n}.idx')
+        self.keys.update(k for k, _ in items)
+    def done(self, key): return (self.d / 'complete').is_file() and (self.d / 'complete').read_text() == key
+    def finish(self, key): (self.d / 'complete').write_text(key)
+
+
+def wants(folder):
+    """The streams a record run listed (shader_split.py oodle_cached's want.<pid> files: u32 compressed length, u32 raw length, the bytes) → {key: (file, offset of the bytes, length,
+    whether they start as Oodle's do)}. Only where they are is kept, not the bytes: Pokémon Legends: Arceus's GFPAKs hold 1.6 GB of them, Legends: Z-A's Trinity packs 4.4 GB"""
+    out = {}
+    for f in sorted(Path(folder).glob('want.*')):
+        with open(f, 'rb') as h:
+            while len(hd := h.read(8)) == 8:
+                cl, raw = struct.unpack('<II', hd); at = h.tell(); c = h.read(cl)
+                if len(c) < cl: break   # its worker stopped while it wrote
+                out.setdefault(stream_key(c, raw), (f, at, cl, oodle_head(c)))
+    return out
+
+
+def fill(cache, record, phone, want_dir, rounds=8):
+    """cache filled with every stream the shader split reads → (the runs that needed the phone, the streams decoded). record(folder) runs the split with DM_OODLE_CACHE and
+    DM_OODLE_RECORD=folder; phone() returns the decoder (records → [bytes or None]), called only once a run lists a stream the cache lacks, as the phone and the app are set up then.
+    The runs go on until one lists nothing new. A stream that does not start as Oodle's do is not sent: the split asks for one only from an earlier run's zeros (as in Rounds), and
+    the real split, reading the cache alone, finds it missing, loudly. Each batch of at most CHUNK decoded bytes is one job, written to the cache as it comes back"""
+    want_dir, dec, total = Path(want_dir), None, 0
+    try:
+        for r in range(rounds + 1):
+            shutil.rmtree(want_dir, ignore_errors=True); want_dir.mkdir(parents=True)
+            record(want_dir)
+            todo = [(k, v) for k, v in wants(want_dir).items() if k not in cache and v[3]]
+            if not todo: return r, total
+            dec = dec or phone()
+            batches, cur, size = [], [], 0
+            for k, v in todo:
+                if cur and size + k[1] > CHUNK: batches.append(cur); cur, size = [], 0
+                cur.append((k, v)); size += k[1]
+            for b in batches + [cur]:
+                recs = []
+                for (_, raw), (f, at, cl, _) in b:
+                    with open(f, 'rb') as h: h.seek(at); recs.append((h.read(cl), raw))
+                cache.add(list(zip((k for k, _ in b), dec(recs)))); total += len(b)
+        raise ValueError(f'the shader split still listed new Oodle streams after {rounds} runs with the phone')
+    finally: shutil.rmtree(want_dir, ignore_errors=True)

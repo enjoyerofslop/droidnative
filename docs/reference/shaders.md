@@ -481,6 +481,42 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_android_oodle` covers the rounds (a two-layer chain settles in two rounds, with no zeros sent), the job and output formats, and the header test. It passes on macOS and on Windows 11 (Python 3.14).
 - **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), with `DM_UE_DECODE=phone` and the Android extraction's archives moved away, a OnePlus Pad 3 doing the decode: 5,919 shader groups (74,244 shaders) in three jobs of 2 to 3 s, the whole step 22 s with the host built and installed. Both archives and the stamp came out byte-identical to the Mac host's.
 
+### Oodle-compressed archives decoded on the phone for an Android build
+
+- **Symptom:** an Android build of Pokémon Legends: Arceus runs its shader split for about 220 s, then every GFPAK fails with `[RED] Oodle- or LZ5-compressed game files: set DM_OODLE_HOST (the Mac host, …)`, the split ends with `[RED] 678 file(s) could not be read`, and the build stops with "The game is not packed". It happens on Windows, Linux and the Mac alike (droidplay-core#310, on Windows).
+- **Cause:** the split reads these archives (`profile_guess.build_sources` `oodle_packs`: [Oodle entries of GFPAK archives](#oodle-entries-of-gfpak-archives), [BNSH in Trinity packs](#bnsh-in-trinity-packs), Bayonetta 3's PKZ entries, Batman: Arkham Knight's Unreal Engine 3 chunks, EA SPORTS FC 27's Frostbite items) through `oodle_ask`, which asks the game's own decoder in the Mac host for one stream at a time over a pipe (`DM_OODLE_SERVE`). `build_android_from_nsp.py` never set up a decoder for it. The phone's host can't stand in as it is: it runs inside the app and takes only batched jobs (`DM_OODLE_JOB`), one launch of the game each, and the phone decode built for [Unreal shaders](#unreal-shaders-decoded-on-the-phone-for-an-android-build) only covered `ue_decode`.
+- **Fix:** `build_android_from_nsp.py` `oodle_decode`, before the split, for an `oodle_packs` game:
+  - **A Mac decoder first** (`mac_decoder`): `DM_OODLE_HOST` / `DM_OODLE_MODULES` set by hand, or, on an Apple-silicon Mac, the Mac host and `patched_<ver>` of DroidPlay for Mac's build of the same `main` (its `main.fixups.tsv` `BUILD_ID`), in `<game>/<title ID>_build` beside the NSP folder or the build's own folder. They go to the split as the NSP script's do (`split_shaders`' `oodle`, so the host is one of the split's inputs). The Android build's own `patched_android_<ver>` can't be used: its thread slots go through x18 (`dm/tools/nso_asm.py`), and the Mac host gives them through `tpidrro_el0`.
+  - **Otherwise the phone** (`scripts/android_oodle.py` `fill`):
+    - A record run lists what the split reads. The split runs whole with `DM_OODLE_CACHE` and `DM_OODLE_RECORD`; each worker appends a stream the cache lacks to its `want.<pid>`, and zeros stand in for it.
+    - The phone decodes the listed streams in jobs of at most 256 MB decoded (`Phone`, as for Unreal), and each job's answers go into `extract/<ver>/oodle_cache` as one batch.
+    - The runs repeat until one lists nothing new. Only a stream that starts as Oodle's do is sent, so bytes made from a run's zeros never are.
+    - The game's host and code reach the phone (`oodle_phone`, shared with `ue_decode`) only once a run lists a stream, and the device is held only while the phone works.
+  - **The real split reads the cache alone** (`shader_split.py` `oodle_cached`). A stream missing there is red, never zeros, so a gap stops the build as before. A stream the decoder refused is stored as refused and answered as the Mac host's refusal is.
+  - **The cache's format:** per batch, `<n>.pack` holds the decoded bytes back to back. `<n>.idx` has a line per stream: blake2b-128 of the compressed bytes in hex, the raw length, and the offset, or −1 for a refused stream. The index is written last, so a cut batch isn't taken.
+  - **Kept between builds:**
+    - `stamp` names the decoder (sha256 of `main`); a cache another decoder made is emptied.
+    - `complete` holds the key of the files, DLC and split code that the last fill ended on. A build with the same key runs no record split and needs no phone, including a game app or a `--no-push` build.
+    - The cache can be deleted; the next build with a phone makes it again.
+  - **No decoder at all** (no Mac decoder, no phone and no finished cache): the build stops right after its graphics check, before the rewrite, and says to connect a phone or build the game in DroidPlay for Mac first (`undecodable_packs`).
+- **Costs, measured on Pokémon Legends: Arceus** (1.1.1, a Pixel 9 Pro XL decoding, built on an Apple-silicon Mac with `DM_UE_DECODE=phone`):
+  - **Streams:** 75,468 Oodle Kraken streams in its 678 GFPAKs, 1.22 GB compressed and 5.41 GB decoded (4.43×), in 21 jobs.
+  - **The step:** 4:00 in all. The first record run took 46 s. The host, the app install and the code push took about 39 s. The 21 jobs took about 2:05, 3–5 s each: the decode itself, the game's launch, and the transfer at USB 3 speed. The second record run took 33 s and listed nothing new.
+  - **The real split** took 31 s from the cache. A record run costs about as much as the split, and a slower computer pays it twice more: the reporter's split took about 220 s.
+  - **Disk:** the cache is 5.0 GiB in the extraction. The want files (1.22 GB) are removed after each run.
+  - **The phone:** each job needs its file, its output and 64 MB free, under 600 MB at a time. Nothing is left on the phone after the step.
+  - **Heavier games:** Legends: Z-A's Trinity packs (4.4 GB stored, 17.7 GB unpacked) and Bayonetta 3's PKZs (14 GB) would pull and keep several times more. Decoding only the streams that hold shaders would cut that: a job flag for the host to return only records that hold one of `scan_blob`'s magics, the others answered as empty. That's open.
+- **Not covered:** `ue_legacy` (DRAGON QUEST XI S's LZ5 paks). That key also covers Zlib paks that Python reads itself, and the blind scan's guessed streams would all go to the phone. That's open.
+- **Check:**
+  - `test_android_oodle` `SplitCacheTest`: the split reads what `Cache` writes and lists what it lacks once per process, with a missing or refused stream red in a real split. `fill` settles a two-layer chain in two runs with one phone setup, sends no zeros, and asks nothing of the phone once the cache has everything. Batches of at most 256 MB are each a job, and a cut batch isn't taken. Another decoder's stamp empties the cache.
+  - `test_android_shaders` `OodleDecode`: `oodle_decode` with a stand-in split and phone keeps its cache and reuses it with no phone, and stops with "connect one" without a phone. `mac_decoder` takes a Mac build of the same `main` only on an Apple-silicon Mac.
+  - `test_gfpak`: a compression 3 entry read from the cache.
+  - On a device: Pokémon Legends: Arceus, below. The other `oodle_packs` games haven't been run.
+- **Found on:** [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md), built for a Retroid Pocket G2 on Windows (droidplay-core#310). Checked on a Pixel 9 Pro XL (Mali-G715) from a cartridge dump holding the base game and 1.1.1:
+  - The real split read every GFPAK from the cache. Its tables were byte-identical to the profile's, which were made with the Mac host's decoder: 12,851 shaders, 73 of them from the GFPAKs.
+  - The game reached its language screen about 40 s after launch, at 30 fps (frame time p50 33.3 ms over 1,500 frames).
+  - A `--no-push` build afterwards took the cache with no record run and no phone.
+
 ### A phone's Oodle job counted as unfinished after it finished
 
 - **Symptom:** the Android build stops at its UE shader decode with `the Oodle job on the phone did not finish (… DM_OODLE_JOB: OodleLZ_Decompress at main+0x…)`, or `(the game stopped before it decoded anything)`, and `logs/oodle_phone_1.log` either ends at that line or is empty. The phone shows the game start and close within a second. logcat names no crash: `Zygote: Process … exited cleanly (0)`.
@@ -2205,6 +2241,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Measurement:** a cold build of 1,001 Pokopia shaders on an M4 Pro (`J=10`): 528 s before, 240 s after (1.9 to 4.2 shaders a second); the builder's Python went from 100% to about 46% of a core, and 8 to 10 Metal compiles ran at once instead of about 3. At that rate the whole map would take about 9 hours on that Mac (not run). The largest packages of the other local games are 241 MB (Splatoon Raiders) and less, where a fork costs a few milliseconds.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game) (resolved).
 - **Check:** `test_shader_toolchain_cache.py` (`test_package_records_are_read_from_the_file_at_their_offsets`).
+
+### The shader split fails on Windows when one job's result is several GB
+
+- **Symptom:** on Windows only, `shader_split.py` exits with a traceback ending in `OSError: [WinError 87] The parameter is incorrect`, raised from `pooled`'s `f.result()` after `concurrent.futures`' `_sendback_result` failed. The progress count reaches its total first. Pokémon Pokopia 2.0.1 on Windows 11 ([droidplay-core#307](https://github.com/enjoyerofslop/droidplay-core/issues/307)); the same game splits on a Mac.
+- **Cause:** a pool worker sends its result back through a pipe as one pickled message, and the result holds the control and code bytes of every shader its batch found. Pokopia keeps 125,950 of its 131,426 shaders in one KTGL `.fdata` (`0x38f972af.fdata`), read in one job, so that batch's result is about 4.4 GB. CPython passes `WriteFile` the length as a 32-bit DWORD, and Windows refuses the write (ERROR_INVALID_PARAMETER). Unix connections send a 64-bit length for a message over 2 GiB, so the Mac and Linux get it through. Hyrule Warriors: Age of Imprisonment (the same engine) has 99,702 of its 101,860 shaders in one such file.
+- **Fix:** `scan_batch` pickles a batch whose shaders' control and code bytes pass `SPILL` (256 MiB) into a file and returns its path. The files go in a folder beside the package, on the drive that has room for it, which goes when the split exits. `pooled` reads each back in job order and removes it (`unspill`), and the deferred Unity pass goes through the same two. The file is written and read as a stream, so neither process holds a pickled copy beside the results, about 4.4 GB each for Pokopia.
+- **Measurement:** Mario Kart World 1.8.0 (11,603 shaders, 206,202 files) on an M4 Pro, with `SPILL` lowered to 1 MiB so its large batches spilled (at least 4 files at once, up to 33.5 MB each): the same 4 tables and the same 15 package files (90 MB), byte for byte, as main's split, in 182 s against 176, and no spill file left.
+- **Check:** `test_shader_split_spill.py`. A spawned pool worker that refuses any message over 1 MiB, as Windows refuses a multi-GB one, fails as in the report without a spill folder and returns every result in order through files with one. Only a batch over the limit spills.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) ([droidplay-core#307](https://github.com/enjoyerofslop/droidplay-core/issues/307)), not run on Windows here.
 
 ### Each Metal compile instantiates Metal's texture classes again
 

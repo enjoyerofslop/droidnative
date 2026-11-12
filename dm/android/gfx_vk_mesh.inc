@@ -60,7 +60,7 @@ static int vk_mesh_draw_(const p_draw *dw) {
     while (left) {
         uint32_t n = left < mx ? left : mx, pc[MESH_PC_BYTES / 4] = {first};
         vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 0, MESH_PC_BYTES, pc);
-        g_draw_mesh(c, n, 1, 1); first += n; left -= n;
+        rec_draw_mesh(c, n, 1, 1); first += n; left -= n;   // (through the recorder, as the push constant before it: gfx_vk_rec.inc)
     }
     g_draws++; C->ndraw++; g_mesh_draws++; g_mesh_groups += (uint64_t)dw->count;
     if (g_prof_cur >= 0) { prof_rec *pr = &g_prof[g_prof_cur]; pr->draws++; }

@@ -83,6 +83,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** a boot that set `mem_alias` or `mem_reserve` is followed by another on the resized layout, up to `HEAP_CHECK_ROUNDS` (3) boots (`build_ipa_from_nsp.py` `heap_check`); the stamp names every boot's result and every key set. `test_nsp_incremental.py` checks the two boots and their keys.
 - **Found on:** Pokémon FireRed Version and LeafGreen Version (0100554023408000, 010034D02340E000, SDK 20.5.19, provisional profiles), pull request #1620: a 3.14 GB heap plus 102 MB of modules over the pool; the second boot sets `mem_used` 0x6a00000.
 
+### The heap region at least the app pool (Android)
+
+- **Symptom:** Android only: a game without a profile aborts at its first heap request: `SetHeapSize OOM: req 0x81200000 > cap 0x8000000`, then `Result 0x1003` (`os::ResultOutOfMemory`), `FATAL` and `CRASH sig=6`.
+- **Cause:** for a game with virtual address memory that sets a heap, the provisional guess (`profile_guess.py`) leaves a 128 MB heap region, and only the [heap check](#the-heap-check-grows-the-block-around-the-profiles-alias-region) resizes it. That check boots the Mac host, so `build_android_from_nsp.py` never runs it, on any build machine. Android's alias region is [a Switch's 64 GB](#the-macs-alias-region-is-the-switchs-64-gb) whatever the profile says, so `mem_alias` only cuts the heap region out of `mem_reserve`.
+- **Fix:** on Android the heap region is at least the app pool, in whole 2 MB, and the block grows by as much (`hle_svc.c` `mem_init_once`, under `DM_ANDROID`). It is address space only: the pool check behind it still bounds the heap, as Horizon's does. It also reaches the registered profiles whose heap region is smaller than the pool, 77 of 158 at this change (Brilliant Diamond 128 MB → 2 GB, FF Resonance 128 MB → 3.2 GB), which then report the larger `HeapRegionSize`. The Mac and the iPhone keep the profile's region, so the heap check still sees the request fail on an iPhone's layout. `make -C dm/host/tests GAME=<id> memory` runs `t_svc_memory_android --android-heap`.
+- **Found on:** Trails in the Sky 1st Chapter 1.0.0 (01002C9022770000, provisional profile) on a Poco F7 (Adreno 825, Android 16), droidplay-core#291.
+
 ### `nninitStartup`'s heap only without virtual address memory
 
 - Not needed in the end for [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (1.0.0.2, SDK 17.5.3): the process heap of pull request #16. `nninitStartup` calls `SetMemoryHeapSize` / `AllocateMemoryBlock` only without virtual address memory, and nothing else in `main` calls them ([Virtual address memory follows the NPDM's system resource](#virtual-address-memory-follows-the-npdms-system-resource)).
