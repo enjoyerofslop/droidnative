@@ -123,6 +123,15 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 
   - **With raw global memory allowed on Samsung's Xclipse** (no env switch), the same: 29.4–29.5 fps in the city, GPU p50 12.2–13.3 ms, PSS 3.04 GB, the meshes drawn.
   - **A camera panned low to the crater's edge** showed large flat bright faces on the cliffs. Not compared with the Mac; it may be the terrain's hull and domain shaders (Open, below).
+- **Played by hand on the Z Flip 7, 2026-11-11, to the first night:** `main` 91baeea8 (`0.7.6-24-g91baeea8`, `ANDROID_CHAIN` 6), its shaders translated again and sent with the build; raw global memory on by default on Xclipse (#251). The same route as the S25 Edge's, by adb input (`DM_CTL`), with a save folder of its own, per-frame timing and an audio dump.
+  - **The stretch:** a new game of A New Home: fifteen workers on each of the two coal piles at the north edge, five on a steel wreckage and fifteen on wood crates, three tents and a cookhouse against the Generator's ring, then free time from 18:00. Selecting the Generator at 21:22 brought up the people's demand "The heating is off", accepted; the Generator started at steam level 1; the night ran past 23:00 (the next objective, Food, came up), then saved from the pause menu.
+  - **The save:** five save commits. After a force-stop, the main menu offered **Resume story — A New Home, Day 1**, which loaded the save at 22:00 with the same stocks and buildings; the night ran on to 02:16 of day 2.
+  - **Frame rate,** in 30 s windows over both launches (1,369 s and 274 s): 29.0–29.7 fps in the city, frame p50 33.6–34.1 ms, p95 34.2–34.8 ms, GPU p50 8.4–13.5 ms. One window at 27.5 fps held a single 1.9 s frame as the build menu first opened tent placement. The loads: 23.1–24.3 fps as the scenario loads, 20.7–28.1 as the save loads.
+  - **Sound:** the dump holds sound throughout, 10 s RMS median −27 dBFS (the loudest −16), one near-silent 10 s stretch per launch (the loads), one underrun per launch. Judged from the dump; nobody listened.
+  - **Red lines:** only the sky's uniform slot. No crash.
+  - **Raw global memory** on this build logged 2 placed pieces, 6 MiB, with 440–453 MiB of the pools resident when placed (the 0.7.5 build placed 350 MiB on the S25); the Generator, the tents, the cookhouse and the wreckage drew throughout.
+  - **The 0.7.5 smoke APK** (`0.7.5-26-ga91a6a64`), put back afterwards, runs these chain-6 files too: it loaded the save at 30 fps with the Generator drawn.
+  - **A difference from the S25 route:** selecting the Generator with A picked the tent beside it or a passing citizen several times, zoomed in or out; it took the cursor moved from the north tent straight down onto the Generator's core at the zoomed-out view.
 
 ## Found on this game
 

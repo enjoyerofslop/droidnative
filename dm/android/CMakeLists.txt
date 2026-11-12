@@ -177,6 +177,7 @@ if(DM_TESTS)
   # the guest address space only 4 KiB alignment. A 16 KiB-page Android kernel runs t_svc_memory itself at its real page size
   dm_test(t_nro SOURCES ${T}/t_nro.c)
   dm_test(t_module_pack SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_module_pack.c ${CMAKE_CURRENT_SOURCE_DIR}/module_pack.c)
+  dm_test(t_vm_remap SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_vm_remap.c)   # vm_remap to a fixed destination: a refused duplication leaves no hole (plat_android.c)
   dm_test(t_audio SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_audio.c ${CMAKE_CURRENT_SOURCE_DIR}/coreaudio_aaudio.c)
   target_link_libraries(t_audio aaudio mediandk m)
   dm_test(t_media SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_media.c ${CMAKE_CURRENT_SOURCE_DIR}/media_android.c)

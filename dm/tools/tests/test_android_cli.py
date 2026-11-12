@@ -34,7 +34,8 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
         self.said = []
-        for cm in (mock.patch.object(ba.bi, 'PROG', mock.Mock()), mock.patch.object(ba, 'say', self.said.append), mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data')):
+        for cm in (mock.patch.object(ba.bi, 'PROG', mock.Mock()), mock.patch.object(ba, 'say', self.said.append), mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'),
+                   mock.patch.dict(ba._keys, clear=True)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
 
@@ -61,6 +62,19 @@ class Json(unittest.TestCase):
         self.assertIn('with OpenGL', ba.unsupported_graphics(('gl', 'main imports eglCreateWindowSurface'), 'Digimon'))
         t = ba.games_table()   # no game played on Android is one the table lists as drawing without NVN
         self.assertEqual([g for g in ba.ANDROID_TESTED if g in t and 'NVN' not in t[g]['graphics']], [])
+
+    def test_oodle_packs_stop_early(self):   # issue #310: Pokémon Legends: Arceus's split failed on its 678 GFPAKs after about 220 s, with no decoder for the game's Oodle
+        sys.path.insert(0, str(REPO / 'dm/games')); import profile_guess as pg   # noqa: E401
+        src = pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_gfpak=678)
+        why = ba.undecodable_packs(src['oodle_packs'], 'Pokémon Legends: Arceus', {})
+        self.assertIn("Arceus keeps its shaders in files compressed with the game's own Oodle (678 Game Freak GFPAK archive(s) with Oodle Kraken entries "
+                      '(Pokémon Legends: Arceus)). The Android build cannot decode those yet', why)
+        self.assertIn('droidplay-core/issues/310', why); self.assertNotIn('Mac host', why)
+        self.assertIsNone(ba.undecodable_packs(pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0)['oodle_packs'], 'Odyssey', {}))
+        self.assertIsNone(ba.undecodable_packs(src['oodle_packs'], 'Arceus', {'DM_OODLE_HOST': 'dmhost', 'DM_OODLE_MODULES': 'patched_v262144'}))   # a Mac host set up by hand
+        for s in (pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, trinity_packs=1), pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_pkz=1),
+                  pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_ue3=1)):   # Legends: Z-A, Bayonetta 3, Batman: Arkham Knight
+            self.assertIn('cannot decode those yet', ba.undecodable_packs(s['oodle_packs'], 'x', {}))
 
     def test_games_played_on_android_have_profiles(self):   # a mistyped title ID would leave its game shown as not played on Android
         t = ba.games_table()
@@ -457,12 +471,32 @@ class AdbErrors(unittest.TestCase):
             with self.assertRaisesRegex(ba.BuildError, r"failed \(exit status 255\): adb: device 'S' not found$"): ba.adb('S', 'shell', 'true')
 
 
+class PickDevice(Base):   # the console's default phone: the only one ready, a phone on a cable and on Wi-Fi at once counting once
+    def pick(self, listed, props):
+        out = 'List of devices attached\n' + ''.join(f'{s}\t{st}\n' for s, st in listed)
+        with mock.patch.object(ba.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=out, stderr='')), \
+                mock.patch.object(ba, 'adb', lambda serial, *a, **k: props.get(serial, '')):
+            return ba.pick_device()
+
+    def test_one_phone_on_usb_and_wifi_is_used_over_the_cable(self):
+        props = dict.fromkeys(('192.168.1.20:37123', 'R5CY51ZLGKH', 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp'), 'R5CY51ZLGKH\n9774d56d682e549c\n')
+        self.assertEqual(self.pick([(s, 'device') for s in props], props), 'R5CY51ZLGKH')
+        self.assertEqual(self.pick([('192.168.1.20:37123', 'device'), ('adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp', 'device')], props),
+                         'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp')   # an mDNS name outlives the port
+
+    def test_two_phones_still_ask_which(self):
+        props = {'R5CY51ZLGKH': 'R5CY51ZLGKH\n9774d56d682e549c\n', '192.168.1.30:5555': 'e7879cce\nf00dfeed12345678\n'}
+        with self.assertRaisesRegex(ba.BuildError, r'2 adb devices ready'): self.pick([(s, 'device') for s in props], props)
+        self.assertEqual(self.pick([('R5CY51ZLGKH', 'device'), ('192.168.1.30:5555', 'offline')], props), 'R5CY51ZLGKH')
+
+
 class Phone(Base):
     def setUp(self):
         super().setUp()
         self.cmds = []; self.remote: dict[str, Any] = {}   # remote path → exists ('free': the phone's free KiB for df, 'mkdirs': what the folder script prints)
         def adb(serial, *a, log=None, check=True):
             c = [str(x) for x in a]; self.cmds.append(c)
+            if c == ['shell', ba.phone_id.ID_CMD]: return self.remote.get('props', {}).get(serial, '')   # the phone's ID (phone_key): '' gives none
             if c[:2] == ['shell', 'sh'] and c[2].endswith('nxnative_mkdirs.sh'):
                 out = self.remote.get('mkdirs', ba.MKDIRS_DONE + '\n')
                 if isinstance(out, Exception): raise out
@@ -481,9 +515,18 @@ class Phone(Base):
         self.font = self.tmp / 'font'; self.font.mkdir(); (self.font / 'f.ttf').write_bytes(b'f')
         (self.tmp / 'logs').mkdir()
 
-    def push(self):
-        ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'en-US', self.tmp, self.tmp / 'logs', {'title_id': GID})
+    def push(self, serial='S'):
+        ba.push_game(serial, GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'en-US', self.tmp, self.tmp / 'logs', {'title_id': GID})
         return [' '.join(c) for c in self.cmds]
+
+    def test_a_wifi_serial_makes_folders_windows_takes(self):   # after the desktop app's Connect, a phone's serial is ip:port; after adb's own, its mDNS name
+        for serial in ('192.168.1.20:37123', 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp', '[fe80::1%wlan0]:5555'):
+            self.cmds.clear(); self.push(serial)   # on Windows, push_<ip:port> raised WinError 123 here, before anything was copied
+            made = [p.relative_to(self.tmp / 'logs') for p in (self.tmp / 'logs').rglob('*')]
+            self.assertTrue(made)
+            for p in made:
+                for part in p.parts: self.assertFalse(set(part) & set('<>:"/\\|?*') or part.endswith(('.', ' ')), (serial, p))
+            self.assertTrue(any(c[0] == 'push' for c in self.cmds), serial)
 
     def test_copies_to_games_folder_and_opens_it(self):
         flat = self.push(); dst = f'{ba.REMOTE}/games/{GID}'
@@ -492,6 +535,11 @@ class Phone(Base):
         self.assertTrue(any(f"chmod -R a+rwX '{dst}' 2>&1; chmod a+rwx '{ba.REMOTE}/games' 2>&1" in c for c in flat), flat)
         writes = [c for c in flat if not c.startswith('shell [ -e ')]   # the one-game layout is only looked for
         self.assertFalse(any(f'{ba.REMOTE}/game/' in c or c.endswith(f'{ba.REMOTE}/game') for c in writes), writes)
+
+    def test_a_phones_logs_folder_keeps_its_name_over_wifi(self):   # named after the phone's ID: its serial over Wi-Fi changes with each new port
+        self.remote['props'] = {s: 'R5CY51ZLGKH\n9774d56d682e549c\n' for s in ('R5CY51ZLGKH', '192.168.1.20:37123', '192.168.1.20:41011')}
+        for serial in self.remote['props']: self.push(serial)
+        self.assertEqual([p.name for p in (self.tmp / 'logs').iterdir()], ['push_R5CY51ZLGKH'])
 
     def test_launcher_files_end_lines_with_newline_alone(self):   # on Windows too: the desktop app reads game.json by lines, and the \r of \r\n split its JSON
         ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'DM_LANG=en-US\n', self.tmp, self.tmp / 'logs', {'title_id': GID, 'name': 'x'})

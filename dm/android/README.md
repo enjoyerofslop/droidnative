@@ -131,6 +131,9 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   found through `DM_GAMES_DIR`); once built it is marked *Experimental* and installs like the others.
 - **Phones**: the adb devices over USB and Wi-Fi (*Pair over Wi-Fi*, *Connect*, *Discover*, *Disconnect*); for the phone picked at the top, the app version and the games
   on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`) and *Remove game from phone* (its save stays).
+  A phone is known by its ID (`dm/android/tools/phone_id.py`: `ro.serialno`, or the shell's Android ID where that is empty or a placeholder), asked once per adb
+  serial: the picker shows a phone on USB and Wi-Fi once, over USB; the picked phone, its backups (`<data>/backups/<id>`) and the first-start notice are kept by ID, as
+  are the script's device lock and `logs/push_<id>`, so a Wi-Fi port that changes loses nothing and one phone's two serials can't run two installs at once.
 - **Builds**: the running build's stages, progress bars and messages, from `--progress json` (or a console build's journal); *Stop* ends it and its tools.
 - **Performance**: `adb logcat -s DroidPlay` with tiles for the figures the host prints (frame time, GPU busy, replay CPU and draws, game speed, the wait for the GPU) and a frame-time
   chart; *Profile a frame* asks for a frame's GPU times per pass (`files/prof_now`) and groups them; *Thermal* shows the phone's cooling state.
