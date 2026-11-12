@@ -183,9 +183,10 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   key, the D-pad, both sticks, two fingers and the game's touch screen (`gamepad check: 44 checks, 0 failed`); `DM_TEXT_TEST=2` opens the text box after the demo and
   types and confirms "Zelda" and an emoji itself, under a minimum of 2 characters (`text box check: … OK with 1 character disabled`, then `text "Zelda😀" (9 bytes)`; `DM_TEXT_TEST=1` waits for a person); `DM_RUMBLE_TEST=1` vibrates half a second (`dumpsys vibrator_manager` shows it).
 - `tests/t_audio`: the AAudio output at real time (a 440 Hz tone for two seconds: the frames rendered, the underruns), Stop and Start again.
-- `tests/t_media <h264> <aac>`: the movie decoders on clips ffmpeg makes (`ffmpeg -f lavfi -i color=c=0x2060c0:size=320x240:rate=30 -t 1 -c:v libx264 -profile:v high -bf 2
-  -pix_fmt yuv420p -x264-params aud=1 -f h264 blue.h264`; `ffmpeg -f lavfi -i sine=frequency=1000:sample_rate=48000 -t 1 -ac 2 -c:a aac -f adts tone.aac`): every picture
-  in NV12 and RGBA with its colour, the tone's length and pitch.
+- `tests/t_media <h264> <aac> [<h264 without B-frames>]`: the movie decoders on clips ffmpeg makes (`ffmpeg -f lavfi -i color=c=0x2060c0:size=320x240:rate=30 -t 1 -c:v libx264 -profile:v high -bf 2
+  -pix_fmt yuv420p -x264-params aud=1 -f h264 blue.h264`; `ffmpeg -f lavfi -i sine=frequency=1000:sample_rate=48000 -t 1 -ac 2 -c:a aac -f adts tone.aac`; the same picture
+  with `-profile:v main -bf 0` into `blue_p.h264`): every picture in NV12 and RGBA with its colour, the tone's length and pitch, and every picture of the clip without
+  B-frames before the end of stream, as it is and with its SPS's `bitstream_restriction` taken out (10 of 10 on the Odin 2 on 2026-11-12).
 - `-DDM_TESTS=ON`: `t_thread_leak`, `t_condvar`, `t_fs`, `t_fs_commit_list`, `t_svc_memory` (with and without the map limit), `t_nro`, `t_hid`,
   `t_preempt` (both modes) pass on the device. `t_nvn` passes 154 of 154 on `gfx_vk.c` (130 on `gfx_null.c`; two of its checks time the GPU right after a submit and can miss on a
   fast run); before asynchronous submissions three of them failed: they expect the GPU to be
