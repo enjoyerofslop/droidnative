@@ -211,6 +211,33 @@ class SpvNoPtr(unittest.TestCase):
         out, why = self.run_on(self.asm(CS, 'set3'), set_=3); self.assertIsNotNone(out, why); assert out is not None
         self.valid(out, 'set3'); self.check_rewritten(out, 15, set_=3)
 
+    def test_a_vector_load_in_two_fetches(self):   # SPV_NOPTR_VEC: each 4-vector load is two loads of a uvec4 view at the same binding, picked by the word index & 3
+        for name, env in (('vec', 'vulkan1.1'), ('vec15', 'vulkan1.2')):
+            data = self.asm(CS.replace('"main" %lid', '"main" %lid %o') if env == 'vulkan1.2' else CS, name, env)
+            out, why = self.run_on(data, nu=3); self.assertIsNotNone(out, why); assert out is not None
+            self.valid(out, name, env); o = ops(out)
+            sets = {x[0]: x[2] for op, x in o if op == 71 and x[1] == 34}; binds = {x[0]: x[2] for op, x in o if op == 71 and x[1] == 33}
+            views = [v for v, st in sets.items() if st == 5]; self.assertEqual(len(views), 2); self.assertEqual({binds[v] for v in views}, {0})   # the words and the uvec4s, one binding
+            strides = sorted(x[2] for op, x in o if op == 71 and x[1] == 6 and x[0] in {y[1] for p, y in o if p == 30 and y[0] in {z[1] for q, z in o if q == 29}} | {y[0] for p, y in o if p == 29})
+            self.assertIn(16, strides)
+            acc = [x for op, x in o if op == 65 and x[2] in views]; nonuni = {x[0] for op, x in o if op == 71 and x[1] == 5300}
+            # main: a store and an atomic (2 words); the helper: a uint load (1), a uvec4 and a vec4 load (2 fetches each), a vec4 store (4 words)
+            self.assertEqual(len(acc), 2 + 1 + 2 + 2 + 4); self.assertTrue(all(a[1] in nonuni for a in acc))
+            self.assertEqual(len([x for op, x in o if op == 79]), 6)   # three shuffles a load: the vector from word 1, 2 and 3 of the first element
+            self.assertEqual(len([x for op, x in o if op == 199]), 2)   # the word index & 3
+            if env == 'vulkan1.2': ep = [x for op, x in o if op == 15][0]; self.assertTrue(set(views) <= set(ep[3:]))
+            self.assertNotIn(11, {x[0] for op, x in o if op == 17})
+
+    def test_the_self_tests_module_is_rewritten(self):   # shaders/gmem_test_u64.spvasm as the build assembles it (glslc: SPIR-V 1.0): a form spv_noptr takes, or the test never runs
+        src = (REPO / 'dm/android/shaders/gmem_test_u64.spvasm').read_text()
+        data = self.asm(src, 'selftest', 'spv1.0'); self.assertTrue(self.wanted(data))
+        for nu, fetches in ((3, 2), (1, 4)):   # its one uvec4 load: two fetches of the uvec4 view, or four of a word
+            out, why = self.run_on(data, set_=1, nu=nu); self.assertIsNotNone(out, why); assert out is not None
+            self.valid(out, f'selftest{nu}'); o = ops(out)
+            self.assertFalse([x for op, x in o if op == 120])
+            sets = {x[0]: x[2] for op, x in o if op == 71 and x[1] == 34}; views = [v for v, st in sets.items() if st == 1]
+            self.assertEqual(len([x for op, x in o if op == 65 and x[2] in views]), fetches)
+
     def test_without_nonuniform_decorations(self):   # the diagnostic form: the same accesses, none decorated
         out, why = self.run_on(self.asm(CS, 'nonu'), nu=0); self.assertIsNotNone(out, why); assert out is not None
         self.valid(out, 'nonu'); o = ops(out)
@@ -261,7 +288,7 @@ OpFunctionEnd
         for f in sorted(d.glob('*.spv')):
             data = f.read_bytes()
             if not self.wanted(data): continue
-            out, why = self.run_on(data)
+            out, why = self.run_on(data, nu=3)   # as the device makes them: NonUniform, vectors in two fetches
             if out is None: left.setdefault(why, []).append(f.name); continue
             env = ENV.get(words(data)[1] >> 8 & 0xffff, 'vulkan1.3')   # the module's own SPIR-V version
             (self.tmp / 'g.spv').write_bytes(out)

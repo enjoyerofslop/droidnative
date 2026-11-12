@@ -5,8 +5,8 @@
 static const uint32_t k_gm_test_cs[] =
 #include "shaders/gmem_test.comp.inc"
 ;
-static const uint32_t k_gm_test_np_cs[] =   // without physical pointers: the pools' descriptor array at set 1 (gfx_vk_gmem_noptr.inc)
-#include "shaders/gmem_test_noptr.comp.inc"
+static const uint32_t k_gm_test_u64_cs[] =   // without physical pointers: rewritten by spv_noptr as the game's shaders are, the pools' descriptor array at set 1 (gfx_vk_gmem_noptr.inc)
+#include "shaders/gmem_test_u64.spvasm.inc"
 ;
 static void gm_selftest(void) {
     const char *e = getenv("DM_VK_RAW_GMEM_TEST"); if (!e || *e != '1' || !g_ngm) return;
@@ -19,7 +19,12 @@ static void gm_selftest(void) {
         addr[n] = g_gm[i].lo + off; ent[n++] = (uint32_t)i + 1;
     }
     pthread_mutex_unlock(&g_gm_mu);
-    VkShaderModuleCreateInfo mc = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = g_gm_np ? sizeof k_gm_test_np_cs : sizeof k_gm_test_cs, .pCode = g_gm_np ? k_gm_test_np_cs : k_gm_test_cs};
+    VkShaderModuleCreateInfo mc = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_gm_test_cs, .pCode = k_gm_test_cs};
+    uint32_t *npc = NULL;   // the array form of the test, made by the pass the game's shaders go through
+    if (g_gm_np) { size_t nw = sizeof k_gm_test_u64_cs / 4, cap = 4 * nw + 4096; uint32_t *sc = malloc(3 * (size_t)k_gm_test_u64_cs[3] * 4); int why = 0; npc = malloc(cap * 4);
+        size_t k = sc && npc ? spv_noptr(k_gm_test_u64_cs, nw, 1, gm_np_opt(), sc, npc, cap, &why) : 0; free(sc);
+        if (!k) { LOG("[RED] [vk] raw global memory self-test (DM_VK_RAW_GMEM_TEST): not run, spv_noptr left its shader (%d)", why); free(npc); return; }
+        mc.codeSize = k * 4; mc.pCode = npc; }
     VkDescriptorSetLayoutBinding lb[2] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
     VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = lb};
     VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2}; VkDescriptorPoolCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps};
@@ -63,6 +68,7 @@ static void gm_selftest(void) {
         LOG("%s[vk] raw global memory self-test (DM_VK_RAW_GMEM_TEST): %d of %d 16-byte reads through the pool table on the GPU match the CPU's bytes (%d of them not all zero)%s", bad ? "[RED] " : "", n - bad, n, nz,
             g_gm_np ? ", through the pools' descriptor array" : "");
     } else LOG("[RED] [vk] raw global memory self-test (DM_VK_RAW_GMEM_TEST): not run, its %s failed", why);
+    free(npc);
     if (f) vkDestroyFence(g_vk.dev, f, NULL); if (cp) vkDestroyCommandPool(g_vk.dev, cp, NULL); if (dp) vkDestroyDescriptorPool(g_vk.dev, dp, NULL); stg_free(&io);
     if (pp) vkDestroyPipeline(g_vk.dev, pp, NULL); if (pl) vkDestroyPipelineLayout(g_vk.dev, pl, NULL); if (dsl) vkDestroyDescriptorSetLayout(g_vk.dev, dsl, NULL); if (m) vkDestroyShaderModule(g_vk.dev, m, NULL);
 }

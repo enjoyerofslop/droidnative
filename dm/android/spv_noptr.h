@@ -6,7 +6,8 @@
 // So on such a driver each table entry's delta carries a slot instead of the piece's device address minus its start ((slot << 32) - start, gm_table): the helper's own sum
 // comes out as the slot in the high word and the offset into the piece in the low word, and its code stays as translated. spv_noptr replaces only the end: each
 // OpConvertUToPtr of a bitcast v2uint, and every load, store or atomic through its result, by an access into a runtime array of storage buffers, pools[high word].d[low word >> 2]
-// (a vector as its components, each its own access, bitcast where they are not uint), decorated NonUniform as each invocation may reach another piece. The replay binds
+// (a 4-vector load as two fetches of a uvec4 view of the same array, see spv_noptr's flags; any other vector as its components, each its own access, bitcast where they
+// are not uint), decorated NonUniform as each invocation may reach another piece. The replay binds
 // each placed piece's buffer at its slot (the set the caller names, SPV_NOPTR_BINDING). The pointer types, the capability, the extension and the memory model's addressing go, and
 // Int64 too when nothing else needs it. It needs runtimeDescriptorArray and shaderStorageBufferArrayNonUniformIndexing (the Odin 2's 740 has both). A module whose pointers
 // are made or used any other way is left as it is. Self-contained (no libc) for dm/tools/tests/test_spv_noptr.py.
@@ -68,15 +69,21 @@ static int spv_noptr_lit(uint32_t op, uint32_t q) {
     }
 }
 
-// The rewrite. set: the descriptor set of the pools' array; nu: 0 leaves the NonUniform decorations out (a diagnostic: right only where every lane of a draw reaches one
-// piece); sc: 3 * bound words of scratch. → words written to out (0: left as it is; *why says why, 0 when it has no pointers to rewrite)
-static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, int nu, uint32_t *sc, uint32_t *out, size_t cap, int *why) {
+// The rewrite. set: the descriptor set of the pools' array; sc: 3 * bound words of scratch. → words written to out (0: left as it is; *why says why, 0 when it has no
+// pointers to rewrite). opt: SPV_NOPTR_NU decorates the accesses NonUniform (without: a diagnostic, right only where every lane of a draw reaches one piece);
+// SPV_NOPTR_VEC loads a 4-vector in two fetches. A fetch through the array is what costs on Qualcomm's V@0615.98 (the Razr's Adreno 730: about a twentieth of a
+// full-screen pass for each fetch a vertex in Frostpunk's mesh pass, whose vertex shaders load a word and 15 vectors), and a pointer loads a vector in one. So the
+// array is also seen as uvec4 elements (a second variable at the same binding): a vector at word wi is in elements wi >> 2 and, when it is not at a multiple of 16
+// bytes, the next; both are fetched (the same one twice when the first holds it all) and the four words picked by wi & 3, without a branch
+enum { SPV_NOPTR_NU = 1, SPV_NOPTR_VEC = 2 };
+static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, int opt, uint32_t *sc, uint32_t *out, size_t cap, int *why) {
     *why = 0;
     if (n < 5 || w[0] != 0x07230203) { *why = SPV_NOPTR_FORM; return 0; }
     uint32_t bound = w[3], ver = w[1];
     uint32_t *def = sc, *fl = sc + bound, *nid = sc + 2 * (size_t)bound;   // def: the instruction defining an id; fl: 1 a pointer to rewrite, 2 a bitcast that goes, 4 a pointer type
     for (size_t i = 0; i < 3 * (size_t)bound; i++) sc[i] = 0;                // that goes; nid: a pointer's slot id (its word index is that id + 2)
-    uint32_t tu = 0, tl = 0, have = 0;   // the 32-bit unsigned int type, the 64-bit one; have: 1, 2, 4 the descriptor indexing capabilities, 8 its extension, 16 the storage
+    uint32_t tu = 0, tl = 0, have = 0, tb = 0, tv4 = 0, tvb4 = 0; int nv4 = 0;   // tb, tv4, tvb4: bool, uvec4, bvec4 where the module has them; nv4: 4-vector loads to make
+   // the 32-bit unsigned int type, the 64-bit one; have: 1, 2, 4 the descriptor indexing capabilities, 8 its extension, 16 the storage
     int n64 = 0, nconv = 0;              // buffer class's; n64: 64-bit int types
     size_t i_ty = 0, i_fn = 0;           // the first type and the first function
     for (size_t i = 5; i < n; ) { uint32_t len = w[i] >> 16, op = w[i] & 0xffff; if (!len || i + len > n) { *why = SPV_NOPTR_FORM; return 0; }
@@ -87,6 +94,8 @@ static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, int nu, uint3
         if (op >= 19 && op <= 38) { if (len >= 2 && x[1] < bound) def[x[1]] = (uint32_t)i; }
         else if (spv_noptr_typed(op) && len >= 3 && x[2] < bound) def[x[2]] = (uint32_t)i;
         if (op == 21 && len == 4 && x[2] == 64) n64++;
+        if (op == 20) tb = x[1];
+        if (op == 23 && len == 4 && x[3] == 4) { if (tu && x[2] == tu) tv4 = x[1]; if (tb && x[2] == tb) tvb4 = x[1]; }
         if (op == 21 && len == 4 && x[3] == 0) { if (x[2] == 32 && !tu) tu = x[1]; if (x[2] == 64 && !tl) tl = x[1]; }
         if (op == 32 && len == 4 && x[2] == 5349 && x[1] < bound) fl[x[1]] |= 4;
         if (op == 17 && len == 2) have |= x[1] == 5302 ? 1u : x[1] == 5301 ? 2u : x[1] == 5308 ? 4u : 0u;
@@ -123,12 +132,16 @@ static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, int nu, uint3
     for (size_t i = i_fn; i < n; i += w[i] >> 16) { const uint32_t *x = w + i; uint32_t op = x[0] & 0xffff;   // an atomic only on uint words (an int one would want a pointer to int)
         uint32_t pp = op == 228 ? x[1] : spv_noptr_atomic(op) ? x[3] : 0;
         if (pp && pp < bound && (fl[pp] & 1) && w[def[w[def[pp] + 1]] + 3] != tu) { *why = SPV_NOPTR_TYPE; return 0; } }
+    if (opt & SPV_NOPTR_VEC) for (size_t i = i_fn; i < n; i += w[i] >> 16) { const uint32_t *x = w + i;   // the loads SPV_NOPTR_VEC makes in two fetches
+        if ((x[0] & 0xffff) == 61 && (x[0] >> 16) >= 4 && x[3] < bound && (fl[x[3]] & 1)) { const uint32_t *td = w + def[w[def[w[def[x[3]] + 1]] + 3]]; nv4 += (td[0] & 0xffff) == 23 && td[3] == 4; } }
     int drop_tl = !keep64, drop64 = drop_tl && n64 == 1;
     uint32_t nb = bound;
     const uint32_t rta = nb++, blk = nb++, rtb = nb++, prtb = nb++, pu = nb++, var = nb++, c0 = nb++, c1 = nb++, c2 = nb++, c3 = nb++;
+    uint32_t rta4 = 0, blk4 = 0, rtb4 = 0, prtb4 = 0, pv4 = 0, var4 = 0, newtb = 0, newtv4 = 0, newtvb4 = 0;   // the uvec4 view, and the types it needs that the module lacks
+    if (nv4) { rta4 = nb++; blk4 = nb++; rtb4 = nb++; prtb4 = nb++; pv4 = nb++; var4 = nb++; if (!tb) tb = newtb = nb++; if (!tv4) tv4 = newtv4 = nb++; if (!tvb4) tvb4 = newtvb4 = nb++; }
     size_t k = 0, ann = 0; uint32_t nnu = 0;   // ann: where the NonUniform decorations go; they are listed at the top of out meanwhile, out[cap - 1 - j]
 #define NP_E(v) do { if (k + nnu >= cap) { *why = SPV_NOPTR_ROOM; return 0; } out[k++] = (uint32_t)(v); } while (0)
-#define NP_NU(id) do { if (k + nnu + 1 >= cap) { *why = SPV_NOPTR_ROOM; return 0; } if (nu) out[cap - 1 - nnu++] = (id); } while (0)
+#define NP_NU(id) do { if (k + nnu + 1 >= cap) { *why = SPV_NOPTR_ROOM; return 0; } if (opt & SPV_NOPTR_NU) out[cap - 1 - nnu++] = (id); } while (0)
 #define NP_ROOM(m) do { if (k + nnu + (m) >= cap) { *why = SPV_NOPTR_ROOM; return 0; } } while (0)
     for (int q = 0; q < 5; q++) NP_E(w[q]);
     int caps_done = 0;
@@ -147,6 +160,8 @@ static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, int nu, uint3
             NP_E(3u << 16 | 71); NP_E(blk); NP_E(2);   // Block
             NP_E(4u << 16 | 71); NP_E(var); NP_E(34); NP_E(set);   // DescriptorSet
             NP_E(4u << 16 | 71); NP_E(var); NP_E(33); NP_E(SPV_NOPTR_BINDING);   // Binding
+            if (nv4) { NP_E(4u << 16 | 71); NP_E(rta4); NP_E(6); NP_E(16); NP_E(5u << 16 | 72); NP_E(blk4); NP_E(0); NP_E(35); NP_E(0); NP_E(3u << 16 | 71); NP_E(blk4); NP_E(2);   // the uvec4 view: the same
+                NP_E(4u << 16 | 71); NP_E(var4); NP_E(34); NP_E(set); NP_E(4u << 16 | 71); NP_E(var4); NP_E(33); NP_E(SPV_NOPTR_BINDING); }                                          // binding, a stride of 16
             ann = k; }
         if (i == i_fn) {   // its types, the constants the accesses take and the variable
             NP_E(3u << 16 | 29); NP_E(rta); NP_E(tu);   // uint[]
@@ -156,7 +171,11 @@ static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, int nu, uint3
             NP_E(4u << 16 | 32); NP_E(pu); NP_E(12); NP_E(tu);
             const uint32_t cs[4] = {c0, c1, c2, c3};
             for (uint32_t q = 0; q < 4; q++) { NP_E(4u << 16 | 43); NP_E(tu); NP_E(cs[q]); NP_E(q); }
-            NP_E(4u << 16 | 59); NP_E(prtb); NP_E(var); NP_E(12); }
+            NP_E(4u << 16 | 59); NP_E(prtb); NP_E(var); NP_E(12);
+            if (nv4) {
+                if (newtb) { NP_E(2u << 16 | 20); NP_E(tb); } if (newtv4) { NP_E(4u << 16 | 23); NP_E(tv4); NP_E(tu); NP_E(4); } if (newtvb4) { NP_E(4u << 16 | 23); NP_E(tvb4); NP_E(tb); NP_E(4); }
+                NP_E(3u << 16 | 29); NP_E(rta4); NP_E(tv4); NP_E(3u << 16 | 30); NP_E(blk4); NP_E(rta4); NP_E(3u << 16 | 29); NP_E(rtb4); NP_E(blk4);   // struct { uvec4 v[]; } pools4[]
+                NP_E(4u << 16 | 32); NP_E(prtb4); NP_E(12); NP_E(rtb4); NP_E(4u << 16 | 32); NP_E(pv4); NP_E(12); NP_E(tv4); NP_E(4u << 16 | 59); NP_E(prtb4); NP_E(var4); NP_E(12); } }
         // what goes: the capability (and Int64 when nothing else needs it), the extension, the pointer types, the ulong type unless used, the bitcasts, their names and decorations
         if (op == 17 && len == 2 && (x[1] == 5347 || (x[1] == 11 && drop64))) { i += len; continue; }
         if (op == 10 && spv_noptr_str(x + 1, len - 1, "SPV_KHR_physical_storage_buffer")) { i += len; continue; }
@@ -165,7 +184,7 @@ static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, int nu, uint3
         if (op == 124 && len >= 3 && x[2] < bound && (fl[x[2]] & 2)) { i += len; continue; }
         if ((op == 5 || op == 6 || op == 71 || op == 72) && len >= 2 && ((x[1] < bound && fl[x[1]]) || (x[1] == tl && drop_tl))) { i += len; continue; }
         if (op == 14 && len == 3) { NP_E(w[i]); NP_E(x[1] == 5348 ? 0u : x[1]); NP_E(x[2]); i += len; continue; }   // OpMemoryModel: Logical addressing
-        if (op == 15 && ver >= 0x10400) { NP_E((len + 1) << 16 | 15); for (uint32_t q = 1; q < len; q++) NP_E(x[q]); NP_E(var); i += len; continue; }   // the variable in the interface
+        if (op == 15 && ver >= 0x10400) { NP_E((len + (nv4 ? 2u : 1u)) << 16 | 15); for (uint32_t q = 1; q < len; q++) NP_E(x[q]); NP_E(var); if (nv4) NP_E(var4); i += len; continue; }   // the variables in the interface
         if (op == 120) {   // the conversion: the address vector's high word is the slot (NonUniform), its low word >> 2 the word in the piece
             uint32_t v = w[def[x[3]] + 3], idx = nb, off = nb + 1, wi = nb + 2; nb += 3; nid[x[2]] = idx;
             NP_E(5u << 16 | 81); NP_E(tu); NP_E(idx); NP_E(v); NP_E(1);   // OpCompositeExtract
@@ -177,6 +196,20 @@ static size_t spv_noptr(const uint32_t *w, size_t n, uint32_t set, int nu, uint3
         if (pp && pp < bound && (fl[pp] & 1)) {   // a load, store or atomic through it: an access per 32-bit component
             uint32_t T = w[def[w[def[pp] + 1]] + 3], idx = nid[pp], wi = idx + 2; const uint32_t *td = w + def[T];
             int isv = (td[0] & 0xffff) == 23; uint32_t nc = isv ? td[3] : 1, ct = isv ? td[2] : T, comp[4] = {0, 0, 0, 0};
+            if (op == 61 && isv && nc == 4 && nv4) {   // a 4-vector in two fetches of the uvec4 view: elements q and, when the vector is not all in q, q + 1; its words picked by wi & 3
+                uint32_t q = nb++, r = nb++, sp = nb++, spu = nb++, q2 = nb++, aa = nb++, ab = nb++, a = nb++, b = nb++, s[4] = {a, nb, nb + 1, nb + 2}, pick = a; nb += 3;
+                NP_E(5u << 16 | 194); NP_E(tu); NP_E(q); NP_E(wi); NP_E(c2); NP_E(5u << 16 | 199); NP_E(tu); NP_E(r); NP_E(wi); NP_E(c3);   // OpShiftRightLogical, OpBitwiseAnd
+                NP_E(5u << 16 | 171); NP_E(tb); NP_E(sp); NP_E(r); NP_E(c0); NP_E(6u << 16 | 169); NP_E(tu); NP_E(spu); NP_E(sp); NP_E(c1); NP_E(c0);   // OpINotEqual, OpSelect
+                NP_E(5u << 16 | 128); NP_E(tu); NP_E(q2); NP_E(q); NP_E(spu);
+                NP_E(7u << 16 | 65); NP_E(pv4); NP_E(aa); NP_E(var4); NP_E(idx); NP_E(c0); NP_E(q); NP_NU(aa); NP_E(4u << 16 | 61); NP_E(tv4); NP_E(a); NP_E(aa);
+                NP_E(7u << 16 | 65); NP_E(pv4); NP_E(ab); NP_E(var4); NP_E(idx); NP_E(c0); NP_E(q2); NP_NU(ab); NP_E(4u << 16 | 61); NP_E(tv4); NP_E(b); NP_E(ab);
+                for (uint32_t j = 1; j < 4; j++) {   // the vector as it lies from word j of the first: OpVectorShuffle; taken where wi & 3 is j: OpSelect by a bvec4
+                    uint32_t m = nb++, mv = nb++, nx = j == 3 && ct == tu ? x[2] : nb++;
+                    NP_E(9u << 16 | 79); NP_E(tv4); NP_E(s[j]); NP_E(a); NP_E(b); NP_E(j); NP_E(j + 1); NP_E(j + 2); NP_E(j + 3);
+                    NP_E(5u << 16 | 170); NP_E(tb); NP_E(m); NP_E(r); NP_E(j == 1 ? c1 : j == 2 ? c2 : c3); NP_E(7u << 16 | 80); NP_E(tvb4); NP_E(mv); NP_E(m); NP_E(m); NP_E(m); NP_E(m);
+                    NP_E(6u << 16 | 169); NP_E(tv4); NP_E(nx); NP_E(mv); NP_E(s[j]); NP_E(pick); pick = nx; }
+                if (ct != tu) { NP_E(4u << 16 | 124); NP_E(T); NP_E(x[2]); NP_E(pick); }
+                i += len; continue; }
             for (uint32_t j = 0; j < nc; j++) {
                 uint32_t wj = wi;
                 if (j) { wj = nb++; NP_E(5u << 16 | 128); NP_E(tu); NP_E(wj); NP_E(wi); NP_E(j == 1 ? c1 : j == 2 ? c2 : c3); }   // OpIAdd
