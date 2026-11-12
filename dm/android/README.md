@@ -43,7 +43,16 @@ cream on ink, with a monochrome layer), which `tools/build_apk.py` links unless 
   folder to `files/games/<id>/` when it packs the same game (the same `control.nacp`), or with `--migrate --title <id>`, and leaves a `legacy_save` marker there. At its next start
   the launcher backs every internal save up to `files/backups/<time>/` and copies `files/save` (and `save_device`) into `saves/<id>`, through a temporary folder; `files/save`
   itself is left as it was. **Back up saves** in the game list makes the same backup on demand (xattrs, the guest names of case collisions, go to its `xattrs.tsv`: external
-  storage does not keep them); a backup pushed to `files/backups/restore/` is copied back into internal storage at the next start, after a backup of what is there.
+  storage does not keep them); a backup pushed to `files/backups/restore/` is copied back into internal storage at the next start, after a backup of what is there,
+  a game at a time (a game the backup has no save of keeps its own).
+- **A game's save in and out** (the settings screen's Save rows, `LauncherSaves.java`; the logic, plain Java that `dm/tools/tests/test_android_saves.py` runs on a JVM, in
+  `Saves.java`). Export writes `saves/<id>/` (and `saves/<id>_device/`) as a ZIP laid out as a backup, through Android's file picker. Import takes a ZIP or a folder from the
+  picker, staged in internal `files/import-staging/`, and finds the save in the layouts other tools write (a DroidPlay export or backup; yuzu and its successors,
+  `nand/user/save/0000000000000000/<user>/<title ID>/`; Ryujinx, `bis/user/save/<save ID>/0/` with the title ID in `ExtraData0`; JKSV with `.nx_save_meta.bin`; EdiZon
+  with `edizon_save_metadata.json`; Checkpoint's `0x<title ID> <name>/`), else takes the folder as the save itself, matched by file names against the game's save on the
+  phone when there is one. It keeps the game's save as a backup (`files/backups/<time>-<id>/`) before swapping the new one in by renames through `<save>.swap`, the
+  host's own convention (`plat_android.c`), and never while the game runs. Earlier saves lists the backups that hold the game's save, and puts one back the same way.
+  Only `user.*` extended attributes travel with a save: a backup's `security.selinux` rows name its own phone's labels.
 - **Updates keep the saves.** Every APK is signed with `~/.android/nxnative-debug.jks` and installed with `adb install -r`; the scripts never uninstall.
 
 ## Settings screen
