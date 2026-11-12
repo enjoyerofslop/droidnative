@@ -32,6 +32,13 @@ if(NOT rc EQUAL 0)
   message(FATAL_ERROR "game.py header ${GAME} failed")
 endif()
 
+# The commit and version the host is built from, for its build: line at start (build_stamp.c, main.c): asked at every build (git in a checkout; VERSION and
+# tools/build_commit in a release's archive), the header rewritten only when it changes
+set(STAMP_H ${GEN}/build_stamp.h)
+add_custom_target(build_stamp ALL
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/build_stamp.py ${STAMP_H}
+  BYPRODUCTS ${STAMP_H} COMMENT "build stamp")
+
 # Assembly: the Mach-O sources converted to ELF (tools/asm_elf.py)
 set(ASM_ELF)
 foreach(s ${DM}/host/entry.S ${DM}/gfx/nvn/nvn_entry.S ${DM}/gfx/nvn/nvn_thunks.S)
@@ -81,6 +88,7 @@ set(ANDROID_C
   ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver.c
   ${CMAKE_CURRENT_SOURCE_DIR}/vk_start.c
   ${CMAKE_CURRENT_SOURCE_DIR}/module_pack.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/build_stamp.c
   ${CMAKE_CURRENT_SOURCE_DIR}/gfx_${DM_GFX}.c)
 
 # char is signed, as on Apple arm64 (the host and its third-party code were written there); AArch64 Linux / Android makes plain char unsigned. bcdec read BC4 / BC5 SNORM
@@ -94,7 +102,7 @@ target_compile_options(vpx PRIVATE -O2 -w -fvisibility=hidden)
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/gfx_vk.c PROPERTIES COMPILE_OPTIONS "-O2" OBJECT_DEPENDS "${SHADER_INC}")
 set_source_files_properties(${DM}/gfx/nvn/hle_nvn.c PROPERTIES COMPILE_OPTIONS "-fno-omit-frame-pointer")   # frame records: DM_NVN_SIZE_TRACE walks the game's call chain from them
 add_library(dmcore OBJECT ${HOST_C} ${GFX_C} ${ANDROID_C} ${ASM_ELF} ${SHADER_INC})
-add_dependencies(dmcore game_profile)
+add_dependencies(dmcore game_profile build_stamp)
 target_include_directories(dmcore PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/compat ${DM}/host ${DM}/gfx/nvn/include ${DM}/gfx/nvn ${DM}/gfx/tex ${DM}/third_party/vulkan-headers/include
   ${GEN}/${GAME} ${GEN} ${DM}/third_party/libvpx ${DM}/third_party/stb_vorbis)

@@ -117,7 +117,9 @@ static void host_preload(int argc, char **argv) {
 #ifdef __APPLE__
         CFBundleRef b = CFBundleGetMainBundle(); CFTypeRef c = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMCommit")) : NULL;
         if (c && CFGetTypeID(c) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)c, cs, sizeof cs, kCFStringEncodingUTF8);
-#endif   // Android: no Info.plist; the app's version is in its manifest
+#elif defined(__ANDROID__)   // no Info.plist: the commit and version the host library was built from (dm/android/build_stamp.c)
+        { const char *dm_build_commit(void); snprintf(cs, sizeof cs, "%s", dm_build_commit()); }
+#endif
         LOG("build: commit %s, shader chain %s, profile %s", cs, DMSH_CHAIN, DM_GAME_ID);
     }
     const char *race = getenv("DM_TEST_KEYRACE");
