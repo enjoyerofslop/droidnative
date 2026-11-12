@@ -39,6 +39,7 @@ import build_android_from_nsp as ba   # noqa: E402  (data_dir, library: the host
 import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, which the script put on the path: a phone's ID, which outlives a Wi-Fi port)
 sys.path.insert(0, str(REPO / 'dm' / 'android' / 'desktop'))
 import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop, put on the path here: the Get started checklist's steps, Qt-free so its tests run without PySide6)
+import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (what adb pair, connect and mdns say over Wi-Fi, in plain words)
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]  (plain words for what went wrong, and the report for #help)
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]  (how to connect a phone, by brand; its battery and free space)
 import update as upd   # noqa: E402  # pyright: ignore[reportMissingImports]  (the newest release, and its Setup downloaded and checked)
@@ -593,6 +594,8 @@ class LibraryPage(QWidget):
         self.menu.addSeparator()
         act('Update the app on the phone', lambda: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.after_task), bool(s and ba.library()))
         act('Remove from the phone…', lambda: self.win.phones.remove_game(g.id, g.name), bool(s and g.id in self.win.phone_games))
+        act('Import a save to the phone…', lambda: self.win.phones.import_save(g.id, g.name), bool(s and g.id in self.win.phone_games))
+        act('Restore its save from a backup…', lambda: self.win.phones.restore_backup(g.id, g.name), bool(s and g.id in self.win.phone_games))
         self.menu.addSeparator()
         act('Open the game folder', lambda: reveal(g.folder))
         act('Remove from the collection…', lambda: self.remove(g))
@@ -688,6 +691,8 @@ class BuildsPage(QWidget):
     def start(self, title, args, after=None):
         if self.busy() or self.ext: QMessageBox.warning(self, 'Busy', 'A build is running: wait for it or stop it'); return
         self.live = None; self.title = title; self.head.setText(title); self.sub.setText('starting…'); self.tree.clear(); self.items = {}; self.log.clear(); self.after = after; self.buf = ''
+        if '--serial' in args[:-1] and '--phone-id' not in args and (pid := self.win.ids.get(args[args.index('--serial') + 1])):
+            args = [*args, '--phone-id', pid]   # the script finds the phone by its ID when adb loses it on the way (a new Wi-Fi port)
         bid = uuid.uuid4().hex; self.ids.add(bid); self.fresh(args, bid); self.last = (title, args, after)
         self.proc = QProcess(self); self.proc.setProgram(PYTHON); self.proc.setArguments([str(SCRIPT), *args, '--progress', 'json'])
         env = QProcessEnvironment.systemEnvironment(); env.insert('PYTHONUTF8', '1'); env.insert('PYTHONUNBUFFERED', '1'); env.insert('NXNATIVE_BUILD_ID', bid); self.proc.setProcessEnvironment(env)
@@ -757,15 +762,21 @@ class BuildsPage(QWidget):
         after, self.after = self.after, None
         if ok and after: QTimer.singleShot(200, after)
         if h: self.win.toast(f'{h.title}: see Builds')
-    def retry(self):   # a failed build's Install again / Try again: the same build, which reuses what it made before
-        if self.last: self.start(*self.last)
+    def retry(self):   # a failed build's Install again / Try again: the same build, which reuses what it made before, on the same phone by its ID: over Wi-Fi its serial
+        # changes when wireless debugging restarts, and the old one named no device any more
+        if not self.last: return
+        title, args, after = self.last
+        if '--serial' in args[:-1]:
+            i = args.index('--serial') + 1; now = self.win.serial_of(args[i])
+            if now and now != args[i]: args = args[:i] + [now] + args[i + 1:]
+        self.start(title, args, after)
     def context(self):   # (explain()'s context, the game, the phone's serial, the stage it stopped in) of the last build, from its arguments
         a = self.args; folder = a[0] if a and not a[0].startswith('-') else ''
         g = self.win.library.games.get(folder) or next((x for x in self.win.library.games.values() if folder and Path(x.folder).resolve() == Path(folder).resolve()), None)
         serial = a[a.index('--serial') + 1] if '--serial' in a[:-1] else ''
         st = self.failed_stage or self.stage or (None, None, '')
-        return {'phone': self.win.models.get(serial, '') if serial else '', 'game': g.name if g else '', 'stage': st[2], 'setup': self.title == fr.SETUP_TITLE,
-                'folder': folder}, g, serial, st
+        return {'phone': self.win.models.get(self.win.serial_of(serial) or serial, '') if serial else '', 'game': g.name if g else '', 'stage': st[2],
+                'setup': self.title == fr.SETUP_TITLE, 'folder': folder, 'wifi': phone_id.wifi(serial) if serial else False}, g, serial, st
     def show_failure(self):
         ctx = self.context()[0]
         h = ex.explain('\n'.join(self.reds[-6:] + [self.last_line]), **ctx); self.banner.show_help(h, self.last_red or self.last_line); return h
@@ -893,12 +904,87 @@ class PhoneGuide(QDialog):   # how to connect a phone, by brand (dm/android/desk
         self.seen.setText(f'<span style="color:{c}">{text}</span>')
 
 
+class PairDialog(QDialog):   # Pair over Wi-Fi: the phones showing a pairing code, found on the network by adb (mDNS) with their address filled in, so the player
+    # types only the code; then the phone's connection, which adb makes by itself or DroidPlay makes to the address the phone offers. It asked for two addresses
+    # by hand before, the second one easy to get wrong (the Wireless debugging screen's, not the pairing one's)
+    WAIT = 10   # seconds after pairing for adb to connect to the phone by itself, before DroidPlay connects to it, or asks for the address
+    def __init__(self, win):
+        super().__init__(win); self.win = win; self.setWindowTitle('Pair over Wi-Fi'); self.setStyleSheet(STYLE + f'QDialog {{ background: {PANEL}; }}'); self.setMinimumWidth(560)
+        lay = QVBoxLayout(self); lay.setContentsMargins(28, 24, 28, 22); lay.setSpacing(12)
+        lay.addWidget(label('Pair over Wi-Fi', 'h2'))
+        steps = label('<ol style="margin: 0">' + ''.join(f'<li style="margin-bottom: 6px">{x}</li>' for x in wifi.STEPS) + '</ol>', wrap=True); steps.setTextFormat(Qt.RichText); lay.addWidget(steps)
+        self.list = QListWidget(); self.list.setMaximumHeight(110); lay.addWidget(self.list)
+        self.addr = QLineEdit(); self.addr.setPlaceholderText('Not listed? The IP address & port shown with the code, e.g. 192.168.1.20:37123'); lay.addWidget(self.addr)
+        row = QHBoxLayout(); row.addWidget(label('Pairing code', 'meta')); self.code = QLineEdit(); self.code.setMaxLength(6); self.code.setPlaceholderText('6 digits'); self.code.setFixedWidth(120)
+        row.addWidget(self.code); row.addStretch(); lay.addLayout(row)
+        self.status = label('', 'meta', wrap=True); self.status.setTextFormat(Qt.RichText); lay.addWidget(self.status)
+        foot = QHBoxLayout(); foot.addStretch(); cancel = QPushButton('Cancel'); cancel.clicked.connect(self.reject); foot.addWidget(cancel)
+        self.go = QPushButton('Pair'); self.go.setDefault(True); self.go.clicked.connect(self.pair); foot.addWidget(self.go); lay.addLayout(foot)
+        for w in (self.code, self.addr): w.textChanged.connect(self.ready)
+        self.list.currentItemChanged.connect(self.ready); self.code.returnPressed.connect(self.pair)
+        self.busy, self.found, self.deadline, self.target = False, [], 0.0, ('', None)
+        self.t = QTimer(self); self.t.timeout.connect(self.look); self.t.start(2000); self.look(); self.ready()
+    def look(self):   # the pairing services on the network, every 2 s while the dialog is open
+        if not self.busy: bg(lambda: adb_run(None, 'mdns', 'services', timeout=8)[1], self.listed)
+    def listed(self, out):
+        if isinstance(out, Exception) or self.busy: return
+        found = wifi.pairing(out)
+        if found == self.found and self.list.count(): return
+        keep = self.list.currentItem().data(Qt.UserRole) if self.list.currentItem() else None
+        self.found = found; self.list.blockSignals(True); self.list.clear()
+        for text, addr in found:
+            it = QListWidgetItem(text); it.setData(Qt.UserRole, addr); self.list.addItem(it)
+            if addr == keep or len(found) == 1: self.list.setCurrentItem(it)
+        if not found:
+            it = QListWidgetItem('Looking for a phone showing a pairing code…'); it.setFlags(Qt.NoItemFlags); self.list.addItem(it)
+        self.list.blockSignals(False); self.ready()
+    def address(self):
+        typed = self.addr.text().strip()
+        return typed or (self.list.currentItem().data(Qt.UserRole) if self.list.currentItem() else None)
+    def ready(self, *_): self.go.setEnabled(not self.busy and bool(self.address()) and re.fullmatch(r'\d{6}', self.code.text().strip()) is not None)
+    def say(self, text, colour=TEXT2): self.status.setText(f'<span style="color:{colour}">{text}</span>')
+    def pair(self):
+        addr, code = self.address(), self.code.text().strip()
+        if not self.go.isEnabled() or not addr: return
+        self.busy = True; self.ready(); self.say('Pairing…', BUILD)
+        bg(lambda: adb_run(None, 'pair', addr, code, timeout=30), lambda r: self.paired(addr, r))
+    def paired(self, addr, r):
+        ok, sn, text = wifi.pair_result(*r) if not isinstance(r, Exception) else (False, None, str(r))
+        if not ok: self.busy = False; self.ready(); self.say(text, ERR); return
+        self.say('Paired. Connecting…', BUILD); self.deadline = time.time() + self.WAIT; self.target = (addr.rsplit(':', 1)[0], sn); self.connect_paired()
+    def connect_paired(self):   # adb connects a paired phone by itself when it sees it on the network; else the phone's own address is asked for its connection
+        ip, sn = self.target
+        def look():
+            listed = wifi.listed(adb_run(None, 'devices', timeout=10)[1], sn, ip)
+            if listed: return True, f'connected to {listed}'
+            to = wifi.connect_target(adb_run(None, 'mdns', 'services', timeout=8)[1], sn, ip)
+            return wifi.connect_result(*adb_run(None, 'connect', to, timeout=15)) + (to,) if to else None
+        def got(r):
+            if isinstance(r, Exception): r = None
+            if r and r[0]: self.connected(); return
+            if time.time() < self.deadline: QTimer.singleShot(1500, self.connect_paired); return
+            self.ask_address(ip)
+        bg(look, got)
+    def ask_address(self, ip):   # neither adb nor the network offered the phone's connection: the Wireless debugging screen's address, by hand
+        addr, ok = QInputDialog.getText(self, 'Connect', 'Paired. Now the IP address & port on the phone\'s Wireless debugging screen itself (not the pairing one):', text=f'{ip}:')
+        if not ok or not addr.strip(): self.busy = False; self.ready(); self.say('Paired, not connected: <b>Connect…</b> on the Phones page takes the address later.', BUILD); return
+        self.say('Connecting…', BUILD)
+        def got(r):
+            ok2, text = wifi.connect_result(*r) if not isinstance(r, Exception) else (False, str(r))
+            if ok2: self.win.st.setValue('wifi', addr.strip()); self.connected()
+            else: self.busy = False; self.ready(); self.say(text, ERR)
+        bg(lambda: adb_run(None, 'connect', addr.strip(), timeout=30), got)
+    def connected(self):   # not done(): that is QDialog's own, which accept() calls
+        self.t.stop(); self.win.refresh_devices(); self.win.toast('Connected over Wi-Fi: the phone is in the list at the top'); self.accept()
+
+
 class PhonesPage(QWidget):
     def __init__(self, win):
         super().__init__(); self.win = win; self.setObjectName('page')
         lay = QVBoxLayout(self); lay.setContentsMargins(48, 32, 48, 24); lay.setSpacing(16)
         lay.addWidget(label('Phones', 'h1'))
-        lay.addWidget(label('Over Wi-Fi: on the phone, Developer options → Wireless debugging. "Pair device with pairing code" gives an address and a code for Pair; '
+        lay.addWidget(label('Over Wi-Fi (Android 11 and later): turn on Developer options › Wireless debugging and open "Pair device with pairing code"; Pair over Wi-Fi… '
+                            'then finds the phone and asks only for its code. For Connect… by hand, '
                             'the address on the Wireless debugging screen itself is the one to Connect to (its port changes when wireless debugging restarts).', 'muted', wrap=True))
         self.table = QTableWidget(0, 7); self.table.setHorizontalHeaderLabels(['Device', 'Model', 'Android', 'Battery', 'Free', 'Connection', 'State'])
         hh = self.table.horizontalHeader(); hh.setSectionResizeMode(QHeaderView.Stretch); hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -912,13 +998,14 @@ class PhonesPage(QWidget):
         self.warn = label('', wrap=True); self.warn.setStyleSheet(f'color: {BUILD}; font-size: 13px'); self.warn.hide(); lay.addWidget(self.warn)   # the picked phone's low battery
         row = QHBoxLayout(); self.adb_buttons = []
         b = QPushButton('How to connect a phone…'); b.clicked.connect(win.phone_guide); row.addWidget(b)
-        for text, fn in (('Pair over Wi-Fi…', self.pair), ('Connect…', self.connect), ('Discover', self.discover), ('Disconnect', self.disconnect)):
+        for text, fn in (('Pair over Wi-Fi…', self.pair), ('Connect…', self.connect), ('Discover', self.discover), ('Disconnect', self.disconnect), ('Use over Wi-Fi…', self.tcpip)):
             b = QPushButton(text); b.clicked.connect(fn); row.addWidget(b); self.adb_buttons.append(b)
         row.addStretch(); lay.addLayout(row)
         lay.addSpacing(10); self.ph = label('The picked phone', 'h2'); lay.addWidget(self.ph); self.app = label('—', 'meta', wrap=True); lay.addWidget(self.app)
         self.games = QListWidget(); lay.addWidget(self.games, 1)
         row = QHBoxLayout()
-        for text, fn, name in (('Update the app', self.update_app, None), ('Back up saves to this computer', self.backup, None), ('Move the old one-game install…', self.migrate, 'ghost')):
+        for text, fn, name in (('Update the app', self.update_app, None), ('Back up saves to this computer', self.backup, None), ('Restore a backup…', self.restore_all, None),
+                               ('Move the old one-game install…', self.migrate, 'ghost')):
             b = QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
             if name: b.setObjectName(name)
         row.addStretch(); lay.addLayout(row)
@@ -948,28 +1035,74 @@ class PhonesPage(QWidget):
         for gid, meta in games.items():
             it = QListWidgetItem(f'{meta.get("name") or gid}     {gid} · {meta.get("display") or meta.get("version") or "?"}'); it.setData(Qt.UserRole, gid); self.games.addItem(it)
         if legacy: self.games.addItem('A one-game install (files/game, before the launcher): Move the old one-game install puts it in the launcher, its save copied over')
-    def pair(self):
-        addr, ok = QInputDialog.getText(self, 'Pair over Wi-Fi', 'Address and port from "Pair device with pairing code" (e.g. 192.168.1.125:37123):')
-        if not ok or not addr: return
-        code, ok = QInputDialog.getText(self, 'Pair over Wi-Fi', 'Pairing code:')
-        if not ok or not code: return
-        bg(lambda: adb_run(None, 'pair', addr.strip(), code.strip(), timeout=30), lambda r: (self.win.toast(r[1] if not isinstance(r, Exception) else str(r)), self.connect()))
+    def pair(self): PairDialog(self.win).exec()
     def connect(self):
         addr, ok = QInputDialog.getText(self, 'Connect', 'Address and port from the Wireless debugging screen (e.g. 192.168.1.125:39973):', text=self.win.st.value('wifi', ''))
         if not ok or not addr: return
         self.win.st.setValue('wifi', addr.strip())
-        bg(lambda: adb_run(None, 'connect', addr.strip(), timeout=30), lambda r: (self.win.toast(r[1] if not isinstance(r, Exception) else str(r)), self.win.refresh_devices()))
-    def discover(self):
+        def got(r):   # adb's words in plain ones: it exits 0 from a failed connect too
+            ok2, text = wifi.connect_result(*r) if not isinstance(r, Exception) else (False, str(r))
+            self.win.toast(f'Connected to {addr.strip()}' if ok2 else re.sub(r'<[^>]+>', '', text)); self.win.refresh_devices()
+        bg(lambda: adb_run(None, 'connect', addr.strip(), timeout=30), got)
+    def discover(self):   # every phone offering a connection on the network, to connect to: it offered the first one only
+        names = {i: self.win.models.get(s) for s, i in self.win.ids.items() if self.win.models.get(s)}
         def got(r):
-            text = r[1] if not isinstance(r, Exception) else str(r)
-            found = re.findall(r'_adb-tls-connect\._tcp\S*\s+(\d+\.\d+\.\d+\.\d+:\d+)', text)
-            if found and QMessageBox.question(self, 'Discover', f'Phones offering wireless debugging:\n{text}\n\nConnect to {found[0]}?') == QMessageBox.Yes:
-                bg(lambda: adb_run(None, 'connect', found[0], timeout=30), lambda _: self.win.refresh_devices())
-            elif not found: QMessageBox.information(self, 'Discover', text or 'Nothing found: pair the phone first, and keep its Wireless debugging screen open')
-        bg(lambda: adb_run(None, 'mdns', 'services'), got)
-    def disconnect(self):
-        s = self.win.serial()
-        if s and ':' in s: bg(lambda: adb_run(None, 'disconnect', s), lambda _: self.win.refresh_devices())
+            found = wifi.discovered(r[0], r[1], names) if not isinstance(r, Exception) else []
+            if not found: QMessageBox.information(self, 'Discover', 'No phone offers wireless debugging on this network. Pair it first (Pair over Wi-Fi…), keep its '
+                                                  'Wireless debugging screen on, and check that ' + wifi.SAME_NETWORK + '.'); return
+            d = QDialog(self); d.setWindowTitle('Discover'); d.setStyleSheet(STYLE + f'QDialog {{ background: {PANEL}; }}'); d.setMinimumWidth(480)
+            lay = QVBoxLayout(d); lay.setContentsMargins(24, 20, 24, 18); lay.addWidget(label('Phones offering wireless debugging on this network', 'h2'))
+            lst = QListWidget()
+            for text, addr, on in found:
+                it = QListWidgetItem(text + (' · connected' if on else '')); it.setData(Qt.UserRole, addr)
+                it.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled if not on else Qt.NoItemFlags); it.setCheckState(Qt.Unchecked if on else Qt.Checked); lst.addItem(it)
+            lay.addWidget(lst); box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); box.button(QDialogButtonBox.Ok).setText('Connect')
+            box.accepted.connect(d.accept); box.rejected.connect(d.reject); lay.addWidget(box)
+            if d.exec() != QDialog.Accepted: return
+            want = [lst.item(i).data(Qt.UserRole) for i in range(lst.count()) if lst.item(i).checkState() == Qt.Checked]
+            def connect_all(): return [(a, *wifi.connect_result(*adb_run(None, 'connect', a, timeout=20))) for a in want]
+            def done(rs):
+                bad = [f'{a}: {re.sub(r"<[^>]+>", "", t)}' for a, ok, t in rs if not ok] if not isinstance(rs, Exception) else [str(rs)]
+                self.win.toast(f'Connected to {len(want) - len(bad)} of {len(want)}' + (f'. {bad[0]}' if bad else '')); self.win.refresh_devices()
+            if want: bg(connect_all, done)
+        bg(lambda: (adb_run(None, 'mdns', 'services', timeout=8)[1], adb_run(None, 'devices', timeout=10)[1]), got)
+    def disconnect(self):   # the row picked here, else the phone picked at the top: a phone on USB and Wi-Fi has one entry at the top, its USB one
+        r = self.table.currentRow(); s = self.table.item(r, 0).data(Qt.UserRole) if r >= 0 and self.table.item(r, 0) else self.win.serial()
+        if not s: return
+        how, s = wifi.disconnect_plan(s); name = self.win.models.get(s) or s
+        if how == 'usb': self.win.toast(f'{name} is connected by its cable: unplug it to disconnect it'); return
+        self.win.let_go.update(dict.fromkeys({self.win.phone_key(s), s}, 'leaving'))   # dropped on purpose: not connected again behind the player's back (track_lost)
+        if self.win.lost and self.win.lost['id'] == self.win.phone_key(s): self.win.lost = None
+        if how == 'wireless off':
+            if QMessageBox.question(self, 'Disconnect', f'Turn off Wireless debugging on {name}? adb connected it by itself over the network and would connect it again '
+                                    'while Wireless debugging is on. Turn it on again on the phone to reconnect.') != QMessageBox.Yes: return
+            bg(lambda: adb_run(s, 'shell', 'settings put global adb_wifi_enabled 0', timeout=15),
+               lambda _: (self.win.toast(f'Wireless debugging is off on {name}: turn it on again on the phone to reconnect'), self.win.refresh_devices())); return
+        bg(lambda: adb_run(None, 'disconnect', s, timeout=15), lambda r: (self.win.toast(f'Disconnected {name}' if not isinstance(r, Exception) and r[0] else f'Could not disconnect {name}: {r[1] if not isinstance(r, Exception) else r}'),
+                                                                           self.win.refresh_devices()))
+    def tcpip(self):   # a phone on its cable, over Wi-Fi with no pairing (adb tcpip): Android 10 has no Wireless debugging, and a phone allowed over USB needs no pairing
+        r = self.table.currentRow(); s = self.table.item(r, 0).data(Qt.UserRole) if r >= 0 and self.table.item(r, 0) else self.win.serial()
+        name = self.win.models.get(s) or s
+        if not s or phone_id.wifi(s): self.win.toast('Pick a phone connected by its cable: Use over Wi-Fi starts from there'); return
+        box = QMessageBox(QMessageBox.Question, 'Use over Wi-Fi', f'<b>Use {esc(name)} over Wi-Fi?</b>', parent=self); box.setInformativeText(wifi.TCPIP_WARNING)
+        box.setStyleSheet('QLabel#qt_msgbox_informativelabel { min-width: 460px; }')
+        go = box.addButton('Use over Wi-Fi', QMessageBox.AcceptRole); box.addButton(QMessageBox.Cancel); box.setDefaultButton(go); box.exec()
+        if box.clickedButton() is not go: return
+        def run():   # its Wi-Fi address first: adb on the phone is out of reach over USB for a moment once it restarts
+            ip = wifi.wifi_ip(adb_run(s, 'shell', wifi.IP_CMD, timeout=10)[1])
+            if not ip: return False, f'{name} is not on Wi-Fi: connect it to the same network as this PC, then try again'
+            ok, text = wifi.tcpip_result(*adb_run(s, 'tcpip', str(wifi.TCPIP_PORT), timeout=20))
+            if not ok: return False, text
+            addr = f'{ip}:{wifi.TCPIP_PORT}'
+            for _ in range(6):   # adb on the phone takes a second or two to listen again
+                time.sleep(2); ok, text = wifi.connect_result(*adb_run(None, 'connect', addr, timeout=10))
+                if ok: return True, addr
+            return False, text
+        def got(r):
+            ok, text = r if not isinstance(r, Exception) else (False, str(r))
+            if ok: self.win.st.setValue('wifi', text)
+            self.win.toast(f'{name} is connected over Wi-Fi at {text} (not encrypted): you can unplug its cable' if ok else re.sub(r'<[^>]+>', '', text)); self.win.refresh_devices()
+        self.win.toast(f'Connecting to {name} over Wi-Fi…'); bg(run, got)
     def update_app(self):
         s = self.win.serial()
         if s: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.win.refresh_phone)
@@ -1003,6 +1136,27 @@ class PhonesPage(QWidget):
             if then and ok: then()
             elif then and QMessageBox.question(self, 'Backup', f'No backup was copied ({out}). Go on anyway? The old save stays on the phone either way.') == QMessageBox.Yes: then()
         bg(run, got)
+    # A save sent to the phone's files/import/<title ID>/ (build_android_from_nsp.py --import-save / --restore-backup): DroidPlay on the phone shows what it found and asks,
+    # keeps the save it has in its files/backups/, then swaps the new one in (dm/android/java LauncherSaves.incoming)
+    def import_save(self, gid, name):
+        s = self.win.serial()
+        if not s: return
+        b = QMessageBox(QMessageBox.Question, 'Import a save', f'A save for {name} on {self.win.phone_name()}: a save folder (an emulator\'s, a JKSV, EdiZon or Checkpoint backup, '
+                        'a PC port\'s), or a zip of one.\n\nDroidPlay on the phone shows the save it found and asks before swapping it in, and keeps the save it has first.',
+                        QMessageBox.Cancel, self)
+        folder = b.addButton('A folder…', QMessageBox.AcceptRole); archive = b.addButton('A zip or other archive…', QMessageBox.AcceptRole); b.exec()
+        if b.clickedButton() is folder: path = QFileDialog.getExistingDirectory(self, f'The save folder for {name}', str(Path.home()))
+        elif b.clickedButton() is archive: path = QFileDialog.getOpenFileName(self, f'A save archive for {name}', str(Path.home()), 'Archives (*.zip *.rar *.7z *.tar *.tgz *.gz);;All files (*)')[0]
+        else: return
+        if path: self.win.builds.start(f'Import a save for {name}', ['--import-save', path, '--title', gid, '--serial', s], after=self.win.refresh_phone)
+    def restore_all(self): self.restore_backup()   # a button's clicked(checked) would pass its bool as gid
+    def restore_backup(self, gid=None, name=None):   # one game's save from a backup Back up saves pulled, or every game's in it
+        s = self.win.serial()
+        if not s: return
+        mine = ba.data_dir() / 'backups' / phone_id.safe(self.win.phone_key(s))   # where backup() puts this phone's
+        start = mine if mine.is_dir() else ba.data_dir() / 'backups'
+        path = QFileDialog.getExistingDirectory(self, f'A backup holding {name}\'s save' if name else 'A save backup to put back (every game in it)', str(start if start.is_dir() else Path.home()))
+        if path: self.win.builds.start('Restore a save backup', ['--restore-backup', path, *(['--title', gid] if gid else []), '--serial', s], after=self.win.refresh_phone)
     def remove_game(self, gid, name):
         s = self.win.serial()
         if not s or QMessageBox.question(self, 'Remove', f'Delete {name} from {self.win.phone_name()}? Its save stays in the app.') != QMessageBox.Yes: return
@@ -1053,11 +1207,15 @@ class PerformancePage(QWidget):
         self.prof.verticalHeader().hide(); self.prof.setShowGrid(False); split.addWidget(self.prof); split.setSizes([700, 380])
         lay.addWidget(split, 1)
     def toggle(self):
-        if self.proc and self.proc.state() != QProcess.NotRunning: self.proc.kill(); self.b_run.setText('Watch the log'); return
+        if self.proc and self.proc.state() != QProcess.NotRunning: self.wanted = False; self.proc.kill(); self.b_run.setText('Watch the log'); return
         s = self.win.serial()
         if not s: self.win.toast(self.win.no_phone()); return
         self.proc = QProcess(self); self.proc.setProgram('adb'); self.proc.setArguments(['-s', s, 'logcat', '-T', '200', '-s', 'DroidPlay', 'nxnative'])   # the app's tag; nxnative from an app older than 0.5.0
-        self.proc.readyReadStandardOutput.connect(self.read); self.proc.start(); self.b_run.setText('Stop watching')
+        self.proc.readyReadStandardOutput.connect(self.read); self.proc.finished.connect(self.ended); self.proc.start(); self.b_run.setText('Stop watching'); self.wanted = True
+    def ended(self, *_):   # logcat ended without Stop watching: the phone dropped off (Wi-Fi). resume() starts it again when the phone is back
+        if getattr(self, 'wanted', False): self.b_run.setText('Watch the log'); self.log.appendHtml(f'<span style="color:{BUILD}">— the phone dropped off: the log goes on when it is back</span>')
+    def resume(self):
+        if getattr(self, 'wanted', False) and not (self.proc and self.proc.state() != QProcess.NotRunning) and self.win.serial(): self.toggle()
     def read(self):
         if not self.proc: return
         self.buf += bytes(self.proc.readAllStandardOutput()).decode('utf-8', 'replace')
@@ -1386,6 +1544,9 @@ class Window(QMainWindow):
         if self.pages.currentWidget() is not self.setup and (not self.setup.step('keys').done or self.library.no_games() or
                                                              not self.setup.step('phone').done and not self.st.value('serial', '')): self.go('setup')
         self.ids = {}   # serial → the phone's ID (phone_id.py), asked once per serial: its settings, backups and first-start notice are kept under it
+        self.seen = {}   # every serial → ID this session, kept after a serial goes: Install again finds the phone a build was for on the serial it has now
+        self.lost, self.reconnecting, self.reconnect_at = None, False, 0.0   # the picked phone, gone off Wi-Fi: looked for by its ID (track_lost, reconnect)
+        self.let_go = {}   # ID → 'leaving' or 'gone': phones the player disconnected (Disconnect), not looked for until they have gone and come back
         for k in self.st.allKeys():   # first-start notices kept under a Wi-Fi address, before IDs: the address is gone with its port, and the notice with it
             if k.startswith('firststart/') and k.count('/') == 2 and phone_id.wifi(k.split('/')[1]): self.st.remove(k)
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh_devices); self.timer.start(5000); self.refresh_devices()
@@ -1500,9 +1661,38 @@ class Window(QMainWindow):
         s = s or self.serial()
         return self.ids.get(s) or s
     def find_phone(self, keys): return phone_id.find([self.phone.itemData(i) for i in range(self.phone.count())], keys, self.ids)
+    def serial_of(self, s): return phone_id.current(s, [d for d in self.devs or [] if d['state'] == 'device'], self.seen)   # the serial s's phone is on now, or None
     def set_serial(self, s):   # a row of the Phones page: the picker has one entry a phone, so a phone's Wi-Fi row picks its entry over the cable
         i = self.find_phone([s, self.ids.get(s)])
         if i >= 0: self.phone.setCurrentIndex(i)
+    def track_lost(self, was, devs):   # the picked phone gone from adb's ready list after it was there over Wi-Fi (asleep, roamed, a new port): looked for by its ID
+        # every RECONNECT_EVERY s for RECONNECT_FOR s. Back: its stale offline entry dropped, and the Performance page's log started again if it was running
+        here = {d.get('id') or d['serial']: d['serial'] for d in devs if d['state'] == 'device'}; s = self.serial()
+        listed = set(here) | set(here.values())   # by ID and by serial: an ID the first look hadn't read yet
+        for i in list(self.let_go):   # still listed a moment after Disconnect (adb takes a second), then gone; listed again later: looked for again when it next drops
+            if i not in listed: self.let_go[i] = 'gone'
+            elif self.let_go[i] == 'gone': del self.let_go[i]
+        if was and s and phone_id.wifi(s) and was not in here and not self.lost and was not in self.let_go and s not in self.let_go:
+            self.lost = {'id': was, 'name': self.models.get(s) or s, 'addr': s, 'until': time.time() + wifi.RECONNECT_FOR}
+        if not self.lost: return
+        if self.lost['id'] in here:
+            old, back = self.lost, here[self.lost['id']]; self.lost = None
+            gone = wifi.stale(devs, old['id'], self.seen, back)
+            if gone: bg(lambda: [adb_run(None, 'disconnect', g, timeout=10) for g in gone], lambda _: QTimer.singleShot(0, self.refresh_devices))
+            self.toast(f'{old["name"]} is back over Wi-Fi'); QTimer.singleShot(500, self.perf.resume); return
+        if time.time() > self.lost['until']: self.lost = None; return
+        self.reconnect()
+    def reconnect(self):   # once every RECONNECT_EVERY s while the phone is lost: its address on the network, by its serial number, else the last one it had
+        if self.reconnecting or time.time() < self.reconnect_at or not self.lost: return
+        lost = dict(self.lost); self.reconnecting, self.reconnect_at = True, time.time() + wifi.RECONNECT_EVERY
+        def look():
+            for a in wifi.reconnect_targets(lost['id'], adb_run(None, 'mdns', 'services', timeout=8)[1], lost['addr']):
+                if wifi.connect_result(*adb_run(None, 'connect', a, timeout=10))[0]: return a
+            return None
+        def got(a):
+            self.reconnecting = False
+            if a and not isinstance(a, Exception): self.refresh_devices()
+        bg(look, got)
     def phone_changed(self, _):
         s = self.serial()
         if s: self.st.setValue('serial', s); self.st.setValue('phone', self.phone_key(s))   # the phone by its ID too, which outlives a Wi-Fi port
@@ -1564,13 +1754,14 @@ class Window(QMainWindow):
                 if self.devs is not None: return
                 r = []
             r = r or []
-            was = self.phone_key(); self.ids = {d['serial']: d['id'] for d in r if d.get('id')}   # the picked phone's ID as the last list had it
+            was = self.phone_key(); self.ids = {d['serial']: d['id'] for d in r if d.get('id')}; self.seen.update(self.ids)   # the picked phone's ID as the last list had it
+            self.track_lost(was, r)
             if r == self.devs and adb == self.adb: return
             ident = lambda ds: [(d['serial'], d['state'], d.get('model'), d.get('name'), d.get('android')) for d in ds]   # noqa: E731
             same = self.devs is not None and adb == self.adb and ident(r) == ident(self.devs)
             self.devs, self.adb = r, adb
             if same: self.phones.fill(r, adb); self.setup_changed(); return   # only a battery level or the free space moved: the picker and the phone's games stay
-            keep = [was, self.st.value('phone', ''), self.st.value('serial', '')]   # the picked phone by its ID: the same phone over Wi-Fi once its cable is out
+            keep = [was, (self.lost or {}).get('id'), self.st.value('phone', ''), self.st.value('serial', '')]   # the picked phone by its ID: the same phone over Wi-Fi once its cable is out
             self.models = {d['serial']: d.get('name') or d.get('model') or d['serial'] for d in r}
             self.phone.blockSignals(True); self.phone.clear()
             for d in phone_id.one_per_phone([d for d in r if d['state'] == 'device']):   # one entry a phone, over the cable when it is on a cable and on Wi-Fi (the Phones page lists both)
@@ -1579,10 +1770,12 @@ class Window(QMainWindow):
             for d in r:
                 if d['state'] in ('unauthorized', 'authorizing', 'offline'):
                     off = d['state'] == 'offline'
-                    self.phone.addItem(icon('phone', ERR if off else BUILD, 16), 'Plug your phone in again' if off else 'Tap Allow on your phone', None)
+                    self.phone.addItem(icon('phone', ERR if off else BUILD, 16), ((f'Reconnecting to {self.lost["name"]} over Wi-Fi…' if self.lost else 'Wake your phone (Wi-Fi)')
+                                                                       if phone_id.wifi(d['serial']) else 'Plug your phone in again') if off else 'Tap Allow on your phone', None)
                     it = self.phone.model().item(self.phone.count() - 1); it.setEnabled(False)
-                    it.setToolTip(re.sub(r'<[^>]+>', '', ex.explain(f'device {d["state"]}', phone=d.get('model', '')).body))
-            if not self.phone.count(): self.phone.addItem(icon('phone', TEXT3, 16), 'No phone connected' if adb else 'Install the tools to find phones', None)
+                    it.setToolTip(re.sub(r'<[^>]+>', '', ex.explain(f'device {d["state"]}', phone=d.get('model', ''), wifi=phone_id.wifi(d['serial'])).body))
+            if not self.phone.count(): self.phone.addItem(icon('phone', BUILD if self.lost else TEXT3, 16), f'Reconnecting to {self.lost["name"]} over Wi-Fi…' if self.lost and adb else
+                                                          'No phone connected' if adb else 'Install the tools to find phones', None)
             self.phone.setToolTip('The phone builds install to' if adb else 'DroidPlay finds phones with adb, which comes with the tools: Get started, step 2')
             i = self.find_phone(keep); self.phone.setCurrentIndex(i if i >= 0 else 0); self.phone.blockSignals(False)
             self.phones.fill(r, adb); self.phone_changed(0); self.setup_changed()

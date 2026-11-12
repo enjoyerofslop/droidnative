@@ -14,6 +14,7 @@ import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]
 sys.path.insert(0, str(REPO / 'dm/android/tools'))
 import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above)
+import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop)
 
 ROWS_OK = [{'name': n, 'ok': True, 'detail': '', 'fix': ''} for n in ('Python module lz4', '.NET SDK 10', 'Android SDK', 'NDK', 'CMake', 'build-tools 36.0.0',
                                                                        'platform android-35', 'adb', 'JDK keytool', 'JDK javac', 'signing key', 'game hosts')]
@@ -95,6 +96,10 @@ class Phone(unittest.TestCase):
         s = fr.phone_step([dict(self.S25, state='offline')], True)
         self.assertEqual(s.state, fr.PROBLEM); self.assertIn('plug it back in', s.text)
 
+    def test_offline_over_wifi_says_to_wake_it(self):   # an offline Wi-Fi entry left from a phone that slept
+        s = fr.phone_step([dict(self.S25, serial='192.168.1.20:37123', state='offline')], True)
+        self.assertEqual(s.state, fr.PROBLEM); self.assertIn('over Wi-Fi', s.text); self.assertNotIn('plug', s.text)
+
     def test_one_set_up_before_stays_done_unplugged(self):   # the step can't come undone each time a phone is unplugged, or the checklist would return at every launch
         self.assertTrue(fr.phone_step([], True, seen=True).done)
         self.assertEqual(fr.phone_step([], True).state, fr.TODO)
@@ -152,6 +157,15 @@ class PhoneId(unittest.TestCase):   # one phone, one name: over USB, over Wi-Fi 
         self.assertEqual(phone_id.one_per_phone([tcp, mdns]), [mdns])
         self.assertEqual(phone_id.one_per_phone([{'serial': 'A', 'id': None}, {'serial': 'B', 'id': None}]), [{'serial': 'A', 'id': None}, {'serial': 'B', 'id': None}])
 
+    def test_install_again_finds_the_phones_serial_now(self):   # the build's --serial was the old port's; the phone is back on another, or on its cable
+        seen = {'192.168.1.20:37123': 'R5CY51ZLGKH', '10.0.0.7:5555': 'e7879cce'}
+        ready = [{'serial': '10.0.0.7:5555', 'id': 'e7879cce'}, {'serial': '192.168.1.20:41011', 'id': 'R5CY51ZLGKH'}]
+        self.assertEqual(phone_id.current('192.168.1.20:37123', ready, seen), '192.168.1.20:41011')
+        self.assertEqual(phone_id.current('192.168.1.20:37123', ready + [{'serial': 'R5CY51ZLGKH', 'id': 'R5CY51ZLGKH'}], seen), 'R5CY51ZLGKH')   # the cable first
+        self.assertEqual(phone_id.current('10.0.0.7:5555', ready, seen), '10.0.0.7:5555')
+        self.assertIsNone(phone_id.current('192.168.1.20:37123', ready[:1], seen))   # not connected now: the build's serial stays, and the script waits for it
+        self.assertIsNone(phone_id.current('192.168.9.9:5555', ready, seen))
+
     def test_the_picked_phone_is_found_by_its_id(self):   # the picker keeps the phone when its cable comes out and its Wi-Fi entry takes over, and the reverse
         ids = {'R5CY51ZLGKH': 'R5CY51ZLGKH', '192.168.1.20:41011': 'R5CY51ZLGKH', '10.0.0.7:5555': 'e7879cce'}
         picker = ['10.0.0.7:5555', '192.168.1.20:41011', None]
@@ -159,6 +173,91 @@ class PhoneId(unittest.TestCase):   # one phone, one name: over USB, over Wi-Fi 
         self.assertEqual(phone_id.find(picker, [None, '', '192.168.1.20:37123', '10.0.0.7:5555'], ids), 0)   # the first key that names a listed phone
         self.assertEqual(phone_id.find(picker, ['192.168.1.20:37123'], ids), -1)
         self.assertEqual(phone_id.find(['R5CY51ZLGKH'], ['192.168.1.20:41011', ids['192.168.1.20:41011']], ids), 0)   # the Phones page's Wi-Fi row picks the cable entry
+
+
+class WiFi(unittest.TestCase):   # PairDialog and Connect…: adb's mDNS list, pair and connect replies as adb 35 prints them, in plain words (wifi.py)
+    MDNS = ('List of discovered mdns services\n'
+            'adb-e7879cce-DkIYY8\t_adb-tls-pairing._tcp\t192.168.50.66:41234\n'
+            'adb-e7879cce-DkIYY8\t_adb-tls-connect._tcp\t192.168.50.66:37853\n'
+            'adb-R5CY51ZLGKH-AbCdEf\t_adb-tls-pairing._tcp.\t192.168.50.20:39001\n'
+            'studio-xh3Kq9\t_adb-tls-pairing._tcp\t192.168.50.30:40000\n'
+            'adb-GF518M0010960000\t_adb._tcp\t192.168.50.92:5555\n')
+
+    def test_the_services_on_the_network(self):   # the Pad 3 offered both at once (q215); a QR code's pairing service is named studio-…
+        self.assertEqual(phone_id.services(self.MDNS)[0], ('adb-e7879cce-DkIYY8', 'pairing', '192.168.50.66:41234'))
+        self.assertEqual([k for _, k, _ in phone_id.services(self.MDNS)], ['pairing', 'connect', 'pairing', 'pairing', 'tcp'])
+        self.assertEqual(phone_id.mdns_services(self.MDNS), [('e7879cce', '192.168.50.66:37853')])
+        for name in ('adb-e7879cce-DkIYY8', 'adb-e7879cce-DkIYY8._adb-tls-pairing._tcp', 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp.'):
+            self.assertEqual(phone_id.serialno_of(name), 'e7879cce', name)
+        self.assertIsNone(phone_id.serialno_of('studio-xh3Kq9'))
+
+    def test_phones_showing_a_pairing_code_are_listed_with_their_address(self):
+        self.assertEqual(wifi.pairing(self.MDNS), [('e7879cce · 192.168.50.66:41234', '192.168.50.66:41234'), ('R5CY51ZLGKH · 192.168.50.20:39001', '192.168.50.20:39001'),
+                                                   ('studio-xh3Kq9 · 192.168.50.30:40000', '192.168.50.30:40000')])
+        self.assertEqual(wifi.pairing('List of discovered mdns services\n'), [])
+
+    def test_pairing_replies_in_plain_words(self):
+        self.assertEqual(wifi.pair_result(True, 'Successfully paired to 192.168.50.66:41234 [guid=adb-e7879cce-DkIYY8]'), (True, 'e7879cce', 'Paired'))
+        ok, _, text = wifi.pair_result(False, 'Failed: Wrong password or connection was dropped.')
+        self.assertFalse(ok); self.assertIn("code didn't match", text)
+        for raw in ('Failed: Unable to start pairing client.', 'failed to connect to 192.168.50.66:41234', 'error: connect failed: Connection refused'):
+            self.assertIn("couldn't reach the phone", wifi.pair_result(False, raw)[2], raw)
+        self.assertIn('Pairing failed: something new', wifi.pair_result(False, 'something new')[2])   # adb's own words when they're new
+
+    def test_connect_replies_in_plain_words(self):   # adb connect exits 0 when it fails too: the words decide
+        self.assertTrue(wifi.connect_result(True, 'connected to 192.168.50.66:37853')[0]); self.assertTrue(wifi.connect_result(True, 'already connected to 192.168.50.66:37853')[0])
+        ok, text = wifi.connect_result(True, 'failed to connect to 192.168.50.66:5555'); self.assertFalse(ok); self.assertIn('No phone answered there', text)
+        self.assertIn('pair it first', wifi.connect_result(True, 'failed to authenticate to 192.168.50.66:37853')[1])
+        self.assertIn('not one adb can use', wifi.connect_result(False, "cannot resolve host 'pad' and port 5555: nodename nor servname provided")[1])
+
+    def test_discover_lists_every_phone_on_the_network(self):   # it offered the first one only
+        devs = 'List of devices attached\nR5CY51ZLGKH\tdevice\n'
+        mdns = self.MDNS + 'adb-R5CY51ZLGKH-AbCdEf\t_adb-tls-connect._tcp\t192.168.50.20:40111\n'
+        self.assertEqual(wifi.discovered(mdns, devs, {'e7879cce': 'OnePlus Pad 3'}), [
+            ('OnePlus Pad 3 · 192.168.50.66:37853', '192.168.50.66:37853', False),
+            ('GF518M0010960000 · 192.168.50.92:5555 · adb tcpip, not encrypted', '192.168.50.92:5555', False),
+            ('R5CY51ZLGKH · 192.168.50.20:40111', '192.168.50.20:40111', True)])   # on its cable already: the same phone
+        self.assertEqual(wifi.discovered('List of discovered mdns services\n', devs), [])
+
+    def test_disconnect_by_how_the_phone_is_connected(self):   # adb disconnect adds :5555 to an mDNS name (adb 37): "no such device 'adb-…._tcp:5555'"
+        self.assertEqual(wifi.disconnect_plan('192.168.50.66:37853'), ('disconnect', '192.168.50.66:37853'))
+        self.assertEqual(wifi.disconnect_plan('adb-e7879cce-DkIYY8._adb-tls-connect._tcp'), ('wireless off', 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp'))
+        self.assertEqual(wifi.disconnect_plan('e7879cce'), ('usb', 'e7879cce'))
+
+    def test_a_phone_that_dropped_off_is_looked_for_by_its_id(self):   # its new port first (adb mdns services), then its old address
+        mdns = self.MDNS.replace('192.168.50.66:37853', '192.168.50.66:41011')
+        self.assertEqual(wifi.reconnect_targets('e7879cce', mdns, '192.168.50.66:37853'), ['192.168.50.66:41011', '192.168.50.66:37853'])
+        self.assertEqual(wifi.reconnect_targets('e7879cce', '', 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp'), [])   # an mDNS name is no address to connect to
+        self.assertEqual(wifi.reconnect_targets('aid-9774d56d682e549c', mdns, '10.0.0.7:5555'), ['10.0.0.7:5555'])   # no serial number to find it by: its address
+
+    def test_the_offline_entries_a_phone_left_are_dropped_once_it_is_back(self):
+        devs = [{'serial': '192.168.50.66:37853', 'state': 'offline'}, {'serial': '192.168.50.66:41011', 'state': 'device', 'id': 'e7879cce'},
+                {'serial': '10.0.0.7:5555', 'state': 'offline'}, {'serial': 'R5CY51ZLGKH', 'state': 'offline'}]
+        self.assertEqual(wifi.stale(devs, 'e7879cce', {}, '192.168.50.66:41011'), ['192.168.50.66:37853'])   # the same address, the old port
+        self.assertEqual(wifi.stale(devs, 'e7879cce', {'10.0.0.7:5555': 'e7879cce'}, 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp'), ['10.0.0.7:5555'])   # known by ID this session
+        self.assertEqual(wifi.stale(devs, 'e7879cce', {}, 'R5CY51ZLGKH'), [])   # back on its cable: an address's IP isn't known to be its
+
+    def test_a_cable_phones_wifi_address(self):   # Use over Wi-Fi reads it before adb tcpip, while the cable still reaches the phone
+        out = ('1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000\n    inet 127.0.0.1/8 scope host lo\n'
+               '14: rmnet_data2: <UP,LOWER_UP> mtu 1500 qdisc mq state UNKNOWN group default qlen 1000\n    inet 10.168.2.17/30 scope global rmnet_data2\n'
+               '30: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 3000\n'
+               '    inet 192.168.50.66/24 brd 192.168.50.255 scope global dynamic wlan0\n')
+        self.assertEqual(wifi.wifi_ip(out), '192.168.50.66')   # the Pad 3's, as q215 read it; not the mobile network's
+        self.assertIsNone(wifi.wifi_ip(out.split('30: wlan0')[0].replace('rmnet_data2', 'rmnet_data2')))   # on mobile data only: no Wi-Fi address
+        self.assertEqual(wifi.wifi_ip('5: eth0: <UP>\n    inet 10.0.0.9/24 brd 10.0.0.255 scope global eth0\n'), '10.0.0.9')   # a handheld on a dock's Ethernet
+
+    def test_adb_tcpip_replies(self):
+        self.assertEqual(wifi.tcpip_result(True, 'restarting in TCP mode port: 5555')[0], True)
+        ok, text = wifi.tcpip_result(False, 'error: closed'); self.assertFalse(ok); self.assertIn('error: closed', text)
+        self.assertIn('not encrypted', wifi.TCPIP_WARNING); self.assertIn('Android 10', wifi.TCPIP_WARNING)
+
+    def test_after_pairing_the_phones_connection_is_found(self):   # adb's own connection by mDNS name, or the service the phone offers at the same address
+        devs = 'List of devices attached\nR5CY51ZLGKH\tdevice\nadb-e7879cce-DkIYY8._adb-tls-connect._tcp\tdevice\n'
+        self.assertEqual(wifi.listed(devs, 'e7879cce', '192.168.50.66'), 'adb-e7879cce-DkIYY8._adb-tls-connect._tcp')
+        self.assertEqual(wifi.listed('List of devices attached\n192.168.50.66:37853\toffline\n', 'e7879cce', '192.168.50.66'), None)   # not ready: not connected
+        self.assertEqual(wifi.connect_target(self.MDNS, 'e7879cce', '192.168.50.66'), '192.168.50.66:37853')
+        self.assertEqual(wifi.connect_target(self.MDNS, None, '192.168.50.66'), '192.168.50.66:37853')   # a guid adb didn't print: by the address
+        self.assertIsNone(wifi.connect_target(self.MDNS, 'R5CY51ZLGKH', '192.168.50.20'))   # paired, but not offering a connection yet
 
 
 class Game(unittest.TestCase):
@@ -257,7 +356,28 @@ class Explain(unittest.TestCase):   # the messages as the script, nx_extract and
 
     def test_no_phone(self):
         h = ex.explain('0 adb devices ready (none): connect one, or pick it with --serial')
-        self.assertEqual((h.title, h.label), ('No phone connected', 'Set up my phone…'))
+        self.assertEqual((h.title, h.label), ('No phone connected', 'Set up my phone…')); self.assertIn('over Wi-Fi', h.body)
+
+    def test_a_phone_that_dropped_off_wifi_is_told_wifi_things(self):   # "unplug it and plug it back in" was a cable's advice, at the worst moment
+        for t in ("adb -s 192.168.1.20:37123 push x y: adb lost the phone: error: closed", "adb: error: device '192.168.1.20:37123' not found"):
+            h = ex.explain(t, phone='Galaxy S25 Edge', wifi=True)
+            self.assertEqual((h.title, h.action), ('Galaxy S25 Edge dropped off Wi-Fi', 'retry'), t); self.assertIn('Wireless debugging is still on', h.body)
+            self.assertNotIn('plug', h.body)
+        gave_up = ('the phone did not come back within 180 s after adb lost it (error: closed). Wake it, check that it is on the same network as this computer and '
+                   'that Wireless debugging is still on, then install again: the copy goes on from what the phone holds')
+        self.assertEqual(ex.explain(gave_up).title, 'Your phone dropped off Wi-Fi')   # the script's words say it was Wi-Fi
+        cable = 'the phone did not come back within 180 s after adb lost it (device offline). Plug it back in, then install again: the copy goes on from what the phone holds'
+        self.assertEqual(ex.explain(cable).title, 'Your phone stopped answering')
+
+    def test_a_connection_that_keeps_dropping(self):
+        wifi = ('adb -s 10.0.0.7:5555 push x y: adb lost the phone: error: closed\nadb lost the phone 6 times in a row with nothing copied in between, so the connection is too poor to finish '
+                'over: move the phone closer to the router (5 GHz), or use a USB cable, then install again')
+        h = ex.explain(wifi, phone='OnePlus Pad 3'); self.assertEqual(h.title, 'The connection to OnePlus Pad 3 keeps dropping'); self.assertIn('closer to the router', h.body)
+        h = ex.explain('adb lost the phone 6 times in a row with nothing copied in between, so the connection is too poor to finish over: try another cable or USB port, then install again')
+        self.assertIn('another cable or USB port', h.body)
+
+    def test_a_wifi_phone_that_forgot_this_pc_pairs_again(self):
+        self.assertIn('Pair over Wi-Fi', ex.explain('adb: device unauthorized.', wifi=True).body)
 
     def test_keys(self):
         self.assertEqual(ex.explain('give -k <prod.keys>: the game is in NSP / XCI files, which are encrypted').action, 'keys')
@@ -305,6 +425,11 @@ class Report(unittest.TestCase):   # Copy report: one Discord message, home fold
     def test_the_phones_serial_stays_out(self):
         text = ex.markdown_report(self.INFO, ['[RED] adb -s R5CY00000XX push a b failed (exit status 255): no output'], ['$ python b.py D:/BD -k k --serial R5CY00000XX'], '/home/p')
         self.assertNotIn('R5CY00000XX', text); self.assertIn('adb -s <serial> push', text); self.assertIn('--serial <serial>', text)
+
+    def test_a_wifi_phones_mdns_name_and_id_stay_out(self):   # adb-<serial number>-<suffix>._adb-tls-connect._tcp carries the serial number
+        text = ex.markdown_report(self.INFO, ['[RED] the phone is back as adb-R5CY00000XX-AbCdEf._adb-tls-connect._tcp: going on'],
+                                  ['$ python b.py D:/BD -k k --serial 192.168.1.20:37123 --phone-id R5CY00000XX'], '/home/p')
+        self.assertNotIn('R5CY00000XX', text); self.assertIn('back as <serial>', text)
 
     def test_forward_slashed_home_is_redacted_too(self):
         self.assertNotIn('andre', ex.full_report(self.INFO, 'C:/Users/andre/x.log failed', 'C:\\Users\\andre\\j.jsonl', 'C:\\Users\\andre'))

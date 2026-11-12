@@ -3,3 +3,4 @@
 # in the dark chamber with the Move / Controls / Camera prompts, from about 45 s after launch on a OnePlus Pad 3 (about 3,600 draws a frame). Frame-numbered keys, so a slower
 # load moves them in time but not in the game
 outdoors	f300:A,f500:A,f700:A,f900:A,f1100:B,f1300:A,f1500:A,f1700:A	saves/outdoors	70	40	-	the outdoors save: the title's Continue, the load prompt and the DLC notice's B, then Link standing in the Shrine of Resurrection's chamber
+dl_main_story	f300:A,f500:A,f700:A,f900:A,f1100:B,f1300:A,f1500:A,f1700:A	saves/dl-completed-main-story/completed-main-story.zip	75	60	Terrain/A/MainField\.tscb	a downloaded save after the main story (read from its archive; Deflate64, so unpacked by Info-ZIP's unzip): A past the Downloaded DLC notice (shown because the pack carries The Champions' Ballad: without the DLC the notice isn't there and the keys run one screen ahead), B, A at the title, Continue and the newest save, then Link standing on the Great Plateau

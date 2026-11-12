@@ -49,6 +49,7 @@ final class LauncherSaves {
         public void apply(File root, String top, File tsv) { Launcher.applyXattrs(root, top, Launcher.readXattrs(tsv)); }
     };
     final Launcher l; volatile boolean busy; AlertDialog progress;
+    File source; boolean computer;   // what the save on show came in (the staging folder, or an import/<title ID> folder), deleted when its dialogs end; whether a computer sent it
     LauncherSaves(Launcher l) { this.l = l; }
 
     File saves() { return new File(l.internal, "saves"); }
@@ -140,7 +141,7 @@ final class LauncherSaves {
             catch (Exception e) { Log.w(Launcher.TAG, "import: " + e); why = String.valueOf(e.getMessage()).startsWith("too big") ? "It's bigger than this phone has room for." : "It can't be read: " + e.getMessage(); }
             if (why != null) { Saves.deleteTree(st); done("Nothing imported", why); return; }
             final List<Saves.Found> fs = Saves.find(st, g.id, Saves.names(new File(saves(), g.id)), Saves.names(new File(saves(), g.id + "_device")));
-            then(new Runnable() { public void run() { choose(g, fs); } });
+            then(new Runnable() { public void run() { source = staging(); computer = false; choose(g, fs); } });
         } });
     }
     String stageFile(Uri uri, File st, long limit) throws IOException {
@@ -192,17 +193,17 @@ final class LauncherSaves {
 
     void choose(final Launcher.Game g, final List<Saves.Found> fs) {
         if (fs.isEmpty()) {
-            Saves.deleteTree(staging());
-            info("No save found", "Nothing in what you picked looks like a save. Pick the folder that holds the save's files, or a zip of it: for an emulator, the folder its "
+            cleanup();
+            info("No save found", "Nothing in " + (computer ? "what your computer sent" : "what you picked") + " looks like a save. Pick the folder that holds the save's files, or a zip of it: for an emulator, the folder its "
                 + "\"Open save data location\" opens, or the one above it.");
             return;
         }
         if (fs.size() == 1) { confirm(g, fs.get(0)); return; }
         String[] items = new String[fs.size()];
         for (int i = 0; i < items.length; i++) items[i] = what(fs.get(i)) + "\n" + size(fs.get(i));
-        new AlertDialog.Builder(l, DIALOG).setTitle("Which save?")
+        new AlertDialog.Builder(l, DIALOG).setTitle(computer ? "Which save from your computer, for " + g.name + "?" : "Which save?")
             .setItems(items, new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) { confirm(g, fs.get(w)); } })
-            .setNegativeButton("Cancel", new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) { Saves.deleteTree(staging()); } })
+            .setNegativeButton("Cancel", new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) { cleanup(); } })
             .setCancelable(false).show();
     }
     void confirm(final Launcher.Game g, final Saves.Found f) {
@@ -214,9 +215,9 @@ final class LauncherSaves {
         else if (f.unmatched) m.append("\nThey share no names with ").append(g.name).append("'s save on this phone, which holds ").append(Saves.top(new File(saves(), g.id), 4)).append(".\n");
         if (g.version != null) m.append("\nThe game here is version ").append(g.version).append(": a save from a later update may not load.\n");
         m.append('\n').append(hasSave(g.id) ? "The save " + g.name + " has now is kept first: Earlier saves > Restore puts it back." : g.name + " has no save on this phone yet.");
-        new AlertDialog.Builder(l, DIALOG).setTitle("Import this save?").setMessage(m.toString())
+        new AlertDialog.Builder(l, DIALOG).setTitle(computer ? "Import this save from your computer?" : "Import this save?").setMessage((computer ? "For " + g.name + ": " : "") + m)
             .setPositiveButton(other ? "Import anyway" : "Import", new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) { install(g, f, false); } })
-            .setNegativeButton("Cancel", new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) { Saves.deleteTree(staging()); } })
+            .setNegativeButton("Cancel", new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) { cleanup(); } })
             .setCancelable(false).show();
     }
 
@@ -224,7 +225,7 @@ final class LauncherSaves {
     void install(final Launcher.Game g, final Saves.Found f, final boolean restoring) {
         final String running = l.runningGame();
         if (running != null && running.equalsIgnoreCase(g.id)) {   // started from the desktop app while the picker was up
-            if (!restoring) Saves.deleteTree(staging());
+            if (!restoring) cleanup();
             info("Nothing imported", g.name + " is running: close it, then try again."); return;
         }
         working(restoring ? "Putting the save back…" : "Importing the save…", new Runnable() { public void run() {
@@ -234,7 +235,7 @@ final class LauncherSaves {
                 kept = Saves.keep(l.internal, g.id, keep, "DroidPlay save backup: " + g.name + " (" + g.id + ")'s save before " + (restoring ? "a restore" : "an import") + ", " + now()
                     + ".\nThe game's screen in DroidPlay > Earlier saves > Restore puts it back; so does copying this folder to backups/restore/ on the phone.\n", XA);
             } catch (IOException e) {
-                Saves.deleteTree(keep); if (!restoring) Saves.deleteTree(staging());
+                Saves.deleteTree(keep); if (!restoring) cleanup();
                 done("Nothing imported", "The save " + g.name + " has now couldn't be kept first (" + e.getMessage() + "), so it was left as it is. Free some space and try again.");
                 return;
             }
@@ -245,8 +246,40 @@ final class LauncherSaves {
             } catch (IOException e) {
                 Log.w(Launcher.TAG, "install: " + e);
                 done("Import failed", "The save couldn't be swapped in (" + e.getMessage() + ")." + (kept ? " The one " + g.name + " had is kept: Earlier saves > Restore puts it back." : ""));
-            } finally { if (!restoring) Saves.deleteTree(staging()); }
+            } finally { if (!restoring) cleanup(); }
         } });
+    }
+
+    // The save's folder gone once its dialogs end. An import/<title ID> folder the app can't delete (adb made it, and its chmod was cut short) is remembered by its
+    // time, so it isn't offered at every start
+    void cleanup() {
+        File f = source; source = null; if (f == null) return;
+        Saves.deleteTree(f);
+        if (f.exists() && computer) l.app.edit().putLong(SEEN + f.getName(), f.lastModified()).apply();
+    }
+
+    // ---------------- from the computer ----------------
+    // A save the desktop app or the command line sent (scripts/build_android_from_nsp.py --import-save / --restore-backup): adb can't write the app's internal storage,
+    // so it pushes to <external files>/import/<title ID>/, and the launcher takes it at its start and whenever it comes back to the front, with the same dialogs as an
+    // import from the picker. One at a time; a game that is running waits until it isn't
+    static final String SEEN = "import_seen_";
+    void incoming() {
+        if (busy || source != null) return;
+        File[] ds = new File(l.ext, "import").listFiles(); if (ds == null) return;
+        java.util.Arrays.sort(ds);
+        String running = l.runningGame();
+        for (File d : ds) {
+            if (!d.isDirectory() || !d.getName().matches("(?i)0[1-7][0-9a-f]{14}")) continue;
+            if (l.app.getLong(SEEN + d.getName(), -1) == d.lastModified()) continue;
+            final String id = d.getName().toUpperCase(Locale.ROOT);
+            if (id.equalsIgnoreCase(running)) continue;
+            Launcher.Game g = null; for (Launcher.Game x : l.scan()) if (x.id.equals(id)) g = x;
+            if (g == null) continue;   // the game isn't on the phone (yet)
+            Log.i(Launcher.TAG, "a save for " + id + " came from the computer: " + d);
+            source = d; computer = true;
+            choose(g, Saves.find(d, id, Saves.names(new File(saves(), id)), Saves.names(new File(saves(), id + "_device"))));
+            return;
+        }
     }
 
     // ---------------- earlier saves ----------------

@@ -62,14 +62,14 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 
 - **Library:** the games you added (**+ Build game** picks a folder with a game's NSP files), each with its box art, version and status on the phone picked at the top.
   The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
-  build only, update the app on the phone, remove the game. A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
+  build only, update the app on the phone, remove the game, import a save to the phone, restore its save from a backup ([Saves](#saves)). A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
   provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.
 - **Builds:** the running build's stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console shows here too.
   When a build fails, a banner says what went wrong in plain words, with the button that fixes it where there is one (**Install again** once the phone has room,
   **Choose prod.keys** for keys older than the game). Otherwise it is likely a bug: **Copy report** copies a short report to paste in #help on the Discord, and
   **Save full report** saves the whole log; both leave out your user folder, the phone's serial and anything that looks like a key.
 - **Phones:** adb devices over USB and Wi-Fi (pair, connect, discover), each one's battery and free space, the app version and the games on each phone, saves
-  backed up to the computer. **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
+  backed up to the computer and put back (**Restore a backup…**). **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
   (Samsung's Auto Blocker, Xiaomi's Install via USB, a Pixel's driver) and what to try when the phone doesn't show up; a phone below 20% battery gets a warning,
   since a PC's USB port charges slowly and an install takes minutes. A phone on a cable and on Wi-Fi at once is one phone: the list at the top shows it once, over
   the cable. What DroidPlay keeps for a phone (the one you picked, its backups) follows the phone itself, not its Wi-Fi address, which changes each time wireless
@@ -81,8 +81,37 @@ A rebuild only does what changed: the extraction, the rewritten code and the tra
 copied to the phone again when the phone already holds the same one.
 
 If the phone drops off during an install (it slept, Wi-Fi roamed, wireless debugging restarted on a new port, or the cable came out), the install waits up to
-three minutes for it to come back, finds it again by its serial number (over Wi-Fi it connects to it again by itself) and goes on: the RomFS copy carries on from
-what the phone already holds, and the other steps run again. Wake the phone, or plug it back in, while the Builds page says it is waiting.
+three minutes for it to come back, finds it again by its serial number (over Wi-Fi it connects to it again by itself) and goes on: the game data, the shaders
+and large DLC carry on from what the phone already holds, and the other steps run again. Wake the phone, or plug it back in, while the Builds page says it is waiting.
+
+### Over Wi-Fi
+
+DroidPlay can install and play over Wi-Fi instead of a cable, through Android's wireless debugging (Android 11 and later):
+
+1. On the phone, turn on **Settings › Developer options › Wireless debugging**, allow it on your network, and tap **Pair device with pairing code**. Keep that
+   screen open.
+2. On the **Phones** page, click **Pair over Wi-Fi…**. It finds the phone on the network by itself and fills in its address: type the six-digit code the phone shows,
+   then **Pair**. DroidPlay then connects to the phone (adb usually does it by itself within a few seconds), and the phone appears in the list at the top.
+   If the phone isn't listed (some networks don't pass the multicast that finds it), type the address shown with the code; if the connection isn't found after
+   pairing, it asks for the address on the Wireless debugging screen itself.
+3. Install and play as over a cable. A phone already allowed over USB can skip pairing: **Connect…** with the address on its Wireless debugging screen.
+
+The phone and this computer must be on the same network: a guest network keeps devices apart. A failed pairing says why (a wrong code, the pairing screen closed,
+another network) in place of adb's own words.
+
+**Discover** lists every phone offering wireless debugging on the network (a phone already connected, over Wi-Fi or its cable, is shown as such) and connects to
+the ones you tick. **Disconnect** drops the phone picked in the list (or at the top): a phone connected by address is disconnected at once. A phone adb connected
+by itself over the network would be connected again while Wireless debugging is on, so for that one DroidPlay offers to turn Wireless debugging off on the phone.
+A phone on its cable is unplugged to disconnect it.
+
+When the phone picked at the top drops off Wi-Fi (it slept, roamed, or Wireless debugging restarted on a new port), the list at the top says **Reconnecting to
+<phone> over Wi-Fi…** and DroidPlay looks for it every 20 seconds for ten minutes, by its serial number on the network and at its last address, and connects to
+it again. If the phone's Wi-Fi itself went off, Android turns Wireless debugging off with it: turn it on again on the phone. The Performance page's log carries
+on once the phone is back.
+
+**Use over Wi-Fi…** (Phones page) takes a phone connected by its cable onto Wi-Fi with no pairing, on Android 10 as well: DroidPlay restarts adb on the phone in
+network mode (`adb tcpip 5555`) and connects to it at its Wi-Fi address, and then the cable can come out. That connection is **not encrypted** (the phone still
+accepts only computers it has allowed) and lasts until the phone restarts; on Android 11 and later, Pair over Wi-Fi gives an encrypted one.
 
 ### From source
 
@@ -136,6 +165,16 @@ At the bottom of a game's screen in the app, under **Save**:
   RAR and 7z archives, and zips that Windows packed with Deflate64 (it does for big ones), can't be opened on a phone: unpack them with a file manager app or on a
   computer, then import the folder.
 - **Earlier saves** puts back a save kept before an import, or one from **Back up saves** on the games list.
+
+From a computer, **DroidPlay for Windows** does the same over adb, for a phone that's connected:
+- **Library › Manage › Import a save to the phone…** sends a save folder or archive for that game. Unlike the phone, the computer unpacks RAR and 7z archives too
+  (with Windows' own `tar`); a Deflate64 zip still needs unpacking first (Explorer's **Extract all** reads it).
+- **Manage › Restore its save from a backup…**, and **Phones › Restore a backup…** for every game in one, send saves back from what **Back up saves to this computer**
+  copied (pick its folder, or one of the dated folders inside it; the newest backup of each game is taken).
+- The command line's `--import-save` and `--restore-backup` do the same ([Packing from the command line](#packing-from-the-command-line)).
+
+The save goes to `files/import/<title ID>/` on the phone, which adb can write; the app's own save folder it can't. DroidPlay on the phone then shows what it found and
+asks, as for an import from the phone: at once when the app is open or opens, or after the game, when it's being played.
 
 Before an import or a restore, the game's save is kept in `Android/data/org.nxnative.android/files/backups/<time>-<title ID>/`, which DroidPlay for Windows' **Back up
 saves to this computer** copies too. The game must not be running; the app offers to close it, and progress it hasn't saved is lost. Uninstalling the app deletes
@@ -201,10 +240,12 @@ python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k
     --game-apk [--xapk]  the game as an app of its own (<name>.apk, plus <name>.romfs, with its DLC after the RomFS, for a game over 2 GB, or one .xapk); no device needed
     -p v0                pack the base game instead of the newest version in the folder (a version the profile does not register is packed from a derived profile)
     -l es-419            the default game language (a code or a name)
-    --serial <device>    the adb device, when more than one is connected
+    --serial <device>    the adb device, when more than one is connected (over Wi-Fi: its ip:port, or the adb-…._adb-tls-connect._tcp name adb found it by)
     --no-push            build the APK only (a game without a profile is first built this way)
     --push-only          install the app and copy a game built before, without building
 python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
+python scripts/build_android_from_nsp.py --import-save "<save folder or archive>" --title <title ID>    send a save to the phone (Saves)
+python scripts/build_android_from_nsp.py --restore-backup "<backup folder>" [--title <title ID>]       send a game's save, or every game's, from a backup
 python scripts/build_android_from_nsp.py --check       what the build needs on this computer, as JSON
 ```
 

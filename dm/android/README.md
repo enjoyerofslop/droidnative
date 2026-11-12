@@ -17,7 +17,7 @@ This host on Windows on Arm (Snapdragon laptops and tablets), reusing the Vulkan
 | Host | All of `dm/host` builds unchanged in logic: Darwin interfaces come from `compat/` (force-included `dm_android.h` and headers named as Apple's) and `plat_android.c` |
 | Audio and movies | AudioToolbox's output AudioUnit on AAudio (`coreaudio_aaudio.c`). Movies' H.264 (`hle_movie_avc.h`) and AAC (AudioConverter) on MediaCodec (`media_android.c`): H.264 pictures through an AImageReader (YUV 4:2:0 with plane strides), out as NV12 or RGBA |
 | Graphics | `gfx_vk.c`, the NVN replay on Vulkan, stage 1: textures (one image per serial; packaged and CPU-written textures deswizzled and uploaded, re-uploaded after writes through the dirty-page tracker; BC decoded on the CPU with `dm/third_party/bcdec` where the GPU lacks BC), buffer/texture copies, CPU texel reads, render-target and texture clears (full ones), presents to the window. Draws (`gfx_vk_draw.inc`, stage 2): the shaders translated when the game is packed (below), one descriptor set per stage, pipelines cached by their state, render passes on the bound targets, vertex / index / uniform / storage data copied from guest memory per draw, NVN's driver constant banks made from the bound state, textures and samplers resolved through the pools the game registers. Compute dispatches (direct and indirect; c0 + 0x200 the group counts, + 0x210 the uniform buffer table). Indirect and multi-draw-indirect draws (the arguments read on the CPU once earlier GPU writes have landed). Images (storage images in the format the shader declares, the textures made mutable for it; buffer images as storage texel buffers), buffer textures (uniform texel buffers over copies), multisample textures, with stand-ins of the right kind for unbound slots (a draw whose binding cannot be valid is skipped, never bound wrong). Textures shared by storage as `nvn_mtl.m` shares them (pool, offset and description: a render target made anew on another object each frame, or read through another object, is the same image); texture views in their own format (the images of uncompressed colour formats are mutable); whole texture arrays; vertex streams stepping per N instances (`VK_EXT_vertex_attribute_divisor`, or the KHR one, from instance 0 where its driver cannot start past it); vertex attributes matched to the shader's input types (res.json `vin`; integer-only inputs translated again as uint, as `dmsh_build.py` does): a format of another kind, or one the GPU takes as no vertex format (all scaled ones on the Adreno 619: `tests/t_vkfmt.c`), becomes on the CPU the 32-bit registers Maxwell's fetch would give, in a binding of its own; CPU-written linear textures (LINEAR, LINEAR_RENDER_TARGET: a game's glyph cache) uploaded from guest memory and again after CPU writes. Clears limited by the scissor (`vkCmdClearAttachments`) and with a channel or stencil mask (a draw: `shaders/clear.*`). Submissions are asynchronous: chunks of commands with their own staging, arena, descriptor pools and write-backs, completed in order by a thread that writes back to guest memory only the bytes the GPU changed, then signals events and the NVN fence. Not done: tessellation (the Mac / iOS backend has none either: `SetPatchSize` is not even recorded, and the Adreno binds only 4 descriptor sets) Transform feedback without `VK_EXT_transform_feedback` (the Adreno 619 has none): a vertex shader with a feedback layout gets a `.tf.spv` variant that stores its captured outputs into storage buffers, drawn as points with rasterization off and copied back to the game's buffers (the limits of `nvn_mtl.m` tf_draw: not indexed, instanced, fans or quads); rasterizer discard draws nothing else. `-DDM_GFX=null` builds `gfx_null.c` instead (no GPU) |
-| Shaders | `tools/spv_build.py`: the package `dm/gfx/tools/shader_split.py` makes (as for iOS) translated by the repository's `dmsh_xlate` to Vulkan SPIR-V, then `tools/spv_android.py`: a descriptor set per stage, fragment shader interlock removed, a `.z.spv` variant of each vertex shader for NVN's -1..1 depth. The app reads them from `game/spv` (`DM_SPV_DIR`). Vertex shaders whose inputs are only used as integers are translated again with those inputs uint (`int_inputs` on the SPIR-V). Each constant buffer's extent, the bytes the shader can read of it, goes into res.json (`cbufs[].ext`, `cb_extents`: computed indices too, a loop's counter run through its trip count). Then a vertex shader's position can read the constant buffer rows it is made of through a run-time index (`pos_rows`), behind a specialization constant the replay sets on Qualcomm's Adreno 7xx driver for the vertex shaders a game's profile names (`vk_pos_rows`, `gfx_vk_posrows.inc`): that driver's binning copy of FF's flame shader lost those rows. Outputs carry the Android chain version (`android` in res.json); older ones are translated again, except chain 3's, which only lacked the extents and get them from their SPIR-V. Two-part vertex shaders (VertexA + VertexB) are merged first, as `dmsh_build.py` does; compute shaders without facts take their thread group from the control section |
+| Shaders | `tools/spv_build.py`: the package `dm/gfx/tools/shader_split.py` makes (as for iOS) translated by the repository's `dmsh_xlate` to Vulkan SPIR-V, then `tools/spv_android.py` (pure Python, in one process per CPU, or `spv_build.py -j N`; each shader's files are those one process makes): a descriptor set per stage, fragment shader interlock removed, a `.z.spv` variant of each vertex shader for NVN's -1..1 depth. The app reads them from `game/spv` (`DM_SPV_DIR`). Vertex shaders whose inputs are only used as integers are translated again with those inputs uint (`int_inputs` on the SPIR-V). Each constant buffer's extent, the bytes the shader can read of it, goes into res.json (`cbufs[].ext`, `cb_extents`: computed indices too, a loop's counter run through its trip count). Then a vertex shader's position can read the constant buffer rows it is made of through a run-time index (`pos_rows`), behind a specialization constant the replay sets on Qualcomm's Adreno 7xx driver for the vertex shaders a game's profile names (`vk_pos_rows`, `gfx_vk_posrows.inc`): that driver's binning copy of FF's flame shader lost those rows. Outputs carry the Android chain version (`android` in res.json); older ones are translated again, except chain 3's, which only lacked the extents and get them from their SPIR-V. Two-part vertex shaders (VertexA + VertexB) are merged first, as `dmsh_build.py` does; compute shaders without facts take their thread group from the control section |
 | Front end | `front_android.c`: `GameActivity` (a NativeActivity that keeps the system bars off the screen), Vulkan window with a status screen, a physical controller as player 1, lifecycle, log to logcat (tag `DroidPlay`, `nxnative` before 0.5.0) and `files/log.txt`. The Java side (`java/`, in the APK's `classes.dex`): the virtual gamepad of dm/ios's `DmGamepad.m` (2D / 3D / Tap layouts, kept per app; hidden while a controller is connected; touches no control takes go to the game's touch screen; shaking the phone shakes the controller), drawn in a PopupWindow over the activity, and the software keyboard's text box (an AlertDialog). Game vibration (`haptics_android.c`): player 1's motors on the controller's vibrator, else the phone's, as a game vibration (`USAGE_GAME`); `DM_RUMBLE` / `DM_RUMBLE_GAIN` as on Apple. The driver's pipeline cache is kept in the app's files (`DM_PIPELINE_CACHE`), written when the app pauses |
 | Packing | `scripts/build_android_from_nsp.py`, and the desktop app `scripts/nxnative_android.py` over it. A game without a profile is surveyed first and packed from a provisional profile (`--no-push`), then built and installed like any other. `--game-apk` (or `--xapk`) packs one game as an app of its own ([A game app](#a-game-app)) |
 
@@ -52,6 +52,8 @@ cream on ink, with a monochrome layer), which `tools/build_apk.py` links unless 
   with `edizon_save_metadata.json`; Checkpoint's `0x<title ID> <name>/`), else takes the folder as the save itself, matched by file names against the game's save on the
   phone when there is one. It keeps the game's save as a backup (`files/backups/<time>-<id>/`) before swapping the new one in by renames through `<save>.swap`, the
   host's own convention (`plat_android.c`), and never while the game runs. Earlier saves lists the backups that hold the game's save, and puts one back the same way.
+  A save from the computer (`build_android_from_nsp.py --import-save` / `--restore-backup`, the desktop app's Import a save and Restore a backup) is pushed to
+  `files/import/<id>/`, opened to the app, and taken by the launcher when it comes to the front, through the same find, dialogs and swap (`LauncherSaves.incoming`).
   Only `user.*` extended attributes travel with a save: a backup's `security.selinux` rows name its own phone's labels.
 - **Updates keep the saves.** Every APK is signed with `~/.android/nxnative-debug.jks` and installed with `adb install -r`; the scripts never uninstall.
 
@@ -105,7 +107,13 @@ own words (`device '…' not found`, `device offline`, `error: closed`, exit sta
 60 s plus the bytes at 0.5 MB/s for a copy) or a copy whose byte count stood still for 90 s (`counting`). The install, the folder copies, the RomFS copy and the
 game's copy as a whole then wait up to `--reconnect-wait` seconds (180) for the phone by its ID (`reacquire`): its serial again, or another serial with its ID,
 connecting over Wi-Fi to its old address and to the address `adb mdns services` gives for its serial number; every later call goes to the serial it came back
-as. Each step can run again, and the RomFS copy goes on from `RomFS.img.partial`. More than five losses in a row with no piece copied between them stop it.
+as. Each step can run again, and the large copies go on from what the phone holds: the RomFS image from `RomFS.img.partial` (256 MiB pieces appended, the last
+MiB hashed on both sides), a DLC image over 256 MiB the same way, and a shader folder of more than 200 files in tar archives of about 256 MiB, each named in the
+folder's `.nxnative_manifest` once the phone has unpacked it (one archive of every file was 8.4 GB for Final Fantasy Resonance, and needed twice that free on the
+phone). More than five losses in a row with no piece or archive copied between them stop it. The desktop app passes `--phone-id <id>` with `--serial`, so a build whose serial is gone before it starts (a
+new Wi-Fi port since the phone was picked) still knows whom to wait for, and its **Install again** runs on the serial the phone has now; a serial whose phone now
+gives another ID (an address lent to another phone) is refused. The app's failure help says what to do over Wi-Fi for a Wi-Fi phone (`explain.py`), and reports
+leave out a Wi-Fi phone's mDNS name, which carries its serial number.
 
 ### A game app
 
@@ -146,7 +154,8 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   on phone* (no build) and *Play*. A game without a profile gets *Experimental build* (`--no-push`: the survey, a provisional profile in `<NSP folder>/<id>_build/profile`,
   found through `DM_GAMES_DIR`); once built it is marked *Experimental* and installs like the others.
 - **Phones**: the adb devices over USB and Wi-Fi (*Pair over Wi-Fi*, *Connect*, *Discover*, *Disconnect*); for the phone picked at the top, the app version and the games
-  on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`) and *Remove game from phone* (its save stays).
+  on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`), *Restore a backup* and *Remove game from
+  phone* (its save stays); a game's *Manage* menu has *Import a save to the phone* and *Restore its save from a backup*.
   A phone is known by its ID (`dm/android/tools/phone_id.py`: `ro.serialno`, or the shell's Android ID where that is empty or a placeholder), asked once per adb
   serial: the picker shows a phone on USB and Wi-Fi once, over USB; the picked phone, its backups (`<data>/backups/<id>`) and the first-start notice are kept by ID, as
   are the script's device lock and `logs/push_<id>`, so a Wi-Fi port that changes loses nothing and one phone's two serials can't run two installs at once.
@@ -217,6 +226,71 @@ python3 scripts/bench_android.py <NSP folder> [<NSP folder> ...] [-s <serial> ..
   They go in `results.md` and `results.json`, beside each run's log, timing file and screenshots.
 - **Warm-up:** `--warmup` adds a first run, reported apart. The first launch after an install builds the driver's pipelines: Brilliant Diamond's first frame took 33 s there on a OnePlus Pad 3, against 10 s warm on an Odin 2.
 - **Installs:** install before a run, never during one, because an install stops the app.
+
+### Save sweeps
+
+A sweep starts games from saves people downloaded, so a run lands in late-game places that a scripted route from a new game never reaches: a 100 % Ocarina of Time file, Super Mario Odyssey's Metro and Sand kingdoms, Breath of the Wild after the main story. It's for regressions, performance and coverage after a merge.
+
+**A downloaded save never moves a game up a tier.** Playable needs hand play from a new game, or from a save made on Android.
+
+```
+python3 scripts/bench_android.py <NSP folder> [<NSP folder> ...] -s <serial> --sweep [--compare <earlier sweep>]
+python3 scripts/bench_android.py <NSP folder> -s <serial> --routes 'dl_metro,dl_sand'
+```
+
+- **Scene routes:** a game's `dl_*` routes in its `bench_android.tsv`. Each one:
+  - starts from a downloaded save in the game's `saves/dl-<name>/` folder;
+  - uses the keys that reach player control from the title's Continue;
+  - measures a 60–90 s window, standing or walking;
+  - has a ready pattern where the scene's files show one;
+  - has a description of where the save stands.
+
+  A save only gets a route once it has loaded on the game version we pack. A save from a newer update may not load, and is noted and left out.
+- **A save in its archive:** a downloaded save stays in the archive it came in (JKSV, Checkpoint and EdiZon folders, or its files bare). The route names the archive, then `//` and the folder inside it that holds the save's files:
+
+  `saves/dl-100pct/<archive>.zip//<folder inside>`
+
+  It's unpacked into the sweep's output folder (`dm/android/tools/bench_sweep.py`): zip by Python, or by Info-ZIP's `unzip` for Deflate64, which Python can't read (Breath of the Wild's save); rar and 7z by `bsdtar` (macOS's `tar`, and Windows 10's). Nothing is written beside the archive.
+- **`--sweep`** runs every `dl_*` route of each game given, once each unless `--runs` says otherwise. **`--routes`** takes comma-separated shell patterns instead.
+- **`sweep.md`** has one table per phone, and `sweep.json` has the same rows. The columns:
+  - route
+  - load to the scene: the ready pattern's time (– for a route without one)
+  - fps, frame p50 / p95, GPU p50
+  - PSS
+  - red lines, with how many kinds (numbers and addresses made alike)
+  - how it ended
+  - the end screenshot's path
+- **`--compare <earlier sweep folder or sweep.json>`** flags a route when:
+  - its fps fell 5 % or more;
+  - it has a red-line kind the earlier sweep didn't;
+  - it crashed or was killed where the earlier sweep didn't.
+
+  The flags go in a column of their own, with the count at the top of `sweep.md`.
+- **On an idle phone:** `device-sweep queue <NSP folder> <APK | installed>` adds a `sweep` job to device-watch's queue, which `device-watch match` lists like any other job, and `device-sweep run <serial> <job id>` runs it. The runner:
+  1. takes the device's claim as every job does, and refuses a held device;
+  2. pulls the app's APK;
+  3. installs the build (or keeps the installed app);
+  4. sweeps, comparing against the last sweep of that game on that phone;
+  5. puts the APK back, releases the claim, and marks the job done with the result line.
+
+  device-watch and device-sweep are the orchestration tooling on the test Mac, outside this repository.
+
+**The routes:** the 12 downloaded saves on the test Mac, each in its game's `saves/dl-<name>/` folder. Loads are measured from the launch, on a Galaxy Z Flip 7 (Xclipse 950) and a Retroid Pocket 5 (Adreno 650):
+
+| Game | Route | Where it stands | Load to scene |
+|---|---|---|---|
+| Breath of the Wild | `dl_main_story` | the Great Plateau, after the main story | 62 s |
+| Link's Awakening | `dl_eagles_tower` | Mabe Village, before Eagle's Tower | 27 s |
+| | `dl_turtle_rock` | Tal Tal Mountain Range, before Turtle Rock | 27 s |
+| Persona 3 Portable | `dl_final_day` | the Dark Hour at Tartarus, on 1/31 | (no ready pattern) |
+| Pokémon Shield | `dl_wyndon` | a Wyndon street, with all eight badges | 25 s |
+| | `dl_postgame` | a Pokémon Center, post-game | 26 s |
+| Skyward Sword HD | `dl_sand_sea` | by a bird statue in the Lanayru Sand Sea | 30 s |
+| Smash Bros. Ultimate | `dl_all_characters` | a battle against a random fighter, every fighter unlocked | (no ready pattern) |
+| Super Mario Odyssey | `dl_metro`, `dl_sand`, `dl_bowsers` | New Donk City, outside Tostarena, Bowser's Kingdom | 51 s |
+| Ocarina of Time | none yet | the 100 % save: killed for memory on the Flip before it loaded; it needs a phone with more memory | |
+
+Breath of the Wild's keys clear the "Downloaded DLC" notice first, so they work only when The Champions' Ballad is packed.
 
 ## What the GPU backend needs from this device
 

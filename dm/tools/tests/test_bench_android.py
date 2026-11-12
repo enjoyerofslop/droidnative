@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # scripts/bench_android.py: which screen a run's screenshots are taken of on a phone with more than one (a Galaxy Z Fold 8 or Z Flip 7), from adb's dumpsys output;
 # that what is saved is a PNG even when screencap writes a warning ahead of it; that a run removes its own save folder under bench_runs and no other; and that an
-# empty pidof alone is never a death
+# empty pidof alone is never a death; and that a run an adb stall stopped part-way puts the device back and is recorded, not fatal
 import contextlib, importlib.util, io, struct, subprocess, unittest, zlib
 from pathlib import Path
 from unittest import mock
@@ -174,6 +174,38 @@ class RunFolders(unittest.TestCase):
             with self.subTest(bad), mock.patch.object(ba, 'sh') as sh:
                 with self.assertRaises(ValueError): ba.remove_run('s1', bad)
                 sh.assert_not_called()
+
+
+class StalledRuns(unittest.TestCase):   # q213's RP5 sweep: `adb exec-out cat bench_frames.tsv` timed out after 120 s, which ended the sweep and left the run's folder and env.txt
+    def setUp(self):
+        self.run = ba.RUNS + '/0100000000010000_1794445200'; self.lc = mock.Mock(); self.d = Path('/tmp/out/dev/r1')
+        ba.PENDING['s1'] = {'run': self.run, 'env': '', 'dir': self.d, 'logcat': self.lc}
+
+    def tearDown(self): ba.PENDING.clear()
+
+    def test_tidy_puts_the_device_back(self):
+        with mock.patch.object(ba, 'sh') as sh: ba.tidy('s1')
+        self.assertEqual([c.args[1] for c in sh.call_args_list], [f'am force-stop {ba.PKG}', f'rm -rf {self.run} 2>/dev/null', f'rm -f {ba.EXT}/env.txt'])
+        self.lc.terminate.assert_called_once(); self.assertNotIn('s1', ba.PENDING)
+        with mock.patch.object(ba, 'sh') as sh: ba.tidy('s1')   # nothing left to do
+        sh.assert_not_called()
+
+    def test_an_env_txt_that_was_there_goes_back(self):
+        ba.PENDING['s1']['env'] = 'DM_VK_DRIVER=turnip\n'
+        with mock.patch.object(ba, 'sh'), mock.patch.object(ba, 'adb') as adb, mock.patch.object(ba, 'write_tmp', side_effect=lambda p, t: p): ba.tidy('s1')
+        self.assertEqual(adb.call_args.args, ('s1', 'push', str(self.d / 'env_before.txt'), f'{ba.EXT}/env.txt'))
+
+    def test_adb_still_down(self):   # said, not raised: the sweep goes on to the next route
+        out = io.StringIO()
+        with mock.patch.object(ba, 'sh', side_effect=subprocess.TimeoutExpired('adb', 60)), contextlib.redirect_stdout(out): ba.tidy('s1')
+        self.assertIn(self.run, out.getvalue())
+
+    def test_the_run_is_recorded_as_a_bench_error(self):
+        r = ba.failed_run('s1', '0100000000010000', {'name': 'dl_sand'}, 1, subprocess.TimeoutExpired('adb', 120))
+        self.assertEqual((r['route'], r['fps'], r['exit']), ('dl_sand', None, 'bench error: adb timed out after 120 s'))
+        devices = [{'serial': 's1', 'maker': 'Moorechip', 'model': 'Retroid Pocket 5', 'soc': 'SM8250', 'android': '13', 'ram_gb': 7.5, 'gles': ''}]
+        with mock.patch.object(Path, 'write_text'): ba.report(Path('/tmp/out'), devices, [r])   # every field report() reads is there
+        self.assertIn('| dl_sand | – | – |', ba.bench_sweep.table(ba.bench_sweep.summarize([r]), {}))
 
 
 def stat(pid, start, state='S'):   # /proc/<pid>/stat, cut down: field 22 is the start time

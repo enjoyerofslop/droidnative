@@ -50,10 +50,10 @@ NETWORK = ('urlopen error', 'timed out', 'getaddrinfo failed', 'name or service 
 PC_FULL = ('not enough space on the disk', 'errno 28', 'winerror 112', 'no space left on device')
 
 
-def explain(text, phone='', game='', stage='', setup=False, folder=''):
+def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=False):
     """text: what failed said (its [RED] lines, the last line); phone, game: their names; stage: the script's name of the stage it stopped in; setup: it was
-    --setup (Install tools); folder: the game's folder. → Help"""
-    t = text or ''; low = t.lower()
+    --setup (Install tools); folder: the game's folder; wifi: the phone was connected over Wi-Fi (wireless debugging). → Help"""
+    t = text or ''; low = t.lower(); wifi = wifi or 'wireless debugging is still on' in low   # the script's own words for a Wi-Fi phone that didn't come back
     ph, the_phone, g = esc(phone) if phone else 'Your phone', esc(phone) if phone else 'your phone', esc(game) if game else 'The game'
     adb_said = re.search(r'\badb\b', low) is not None   # an adb command's failure: "No space left on device" is then the phone's, not this PC's
     if 'INSTALL_FAILED_USER_RESTRICTED' in t:
@@ -70,14 +70,26 @@ def explain(text, phone='', game='', stage='', setup=False, folder=''):
         return Help(f'Not enough space on {the_phone}', (f'{ph} has only {m[1]} free. ' if m else '') + 'Free up a few GB (videos, other games), then Install again: '
                     'a copy cut short carries on from where it stopped.', 'retry', 'Install again')
     if ('unauthorized' in low or 'authorizing' in low) and 'http error' not in low:   # adb's state, not a web server's 401
+        if wifi: return Help(f"{ph} doesn't know this PC over Wi-Fi", 'Pair it again: on the phone, Wireless debugging › Pair device with pairing code, then '
+                             '<b>Pair over Wi-Fi…</b> on the Phones page.', 'phone', 'Set up my phone…')
         return Help(f"{ph} hasn't allowed this PC yet", 'Unlock it and tap <b>Allow</b> on "Allow USB debugging?" (tick "Always allow from this computer"). '
                     'No prompt? Unplug it and plug it back in.', 'phone', 'Set up my phone…')
+    m = re.search(r'lost the phone (\d+) times', low)   # the script gave up on a connection that kept dropping (survives_drops)
+    if m:
+        return Help(f'The connection to {the_phone} keeps dropping', f'It dropped {m[1]} times in one install. ' +
+                    ('Move the phone closer to the router (5 GHz is faster), keep it awake and charging, or use a USB cable for this install, then Install again: '
+                     'the copy carries on from where it stopped.' if wifi or 'router' in low else
+                     'Try another cable or USB port (one on the computer itself, not a hub), then Install again: the copy carries on from where it stopped.'), 'retry', 'Install again')
     if ('device offline' in low or '(offline)' in low or 'no devices/emulators found' in low or re.search(r"device '?\S*'? not found", low)
-            or 'exit status 255' in low or 'error: closed' in low):
+            or 'exit status 255' in low or 'error: closed' in low or 'did not come back within' in low):
+        if wifi: return Help(f'{ph} dropped off Wi-Fi', 'Wake it, and check that it is on the same network as this PC and that Wireless debugging is still on '
+                             '(its address changes when Wireless debugging restarts: DroidPlay finds it again). Then Install again: the copy carries on from where '
+                             'it stopped.', 'retry', 'Install again')
         return Help(f'{ph} stopped answering', 'Unplug it and plug it back in, then Install again: the copy carries on from where it stopped. A different cable or USB '
                     'port helps if it keeps happening.', 'retry', 'Install again')
     if re.search(r'\b0 adb devices ready', low):
-        return Help('No phone connected', 'Plug in your phone with a USB cable that carries data, with USB debugging on.', 'phone', 'Set up my phone…')
+        return Help('No phone connected', 'Plug in your phone with a USB cable that carries data, with USB debugging on, or connect it over Wi-Fi on the Phones page '
+                    '(Android 11 and later).', 'phone', 'Set up my phone…')
     m = re.search(r'less than ([\d.]+) GB free on the volume of (.+)', t)
     if m or any(x in low for x in PC_FULL):
         where = m[2].strip() if m else folder or ''
@@ -115,7 +127,8 @@ def system_name():
 def redact(text, home):   # bug_report's rules; Windows spells the home folder with \ and, in some tools' messages, with /. And the phone's serial, which a post
     # in a public channel has no need of: the script's --serial and adb's -s name it
     if home: text = text.replace(home.replace('\\', '/'), home)
-    text = re.sub(r'(--serial[ =]|\badb(?:\.exe)? -s )\S+', r'\1<serial>', text)
+    text = re.sub(r'(--serial[ =]|--phone-id[ =]|\badb(?:\.exe)? -s )\S+', r'\1<serial>', text)
+    text = re.sub(r'\badb-[A-Za-z0-9]+-[^\s.]+\._adb-tls-(?:connect|pairing)\._tcp\.?', '<serial>', text)   # a Wi-Fi phone's mDNS name carries its serial number
     return bug_report.redact(text, home)[0]
 
 
