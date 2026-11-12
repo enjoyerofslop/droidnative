@@ -142,8 +142,12 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
 - **In the game.** Touch controls are drawn over the picture in three layouts (2D, 3D and Tap, switched with the round button at the top); touches no control takes go
   to the game's touch screen. Their size and how far in from the sides they sit are the settings screen's choices; a game app, which has none, takes `DM_PAD_SCALE` and
   `DM_PAD_INSET` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
-  shakes the controller. The **≡** button at the top (left of −) goes back to the launcher while the game keeps running behind it: **Play** on the same game resumes
-  it, and picking another game asks before closing the running one.
+  shakes the controller. The **≡** button at the top (left of −), or a controller's Mode or Menu key where Android passes it on, opens the pause menu: the game is held
+  under it (its clock, sound and vibration stop, and no input reaches it) until **Resume**, ≡ again, B or the phone's Back. Its rows change the touch layout and turn the frame-rate
+  counter on or off for this run (the settings screen's choice is the one that is kept), **Export or import the save…** opens the game's screen in the launcher,
+  where the Save rows are (they ask before closing the game: a save is not swapped under a running game), and **Back to the launcher** goes there while the game
+  keeps running behind it: **Play** on the same game resumes it, and picking another game asks before closing the running one. A game app has no launcher: it has
+  no save row, and its last row is **Home screen**.
 - **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; each game's screen exports, imports and puts back its save
   ([Saves](#saves)), and the desktop app backs them all up to the computer. The log is
   `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`). The start before's is kept as `log.prev.txt`, so a game the system closed
@@ -235,7 +239,8 @@ Python 3.12 or newer with `lz4`, `capstone`, `fonttools` and `backports.zstd` (n
 `pip install lz4 capstone fonttools backports.zstd PySide6`. The .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (set `ANDROID_HOME` or pass
 `--sdk`), `adb`, and a JDK (for `keytool` and `javac`). The desktop app's **Settings** page checks all of this and says how to get what is missing; DroidPlay for Windows installs it for you.
 On Windows, use Python 3.14 and set `PYTHONUTF8=1` for the command line (the desktop app sets it for what it runs): the scripts read and write text as UTF-8,
-which Python on Windows does by default only from 3.15, and lz4 has no Windows build for 3.15 yet.
+which Python on Windows does by default only from 3.15, and lz4 has no Windows build for 3.15 yet. On Linux, an Unreal game whose pak index is encrypted also
+needs OpenSSL's libcrypto (`libcrypto.so.3`, which distributions install with OpenSSL); the Mac and Windows have their own AES.
 
 ```
 python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k "<your prod.keys>"    build, install, copy the game
