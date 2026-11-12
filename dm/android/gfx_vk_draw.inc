@@ -2355,6 +2355,21 @@ static int buf_fwd(uint64_t addr, uint64_t n, int write, VkDeviceSize al, VkBuff
 }
 static int sb_fwd(uint64_t addr, uint64_t n, int write, VkBuffer *b, VkDeviceSize *o) { return buf_fwd(addr, n, write, g_vk.props.limits.minStorageBufferOffsetAlignment, b, o); }
 static int tb_fwd(uint64_t addr, uint64_t n, int write, VkBuffer *b, VkDeviceSize *o) { return buf_fwd(addr, n, write, g_vk.props.limits.minTexelBufferOffsetAlignment, b, o); }
+static int ub_fwd(uint64_t addr, uint64_t n, VkBuffer *b, VkDeviceSize *o) { return buf_fwd(addr, n, 0, g_vk.props.limits.minUniformBufferOffsetAlignment, b, o); }
+// A read that the newest write of the current chunk holds whole, where that write is a draw's plain arena copy (wb_promote.h), ends the targets' pass, puts a full barrier
+// after everything recorded and marks the write forwardable: the read binds its copy (buf_fwd: a storage buffer, ub_fwd: a uniform buffer), as a dispatch's, instead of
+// waiting for the chunk. The pass begins again at the next draw. Xenoblade Chronicles 3 reads such a write as a uniform buffer twice a frame. Draws' writes in a chunk in
+// flight still wait (taking one would change the completion thread's count of chunks with forwardable write-backs as it runs). DM_VK_WB_PROMOTE=0 (env.txt): such reads wait, as before
+static int wb_promote_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_WB_PROMOTE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_WB_PROMOTE=0: a read of a draw's pending storage buffer write waits for the GPU"); } return v; }
+static uint64_t g_wb_promote;   // draws' writes made forwardable for a later read
+static void wb_promote(uintptr_t lo, uintptr_t hi) {
+    if (!C || hi <= lo || vk_safe() || !buf_fwd_on() || !wb_promote_on()) return;
+    int copy = 0; for (int k = 0; k < C->ncop; k++) if (C->cop[k].dst < hi && lo < C->cop[k].dst + C->cop[k].n) copy = 1;
+    int n = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb;
+    for (int i = n - 1; i >= 0; i--) { wb_t *w = &C->wb[i]; if (!wb_hits(w, lo, hi)) continue;   // the newest that writes into the range decides
+        if (wb_promote_ok(lo, hi, (uintptr_t)w->dst, w->row_bytes, w->rows, w->st, w->fwd, w->inpl, w->lin, w->ds_n != 0, copy)) { rp_end(); cb_barrier(); w->fwd = 1; C->nfwd++; g_wb_promote++; }
+        return; }
+}
 // A storage buffer a discarded draw writes (run as a dispatch: g_vdisp), bound on a copy of its whole home range (rd_home.h) that is a forwardable write-back of the chunk,
 // so the draws after it find every byte they bind in that one write-back (fwd_find) and read it on the GPU. The chunk's first such write makes the copy (rd_home_copy):
 // its bytes copied on the GPU from the newest copy of a chunk in flight (fwd_find holds that chunk until this one completes), else from guest memory, which draw_view
@@ -2772,7 +2787,8 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             if (src) memcpy(d, src, n); else memset(d, 0, n);
             memset(d + n, 0, q - n); for (; q + 4 <= aa; q += 4) memcpy(d + q, &nan, 4);
             al = aa; g_ext_checked++;
-        } else if (!ucopy(src, n, al, &b, &off)) return 0;
+        } else if (slot >= 3 && slot - 3 < 16 && src && src == (const void *)(uintptr_t)D.ubo[nst][slot - 3].addr && ub_fwd(D.ubo[nst][slot - 3].addr, n, &b, &off)) g_buf_fwd[0]++;   // a pending write read on the GPU (wb_promote, buf_fwd)
+        else if (!ucopy(src, n, al, &b, &off)) return 0;
         int dy = s->cbdyn[i] != 0xff; if (dy) dyn[s->cbdyn[i]] = (uint32_t)off;   // a dynamic one's offset goes to the bind, its descriptor at 0
         bi[nbi] = (VkDescriptorBufferInfo){b, dy ? 0 : off, al};
         wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)s->cb[i].binding, 0, 1, dy ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &bi[nbi++], NULL};
@@ -3210,6 +3226,7 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
     #define FWD(f, a, s, w) do { VkBuffer fb_; VkDeviceSize fo_; int w_ = (w);   /* a dispatch's pending write: read on the GPU (buf_fwd) */ \
         if (w_ && g_vdisp && (f) == sb_fwd && rd_home_on()) { uintptr_t hl_ = 0, hh_ = 0; if ((a) && (s)) rd_home_find(&g_rd_homes, (uintptr_t)(a), (uintptr_t)((a) + (s)), &hl_, &hh_); \
             if (hh_ > hl_ && !fwd_find(hl_, hh_, &fb_, &fo_)) RNG(hl_, hh_ - hl_); break; }   /* a discarded draw's write: its home range, found whole on the GPU or landed (rd_bind_w) */ \
+        if (!w_ && (a) && (s)) wb_promote((uintptr_t)(a), (uintptr_t)((a) + (s)));   /* a draw's write it reads whole: on the GPU after a barrier */ \
         if ((w_ && !cs) || !f((a), (s), w_, &fb_, &fo_)) RNG(a, s); } while (0)
     g_fwd_nwb = C ? C->nwb : 0; const int cs = (sh[0] && sh[0]->stage == SH_CS) || g_vdisp;   // a dispatch (its stage alone), or a draw run as one (g_vdisp)
     if (vtx) { uint32_t seen = 0; for (int i = 0; i < 16; i++) { va_st a; memcpy(&a, &D.attr[i], 4); VkBuffer fb; VkDeviceSize fo;
@@ -3219,7 +3236,10 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
     for (int k = 0; k < 4; k++) { const vshader *s = sh[k]; if (!s) continue; int nst = nvn_stage_of(s->stage); KS = (signed char)k;
         if (!tbuf_range_on()) { for (int i = 0; i < s->ntx; i++) if ((s->tx[i].type & 0xff) == 2) { g_vs = 5; cpu_view(); return; }
                                 for (int i = 0; i < s->nim; i++) if ((s->im[i].type & 0xff) == 2) { g_vs = 6; cpu_view(); return; } }
-        K = 'u'; for (int i = 0; i < s->ncb; i++) { int sl = s->cb[i].slot; if (sl >= 3 && sl - 3 < 16) RNG(D.ubo[nst][sl - 3].addr, D.ubo[nst][sl - 3].size); }
+        K = 'u'; for (int i = 0; i < s->ncb; i++) { int sl = s->cb[i].slot; if (sl < 3 || sl - 3 >= 16) continue; const p_bind_buf *u = &D.ubo[nst][sl - 3];
+            size_t un = u->size > 0x10000 ? 0x10000 : (size_t)u->size; if (s->cb[i].ext && un > s->cb[i].ext) un = s->cb[i].ext;   // what stage_set binds (ub_fwd there)
+            VkBuffer ub_; VkDeviceSize uo_; if (u->addr && un && !ext_check()) { wb_promote((uintptr_t)u->addr, (uintptr_t)(u->addr + un)); if (ub_fwd(u->addr, un, &ub_, &uo_)) continue; }
+            RNG(u->addr, u->size); }
         K = 's'; for (int i = 0; i < s->nsb; i++) { const rb_sbuf *sb = &s->sb[i]; uint32_t off = 4u * (uint32_t)sb->cb_off, base = (uint32_t)c_bases[nst] << 4;
             if (sb->cb_slot == 0 && nst == 5 && off >= 0x210 && off < 0x310 && !((off - 0x210) % 16)) { const p_bind_buf *u = &D.ubo[5][(off - 0x210) / 16]; FWD(sb_fwd, u->addr, u->size, sb->flags & 1); }   // compute: its uniform buffer table (stage_set)
             else if (sb->cb_slot == 0 && base && off >= base && off - base < 0x100 && !((off - base) % 16)) { const p_bind_buf *u = &D.ssbo[nst][(off - base) / 16]; FWD(sb_fwd, u->addr, u->size, sb->flags & 1); } } }

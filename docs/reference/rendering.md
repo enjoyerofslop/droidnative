@@ -1854,6 +1854,21 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - 15.9–16.0 fps against 16.0, GPU 38.5–38.6 ms against 38.3. The picture at the route's end is the same.
   - Super Mario Odyssey on a Retroid Pocket 5 binds none (59.4 against 59.5 fps).
 
+### A draw's storage buffer write read by a later draw after a barrier (Android)
+
+- **Symptom:** Android only: a game reads, in a later draw, what an earlier draw wrote to a storage buffer, and plays far below its GPU's rate, the GPU at a low clock. The `[vk] guest reads of draws` line counts a few waits for the current submission each frame, and the replay thread and the GPU take turns instead of overlapping.
+- **Cause:** a draw's storage buffer write is a write-back of its own that later shaders don't read on the GPU. Draws in a pass have no barrier between them, so only a dispatch's write-back is forwardable ([Buffer textures synced by their range, and dispatch outputs read on the GPU](#buffer-textures-synced-by-their-range-and-dispatch-outputs-read-on-the-gpu)). A draw reading such a write submitted the chunk and waited for it to complete.
+  - Xenoblade Chronicles 3 writes 16 and 64 bytes from a draw, and a later draw reads them as a uniform buffer, twice a frame.
+  - With the GPU at its lowest clock, each wait took about 4 ms. Around them the replay thread (37.6 ms a frame) and the GPU (48.8 ms) ran one after the other: an 80 ms frame.
+- **Fix:** a read that the newest write of the current chunk holds whole, where that write is a draw's plain arena copy, ends the targets' pass, puts a full barrier after everything recorded and marks the write forwardable (`wb_promote`; the rule in `dm/android/wb_promote.h`).
+  - The read then binds the write-back's copy, as a dispatch's: a storage buffer through `buf_fwd`, a uniform buffer through `ub_fwd` at the uniform buffer alignment. The pass begins again at the next draw.
+  - These still wait, as before: a queued copy into the range, a write of another kind (a staging slice, in place, a linear target's, a depth / stencil readback), a read the write does not hold, and a draw's write in a chunk already in flight.
+  - `DM_VK_WB_PROMOTE=0` leaves such reads waiting. The `[vk] guest reads of draws` line counts the writes made readable so.
+- **Check (2026-11-12):** `dm/tools/tests/test_wb_promote.py`. Xenoblade Chronicles 3 1.0.0 on a Galaxy S25 Edge (Adreno 830, Android 16), its game app with only the host swapped, from a fresh start through the opening to the first battle and the field after it:
+  - Measured on top of the stream clip (its own pull request). Without this change: 2 waits for the current submission a frame (these reads), 12.0 fps in the battle and the field (the median of 127 two-second windows, all at 160 MHz), frame p50 84 ms.
+  - With it: none. 12.7 and 13.1 fps at 160 MHz in two runs (121 and 454 windows), frame p50 77 ms, about 20,000 writes made readable in a run of 20 minutes. The rest of the turn-taking is the first draw of each submission waiting for those in flight, fixed in its own pull request (30 fps with the three).
+- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md#android).
+
 ### Render passes kept over CPU-side commands
 
 - **Symptom:** hundreds of render passes a frame on the same targets; on a tiler GPU each loads and stores its attachments.

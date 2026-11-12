@@ -45,6 +45,7 @@
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
 #include "rec_desc.h"   // a descriptor set's writes packed for the recorder (gfx_vk_rec.inc R_UPDDS)
 #include "sb_reuse.h"   // a read-only storage buffer's copy bound again while its pages are unwritten (gfx_vk_sbcopy.inc)
+#include "wb_promote.h"   // whether a read of a draw's pending storage buffer write takes its copy on the GPU after a barrier (gfx_vk_draw.inc wb_promote)
 #include "tex_aspect.h"   // which aspect of its image a texture slot reads: stencil mode (gfx_vk_draw.inc tex_aspect)
 #include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
@@ -2620,8 +2621,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         LOG("[vk] arena write-backs (storage buffers, buffer images, transform feedback), frames %llu to %llu: %.1f a frame, %.0f KB a frame, %.0f%% read through the GPU's cached copy (%s); landing every write-back took the completion thread %.2f ms a frame",
             f0, frame, (double)(n - n0) / fr, (double)(b - b0) / 1024 / fr, n > n0 ? 100.0 * (double)(r - r0) / (double)(n - n0) : 0.0, rb_state(), (double)(t - t0) / 1e6 / fr);
         f0 = frame; n0 = n; b0 = b; r0 = r; t0 = t; }
-    LOG("[vk] guest reads of draws: waited for the current submission %llu, for submissions in flight %llu, no wait %llu; uniform updates and small copies: %llu / %llu / %llu; submissions %llu (cumulative)",
-        (unsigned long long)g_view_cur, (unsigned long long)g_view_fly, (unsigned long long)g_view_free, (unsigned long long)g_mem_cur, (unsigned long long)g_mem_fly, (unsigned long long)g_mem_free,
+    LOG("[vk] guest reads of draws: waited for the current submission %llu, for submissions in flight %llu, no wait %llu (%llu of them after a barrier that made a draw's write readable on the GPU: wb_promote); uniform updates and small copies: %llu / %llu / %llu; submissions %llu (cumulative)",
+        (unsigned long long)g_view_cur, (unsigned long long)g_view_fly, (unsigned long long)g_view_free, (unsigned long long)g_wb_promote, (unsigned long long)g_mem_cur, (unsigned long long)g_mem_fly, (unsigned long long)g_mem_free,
         (unsigned long long)g_flushes);
     LOG("[vk] constant and storage buffer copies: %llu reused, %llu made, %llu MB copied to the arena and %llu MB to the shadows (cumulative; gfx_vk_draw.inc ucopy); constant buffer bindings of the shaders loaded: %llu bounded by res.json, %llu by the SPIR-V scan, %llu read whole, %llu res.json extents below the scan's (gfx_vk_draw.inc cb_ext_pick)%s",
         (unsigned long long)g_ucopy_hit, (unsigned long long)g_ucopy_miss, (unsigned long long)(g_ucopy_bytes >> 20), (unsigned long long)(g_ucopy_shadow >> 20), (unsigned long long)g_cbx[0], (unsigned long long)g_cbx[2], (unsigned long long)g_cbx[3], (unsigned long long)g_cbx[1],
