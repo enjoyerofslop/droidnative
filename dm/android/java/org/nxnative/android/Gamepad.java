@@ -4,6 +4,7 @@
 //   2D (simple), 3D (full, with D-pad, L3 / R3 and a right stick in the right third) and Tap (no controls: touches go to the game's touch screen; handheld mode only),
 //   cycled by the layout button at the top centre and kept per app (each game is its own app). Touches no control takes go to the game's touch screen, normalized
 //   on the centred 16:9 picture. The controls hide while a physical controller is connected (its keys reach the native input queue: this window is not focusable).
+// The ≡ button (shown with a controller too) opens the pause menu, drawn here over the held game: Resume, the touch layout, the frame-rate counter, back to the launcher.
 // NativeActivity owns its window's surface (no view of its own is drawn), so the gamepad is a PopupWindow over the whole activity.
 // Shaking the phone shakes the controller (the accelerometer: gravity followed by a slow low-pass, a hit past DM_SHAKE_G, 1.5 G by default).
 package org.nxnative.android;
@@ -48,6 +49,7 @@ public final class Gamepad extends View {
     static native void nativeLog(String s);
     static native String nativeEnv(String name);   // the host's environment (env.txt is read after the VM starts: System.getenv does not see it)
     static native long nativeFrames();         // frames the game presented (front_android.c): the frame-rate counter
+    static native boolean nativePause(boolean on);   // the pause menu opened or closed: the game held or let go (front_android.c); false: no game is running
 
     static final int B_A = 0, B_B = 1, B_X = 2, B_Y = 3, B_LS = 4, B_RS = 5, B_L = 6, B_R = 7, B_ZL = 8, B_ZR = 9, B_PLUS = 10, B_MINUS = 11,
                      B_LEFT = 12, B_UP = 13, B_RIGHT = 14, B_DOWN = 15, B_N = 16;   // the bits of dm_input.h
@@ -256,6 +258,7 @@ public final class Gamepad extends View {
         return swap;
     }
     @Override public boolean onTouchEvent(MotionEvent e) {
+        if (menuOpen) return menuTouch(e);
         int a = e.getActionMasked(), ai = e.getActionIndex(); boolean swap = false, gameMoved = false;
         switch (a) {
             case MotionEvent.ACTION_DOWN: case MotionEvent.ACTION_POINTER_DOWN: { int p = e.getPointerId(ai) & 63; begin(p, e.getX(ai), e.getY(ai)); break; }
@@ -268,7 +271,7 @@ public final class Gamepad extends View {
         if (gameMoved) pushGame();
         recompute();
         if (swap) nextLayout();
-        if (menuGo) { menuGo = false; toLauncher(); }
+        if (menuGo) { menuGo = false; menuSet(true); }
         return true;
     }
     void nextLayout() {   // 2D → 3D (→ Tap in handheld mode) → 2D; every touch released first
@@ -304,12 +307,17 @@ public final class Gamepad extends View {
         p.close(); return p;
     }
     // ---- Frame-rate counter (DM_SHOW_FPS=1, the settings screen's Frame-rate counter): the game's presented frames over each half second, at the top left ----
-    String fps; long fpsFrames, fpsAt; Paint fpsPaint;
-    void fpsTick(final Handler h) {
+    String fps; long fpsFrames, fpsAt; Paint fpsPaint; boolean fpsOn;
+    final Handler fpsH = new Handler(Looper.getMainLooper()); final Runnable fpsRun = new Runnable() { public void run() { fpsTick(); } };
+    void fpsTick() {
         long n = nativeFrames(), t = android.os.SystemClock.elapsedRealtime();
         if (fpsAt != 0 && t > fpsAt) { fps = String.format(java.util.Locale.ROOT, "%.0f fps", (n - fpsFrames) * 1000.0 / (t - fpsAt)); invalidate(); }
         fpsFrames = n; fpsAt = t;
-        h.postDelayed(new Runnable() { public void run() { fpsTick(h); } }, 500);
+        fpsH.postDelayed(fpsRun, 500);
+    }
+    void fpsSet(boolean on) {   // the launcher's choice at the start; the pause menu's row for this run of the game
+        fpsH.removeCallbacks(fpsRun); fpsOn = on; fps = null; fpsAt = 0;
+        if (on) fpsTick(); else invalidate();
     }
     void fpsDraw(Canvas c) {
         if (fps == null) return;
@@ -319,6 +327,7 @@ public final class Gamepad extends View {
 
     @Override protected void onDraw(Canvas c) {
         fpsDraw(c);
+        if (menuOpen) { menuDraw(c); return; }
         float u = u(); long all = faceBits | dpadBits | btnBits;
         if (!padOff) {
             if (!tap) {
@@ -340,20 +349,109 @@ public final class Gamepad extends View {
         shape(c, circle(menuCx(), menuCy(), K_SWAP_R * u), menuHeld); label(c, "≡", menuCx(), menuCy(), 18 * u, menuHeld);
     }
 
+    // ---- The pause menu: ≡ (or a controller's Mode / Menu key, front_android.c) opens it and the game is held under it (nativePause) until it closes ----
+    // Rows that every device and game has: nothing here is saved but the touch layout, which the layout button saves too. Touch: a row is chosen where the finger lifts
+    // on the row it went down on, ≡ again resumes. A controller: up / down, A chooses, left / right change a row's value, B resumes (menuKey, from the native input queue)
+    static final int M_RESUME = 0, M_LAYOUT = 1, M_FPS = 2, M_SAVE = 3, M_LEAVE = 4;   // M_SAVE is the launcher's screen: a game app, which has none, has no such row
+    int menuN() { return hasLauncher() ? 5 : 4; }
+    int menuId(int row) { return row < M_SAVE || hasLauncher() ? row : row + 1; }
+    static final int MK_TOGGLE = 0, MK_UP = 1, MK_DOWN = 2, MK_LEFT = 3, MK_RIGHT = 4, MK_OK = 5, MK_BACK = 6;   // front_android.c's
+    static final float K_MENU_W = 300, K_MENU_HEAD = 48, K_MENU_ROW = 46, K_MENU_PAD = 10;
+    boolean menuOpen; int menuSel, menuDown = -1; Paint menuPaint;
+    void menuSet(boolean open) {
+        if (open == menuOpen) return;
+        if (open) {
+            reset();   // every touch released first
+            if (!hold(true)) { toLauncher(); return; }   // no game to hold (the status screen), or a host that cannot hold one: ≡ leaves, as it did
+            menuSel = M_RESUME; menuDown = -1;
+        } else hold(false);
+        menuOpen = open; invalidate();
+    }
+    // An app can carry hosts built before the menu (a game kept on its tested host): they register no nativePause, and the call throws. Such a host has no menu
+    boolean hold(boolean on) {
+        try { return nativePause(on); }
+        catch (UnsatisfiedLinkError e) { nativeLog("gamepad: menu: this game's host is older than the pause menu"); return false; }
+    }
+    RectF menuBox() {
+        float u = baseU(), w = Math.min(K_MENU_W * u, getWidth() * 0.9f), h = (K_MENU_HEAD + menuN() * K_MENU_ROW + K_MENU_PAD) * u, cx = getWidth() / 2f, cy = getHeight() / 2f;
+        return new RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2);
+    }
+    RectF menuRow(int i) { RectF b = menuBox(); float u = baseU(), t = b.top + (K_MENU_HEAD + i * K_MENU_ROW) * u; return new RectF(b.left + K_MENU_PAD * u, t, b.right - K_MENU_PAD * u, t + K_MENU_ROW * u); }
+    int menuRowAt(float x, float y) { for (int i = 0, n = menuN(); i < n; i++) if (menuRow(i).contains(x, y)) return i; return -1; }
+    String menuLabel(int i) { i = menuId(i); return i == M_RESUME ? "Resume" : i == M_LAYOUT ? "Touch controls" : i == M_FPS ? "Frame-rate counter" : i == M_SAVE ? "Export or import the save…" : hasLauncher() ? "Back to the launcher" : "Home screen"; }
+    String menuValue(int i) { i = menuId(i); return i == M_LAYOUT ? (tap ? "Tap" : full ? "3D" : "2D") : i == M_FPS ? (fpsOn ? "On" : "Off") : null; }
+    void menuAct(int i) {
+        i = menuId(i);
+        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+        if (i == M_RESUME) menuSet(false);
+        else if (i == M_LAYOUT) nextLayout();
+        else if (i == M_FPS) fpsSet(!fpsOn);
+        else if (i == M_SAVE) { menuSet(false); toLauncher(true); }   // the game's screen there has the Save rows (LauncherSaves.java), which ask before closing the game: a save is never swapped under a running host
+        else if (i == M_LEAVE) { menuSet(false); toLauncher(); }   // as ≡ did: the game goes on behind the launcher, and Play there comes back to it
+        invalidate();
+    }
+    boolean menuTouch(MotionEvent e) {
+        int a = e.getActionMasked(); float x = e.getX(e.getActionIndex()), y = e.getY(e.getActionIndex());
+        if (a == MotionEvent.ACTION_DOWN) { menuDown = inMenu(x, y) ? -2 : menuRowAt(x, y); if (menuDown >= 0) menuSel = menuDown; invalidate(); }
+        else if (a == MotionEvent.ACTION_UP) {
+            int d = menuDown; menuDown = -1;
+            if (d == -2 && inMenu(x, y)) { performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); menuSet(false); }
+            else if (d >= 0 && menuRowAt(x, y) == d) menuAct(d);
+        } else if (a == MotionEvent.ACTION_CANCEL) menuDown = -1;
+        return true;
+    }
+    void menuKeyUi(int k) {
+        if (k == MK_TOGGLE) { menuSet(!menuOpen); return; }
+        if (!menuOpen) return;
+        if (k == MK_UP) menuSel = (menuSel + menuN() - 1) % menuN(); else if (k == MK_DOWN) menuSel = (menuSel + 1) % menuN();
+        else if (k == MK_OK) menuAct(menuSel);
+        else if (k == MK_BACK) menuSet(false);
+        else if ((k == MK_LEFT || k == MK_RIGHT) && menuValue(menuSel) != null) menuAct(menuSel);
+        invalidate();
+    }
+    public static void menuKey(final int k) { new Handler(Looper.getMainLooper()).post(new Runnable() { public void run() { if (view != null) view.menuKeyUi(k); } }); }
+    void menuDraw(Canvas c) {
+        float u = baseU(); RectF b = menuBox();
+        if (menuPaint == null) { menuPaint = new Paint(Paint.ANTI_ALIAS_FLAG); menuPaint.setTypeface(Typeface.DEFAULT_BOLD); }
+        Paint p = menuPaint;
+        c.drawColor(Color.argb(140, 0, 0, 0));   // the held picture, dimmed
+        p.setColor(Color.argb(238, 28, 28, 32)); c.drawRoundRect(b, 16 * u, 16 * u, p);
+        p.setTextSize(15 * u); Paint.FontMetrics fm = p.getFontMetrics();
+        p.setColor(Color.argb(150, 255, 255, 255)); p.setTextAlign(Paint.Align.CENTER); c.drawText("Paused", b.centerX(), b.top + K_MENU_HEAD * u / 2 - (fm.ascent + fm.descent) / 2, p);
+        p.setTextSize(17 * u); fm = p.getFontMetrics();
+        for (int i = 0, n = menuN(); i < n; i++) {
+            RectF r = menuRow(i); float y = r.centerY() - (fm.ascent + fm.descent) / 2; String v = menuValue(i);
+            if (i == menuSel) { p.setColor(Color.argb(56, 255, 255, 255)); c.drawRoundRect(r, 10 * u, 10 * u, p); }
+            p.setColor(Color.argb(235, 255, 255, 255)); p.setTextAlign(Paint.Align.LEFT); c.drawText(menuLabel(i), r.left + 14 * u, y, p);
+            if (v != null) { p.setColor(Color.argb(150, 255, 255, 255)); p.setTextAlign(Paint.Align.RIGHT); c.drawText(v, r.right - 14 * u, y, p); }
+        }
+        shape(c, circle(menuCx(), menuCy(), K_SWAP_R * u()), true); label(c, "≡", menuCx(), menuCy(), 18 * u(), true);   // ≡ again resumes
+    }
+
     // The launcher in front (the game's process keeps running behind it): Play there resumes this game, or asks before closing it for another (Launcher.java). A game app
     // (apk/AndroidManifest.game.xml, java GameStart) has no launcher: the home screen comes in front instead, the game paused behind it, and the app's icon brings it back
-    void toLauncher() {
+    int launcher = -1;   // asked once: the menu's rows read it at every draw
+    boolean hasLauncher() {   // asked of the package manager: an explicit intent's resolveActivity names its component without looking it up
+        if (launcher < 0) {
+            Context a = getContext();
+            try { a.getPackageManager().getActivityInfo(new android.content.ComponentName(a, Launcher.class), 0); launcher = 1; }
+            catch (android.content.pm.PackageManager.NameNotFoundException e) { launcher = 0; }
+        }
+        return launcher == 1;
+    }
+    void toLauncher() { toLauncher(false); }
+    // game: on the running game's own screen (the launcher's "game" extra, as the desktop app's Play sends it), which has its Save rows
+    void toLauncher(boolean game) {
         Context a = getContext(); android.content.Intent i = new android.content.Intent(a, Launcher.class);
-        boolean has;   // asked of the package manager: an explicit intent's resolveActivity names its component without looking it up
-        try { a.getPackageManager().getActivityInfo(new android.content.ComponentName(a, Launcher.class), 0); has = true; }
-        catch (android.content.pm.PackageManager.NameNotFoundException e) { has = false; }
-        if (!has) {
+        if (!hasLauncher()) {
             a.startActivity(new android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_HOME)
                 .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
             nativeLog("gamepad: menu: a game app has no launcher; to the home screen"); return;
         }
         i.addFlags(android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-        a.startActivity(i); nativeLog("gamepad: menu: back to the launcher");
+        String id = game ? a.getSharedPreferences("app", Context.MODE_PRIVATE).getString("running", null) : null;   // Launcher.play's note of the game it started
+        if (id != null) i.putExtra("game", id);
+        a.startActivity(i); nativeLog("gamepad: menu: " + (id != null ? "to the launcher's screen of " + id : "back to the launcher"));
     }
 
     // ---- Self-check (env.txt DM_PAD_TEST=1): touches made up and sent to this view (not to the screen), each control's result checked ----
@@ -412,6 +510,21 @@ public final class Gamepad extends View {
         // the game's touch screen: a touch in the middle, on no control
         int g = gameTouches; press(getWidth() / 2f, getHeight() / 2f); check("a touch in the middle goes to the game's touch screen", gameTouches > g && game[0] >= 0);
         release(getWidth() / 2f, getHeight() / 2f); check("and is lifted", game[0] < 0);
+        // the pause menu, with a game to hold (without one ≡ leaves for the launcher: not pressed here)
+        if (hold(true)) {
+            hold(false);
+            press(menuCx(), menuCy()); release(menuCx(), menuCy()); check("≡ opens the pause menu", menuOpen);
+            press(faceX(B_A), faceY(B_A)); check("no control under the menu reaches the game", lastBtn == 0); release(faceX(B_A), faceY(B_A));
+            boolean f = fpsOn; RectF mr = menuRow(M_FPS);
+            press(mr.centerX(), mr.centerY()); release(mr.centerX(), mr.centerY()); check("its frame-rate counter row turns the counter " + (f ? "off" : "on"), fpsOn != f && menuOpen);
+            press(mr.centerX(), mr.centerY()); release(mr.centerX(), mr.centerY()); check("and back", fpsOn == f);
+            menuSel = M_RESUME;   // the taps left it on the counter's row
+            menuKeyUi(MK_UP); check("a controller's up goes round to the last row", menuId(menuSel) == M_LEAVE);
+            check("the save row is there with a launcher only", (menuN() == 5) == hasLauncher() && (menuId(3) == M_SAVE) == hasLauncher());
+            menuKeyUi(MK_DOWN); menuKeyUi(MK_OK); check("down and A on Resume close it", !menuOpen);
+            menuKeyUi(MK_TOGGLE); check("a controller's Mode key opens it", menuOpen);
+            menuKeyUi(MK_BACK); check("and B closes it", !menuOpen);
+        } else nativeLog("gamepad check: no game is running, or its host is older than the pause menu: not checked");
         nativeLog("gamepad check: " + checks + " checks, " + fails + " failed");
         while (full || tap) { press(swapCx(), swapCy()); release(swapCx(), swapCy()); }   // back to 2D
     }
@@ -451,7 +564,7 @@ public final class Gamepad extends View {
             shakeStart(a);
             nativeLog("gamepad: touch controls shown (" + (view.tap ? "Tap" : view.full ? "3D" : "2D") + (view.scaleSet != 1 || view.insetSet != 0 ?
                 String.format(java.util.Locale.ROOT, ", size %.0f%%, inset %.0f%%", view.scaleSet * 100, view.insetSet * 100) : "") + ")");
-            if ("1".equals(nativeEnv("DM_SHOW_FPS"))) view.fpsTick(h);
+            if ("1".equals(nativeEnv("DM_SHOW_FPS"))) view.fpsSet(true);
             String t = nativeEnv("DM_PAD_TEST"); if (t != null && !t.equals("0")) h.postDelayed(new Runnable() { public void run() { view.selfCheck(); } }, 1500);
         } });
     }
