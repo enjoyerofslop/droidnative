@@ -2235,7 +2235,7 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
     - the probe is refused (`VkResult -13`, the driver's `OpConvertUToPtr not supported`), the array is at set 5 with 8,192 slots, and 96 modules are rewritten, none left;
     - no pipeline fails (31 with `DM_VK_RAW_GMEM_NOPTR=0`, as before), and the Generator and the wreckage draw (a crater without);
     - `DM_VK_RAW_GMEM_TEST=1`: 64 of 64 reads through the array match the CPU's bytes;
-    - 29.4-29.5 fps either way; GPU p50 27.1-28.3 ms in four launches against 17.1 ms without the meshes. A 16-slot array, no `NonUniform` decorations and every fetch made twice (a test build) each left the GPU time there, so the array isn't what the meshes cost on this driver;
+    - 29.4-29.5 fps either way; GPU p50 27.1-28.3 ms in four launches against 17.1 ms without the meshes. The two don't compare as they stand: the GPU clocks down when the frame is light (the frame's terrain pass takes 1.44 ms with the meshes drawn and 3.93 ms without). What the meshes cost is in the note below;
     - `DM_VK_RAW_GMEM_NOPTR_SET=3`: the same picture and times with the array at set 3.
   - **The array against pointers on a driver that takes both,** a Galaxy Z Flip 7 (Xclipse 950, driver 24.0.533), whose probe passes: the phone's app with Frostpunk's and Ocarina of Time's hosts replaced, the default (pointers) against `DM_VK_RAW_GMEM_NOPTR=1`, 2026-11-11:
 
@@ -2248,7 +2248,15 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
     - The pictures match: Frostpunk's Generator and wreckage; Link, the ferns and the water lit in Kokiri Forest. `DM_VK_RAW_GMEM_TEST=1` reads 64 of 64 either way (26 of them not all zero in Ocarina of Time).
     - Ocarina of Time's raw stores go through the array too (298 of its 311 write logs held stores in the array run), and 6 pieces were given back and their slots freed in each run.
     - The first launch with the array compiled the rewritten shaders' pipelines anew (60 of them, with stalls of up to 16 s on this driver); the runs above are the ones after.
-  - **Not run yet:** Ocarina of Time on the Ayn Odin 2 (Adreno 740).
+  - **Ocarina of Time on an Ayn Odin 2** (Adreno 740, V@0676.32, Vulkan 1.3.128, 11.5 GB of RAM and 4 GB of swap), the device's app with only its host replaced, the `kokiri` route, 2026-11-11. The shaders build, and the game no longer fits:
+    - the probe is refused, and with the array no graphics pipeline fails (23 with `DM_VK_RAW_GMEM_NOPTR=0`, with 88 of the driver's lines); 4 compute pipelines fail where 14 did (the note below); `DM_VK_RAW_GMEM_TEST=1` reads 64 of 64 through the array;
+    - the low-memory killer ends the game about 20 s into the Kokiri Forest load, in each of 12 launches ("device is not responding"). With the array off it runs, at 13.2-13.6 fps, with MemAvailable at 0.3-0.5 GB and the swap full;
+    - the pipelines that now build are 0.63 GB of the driver's memory: at the title `DM_VK_MEMREPORT=1` counts 2,871 MB in 1,623 pipeline memory objects with the array and 2,241 MB in 1,525 without. No `NonUniform` decorations, 256 slots and file-backed pools each changed nothing;
+    - no picture of Kokiri Forest through the array was seen on this driver.
+- **Note:** what Qualcomm's two drivers do with the array:
+  - **Each fetch through it costs on V@0615.98** (the Razr). Frostpunk's mesh vertex shaders load a word and 15 vectors a vertex: 61 fetches, a vector being four. Per pass (`prof_now`), in units of the same frame's terrain pass and with the meshes' triangles culled, so vertex work only: 4.4 as built; 0.5 with the lookups kept and no fetch; 2.3 with each vector in one fetch; 4.3 with a sized array and 4.8 with plain-memory copies in the slots. With its fragments the mesh pass is 12.8 of a frame's 19.6. On Xclipse the array costs what pointers do (above).
+  - **An atomic on an element of a storage-buffer array doesn't link on V@0676.32** (the Odin: `Failed to link shaders`, then -13): at a dynamic or a constant slot, in a runtime or a 16-long sized array, with or without `NonUniform`. Loads and stores link, and so does the same atomic on a plain storage buffer. 16 of Ocarina of Time's compute shaders make atomics through pointers. The four a Kokiri load builds (`a039399e6336de1b`, `9bdbca01d3ee6022`, `5a2e37058f21c8a5`, `3a26262eee1427c9`: an `OpAtomicIAdd` and an `OpAtomicUMax` each) fail there with the array, as they did with pointers.
+  - **Pipelines are driver memory on V@0676.32:** Ocarina of Time's are 2.2 GB at the title with the array off (every pipeline the prewarm list names), in objects of up to about 8 MB. `DM_VK_PREWARM=0` leaves 0.4-0.5 GB at the title, but the Kokiri load then makes about 960 pipelines in a few seconds and the killer ends the game, with the array or without.
 
 ### A texture without NVN's image flag bound to an image slot (Android)
 
