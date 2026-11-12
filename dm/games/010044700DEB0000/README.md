@@ -3,7 +3,7 @@
 The cartridge's base game, 1.0.0, SDK **8.2.0** (`NintendoSDK_NVN-8_2_0`, `NintendoSDK_gfx-8_2_0`). It holds **Assassin's Creed IV: Black Flag** and **Assassin's Creed Rogue** on Ubisoft's **AnvilNext**, with Havok and Wwise. It renders with **NVN**. The RomFS is 120 files, 10.95 GB in all: 28 `.forge` archives, 15 Wwise `.pck` banks, 75 Bink movies (`.bik`, `.bk2`), a `.txt` and a `.lang` file.
 
 - **On the Mac:** In-game. Black Flag boots straight to its title, menus and opening storm at sea, with the player in control at 30 fps. The ship, Edward and the crew are drawn, and no shader the run asks for is missing from the map. The shaders come from the `.forge` archives; see [Shaders](#shaders).
-- **On Android:** In-game on a OnePlus Pad 3, a Moto Razr Plus 2023 and an Ayn Odin 2, at 30 fps, with the same picture as the Mac. Edward walks the deck to the ship's wheel, the save loads, and sound plays. Sailing wasn't reached. Rogue can't run from this cartridge: its game data isn't on it. See [Android](#android).
+- **On Android:** In-game on a OnePlus Pad 3, a Moto Razr Plus 2023, an Ayn Odin 2 and a Galaxy Z Flip 7 (Xclipse 950), at 30 fps, with the same picture as the Mac. Edward walks the deck to the ship's wheel, the save loads, and sound plays. Sailing wasn't reached. Rogue can't run from this cartridge: its game data isn't on it. See [Android](#android).
 
 ## What it needs
 
@@ -89,6 +89,19 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made (the sur
 - **Saves:** after a cold start, Story Mode lists "Abstergo, 0%" with its date and time, and loads it back into the storm.
 - **Sound:** the 6-channel `AudioOut` and the audio renderer underran only in two reports, during start-up and the opening's load; none in play.
 - **Red lines:** none.
+
+### Galaxy Z Flip 7
+
+- **Tested 2026-11-12** (Xclipse 950 with Samsung's driver 24.0.533, 0x6000215), with the Odin's game app: this branch with main 011e97f9 merged in. The Xclipse has no BC textures, so those are decoded on the CPU; ASTC is native.
+- **Route:** the Odin's, through the opening storm.
+  - After a cold start, from the save, Edward climbed the side stairs to the raised deck and stood by the ship's wheel with its "reach" marker showing.
+  - The swaying deck turned him away before the prompt to take it, so sailing wasn't reached.
+- **Frame rate:** 30.0 fps in every 30 s window once the storm had loaded, over 11 minutes in two runs. Frame p50 33.3 ms, p95 about 37 ms, GPU 12.7–13.7 ms a frame (9.3 on the Odin's Adreno 740).
+- **Memory:** 1.87–1.96 GB PSS, 0.74–0.78 GB of it graphics. That's more than the Odin's 1.41 GB; BC textures kept decoded may be the difference, but that wasn't measured.
+- **Saves:** after a cold start, Story Mode lists "Abstergo, 0%" and loads it back into the storm.
+- **Picture:** the same as the Odin's at the same points of the opening, with the same texture detail on Edward, the cannons and the deck.
+- **Sound:** no underrun in either output in any report of either run.
+- **Red lines:** none, and no crash or kill.
 
 ## Rogue (program 1)
 
