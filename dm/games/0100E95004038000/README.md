@@ -21,7 +21,7 @@ System → Save and a restart into Argentum were exercised during bring-up;
 the save was created with the isolated winding diagnostic and reloaded with
 the production path. The final fixed host also loads it and walks in Argentum.
 
-On Android, 2.1.0 plays the opening and King Crustip at 30 fps, but draws none of its characters ([Android](#android)).
+On Android, 2.1.0 plays the opening and King Crustip at 30 fps; its characters are drawn since the replay runs draws under rasterizer discard that write memory, with dark speckles on them in close-ups still open ([Android](#android)).
 
 ## Profile and memory
 
@@ -273,11 +273,23 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - **What was played:**
   - **S25 Edge:** the title (no logo, the game's own fresh-save behaviour), New Game, Easy, the opening (the Cloud Sea, the salvage dive, Rex and Gramps), King Crustip's tutorial battle (won: auto-attacks, the EXP and SP shown), and the scenes after it.
   - **Z Flip 7:** the same into King Crustip's tutorial.
-- **No characters drawn, on both GPUs:** Rex, Gramps and King Crustip never appear.
+- **Resolved, no characters drawn on both GPUs:** Rex, Gramps and King Crustip never appeared (fixed: see the next item).
   - The cutscenes frame them over an empty deck, an empty cabin ("No worries, Gramps!") and empty sky. In battle, only the target marker, the red ring and the damage numbers show where the crab is.
   - The world, the ship, the Cloud Sea, the opening's titans, the UI and the effects draw.
   - No `[RED]` line on either phone, and the host's pipeline counters show only the draws a first build leaves out. On the S25 Edge, Qualcomm's driver logged 272 "Failed to link shaders" / "Shader compilation failed for shaderType: 4" lines; Samsung's logged none.
-  - The Mac draws the characters (its Argentum runs). Where to start: the characters' skinning passes, which the Mac's notes describe as vertex updates whose pipelines take the stream-output (transform feedback) variant (`pipeline … again with other: stream`, 0 colour targets, in the Android log).
+  - The Mac draws the characters (its Argentum runs).
+- **Cause and fix (2026-11-11):** the game skins every character with a vertex-only draw under rasterizer discard, without transform feedback
+  (`shd_post.wishp` var122, `fa456dcb6b05c2ce`, `0cf988e8a8ea2aee`, `bce3419b07cb2f3d`, `3fb8ebc13eb37ad7`: the bone matrices into one 384,000-byte
+  storage buffer; and `bd4b7f58c16f180f`, which updates vertex buffers), and the Vulkan replay left every such draw out
+  ([Draws under rasterizer discard that write memory](../../../docs/reference/rendering.md#draws-under-rasterizer-discard-that-write-memory-android)).
+  The S25 Edge's "Failed to link shaders" lines are the Adreno's shader module identifiers' cache misses, not failed pipelines.
+  - **Moto Razr Plus 2023** (Adreno 730, V@0615.98, Android 16), one host: with `DM_VK_RAST_DISCARD=0` the three are missing as above; with the fix,
+    New Game on Easy through the opening (Rex diving in the salvage suit, Rex and Gramps on deck) into the tutorial battle (Rex auto-attacking King
+    Crustip), all drawn, a steady 30 fps (battle frame p50 33.3 ms, p95 33.9 ms, GPU 27.1 ms), no red line.
+  - **Galaxy S25 Edge**, with the fix: the same route, all three drawn, a steady 30 fps (battle frame p50 33.2 ms, GPU 22.1 ms), no red line.
+  - The Z Flip 7 was not run with the fix.
+- **Open:** with the fix, on both phones, the characters' skin, hair and clothes show dark, blocky speckles in close-ups (Rex in the opening's
+  dialogue); the world around them doesn't. Not the texture swizzle (the replay applies it); not looked into yet.
 - **Frame rate:** 30 fps (the target), every 60 s window 29.6–30.1 on the S25 Edge over 12.5 minutes, frame p50 33.2 ms; GPU 18–23 ms on the S25 Edge, 12.5–13 ms on the Z Flip 7.
 - **Sound:** a stereo `AudioOut`, no underrun on either phone. The `DM_AUDIO_DUMP` has signal (RMS about 640–1,360). Not listened to by a person.
 - **Memory:** 2.38 GB PSS on the S25 Edge (0.77 GB graphics) and 2.31 GB on the Z Flip 7. Neither was killed.
@@ -292,4 +304,5 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - [Queue initialization captures the raster origin](../../../docs/reference/rendering.md#queue-initialization-captures-the-raster-origin).
 - [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own): the light probe lists; see [Rendering](#rendering).
 - [Ordering barriers before a draw that writes](../../../docs/reference/rendering.md#ordering-barriers-before-a-draw-that-writes): the skinning draws; see [Rendering](#rendering).
+- [Draws under rasterizer discard that write memory](../../../docs/reference/rendering.md#draws-under-rasterizer-discard-that-write-memory-android): the skinning draws on Android; see [Android](#android).
 - [Present thread rescues a silent display link](../../../docs/reference/frame-rate.md#present-thread-rescues-a-silent-display-link): the motion review's windowed timing comparison is confounded by repeated stalls; see [Controller motion review](#controller-motion-review).

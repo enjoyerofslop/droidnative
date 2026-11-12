@@ -236,7 +236,7 @@ static int memu_draw(memu_t *m, vshader *fs, const prog_t *fpr, int fpst, const 
     if (fs) vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, (uint32_t)(fs->set & 3), 1, &fset, fs->ndyn, dyn);
     if (fs && fs->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { g_drop[3]++; return 0; }
     if (fs && fs->gm && g_gm_np) gm_np_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl);   // (gfx_vk_gmem_noptr.inc)
-    VkViewport v; VkRect2D sc; draw_dyn_state(c, &v, &sc); (void)v; (void)sc;
+    VkViewport v; VkRect2D sc; draw_dyn_state(c, &v, &sc, 0); (void)v; (void)sc;
     bf_ibuf(c, g_me.b, r[3], VK_INDEX_TYPE_UINT32);
     if (nidx) vkCmdDrawIndexed(c, nidx, 1, 0, 0, 0); else vkCmdDrawIndexedIndirect(c, g_me.b, r[1] + 16, 1, 20);
     g_draws++; C->ndraw++;

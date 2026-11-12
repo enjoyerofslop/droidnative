@@ -45,6 +45,7 @@
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
 #include "rec_desc.h"   // a descriptor set's writes packed for the recorder (gfx_vk_rec.inc R_UPDDS)
 #include "sb_reuse.h"   // a read-only storage buffer's copy bound again while its pages are unwritten (gfx_vk_sbcopy.inc)
+#include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
 #include "nvn_queue.h"   // the queue scheduler (hle_nvn.c nvn_queue.inc): event publication and GPU progress
 #include <stdatomic.h>
@@ -172,7 +173,11 @@ static int vk_try(char *why, size_t nwhy) {
     // NVN2's task and mesh shaders as Vulkan's (Adreno 840: Qualcomm's driver has it, Turnip and the Adreno 7xx drivers do not). Its modules are SPIR-V 1.4, which the
     // Vulkan 1.1 instance takes through VK_KHR_spirv_1_4 (and the float controls it builds on). DM_VK_MESH=0 (env.txt): the draws are skipped, as on GPUs without it
     int mesh = has_ext(de, nd, "VK_EXT_mesh_shader") && has_ext(de, nd, "VK_KHR_spirv_1_4") && has_ext(de, nd, "VK_KHR_shader_float_controls");
-    { const char *e = getenv("DM_VK_MESH"); if (e && *e == '0') mesh = 0; }
+    // On Qualcomm's own driver the native path draws them in the compute form by default (gfx_vk_meshemu.inc): Ocarina of Time's foliage, drawn by a mesh depth prepass and an
+    // EQUAL colour pass whose positions come from the same code and the same data, lands behind its own prepass depth through the Adreno 840's mesh pipeline (white tears across
+    // the canopy), and not in the compute form. DM_VK_MESH=1: the native path all the same (for an A/B); 0: neither (the draws skipped where the compute form is off too)
+    { const char *e = getenv("DM_VK_MESH"); if (e && *e == '0') mesh = 0;
+      else if (mesh && g_qcom_driver && !(e && *e == '1')) { mesh = 0; LOG("[vk] task / mesh shaders: Qualcomm's driver has VK_EXT_mesh_shader, but its draws run in compute form (DM_VK_MESH=1: the native path)"); } }
     // the texture pool by ID (gfx_vk_pool.inc): its indices differ between the lanes of a subgroup, and an ID not made yet reads 0 whatever type it is read as. DM_VK_POOL=0: neither
     { const char *e = getenv("DM_VK_POOL"); int pool = !(e && *e == '0'); g_nonuni = pool && has_ext(de, nd, "VK_EXT_descriptor_indexing"); g_null_desc = pool && has_ext(de, nd, "VK_EXT_robustness2"); }
     // pipelines from the driver's cache by their modules' identifiers, the modules made only when it lacks one (gfx_vk_lmod.inc). DM_VK_MODULE_ID=0: modules made at once
@@ -326,7 +331,9 @@ typedef struct { int st; size_t off, row_bytes, rows, src_pitch, dst_pitch; uint
                  int lin; uint8_t *dsnap; size_t snap_cap; uint64_t ser, img; uint32_t fmt, bpb, w, h; uint64_t tsize; size_t rb; VkBuffer ipb; int inpl;
                  // a depth / stencil readback (ds_wb): rows of ds_n texels of NVN format ds_fmt rebuilt from the slice's planes at the source (ds_texels.h ds_slice: the depth
                  // plane of ds_dkind, then the stencil plane when ds_sten); ds_n 0: a plain write-back
-                 uint32_t ds_n, ds_fmt; int ds_dkind, ds_sten; } wb_t;
+                 uint32_t ds_n, ds_fmt; int ds_dkind, ds_sten;
+                 // vd: a draw under rasterizer discard wrote it, run as a dispatch (gfx_vk_draw.inc rd_bind_w): a read it overlaps but does not cover learns a home range (fwd_hit)
+                 int vd; } wb_t;
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize n, used; } arena_blk;
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; uint64_t q0, q1; } post_op;   // kind 1 event, 2 counter, 3 samples passed (occlusion queries q0..q1)
 typedef struct { int kind; uint64_t h; } dead_t;
@@ -2663,7 +2670,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         (unsigned long long)g_q_queries, (unsigned long long)g_q_reports, (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
         (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6,
         (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)g_bind_shaders, (unsigned long long)g_bind_entries);
-    LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig);
+    LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu; under rasterizer discard: made as dispatches %llu, left out (writing nothing) %llu, their storage buffer writes in place on a home copy %llu / through a scratch copy %llu, home copies made %llu (%llu from a chunk in flight on the GPU), home ranges learned %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig, (unsigned long long)g_rd_made, (unsigned long long)g_rd_none, (unsigned long long)g_rd_w[0], (unsigned long long)g_rd_w[1], (unsigned long long)g_rd_w[2], (unsigned long long)g_rd_w[3], (unsigned long long)g_rd_learned);
     if (memu_on()) LOG("[vk] task / mesh draws in compute form: %llu drawn in %llu parts, %llu skipped, %llu left out while a kernel's pipeline was built; kernel pipelines made %llu (%llu from the driver's cache at once, %llu in the background, %.0f ms of compiles) (cumulative; gfx_vk_meshemu.inc)",
                        (unsigned long long)g_me_draws, (unsigned long long)g_me_parts, (unsigned long long)g_me_skipped, (unsigned long long)g_me_left, (unsigned long long)g_me_kpipes, (unsigned long long)g_me_kcached, (unsigned long long)g_me_kbg, atomic_load(&g_me_kpipe_ns) / 1e6);
     pool_stats();

@@ -92,7 +92,6 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
   - Galaxy S25 Edge (Adreno 830): 38 → 17 ms with both, 17.6 → 19.0 fps; its GPU clock stays at 525 MHz, 41 ms a frame.
 - **Open:**
   - the frame rate;
-  - the mesh-shaded foliage, left out: the Vulkan replay has no mesh stage yet. #83 draws it on `VK_EXT_mesh_shader`, but leaves white tears in the distant canopy, which aren't the mist shader's NaN (`5ad65c0eefd09c7f` and the light-tile pass `ea1bf96b72e72476` skipped, the tears stay);
   - a stall of about 10 s at the first start, and after a shader-chain update, while Kokiri Forest's pipelines build.
 
 The history below is dated; the state above supersedes it.
@@ -177,6 +176,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Task and mesh draws in compute form on Qualcomm's driver, which has mesh shaders](../../../docs/reference/rendering.md#task-and-mesh-draws-in-compute-form-on-qualcomms-driver-which-has-mesh-shaders-android): resolved on Android: white tears across Kokiri Forest's distant canopy on the Galaxy Z Fold 8. The foliage's mesh colour pass landed behind its own depth prepass through Qualcomm's mesh pipeline and not in compute form, which is now the default there, at no measured cost.
 - [Storage the CPU wrote before a texture's first use](../../../docs/reference/nvn-objects.md#storage-the-cpu-wrote-before-a-textures-first-use-android): resolved on Android: Kokiri Forest's terrain tiles were missing on the Galaxy Z Fold 8, seen as flat, pale water patches. The water and fog pass (`888c1068ac8f7043`) tinted the far depth it saw through them. The tiles' height, blend, hole and detail maps are filled from the CPU before their textures are made.
 - [Set layouts sized by their highest binding number](../../../docs/reference/rendering.md#set-layouts-sized-by-their-highest-binding-number): on a Galaxy Z Flip 7, its constant buffers at 1,048,576 and up cost 64 to 192 MB a layout, about 9 GB over Kokiri Forest.
 - [A start-up list entry with a mesh shader in its vertex slot](../../../docs/reference/rendering.md#a-start-up-list-entry-with-a-mesh-shader-in-its-vertex-slot): on a OnePlus Pad 3, every start crashed the Adreno 830's compiler a few seconds in, on an entry with mesh shader `0c1ffecd02018fb0` in the vertex slot that another build had written to the start-up list.
