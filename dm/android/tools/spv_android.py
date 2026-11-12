@@ -921,12 +921,12 @@ def post_one(src, dst, k):
             zh, zi, _, _ = process(zdata, stage, cs); files['.z.spv'] = emit(zh, zi); nz = 1
         try:   # the emulation's forms (spv_meshemu.py): what a GPU without VK_EXT_mesh_shader runs instead (gfx_vk_meshemu.inc)
             import spv_meshemu
-            cdata, keep = spv_meshemu.compute(kernel, mesh['info'], mesh['lay'])
+            cdata, keep, pk, direct = spv_meshemu.compute(kernel, mesh['info'], mesh['lay'])
             ch, ci, _, _ = process(cdata, 'cs', cs, keep); files['.cs.spv'] = emit(ch, ci)
             if stage == 'ms':
                 files['.pvs.spv'] = spv_meshemu.vertex(mesh['info'])
                 files['.pvs.z.spv'] = spv_meshemu.vertex(mesh['info'], gl=True)
-            res['mesh_emu'] = spv_meshemu.facts(mesh['info']); nemu = 1
+            res['mesh_emu'] = spv_meshemu.facts(mesh['info'], pk, direct); nemu = 1
         except ValueError as e:
             lines.append(f'[RED] {k}: {e}: no compute form (a GPU without VK_EXT_mesh_shader skips its draws)'); res['mesh_emu'] = None
     hdr, ins, interlock, stripped = process(data, stage, cs)
