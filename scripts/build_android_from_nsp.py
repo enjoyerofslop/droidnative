@@ -1067,6 +1067,15 @@ def unsupported_graphics(gfx, name):   # why a game cannot be built for Android,
             f'so this game cannot be built for Android yet')
 
 
+def undecodable_packs(packs, name, env):   # why a game's shaders cannot be split here, from profile_guess.build_sources' oodle_packs; None when the split can read them
+    # The shader split decodes these archives with the game's own Oodle in the Mac host (shader_split.py oodle_ask, DM_OODLE_HOST), which the Android build never sets up:
+    # Pokémon Legends: Arceus's split failed on all 678 GFPAKs after about 220 s, then the build stopped (issue #310). ue_legacy is left out, as Python reads its Zlib and LZ4 paks
+    on, why = packs
+    if not on or (env.get('DM_OODLE_HOST') and env.get('DM_OODLE_MODULES')): return None
+    return (f'{name} keeps its shaders in files compressed with the game\'s own Oodle ({why.split(", Oodle-compressed")[0]}). The Android build cannot decode those yet, '
+            'so this game cannot be built for Android yet: https://github.com/enjoyerofslop/droidplay-core/issues/310 follows the fix')
+
+
 def games_table():   # {title ID: {engine, graphics, build, sdk}} from dm/games/README.md's Games table
     out = {}
     for line in (REPO / 'dm/games/README.md').read_text(encoding='utf-8').splitlines():
@@ -1275,9 +1284,9 @@ def main(argv):
             if kind == 'folder': return bi.extract_dump(ex, v, u or b, app)
             return bi.extract(nx, keys, ex, v, b, u, None, logs, g, app)
         game = extract(pkg_ver)
-        why = unsupported_graphics(bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['graphics'],
-                                   nacp.name(game / 'control.nacp') or g.get('name', '') or g.id)
-        if why: raise BuildError(why)   # before the rewrite and the shaders, which take minutes and make an app that cannot start
+        src, name = bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main']), nacp.name(game / 'control.nacp') or g.get('name', '') or g.id
+        why = unsupported_graphics(src['graphics'], name) or (undecodable_packs(src['oodle_packs'], name, env) if sv else None)
+        if why: raise BuildError(why)   # before the rewrite and the shaders, which take minutes and make an app that cannot start (or no app at all)
         bad = [] if derived or prov else bi.build_mismatch(game, pkg_ver, g)
         if bad:   # files of another build under a registered version's tag: packed like any other version
             derived = f'not the builds game profile {g.id} registers: {"; ".join(bad)}'; sv = [pkg_ver]
