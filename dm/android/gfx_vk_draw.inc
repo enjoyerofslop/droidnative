@@ -1253,9 +1253,11 @@ static void dump_write(void) {   // after the dumped frame's commands completed
 }
 static void occl_end(void) { if (g_q_act >= 0 && C && C->open) vkCmdEndQuery(C->cb, C->qp, (uint32_t)g_q_act); g_q_act = -1; }   // the pass's open occlusion query (gfx_vk.c)
 static void occl_begin(void) {   // a draw while samples passed are counted: inside a query of this pass
-    if (!g_q_on || g_q_act >= 0 || !C || !C->qp || C->nq >= 1024) return;
+    if (!g_q_on || g_q_act != -1 || !C || !C->qp || C->nq >= 1024) return;
+    int mode = occl_mode();
+    if (!mode) { g_qres[g_qslot++ % QRES] = 1; g_q_act = -2; g_q_noq++; return; }   // the stretch's slot reads 1 with no query (DM_VK_OCCLUSION=0; the completion thread reads only the slots of queries)
     g_q_act = C->nq++; C->qg[g_q_act] = g_qslot++; g_q_queries++;
-    vkCmdBeginQuery(C->cb, C->qp, (uint32_t)g_q_act, g_vk_feat.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+    vkCmdBeginQuery(C->cb, C->qp, (uint32_t)g_q_act, mode == 2 && g_vk_feat.occlusionQueryPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
 }
 // ---- GPU time per render pass: a file named prof_now beside $DM_DUMP_DIR profiles the frame two presents later (the log lists its passes, costliest first) ----
 typedef struct { chunk *c; int s0, s1, draws, ncolor, depth, cont; uint32_t w, h; VkFormat f0; uint64_t t0, t1, seq, verts, big; const char *bigvs, *bigfs; VkFramebuffer fb; } prof_rec;   // verts: vertices drawn (indices × instances); big: the largest draw's, and its shaders (a dispatch: groups in w, h, draws; its compute shader in bigfs); cont: a piece of the pass before it (the same framebuffer, begun again after a chunk was sent in its middle)
