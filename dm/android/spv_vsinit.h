@@ -1,11 +1,11 @@
 // Every vertex shader output starts as (0,0,0,1) before the translated body runs: on the hardware that is what an unwritten component reads, and the Mac's
 // shaders get the same from dmsh_build.py vs_init. Vulkan leaves an output component the shader never writes undefined, and the Adreno 840 (Galaxy Z Fold 8)
-// and the Mali-G715 (Pixel 9 Pro XL) read it as 0. Pokémon Legends: Arceus's full-screen vertex shaders write only x and y of their location 0 output, and
-// its pixel shaders divide by w: a sky-light term came out NaN (239ba1a5a4270b1c, a 64x64 six-layer target) and the screen-space shadow mask fully lit
-// (3be95ee5087724c5), so every outdoor scene was overexposed and shadowless (droidplay-core#310's follow-up). Link's Awakening's missing sun shadows on
-// Android match its old Mac fault of the same kind. spv_vsinit stores a vec4 constant (0,0,0,1) to each 32-bit float vec4 output with a Location (not a
-// built-in) at the start of the vertex entry point's first block, after its local variables; components the body writes are overwritten as before. A module
-// that is not a vertex shader, or has no such output, is left alone. Self-contained (no libc) for dm/tools/tests/test_spv_vsinit.py.
+// and the Mali-G715 (Pixel 9 Pro XL) read it as 0. Pokémon Legends: Arceus's full-screen vertex shaders write only x and y of their location 0 output, and its
+// pixel shaders divide by w: a sky-light term came out NaN (239ba1a5a4270b1c, a 64x64 six-layer target) and the screen-space shadow mask fully lit
+// (3be95ee5087724c5), so every outdoor scene was overexposed and shadowless (droidplay-core#310's follow-up). Link's Awakening cast no sun shadow on Android
+// for the same reason (its Mac fault, which vs_init fixed in the MSL). spv_vsinit stores a vec4 constant (0,0,0,1) to each 32-bit float vec4 output with a
+// Location (not a built-in) at the start of the vertex entry point's first block, after its local variables; components the body writes are overwritten as
+// before. A module that is not a vertex shader, or has no such output, is left alone. Self-contained (no libc) for dm/tools/tests/test_spv_vsinit.py.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
