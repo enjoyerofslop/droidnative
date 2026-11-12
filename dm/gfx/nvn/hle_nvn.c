@@ -2164,6 +2164,9 @@ static void fstep_tick(const win_t *o, int c) {
     // A probe's grace lasts while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP): macOS raises the GPU clock for the shorter deadline over seconds, not the iPhone's 30 frames
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
+#if DM_ANDROID
+    g_fs.probe_near = 1;   // a probe goes to the next shorter hold, when the GPU's headroom (g_fs.gpu, below) could fit it (nvn_fstep.h): the GPU governor follows the busy share, not a declared deadline
+#endif
     g_fs.per_vsync = fstep_hz() / 60;
     g_fs.gpu = gpu;   // the soft-late rule and the GPU-fit trial (nvn_fstep.h FSTEP_LATE_SOFT)
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);

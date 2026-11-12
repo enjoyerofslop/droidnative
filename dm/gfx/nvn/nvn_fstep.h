@@ -61,6 +61,9 @@ typedef struct {
     int late_run, fit_run, trial;   // late frames in a row; frames in a row whose cost fits k − 1; frames left of a trial at k − 1 (0 = none)
     int probe, grace;         // 1: the trial in progress is a probe; 2: a probe held and its run at kmin has not ended yet; frames left of the probe's grace
     int ramp;                 // set by the caller (kept): 1 = a probe's grace is renewed while its frames keep getting cheaper (FSTEP_RAMP; the host's DM_FSTEP_PROBE_RAMP)
+    int probe_near;           // set by the caller (kept): 1 = a probe from a hold two or more above kmin goes to the next shorter hold, not to kmin. A phone's GPU governor sizes the clock
+                              // to the busy share, so a probe only has to make the frames late at the next hold for the clock to rise; at kmin (60 fps) a 30 fps game's frames are
+                              // late whatever the clock, the probe fails, and the step up lands on the cost's hold, where the clock falls again (Ocarina of Time on a Galaxy S25 Edge)
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
     int per_vsync;            // set by the caller: the ticks a 1/60 s vsync is (0 = 1). At 120 fps the unit is 1/120 s (hle_nvn.c fps_high), and the waits between trials stay the same real time
@@ -163,8 +166,12 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         s->k--; s->downs++; s->trial = FSTEP_RUN; s->mtrial = 1; s->grace = FSTEP_GRACE; s->fit_run = s->fit_miss = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;   // back to a hold that held
     } else if (s->gfit_run >= FSTEP_RUN && s->k > kmin && s->gfail < 3 && s->since >= s->hold && !s->trial && !s->probe) {   // the GPU has fitted the shorter hold: try it, with a probe's grace
         s->k--; s->downs++; s->trial = FSTEP_RUN; s->gtrial = 1; s->grace = FSTEP_GRACE; s->fit_run = s->fit_miss = s->late_run = s->gfit_run = s->gfit_miss = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
-    } else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
-        s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
+    } else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial
+               && !(s->probe_near && s->gpu > 0 && s->gpu * s->gpu / s->k > FSTEP_FIT * (s->k - 1 > kmin ? s->k - 1 : kmin))) {   // probe: straight to kmin, so the controller sees the whole deadline
+        // probe_near's headroom rule: a governor that sizes the clock to the busy share can raise it at most in proportion to the idle share, so the GPU's time at hold k, gpu, can
+        // fall to about gpu * (gpu / k) at best; a probe whose target that does not fit is not made (Ocarina of Time on a Galaxy Z Fold 8: at hold 2 with a GPU of 1.6 vsyncs a
+        // probe to 1 failed every time and doubled the hold-off, which then kept hold 3 longer)
+        s->k = s->probe_near && s->k - 1 > kmin ? s->k - 1 : kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     }
     s->step = s->k + (s->debt >= 1 && s->k < FSTEP_MAX);
     s->paid += s->step > s->k;
