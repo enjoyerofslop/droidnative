@@ -36,3 +36,8 @@ DM_VK_RECORDER=1
 # 21.3 ms frame and the culling they buy is worth 3.5 ms (2,100 instead of 2,420 draws), so without them the GPU takes 19.6 ms a frame; a query without the precise count costs
 # the same as one with it there. The picture is the same: the draws added are the ones the game's own tests had found hidden. =precise in env.txt brings the queries back
 DM_VK_OCCLUSION=0
+# DM_VK_IND_FWD=1: an indirect dispatch whose arguments a dispatch before it wrote runs as vkCmdDispatchIndirect on the GPU's copy of them, its group counts copied into its c0
+# bank on the GPU, instead of the replay submitting the chunk and waiting for the whole ring to complete so it can read the counts (gfx_vk_draw.inc vk_dispatch). This game's
+# culling makes about 1.4 such dispatches a frame; each drain took the replay thread 7-10 ms a frame on a Galaxy Z Fold 8 and a Galaxy S25 Edge in Kokiri Forest, the GPU idle
+# meanwhile. With the frame step's hold 2 forced on the S25: 27.7 -> 29.4 fps, the GPU at 832 MHz for 99 % of the time. Off for other games until a sweep has run it (2026-11-12)
+DM_VK_IND_FWD=1
