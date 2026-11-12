@@ -81,6 +81,7 @@ static int g_nonuni, g_null_desc;   // for the texture pool by ID (gfx_vk_pool.i
 static int g_pool_texn;   // the IDs of the game's texture pools in the host table (mtl_set_tex_pool_n, hle_nvn.c): the pool set's image count (gfx_vk_pool.inc)
 static vkb_ctx g_vk; static pthread_mutex_t g_vk_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic int g_vk_made; static int g_vk_ok;   // vkb; vkb_fallback makes it again
 #include "gfx_vk_gap.inc"   // a frame timeline of the pipeline (gap_now; oot-clock, a test switch)
+#include "gfx_vk_cpuprof.inc"   // q190 diagnostic, wall-clock variant (oot-clock; not for commit)
 #include "gfx_vk_rec.inc"   // the vkCmd* calls below go through its wrappers (DM_VK_RECORDER)
 // Query resets (the chunks' query pools, "Query resets" below). DM_VK_QRESET_USED=0 (env.txt): every pool is reset whole in the command buffer at every chunk begin, as before
 // (no host resets either); DM_VK_HOST_QRESET=0: VK_EXT_host_query_reset is not enabled, and the used queries are reset in the command buffer at the chunk's next begin
@@ -717,10 +718,11 @@ static uint64_t g_vsite[8][2];   // syncs that waited, by call site (0 other, 1 
 static int g_vs;   // the call site of the next view_
 static void view_(int cops) {
     int site = g_vs; g_vs = 0;
-    if (C && (C->nwb || (C->gm_st && gm_store_wait()) || (cops && C->ncop))) { g_vsite[site][0]++; submit_wait(); return; }
+    if (C && (C->nwb || (C->gm_st && gm_store_wait()) || (cops && C->ncop))) { g_vsite[site][0]++; gap_ev(23, (uint64_t)site, 0); submit_wait(); gap_ev(24, (uint64_t)site, 0); return; }
     if (!atomic_load(&g_inflight_wb) && !(cops && atomic_load(&g_inflight_cop))) return;
-    g_vsite[site][1]++;
+    g_vsite[site][1]++; gap_ev(23, (uint64_t)site, 1);
     pthread_mutex_lock(&g_cmu); while (atomic_load(&g_inflight_wb) || (cops && atomic_load(&g_inflight_cop))) pthread_cond_wait(&g_ccv, &g_cmu); pthread_mutex_unlock(&g_cmu);
+    gap_ev(24, (uint64_t)site, 1);
 }
 static void cpu_view(void) { view_(1); }
 static void wb_view(void) { view_(0); }
@@ -2530,7 +2532,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     vtex *v = vt_get(t); flush(); rec_drain();   // the frame's chunks on the queue before the front end's blit of it (rec_submit)
     vt_evict();   // images no draw has used for a while (gfx_vk_evict.inc)
     spare_sweep(atomic_load(&g_presents));   // spare image memory unused for a while (gfx_vk_spare.inc)
-    dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents)); gap_poll(atomic_load(&g_presents));
+    dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents)); gap_poll(atomic_load(&g_presents)); cpuprof_poll(atomic_load(&g_presents));
     if (prof_on()) { all_wait(); prof_write(); }
     if (atomic_load(&g_presents) == 30) prewarm_start();   // the pipelines of earlier sessions (gfx_vk_draw.inc), once the game draws
     if (dump_on()) { if (v) LOG("[dump] frame %ld presents ser=%llu %ux%u vk%d", dump_frame(), (unsigned long long)v->serial, v->w, v->h, v->fmt); all_wait(); dump_write();

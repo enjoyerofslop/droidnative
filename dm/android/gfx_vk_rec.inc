@@ -41,13 +41,13 @@ static int rec_on(void) {
 static void rq_wake_c(void) { if (atomic_load(&g_rq_csleep)) { pthread_mutex_lock(&g_rq_mu); pthread_cond_signal(&g_rq_cdata); pthread_mutex_unlock(&g_rq_mu); } }
 static void rq_wait_until(uint64_t r_at_least) {   // the replay: until the recorder has made the records up to that count
     if (atomic_load(&g_rq_r) >= r_at_least) return;
-    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); gap_ev(25, r_at_least - atomic_load(&g_rq_r), 0);
     for (int i = 0; i < 200 && atomic_load(&g_rq_r) < r_at_least; i++) sched_yield();   // the recorder is usually a few records behind
     if (atomic_load(&g_rq_r) < r_at_least) {
         pthread_mutex_lock(&g_rq_mu); atomic_store(&g_rq_pwait, 1);
         while (atomic_load(&g_rq_r) < r_at_least) { if (atomic_load(&g_rq_csleep)) pthread_cond_signal(&g_rq_cdata); pthread_cond_wait(&g_rq_cspace, &g_rq_mu); }   // g_rq_mu held: signalled directly
         atomic_store(&g_rq_pwait, 0); pthread_mutex_unlock(&g_rq_mu); }
-    atomic_fetch_add(&g_rq_waits_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0);
+    atomic_fetch_add(&g_rq_waits_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); gap_ev(26, 0, 0);
 }
 static void rec_drain(void) { if (g_rq) { g_rq_drains++; gap_ev(GAP_R_DRAIN0, atomic_load(&g_rq_w) - atomic_load(&g_rq_r), 0); rq_wake_c(); rq_wait_until(atomic_load(&g_rq_w)); gap_ev(GAP_R_DRAIN1, 0, 0); } }
 // room for a record of n bytes (header included) → where to write it; rq_push publishes it
