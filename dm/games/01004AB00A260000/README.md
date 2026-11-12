@@ -2,7 +2,7 @@
 
 Update 1.0.3 (v196608; the base game v0 is not extracted), SDK 4.5.0, NVN API 53.313. FromSoftware's dantelion2 engine with Havok and FMOD (sound through one 6-channel AudioOut). Modules `main`, `subsdk0` (the SDK's movie library) and `sdk`. Plays on the iPhone at 60 fps and the game's normal speed (30 on the Switch) through two rewriter cuts.
 
-On the Mac: the logos and the opening movie, the title (offline), the first-run Brightness, Options and Button settings, character creation with the name through the inline keyboard, the opening cutscene and the Undead Asylum cell (walking, the camera, pillaging the corpse), at 60 fps with music and sound; no red line but the conditional rendering note. About 1.6 GB resident in the Asylum, flat over three minutes.
+On the Mac: the logos and the opening movie, the title (offline), the first-run Brightness, Options and Button settings, character creation with the name through the inline keyboard, the opening cutscene and the Undead Asylum cell (walking, the camera, pillaging the corpse), at 60 fps with music and sound; no red line but the conditional rendering note. About 1.6 GB resident in the Asylum, flat over three minutes. On Android, the cartridge's 1.0.0 runs at its own 30 fps into the Asylum cell, with saves ([Android](#android)).
 
 ## What it needs
 
@@ -63,6 +63,22 @@ SDK 4.5.0 boots, one each:
 
 - From a fresh save, `DM_KBD=Ash DM_KEYS="20:A~0.2,25:Plus~0.2,40:A~0.2,50:A~0.2,60:A~0.2,70:B~0.2,80:Down~0.08,82:B~0.2,90:Up~0.08,92:B~0.2,100:Down~0.08,102:B~0.2,110:B~0.2,116:B~0.2,122:B~0.2*15/3,168:Left~0.1,170:B~0.2,185:Plus~0.2,190:B~0.2,200:Plus~0.2,210:B~0.2"` goes through the two network notices, New Game, the first-run settings, character creation (a Warrior with the default look) and the opening into the Asylum cell (control at about 245 s). The steps are in seconds, not frames: the loads take different frame counts from run to run.
 - From a save made there, `DM_KEYS="20:A,25:Plus,40:A,50:A,60:A,70:B,76:B,82:B"` continues into the cell at about 90 s.
+
+## Android
+
+First run on Android, 2026-11-11, on a Galaxy Z Flip 7 (Exynos 2500, Xclipse 950 with Samsung's driver 0x6000215, Android 16), unfolded, in handheld mode, driven over adb with `DM_CTL`. The cartridge's base game 1.0.0 (v0), packed as a game app (`build_android_from_nsp.py --game-apk`, an 89 MB APK with the 4.1 GB RomFS as its OBB) from DroidPlay Core `main` at `1c06a5c4`.
+
+- **The build:** a profile derived from 1.0.3's. Its two frame-rate cuts are keyed to 1.0.3's `main`, so 1.0.0 runs at its own 30 fps, the Switch's rate and its target here. The split found 3,095 shaders, all translated to SPIR-V, none failed.
+- **What was played:** the two network notices, New Game, the Brightness, Options and Button settings, and character creation: a Warrior with the default look, named through Android's keyboard (the game's software keyboard opens it: `input text`, then DONE and OK). Then the opening (its cutscenes skipped with + and B after a minute of each) and the Undead Asylum cell under control: walking and the camera.
+- **Save and Continue:** the game writes its save all the time (1,514 commits in 11 minutes). After a cold start, it first warns that it wasn't closed through Quit Game (it was force-stopped), then offers Continue and Load Game. Continue put the character back in the cell.
+- **Frame rate:** 30 fps, every 30 s window 28.0–30.1, frame p50 33.4 ms; the GPU takes up to about 13 ms in the cell.
+- **Sound:** FMOD's 6-channel `AudioOut` has no underrun. The second, stereo `AudioOut` carries the opening movie's sound (its dump holds about 110 s, with signal). It underran in 24 of its 29 reports, 3,566 underruns in all, about 350 ms of zeros every 4 s, so the movie's sound crackles. Not listened to by a person.
+- **Picture:** nothing wrong seen in the logos, the title, the menus, character creation, the cutscenes or the cell. The only `[RED]` line is the conditional rendering note, as on the Mac.
+- **Memory:** 1.80 GB PSS (0.80 GB graphics). Not killed.
+- **Input:** the game confirms with B and goes back with A ([Input](#input)), so a menu that ignores A is expected.
+- **Not Playable yet:** it's real-time action, so the stretch (the Asylum through the Asylum Demon) needs a person with a controller.
+- **On an Ayn Odin 2 (SM8550, Adreno 740 with Qualcomm's driver 0x802a4000), with its built-in controller:** the same route into the Asylum cell, with the name given by `DM_KBD=Ash` in `env.txt` (the host answers the software keyboard, so no Android keyboard opens). 30 fps in every 30 s window, GPU about 6.7 ms in the cell, 1.1 GB PSS. The movie's output underran in only 1 of its 10 reports there (22 underruns), so the Z Flip 7's crackle is mostly that phone's. The game app and its save in the cell stay installed there for a person to play.
+- **Not tried:** the other devices.
 
 ## Found on this game
 

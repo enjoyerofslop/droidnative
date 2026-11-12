@@ -31,6 +31,7 @@ int main(int argc, char **argv);   // main.c
 void dm_focus_set(int st);
 void dm_audio_suspend(int on);
 void dm_gfx_suspend(int on);
+void guest_clock_freeze_for(int reason, int on);   // hle_os.c
 
 enum { ST_START, ST_SELFTEST, ST_PASS, ST_FAIL, ST_GAME, ST_ENDED, ST_CRASHED, ST_DEMO };
 static int g_demo_frames;   // frames the NVN picture check presented (nvn_demo.c)
@@ -567,16 +568,43 @@ static int frame_draw(void) {
 // ---------- Input ----------
 // The touch controls (Gamepad.java) and a physical controller (the native input queue) are merged as dm/ios's DmGamepad.m does: buttons ORed, a tilted physical stick wins
 static int g_ctl_used;
-static uint64_t g_pad_btn; static int32_t g_axis[4];
+static uint64_t g_pad_btn, g_hat; static int32_t g_axis[4];   // g_hat: the directions a hat holds (they come as axes, not as keys)
 static pthread_mutex_t g_in_mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t g_touch_btn, g_shake_btn, g_pad_now; static int32_t g_touch_ax[4];
 static int tilted(int32_t x, int32_t y) { return (int64_t)x * x + (int64_t)y * y > (int64_t)4000 * 4000; }
+// The pause menu (Gamepad.java draws it and owns its rows; the ≡ button or a controller's Mode / Menu key opens it). While it is open the game is held as a suspended
+// application is: its audio suspended (the silent sink keeps the pacing), the guest clock frozen with clock reads waiting (reason 1, hle_os.c), vibration stopped, and
+// no input reaches it. g_swallow: the buttons held when the menu closed (the B or A that closed it) stay from the game until they are let go
+static _Atomic int g_menu, g_bg; static uint64_t g_swallow;
 static void publish(void) {
     pthread_mutex_lock(&g_in_mu);
     int32_t lx = g_touch_ax[0], ly = g_touch_ax[1], rx = g_touch_ax[2], ry = g_touch_ax[3];
     if (tilted(g_axis[0], g_axis[1])) { lx = g_axis[0]; ly = g_axis[1]; }
     if (tilted(g_axis[2], g_axis[3])) { rx = g_axis[2]; ry = g_axis[3]; }
-    dm_input_set(g_touch_btn | g_pad_now | g_shake_btn, lx, ly, rx, ry);
+    uint64_t b = g_touch_btn | g_pad_now | g_shake_btn; g_swallow &= b;
+    if (atomic_load(&g_menu)) dm_input_set(0, 0, 0, 0, 0); else dm_input_set(b & ~g_swallow, lx, ly, rx, ry);
     pthread_mutex_unlock(&g_in_mu);
+}
+// What holds the game, from the two things that can: the app in the background (on_cmd) suspends the audio, the menu suspends it too and stops the clock and the vibration.
+// One place, so coming back to the app with the menu still open does not start the audio under it.
+// The menu owns the clock's freeze reason 1 here (dm.h: "background"; nothing else on this front freezes for it, only hle_oe.c's scripted background, a test's): the reasons are
+// flags, not counts, so a background freeze added to this front later needs a reason of its own, or leaving the app with the menu open would thaw the clock under it
+static void hold_sync(void) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static int held;
+    pthread_mutex_lock(&mu);
+    int menu = atomic_load(&g_menu);
+    if (menu && !held) { dm_audio_suspend(1); guest_clock_freeze_for(1, 1); dm_haptics_suspend(DM_HAPTICS_INACTIVE, 1); }
+    else if (!menu && held) { dm_haptics_suspend(DM_HAPTICS_INACTIVE, 0); guest_clock_freeze_for(1, 0); }
+    held = menu;
+    dm_audio_suspend(menu || atomic_load(&g_bg));
+    pthread_mutex_unlock(&mu);
+}
+static jboolean JNICALL n_pause(JNIEnv *e, jclass c, jboolean on) {   // → 0: no game is running, there is nothing to hold (the menu does not open)
+    (void)e; (void)c;
+    if (on && atomic_load(&g_state) != ST_GAME) return 0;
+    if (!on) { pthread_mutex_lock(&g_in_mu); g_swallow = g_touch_btn | g_pad_now; pthread_mutex_unlock(&g_in_mu); }
+    atomic_store(&g_menu, on ? 1 : 0); publish(); hold_sync();
+    LOG("pause menu %s", on ? "open: the game is held (audio, clock, vibration, input)" : "closed: the game goes on");
+    return 1;
 }
 static void pad_now(uint64_t b) { pthread_mutex_lock(&g_in_mu); g_pad_now = b; pthread_mutex_unlock(&g_in_mu); publish(); }
 static void JNICALL n_touchpad(JNIEnv *e, jclass c, jlong b, jint lx, jint ly, jint rx, jint ry) {
@@ -607,7 +635,8 @@ static void gamepad_start(void) {
     if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionDescribe(e); (*e)->ExceptionClear(e); c = NULL; }
     if (!c) { LOG("[RED] no Java side in the app (classes.dex): no touch controls, no text input"); return; }
     static const JNINativeMethod nm[] = {{"nativeTouchPad", "(JIIII)V", (void *)n_touchpad}, {"nativeGameTouch", "([I[F[FI)V", (void *)n_gametouch},
-        {"nativeShake", "(Z)V", (void *)n_shake}, {"nativeOpMode", "()I", (void *)n_opmode}, {"nativeDefaultLayout", "()I", (void *)n_layout}, {"nativeLog", "(Ljava/lang/String;)V", (void *)n_log}, {"nativeEnv", "(Ljava/lang/String;)Ljava/lang/String;", (void *)n_env}, {"nativeFrames", "()J", (void *)n_frames}};
+        {"nativeShake", "(Z)V", (void *)n_shake}, {"nativeOpMode", "()I", (void *)n_opmode}, {"nativeDefaultLayout", "()I", (void *)n_layout}, {"nativeLog", "(Ljava/lang/String;)V", (void *)n_log}, {"nativeEnv", "(Ljava/lang/String;)Ljava/lang/String;", (void *)n_env}, {"nativeFrames", "()J", (void *)n_frames},
+        {"nativePause", "(Z)Z", (void *)n_pause}};
     if ((*e)->RegisterNatives(e, c, nm, sizeof nm / sizeof *nm)) { (*e)->ExceptionClear(e); LOG("[RED] Gamepad natives not registered"); return; }
     g_gp = (*e)->NewGlobalRef(e, c);
     void dm_haptics_android_init(JavaVM *vm, jclass cls, JNIEnv *e); dm_haptics_android_init(g_app->activity->vm, g_gp, e);
@@ -642,18 +671,46 @@ static uint64_t key_button(int32_t code) {
     }
 }
 static int32_t ax(float v) { if (v > -0.12f && v < 0.12f) v = 0; return (int32_t)(v * DM_STICK_MAX); }
+// A controller in the pause menu: the popup that draws it takes no keys (not focusable), so they come here and go to Gamepad.menuKey. MK_*: its codes.
+// Each press counts once, a direction from the D-pad, the hat or the left stick; A (the Switch's, after DM_PAD_ABXY) chooses and B closes
+enum { MK_TOGGLE, MK_UP, MK_DOWN, MK_LEFT, MK_RIGHT, MK_OK, MK_BACK };
+static void menu_key(int k) {
+    static jmethodID m; JNIEnv *e = g_env; if (!g_gp) return;
+    if (!m) m = (*e)->GetStaticMethodID(e, g_gp, "menuKey", "(I)V");
+    if (m) (*e)->CallStaticVoidMethod(e, g_gp, m, (jint)k);
+    if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+}
+static void menu_nav(uint64_t b) {
+    static uint64_t was;
+    if (g_axis[1] > DM_STICK_MAX / 2) b |= DM_BTN_UP; else if (g_axis[1] < -DM_STICK_MAX / 2) b |= DM_BTN_DOWN;
+    if (g_axis[0] > DM_STICK_MAX / 2) b |= DM_BTN_RIGHT; else if (g_axis[0] < -DM_STICK_MAX / 2) b |= DM_BTN_LEFT;
+    uint64_t down = b & ~was; was = b;   // followed while the menu is closed too: what is held as it opens is not a press in it
+    if (!atomic_load(&g_menu)) return;
+    if (down & DM_BTN_UP) menu_key(MK_UP); if (down & DM_BTN_DOWN) menu_key(MK_DOWN); if (down & DM_BTN_LEFT) menu_key(MK_LEFT); if (down & DM_BTN_RIGHT) menu_key(MK_RIGHT);
+    if (down & DM_BTN_A) menu_key(MK_OK); if (down & DM_BTN_B) menu_key(MK_BACK);
+}
 static int32_t on_input(struct android_app *app, AInputEvent *ev) {
     (void)app;
     if (atomic_load(&g_state) != ST_GAME) return 0;
     int src = AInputEvent_getSource(ev);
     if (AInputEvent_getType(ev) == AINPUT_EVENT_TYPE_KEY) {
         int32_t code = AKeyEvent_getKeyCode(ev); uint64_t b = key_button(code);
+        // a controller's Mode key (its logo or home button, where Android passes it on) and a Menu key open and close the pause menu
+        if (code == AKEYCODE_BUTTON_MODE || code == AKEYCODE_MENU) {
+            if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_DOWN && !AKeyEvent_getRepeatCount(ev)) menu_key(MK_TOGGLE);
+            return 1;
+        }
         // a controller's Back key (some send it for B or for their back / select button) is B: left to Android, Back closes the activity and the game with it, unsaved.
-        // The phone's own Back (gesture or key, a keyboard source) keeps doing that
+        // The phone's own Back (gesture or key, a keyboard source) keeps doing that, except with the pause menu open: there it resumes, as B does
+        if (!b && code == AKEYCODE_BACK && (src & AINPUT_SOURCE_GAMEPAD) != AINPUT_SOURCE_GAMEPAD) {
+            static int back_menu;   // the key-up of a Back that closed the menu is the menu's too
+            if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_DOWN) { back_menu = atomic_load(&g_menu); if (back_menu && !AKeyEvent_getRepeatCount(ev)) menu_key(MK_BACK); }
+            if (back_menu) { if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_UP) back_menu = 0; return 1; }
+        }
         if (!b && code == AKEYCODE_BACK && (src & AINPUT_SOURCE_GAMEPAD) == AINPUT_SOURCE_GAMEPAD) b = DM_BTN_B;
         if (!b) return 0;
         if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_DOWN) g_pad_btn |= b; else if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_UP) g_pad_btn &= ~b;
-        g_ctl_used = 1; pad_now(g_pad_btn); return 1;
+        g_ctl_used = 1; pad_now(g_pad_btn); menu_nav(g_pad_btn | g_hat); return 1;
     }
     if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_MOTION) return 0;
     if (src & AINPUT_SOURCE_JOYSTICK) {
@@ -665,14 +722,16 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
         float hx = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_HAT_X, 0), hy = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_HAT_Y, 0);
         uint64_t b = g_pad_btn & ~(uint64_t)(DM_BTN_LEFT | DM_BTN_RIGHT | DM_BTN_UP | DM_BTN_DOWN);
         if (hx < -0.5f) b |= DM_BTN_LEFT; if (hx > 0.5f) b |= DM_BTN_RIGHT; if (hy < -0.5f) b |= DM_BTN_UP; if (hy > 0.5f) b |= DM_BTN_DOWN;
+        g_hat = b & ~g_pad_btn;
         // analog triggers on LTRIGGER / RTRIGGER, or BRAKE / GAS (Xbox controllers over Bluetooth, among others)
         float lt = fmaxf(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_LTRIGGER, 0), AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_BRAKE, 0));
         float rt = fmaxf(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RTRIGGER, 0), AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_GAS, 0));
         if (lt > 0.5f) b |= DM_BTN_ZL; else if (!(g_pad_btn & DM_BTN_ZL)) b &= ~(uint64_t)DM_BTN_ZL;
         if (rt > 0.5f) b |= DM_BTN_ZR; else if (!(g_pad_btn & DM_BTN_ZR)) b &= ~(uint64_t)DM_BTN_ZR;
-        g_ctl_used = 1; pad_now(b); return 1;
+        g_ctl_used = 1; pad_now(b); menu_nav(b); return 1;
     }
     if (src & AINPUT_SOURCE_TOUCHSCREEN) {   // the touch points as fractions of the window (the 16:9 picture once it is drawn)
+        if (atomic_load(&g_menu)) return 1;
         int act = AMotionEvent_getAction(ev) & AMOTION_EVENT_ACTION_MASK, up = AMotionEvent_getAction(ev) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
         size_t n = AMotionEvent_getPointerCount(ev); dm_touch t[16]; int k = 0;
         float w = (float)ANativeWindow_getWidth(g_app->window), h = (float)ANativeWindow_getHeight(g_app->window);
@@ -704,14 +763,16 @@ static void on_cmd(struct android_app *app, int32_t cmd) {
     int game = atomic_load(&g_state) == ST_GAME;
     switch (cmd) {
         case APP_CMD_INIT_WINDOW:
-            if (app->window) { if (g_started) vk_window_up(app->window); else vk_window_first(app->window); }
+            // a window that comes back (Home and back to the game) has a new swapchain with nothing in it: the newest frame is shown again, which a game held by the
+            // pause menu would not do itself (the picture behind the menu stayed black until Resume)
+            if (app->window) { if (g_started) { vk_window_up(app->window); g_shown = 0; } else vk_window_first(app->window); }
             if (!g_started) { g_started = 1; start_host(); gamepad_start(); }
             break;
         case APP_CMD_TERM_WINDOW: vk_window_down(); break;
         case APP_CMD_GAINED_FOCUS: if (game) dm_focus_set(1); break;
         case APP_CMD_LOST_FOCUS: gamepad_reset(); if (game) dm_focus_set(2); break;
-        case APP_CMD_PAUSE: vkb_pipeline_cache_save(); if (game) { dm_focus_set(3); dm_audio_suspend(1); } break;
-        case APP_CMD_RESUME: if (game) { dm_audio_suspend(0); dm_focus_set(1); } break;
+        case APP_CMD_PAUSE: vkb_pipeline_cache_save(); atomic_store(&g_bg, 1); if (game) { dm_focus_set(3); hold_sync(); } break;
+        case APP_CMD_RESUME: atomic_store(&g_bg, 0); if (game) { hold_sync(); dm_focus_set(1); } break;   // the audio stays suspended under an open pause menu
         default: break;
     }
 }
@@ -733,6 +794,7 @@ void android_main(struct android_app *app) {
     }
     vk_driver_dirs(g_ext, g_int);   // DM_VK_DRIVER: a driver beside env.txt, run from a copy in the internal files
     vk_driver_game(g_game, DM_GAME_ID);   // and its start records: games/<title ID>/vk_driver_result.txt
+    vk_start_game(g_game);   // and vk_start.txt, whatever driver runs
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &g_env, NULL);
     app->onAppCmd = on_cmd; app->onInputEvent = on_input;
     // The screen stays on while the game's window is up, as the launcher's does: Android counts only its own input events as activity, so a cutscene, a game
@@ -747,6 +809,6 @@ void android_main(struct android_app *app) {
             if (g_sc) break;
         }
         if (!frame_draw()) status_draw();
-        driver_proven();
+        driver_proven(); vk_start_tick();
     }
 }

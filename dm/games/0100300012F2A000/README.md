@@ -1,6 +1,6 @@
 # Advance Wars 1+2: Re-Boot Camp (`0100300012F2A000`)
 
-Base game 1.0.0 (v0), the only version, SDK 10.4.1 (The Great Ace Attorney Chronicles' `sdk` and movie module builds, [010036E00FB20000](../010036E00FB20000/README.md)). Unity 2020.2.1f3 IL2CPP on NVN; FMOD sound through `AudioOut`; Bink 2 movies (`.bk2`) decoded by Bink's Unity plugin in `main`; Pia / NEX for online play. Modules `main`, `subsdk0` (`NintendoSDK_movie`, which `main` imports from; the movies seen so far, the opening among them, are Bink's) and `sdk`. Plays on the iPhone (IPA 7.1 GB).
+Base game 1.0.0 (v0), the only version, SDK 10.4.1 (The Great Ace Attorney Chronicles' `sdk` and movie module builds, [010036E00FB20000](../010036E00FB20000/README.md)). Unity 2020.2.1f3 IL2CPP on NVN; FMOD sound through `AudioOut`; Bink 2 movies (`.bk2`) decoded by Bink's Unity plugin in `main`; Pia / NEX for online play. Modules `main`, `subsdk0` (`NintendoSDK_movie`, which `main` imports from; the movies seen so far, the opening among them, are Bink's) and `sdk`. Plays on the iPhone (IPA 7.1 GB), and on Android through Field Training's first lesson ([Android](#android)).
 
 On the Mac: the boot, the Bink opening movie, the title, Nell's introduction, a new casual campaign and the first training battle (Field Training, Troop Orders); sound, about 2.5 GB resident and 1.6–1.9 GB of Metal allocations, level over 15 minutes with no red line.
 
@@ -45,6 +45,34 @@ On the Mac: the boot, the Bink opening movie, the title, Nell's introduction, a 
 ## Mac routes
 
 - The work folder's `run/step.sh <shot> <wait> <presses…>` drives a run started with `DM_CTL`. About 22 s into a boot the opening movie plays: A skips it, `L+R~0.5` opens the main menu (the first time Nell's introduction, A about 25 times, then the file select); A (Campaign), A, A (Advance Wars, the file), A, A, A, A (the mission, Field Training, Troop Orders) start the first battle.
+
+## Android
+
+First run on Android, 2026-11-11: a Moto Razr Plus 2023 (SM8475, Adreno 730 with Qualcomm's own driver 0x80267062, Android 16), unfolded, in handheld mode with the 3D on-screen layout. DroidPlay Core `main` at `9811908b`, packed as a game app (`build_android_from_nsp.py --game-apk`, 359 MB APK with the 7.1 GB RomFS as its OBB). Three launches, about 55 minutes.
+
+- **The build:** the registered profile, with no derived one; the split found all 20,424 shaders in 16 s, and all 20,424 translated to SPIR-V (5 min 10 s on the Mac, none failed).
+- **Plays from a new game through Field Training's first lesson:** the Bink opening movie, the title, Nell's introduction, Campaign → Advance Wars → New Game → Casual → Field Training → Troop Orders, then the lesson's battle: two infantry moved, one ordered to Wait, an attack with Fire, End Turn, the enemy's turn, then Quick Fire to finish the enemy on day 2 ("Lesson complete!"). Then the second lesson, Cities & Terrain: the four units' captures, Fire and the mountain's cover through day 2, then Exit Map (Field Training doesn't save a lesson left part way).
+- **Save and Continue:** the game saves by itself at the lesson's end (`save commit #6` with "Lesson complete!"). After a cold start the main menu opens without Nell's introduction, and the file shows "Next Lesson: Cities & Terrain", with Troop Orders ticked.
+- **Frame rate, the game's own:** 60 fps in the menus and 30 in battle by its own limit (present interval 1 throughout; frame work 33 ms with the replay at 7–8 ms and the GPU at 13–16 ms). In battle, every 30 s window is 29.7–30.0 fps (one at 36, with a stretch at 60 between scenes), over 14 minutes of the first lesson and 17 of the second; frame p50 33.2–33.4 ms, p95 36.5–40 ms; 150–230 draws a frame. Menus 59–60 fps.
+- **Hitches:** 32 frames over 60 ms in the first lesson's 27,500, 45 in the second's 33,100:
+  - the switch into each 3D battle animation (0.1–0.35 s, the replay idle: Unity's own scene load);
+  - the first sight of each animation, whose pipelines are built then (0.3–0.8 s; 138 pipelines in the first launch, kept for later launches);
+  - frames of 65–90 ms in the animations' busiest moments (400–500 draws a frame). The animations are short: about 2–4 s of such frames in each lesson.
+  - While a pipeline is built in the background its draws are left out (792 in the first launch, 311 in the next, as on other games); nothing missing showed in the screenshots.
+- **The menus after a battle can stay at 30 fps:** back on Field Training's menu after either lesson, the menu ran at 30 fps with the GPU busy 24 ms a frame, against 60 fps and 13 ms on the same menu after a cold start. The NVN calls, draws (68), passes (22) and the replay's own copies per frame were the same; the submission's CPU time doubled too (3.9 → 8 ms). A few taps on an empty part of the screen brought it back to 60 fps and 13 ms at once, and it stayed there: the battle's light frames at 30 fps leave the 730's GPU (and CPU) clocks low, and a menu that then takes 24 ms a frame keeps them there. The taps' input boost raises them. The runs above were driven by `DM_CTL`, which sends no touches; with the on-screen controls each press is a touch. Not tried with a controller.
+- **Sound:** FMOD plays through `AudioOut` (AAudio, 48 kHz stereo) with no underrun in any launch. A `DM_AUDIO_DUMP` has sound in the opening movie, the menus and both battles; the game's `AudioRenderer` output stays silent. Not listened to by a person.
+- **Picture:** nothing wrong seen: the movie, the title art, Nell, the 3D board with its forests, mountains and cities, the troops and their HP, the movement and attack ranges, the menus, the blur behind "Lesson complete!", and the plains and mountain battle animations with their sky and effects. No `[RED]` line in any launch. Not compared with the Mac, as nothing needed it.
+- **Memory:** the alias region mapped to 2.26 GB (as on the Mac); 2.35 GB PSS 20 minutes into both long launches (1.4–1.6 GB resident, the rest in zram), high-water mark 2.18 GB. On this 8 GB phone (7.46 GB usable) lmkd killed 13 background apps over the session ("PSI critical event"), never the game.
+- **Driving it over adb:** `env.txt` with `DM_CTL` in the game app's external files (`chmod 666`). The movie starts about 22 s in; A skips it and `L+R~0.5` opens the main menu. Nell's introduction takes about 20 A presses. On the board each D-pad press moves the cursor one tile. Nell's lines and the troops' tips (Quick Fire, holding ZR) appear without warning and take the next presses, so look after every move. A selects a unit, a tile, then the command; A on an empty tile opens the Map menu (End Turn is its third item). To leave a lesson: + → Options → Exit Map, then Left to Yes (No is preselected).
+- **On Xclipse too:** a Galaxy Z Flip 7 (SM-F766U1: Exynos 2500, Xclipse 950 with Samsung's driver 24.0.533 / 0x6000215, Vulkan 1.3.279, Android 16), unfolded, 2026-11-11, the same game app. Two launches, about 20 minutes.
+  - **What was played:** a new Casual campaign through Field Training's first lesson (won on day 2), the save (`save commit #6` at "Lesson complete!"), then a cold start (the file shows "Next Lesson: Cities & Terrain"), and the second lesson through its first day and the enemy's turn.
+  - **The picture:** troops, the map, its cities and the battle scenes (plains and mountain) all draw, as on the Adreno. Another Android port of this game draws no troops or map on Xclipse; this build doesn't share that fault. The textures are BC, which Xclipse lacks, so they are decoded on the CPU. No `[RED]` line.
+  - **Frame rate:**
+    - Battles: 29.7–30.0 fps in every 30 s window (frame p50 33.3 ms, p95 about 36 ms, GPU about 12 ms). Frames over 60 ms were 12 of 11,300 in the first lesson: animation scene switches and one first-time pipeline build of 0.42 s.
+    - Menus: 60 fps, including back on Field Training's menu after the battle (GPU 5 ms). The Razr's post-battle 30 fps menu didn't happen here.
+  - **Sound:** no underrun; the dump has signal in the movie, the menus and the battle.
+  - **Memory:** 2.94 GB PSS after the first lesson and 3.23 GB in the second, of which 0.59–0.86 GB is graphics. VmHWM 2.49 GB, no swap used, 11.2 GB on the phone. No lmkd kill.
+- **Not tried:** past Field Training's second lesson, the other devices and Mali (the Pixel 9 Pro XL).
 
 ## Found on this game
 
