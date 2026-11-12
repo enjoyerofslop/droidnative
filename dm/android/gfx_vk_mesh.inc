@@ -53,6 +53,7 @@ static int vk_mesh_draw_(const p_draw *dw) {
     bf_pipeline(c, pp->p);
     for (int i = 0; i < 4; i++) if (k.sh[i]) vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, (uint32_t)(k.sh[i]->set & 3), 1, &sets[i], k.sh[i]->ndyn, dyn[i]);
     if (pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { g_drop[3]++; return 0; }
+    if (g_gm_np) { int gm = 0; for (int i = 0; i < 4; i++) gm |= k.sh[i] && k.sh[i]->gm; if (gm) gm_np_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl); }   // raw memory's pools as a descriptor array, as vk_draw_ (gfx_vk_gmem_noptr.inc)
     VkViewport v; VkRect2D sc; draw_dyn_state(c, &v, &sc); (void)v; (void)sc;
     // a task shader's workgroups are the draw's; with none, the mesh shader's. Past the device's X limit (65,535 on the Adreno 840) the draw goes in parts, each with its own first
     uint32_t first = (uint32_t)dw->first, left = (uint32_t)dw->count, mx = g_mesh_max[k.sh[2] ? 0 : 1];
@@ -138,12 +139,13 @@ static lmod *ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim) {
     uint32_t *v = w ? spv_perprim(d ? d : w, d ? nd : n, prim, &on) : NULL;
     lmod *m = NULL;
     if (v) {
-        uint32_t *code = v, *pf = NULL, *fit = NULL; size_t cn = on, pn, fn;
+        uint32_t *code = v, *np = NULL, *pf = NULL, *fit = NULL; size_t cn = on, nn, pn, fn;
+        if ((nn = gm_np_code(code, cn, p, 1, &np))) { code = np; cn = nn; }   // raw memory without physical pointers, as lm_code (gfx_vk_gmem_noptr.inc)
         if ((pn = spv_pool_fit(code, cn, p, &pf))) { code = pf; cn = pn; }
         if ((fn = spv_fit(code, cn, p, &fit))) { code = fit; cn = fn; }
         if (s->bmap) spv_bind_remap(code, cn, s->bmap);
         { const char *dd = getenv("DM_DUMP_DIR"); if (dd) { char q[700]; mkdir(dd, 0777); snprintf(q, sizeof q, "%s/pvar_%s_%x_%x.spv", dd, s->key, miss, prim); FILE *f = fopen(q, "wb"); if (f) { fwrite(code, 4, cn, f); fclose(f); } } }   // for spirv-val
-        VkShaderModule mod = lm_create(code, cn, p); free(pf); free(fit);
+        VkShaderModule mod = lm_create(code, cn, p); free(np); free(pf); free(fit);
         size_t pl = strlen(p) + 1;
         if (mod && (m = calloc(1, sizeof *m + pl))) { memcpy(m->path, p, pl); m->miss = miss; m->bm = s->bmap; atomic_store(&m->m, mod); } else if (mod) vkDestroyShaderModule(g_vk.dev, mod, NULL);
     }
