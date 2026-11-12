@@ -544,12 +544,14 @@ static size_t spv_fit_xor(const uint32_t *code, size_t nw, const char *what, uin
 }
 // The module without subgroup operations in a stage where the GPU runs none (spv_limits.h), in *out (to free); 0 when it needs nothing. A GPU that runs them in
 // every graphics stage gets every module as translated, untouched; so does one that runs them in the module's stage. DM_SPV_LIMITS=0 (env.txt): modules as translated
-static size_t spv_fit(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+// nowide: a module whose subgroup operations are already each 32 lanes' own (a packed task / mesh kernel, spv_meshemu.py pack: its halves' ballots, masks and shuffles are
+// rewritten there), which spv_wide must not rewrite again: rewritten twice, the upper half's votes came out empty (white specks in Ocarina of Time's grass)
+static size_t spv_fit(const uint32_t *code, size_t nw, const char *what, int nowide, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LIMITS"); on = !(e && *e == '0'); }
     *out = NULL;
-    uint32_t *xo = NULL; size_t xk = spv_fit_xor(code, nw, what, &xo);   // first: spv_wide keeps its ShuffleXor
+    uint32_t *xo = NULL; size_t xk = nowide ? 0 : spv_fit_xor(code, nw, what, &xo);   // first: spv_wide keeps its ShuffleXor
     if (xk) { code = xo; nw = xk; }
-    size_t wk = spv_fit_wide(code, nw, what, out); if (wk) { free(xo); return wk; }   // a stage that runs them: as wide as the GPU's subgroups
+    size_t wk = nowide ? 0 : spv_fit_wide(code, nw, what, out); if (wk) { free(xo); return wk; }   // a stage that runs them: as wide as the GPU's subgroups
     size_t nk = spv_fit_narrow(code, nw, what, out); if (nk) { free(xo); return nk; }   // or as narrow
     if (xk) { *out = xo; return xk; }   // a stage that runs them (spv_fit_xor's check), so nothing for spv_limits
     if (!on || (g_sg_stages & VK_SHADER_STAGE_ALL_GRAPHICS) == VK_SHADER_STAGE_ALL_GRAPHICS || !spv_lim_wanted(code, nw, g_sg_stages)) return 0;
@@ -604,7 +606,8 @@ static lmod *tff_fs_mod(const vshader *s, const spv_tff_layout *L, uint32_t outs
     } else LOG("[RED] [vk] vertex shader %s: its feedback layout has a buffer of more than 128 words a vertex, so it cannot be captured in the fragment stage", s->key);
     free(o); return m;
 }
-static lmod *sh_module(const vshader *s, const char *path, int *b0) { return lm_new(path, 0, s->bmap, b0); }   // *b0 |= the module reads the support buffer (spv_b0_used)
+static int memu_packed(const vshader *s);   // a task / mesh kernel with the shader's workgroups packed (gfx_vk_meshemu.inc)
+static lmod *sh_module(const vshader *s, const char *path, int *b0) { return lm_new_x(path, 0, 0, 0, memu_packed(s), 0, s->bmap, b0); }   // *b0 |= the module reads the support buffer (spv_b0_used); a packed kernel keeps its own subgroup rewrites (spv_fit nowide)
 // Ryujinx's TextureFormat names (an image's declared format) → Vulkan, with the texel size
 static const struct { const char *n; VkFormat f; int bytes; } DECL_FMT[] = {
     {"R8Unorm", VK_FORMAT_R8_UNORM, 1}, {"R8Snorm", VK_FORMAT_R8_SNORM, 1}, {"R8Uint", VK_FORMAT_R8_UINT, 1}, {"R8Sint", VK_FORMAT_R8_SINT, 1},
