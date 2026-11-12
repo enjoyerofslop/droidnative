@@ -1,6 +1,6 @@
 # Blasphemous 2 (`010040801A4C8000`)
 
-Update 1.0.8 (v524288) over the base game, SDK 15.3.2, Unity 2021.3.20f1 IL2CPP with FMOD on NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`. Plays on the Mac: title, Pilgrimage menu, a new game, opening H.264 cinematic with subtitles, awakening, movement into the weapon room, healing, Veredicto pickup, jumping and a weapon swing. Control testing deliberately stops there. The unsigned IPA is about 1.5 GB; iPhone/iPad validation remains open.
+Update 1.0.8 (v524288) over the base game, SDK 15.3.2, Unity 2021.3.20f1 IL2CPP with FMOD on NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`. Plays on the Mac: title, Pilgrimage menu, a new game, opening H.264 cinematic with subtitles, awakening, movement into the weapon room, healing, Veredicto pickup, jumping and a weapon swing. Control testing deliberately stops there. The unsigned IPA is about 1.5 GB; iPhone/iPad validation remains open. On Android, the cartridge's 1.0.1 runs at 60 fps into the weapon room ([Android](#android)).
 
 ## What it needs
 
@@ -35,6 +35,20 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 The title route can start with `DM_KEYS="f1400:A,f1500:A,f1600:A"`, then the final New Game confirmation through `DM_CTL` once the slot screen is ready. Let the opening play, or hold B to skip when it permits. In play: left stick / D-pad to move, B to jump, Y to attack, X to heal, Up to interact. Move right from the awakening room to the three statues and interact beside the left statue for Veredicto. The default 2D touch-pad layout is sufficient.
 
 Keep the game focused during its opening cinematic. Unity pauses the sequence after a Mac focus-loss notification, while menus and frame submissions can still run. A windowless diagnostic run (omit `DM_WINDOW`, `DM_PRESENT_LINK=0`) plays the cinematic and supports `DM_CTL` screenshots without focus changes. `DM_PRESENT_LINK=0` also allows screenshots when macOS stops the display link of an unfocused window; it is a diagnostic option, not a profile setting.
+
+## Android
+
+First run on Android, 2026-11-11, on a Galaxy S25 Edge (SM8750, Adreno 830 with Qualcomm's driver 0x80320001, Android 16), in handheld mode, driven over adb with `DM_CTL`. The cartridge's 1.0.1 (v65536), packed as a game app (`build_android_from_nsp.py --game-apk`) from DroidPlay Core `main` at `1c06a5c4`: one 1.5 GB APK with the RomFS inside.
+
+- **The build:** a profile derived from 1.0.8's (the same Unity 2021.3.20f1). The split found 2,655 shaders (1.0.8 has 4,354), all translated to SPIR-V, none failed.
+- **What was played:** the title, Pilgrimage → New Game, the opening quote and the H.264 cinematic with its subtitles (MediaCodec), the awakening with the Bile Flask tutorial (L), walking right into the room of the three statues, the sword taken from the middle one (X), and a few swings and jumps beyond it.
+- **Frame rate:** 60 fps (the profile's target): every 30 s window 58.8–60.0 over 9 minutes, frame p50 16.7 ms, p95 about 19 ms, GPU 4.5–6.5 ms.
+- **Sound:** FMOD through a stereo `AudioOut`, no underrun. The `DM_AUDIO_DUMP` has the cinematic and the music (RMS about 360–2,700). Not listened to by a person.
+- **Picture:** nothing wrong seen in the cinematic, the cave, the statues' room or the HUD. One `[RED]` line: `advanced blend mode 25: drawn with plain blending`, nothing visibly wrong where it was seen; not compared with the Mac.
+- **Memory:** 1.99 GB PSS (0.73 GB graphics). Not killed.
+- **Save:** the game saves only at a Prie Dieu, which wasn't reached. After a cold start the pilgrimage's slot 1 is still New Game, so saving and Continue are untested.
+- **Not Playable yet:** it's a real-time platformer, so the stretch (through the Faceless One, with a Prie Dieu save loaded after a cold start) needs a person with a controller.
+- **Not tried:** the other devices.
 
 ## Found on this game
 

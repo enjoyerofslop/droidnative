@@ -2153,12 +2153,14 @@ def compute_reader_additions(g, tables, split_log):
     except (OSError, UnicodeError, ValueError): return False
 
 
-def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None):
+def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, targeted=False):
     """The shader split into pkg, checked against the profile's tables. The package is reused when the extractor and the modules it imports, the profile settings and tables it reads or is checked against,
     the DLC RomFS roots, each version's modules, RomFS (paths and sizes) and run-time capture, and the package's own contents are as at the last successful split. Returns the package's content key, the shader build's input (None for damaged files, which never reuse them): a split that runs
     again because a reader of another engine changed writes the same package, and the iOS shaders stay reused.
     oodle: for decoder-backed packs, builds or reuses the Mac host and returns DM_OODLE_HOST / DM_OODLE_MODULES. Verified host provenance ignores only its chain label;
-    unknown hosts use their bytes, and rewritten modules are always content inputs. Both macOS and iOS builds share this extraction cache."""
+    unknown hosts use their bytes, and rewritten modules are always content inputs. Both macOS and iOS builds share this extraction cache.
+    targeted (the Android build, for a profile that registers this version): first only the files the profile's shader map names (split_from_map), and every file if
+    that split's tables differ from the profile's."""
     names = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv')
     PROG.stage('shader split', step='checking the inputs')   # then the count of files and archive ranges scanned (shader_split.py's progress lines); the package and tables come at the end
     kf, outputkf = pkg.with_name(pkg.name + '.key'), pkg.with_name(pkg.name + '.outputs.key')
@@ -2198,8 +2200,12 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
     def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
         if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
-    run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)] + ([','.join(map(str, dlc_roms))] if dlc_roms else []),
-        logs / 'shader_split.log', env=env, on_line=counted)
+    cmd = [py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)] + ([','.join(map(str, dlc_roms))] if dlc_roms else [])
+    targeted = targeted and not provisional and not dlc_roms and env.get('DM_SPLIT_TARGETED', '1') != '0' and g.table('shader_map.tsv').is_file()   # DLC: its shaders are not in the map
+    if targeted and (why := split_from_map(cmd, env, logs, g, tmp, counted)):
+        say(f'the split of only the files game profile {g.id}\'s shader map names {why}: splitting every file (that split\'s log: {logs / "shader_split.from_map.log"})')
+        (logs / 'shader_split.log').replace(logs / 'shader_split.from_map.log'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True); targeted = False
+    if not targeted: run(cmd, logs / 'shader_split.log', env=env, on_line=counted)
     text = (logs / 'shader_split.log').read_text(errors='replace')
     m = re.search(r'shaders: (\d+) \(', text)
     bad = re.search(r'^\[RED\] (\d+) file\(s\) could not be read.*$', text, re.M)   # the split leaves out a file no reader reads (its own red line per file in the log) and goes on
@@ -2220,7 +2226,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         for n in names: shutil.copyfile(tmp / 'tables' / n, g.table(n))
     else:
         # Data rows byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone). Only data rows are compared: the header of Engage's profile tables was written by an older shader_split
-        diff = [n for n in names if data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
+        diff = [n for n in names if n not in (TARGETED_UNCHECKED if targeted else ()) and data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
         if diff:
             rows = '\n'.join(table_difference(n, g.table(n).read_bytes(), (tmp / 'tables' / n).read_bytes()) for n in diff)
             raise BuildError(f'the split shader tables differ from game profile {g.id}\'s:\n{rows}\nEither these game files are not the versions the profile registers, or shader_split.py now reads them differently and the profile\'s tables were not split again (the split\'s tables: {tmp / "tables"})')
@@ -2236,6 +2242,25 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     else: rmtree(cskf)
     PROG.end(note)
     return key and package_key(pkg)
+
+
+TARGETED_UNCHECKED = ('shader_pairs.tsv',)   # what a split of only the map's files cannot make whole (split_from_map)
+
+
+def split_from_map(cmd, env, logs, g, tmp, on_line):
+    """The split of only the RomFS files a registered profile's shader map names (shader_split.py from_map, DM_SPLIT_FROM_MAP), for a profile that registers the version: a full
+    split reads every file, Ocarina of Time's 186,583 in 128 s where its shaders are in 1,124 (11 s). Kept only when it reads every file it reads, and its shader map, facts and
+    pipeline pairs (where the profile has them) are the profile's, row for row: then its package is the full split's (the map lists each package record, its key the hash of its
+    bytes). Its variation pairs (shader_pairs.tsv) are not compared: a file whose shaders all appear first in other files is named nowhere in the map, yet pairs them (two of
+    Ocarina of Time's 28,178 pairs). The profile's own pairs are the ones its builds use, and the Android translation reads none. → '' when it is kept, else why not"""
+    if run(cmd, logs / 'shader_split.log', env=dict(env, DM_SPLIT_FROM_MAP=str(g.table('shader_map.tsv'))), on_line=on_line, fatal=False):
+        return 'stopped with an error'   # a reader that needs a file beside its own the map does not name: the full split has it
+    text = (logs / 'shader_split.log').read_text(errors='replace')
+    if re.search(r'^\[RED\] \d+ file\(s\) could not be read', text, re.M): return 'left out files it could not read'
+    if not re.search(r'shaders: [1-9]', text): return 'found no shaders'
+    names = ('shader_map.tsv', 'shader_facts.tsv') + (('pso_pairs.tsv',) if g.table('pso_pairs.tsv').is_file() else ())
+    diff = [n for n in names if data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
+    return f'made a {", ".join(diff)} that differs from the profile\'s' if diff else ''
 
 
 def shader_keys(g):   # the base shaders dmsh_build.py builds, shared by progress and the stale-library event
