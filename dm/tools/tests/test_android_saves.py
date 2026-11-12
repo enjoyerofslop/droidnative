@@ -3,7 +3,6 @@ the layouts other tools write (a DroidPlay export or backup, yuzu and its succes
 the game, keeping the current save first and swapping the new one in, the export ZIP, the ZIP reader's limits and the saves kept for Restore. Then the computer's side
 (scripts/build_android_from_nsp.py --import-save / --restore-backup): what it sends to files/import/<title ID>/ and how, with adb a recording stand-in. Synthetic saves
 only: no phone and no game files."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,6 +10,7 @@ from typing import Mapping, Union
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -273,9 +273,10 @@ class Saves(unittest.TestCase):
 
 
 # ---------------- the computer's side ----------------
-spec = importlib.util.spec_from_file_location('build_android_from_nsp', REPO / 'scripts/build_android_from_nsp.py')
-assert spec and spec.loader
-ba = importlib.util.module_from_spec(spec); spec.loader.exec_module(ba)
+# test_android_cli's copy of the script, not a second one: loading it again replaces functions of build_ipa_from_nsp (shared through sys.modules) with ones that
+# read this copy's data_dir, which test_android_cli's own patches then miss
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_android_cli import ba   # noqa: E402
 IMPORT = f'{ba.REMOTE}/import'
 
 
@@ -358,7 +359,7 @@ class SendSave(unittest.TestCase):
         with self.assertRaisesRegex(ba.BuildError, 'holds no DroidPlay save backup'): ba.restore_backup('S', self.logs, None, self.work, self.logs)
 
     def test_the_command_line(self):
-        with mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'), mock.patch.object(ba, 'phone', mock.MagicMock()), \
+        with mock.patch.dict(os.environ, {'NXNATIVE_JOURNAL': '0'}), mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'), mock.patch.object(ba, 'phone', mock.MagicMock()), \
              mock.patch.object(ba, 'import_save') as imp, mock.patch.object(ba, 'restore_backup') as rest:
             ba.main(['--import-save', 'save.zip', '--title', TID, '--serial', 'S', '--progress', 'off'])
             self.assertEqual(imp.call_args[0][:3], ('S', TID, 'save.zip'))
