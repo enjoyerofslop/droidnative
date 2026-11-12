@@ -2563,6 +2563,20 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): far map view CPU 84–118 → 40 ms a frame and frame time p50 64–176 → 48 ms; the normal map view about 35 ms (POCO X5, 95 % of the index and vertex bindings from kept copies, 29 MB kept). With 16-bit indices the far view's GPU time went from about 39 to 34–41 ms a frame (it is bound by geometry: a lower render scale barely changed it). Keeping the game's uniform buffers the same way did not help: they change every frame.
 
 
+### The geometry cache's table walked at every request that found no room
+
+- **Symptom:** Android only, in a game that fills the geometry cache's budget (256 MB): `gc_evict` in the replay thread's profile, under `gc_alloc`, `gc_get` and
+  `bind_vbufs` or `sb_keep`. In Mario Kart World's race on a Galaxy S25 Edge it took 1.8 to 8.9 ms of the replay's 34 to 54 ms a frame, from one window of the race to
+  the next.
+- **Cause:** a copy that finds no room asks `gc_evict` to let go of the copies no draw used in the last 120 presents, and the walk covers the whole table: 35,000 to
+  60,000 entries in that race. With the cache full and nothing stale, every one of the 16 to 43 such requests a frame walked the table and freed nothing.
+- **Fix:** the walk is made at most once a present, and after one that freed nothing only every 60th present (`gc_evict` returns whether it walked; `gc_alloc` gives up
+  at once when it didn't). A request that finds no walk due is copied per draw, as one that found no room after a walk was. `DM_VK_GC_EVICT_PACE=0` (env.txt): a walk
+  at every request, as before. The `[vk] geometry kept on the GPU` line counts the walks, the copies they let go and the requests that found none due.
+- **Check:** Mario Kart World's race on the S25 Edge, the replay thread profiled: `gc_evict` at most 0.2 ms a frame in two races with the pacing (31 walks let 9,387 copies go,
+  29,886 requests found none due), against 1.8 to 8.9 ms a frame in four races without.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md).
+
 ### Read-only storage buffers copied into every chunk
 
 - **Symptom:** Android only: a game whose shaders read large storage buffers spends a share of the replay thread in `memcmp` and `memcpy` under `stage_set`
