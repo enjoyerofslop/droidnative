@@ -105,7 +105,7 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
   - from a longer hold, once the GPU's time has fitted k − 1 for `FSTEP_RUN` frames (a run that holds up to `FSTEP_GFIT_MISS` (10) late frames: at hold 3 on the Pad 3 one Kokiri frame in ten is late, the hold's own pacing, and a run that ended at 3 of them never completed), k − 1 is tried after the hold-off with a probe's grace, whatever the cost at k says; three such trials failing in a row stop them until the hold changes (`gfail`).
   - A frame later than that, a GPU that does not fit, or no GPU time known: as before.
 - **Found on:** Ocarina of Time on a OnePlus Pad 3 (the oot-gpu session, 2026-11-11; nxplay-android plans/oot-gpu-time-2026-11-11.md).
-- **Check:** `t_fstep`: 96 checks; the new ones (soft-late frames hold 2, later ones step up, a GPU that does not fit steps up, no GPU time known steps up, the GPU-fit trial from 3, a hitch every 12 frames not stopping it, its three-failure stop) fail on the controller before.
+- **Check:** `t_fstep`: 97 checks; the new ones (soft-late frames hold 2, later ones step up, a GPU that does not fit steps up, no GPU time known steps up, the GPU-fit trial from 3, a hitch every 12 frames not stopping it, its three-failure stop) fail on the controller before.
 
 ### A derived profile drops the frame step its build lacks
 

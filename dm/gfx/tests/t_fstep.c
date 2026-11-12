@@ -428,6 +428,9 @@ int main(void) {
         sim t = {0}; t.gpu = 1.3; run(&t, 120, 0.5, 1, 3, 0); run(&t, 10, 2.5, 1, 3, 0);   // at hold 3 with a late frame in every 4 (the Pad 3 read one in ten): still tried
         for (int i = 0; i < 60; i++) { run(&t, 3, 2.15, 1, 3, 0); run(&t, 1, 3.4, 1, 3, 0); }
         check(t.s.downs >= 1, "  a late frame in every 4 at hold 3 does not stop it either");
+        sim g = {0}; g.gpu = 2.5; run(&g, 120, 0.5, 1, 3, 0); run(&g, 10, 2.6, 1, 3, 0);   // a GPU that does not fit hold 2 (the Galaxy S25 Edge at 525 MHz: 2.5 vsyncs): hold 3 stays, no trial, no bouncing
+        unsigned long long d0 = g.s.downs; run(&g, 3000, 2.6, 1, 3, 0);
+        check(g.s.k == 3 && g.s.downs == d0, "  a GPU of 2.5 (not fitting hold 2) at hold 3: no GPU-fit trial, no bouncing, hold 3 stays");
         sim f = {0}; f.gpu = 1.3; run(&f, 120, 0.5, 1, 3, 0); run(&f, 3000, 2.7, 1, 3, 0);
         snprintf(b, sizeof b, "  frames of 2.7 with a GPU of 1.3: three GPU-fit trials fail, then no more (downs %llu, failed %llu, k %d)", (unsigned long long)f.s.downs, (unsigned long long)f.s.failed, f.s.k);
         check(f.s.k == 3 && f.s.downs == 3 && f.s.failed == 3 && f.s.gfail == 3, b);
