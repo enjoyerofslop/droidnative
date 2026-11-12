@@ -2345,6 +2345,13 @@ static VkBufferView dummy_tbuf(void) {
 // finds the write-back pending, guest memory holds it. DM_VK_BUF_FWD=0 (env.txt): such reads sync, as before (the A/B of this alone)
 static int fwd_find(uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o);
 static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o, int *res);
+// A draw's storage buffer write made in place in a placed pool (gm_inplace_w with cs 0) is not forwardable to a later draw: a render pass has no barrier inside it. A
+// dispatch begins behind a full barrier (vk_dispatch, or the one before the run of dispatches it chains to), so it reads such a write where it lies: the pool memory is
+// the GPU's, and the write-back is only a note (its pages prepared once the chunk completes). Ocarina of Time's Kokiri Forest: a draw writes a 23,360-byte table in place
+// and a compute shader reads it twice a frame; each read submitted the chunk and waited for the whole ring (ranges_view), the GPU idle meanwhile. g_rd_cs: the reader is
+// a dispatch, or a draw run as one (draw_view, stage_set, vk_dispatch's argument lookup). DM_VK_IP_READ=0 (env.txt): such reads wait, as before
+static int ip_read_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IP_READ"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_IP_READ=0: a dispatch reading a draw's in-place storage buffer write waits for the chunk"); } return v; }
+static int g_rd_cs; static uint64_t g_ip_read;   // reads bound so
 static int g_fwd_nwb = -1; static uint64_t g_fwd;   // the chunk's write-backs counted when the draw began (its own come after); streams bound so
 // A draw under rasterizer discard whose vertex or geometry stage writes memory runs as a dispatch does (rd_writes, vk_draw_): outside the targets' pass, with a full barrier
 // before and after it, so it may write in place and its write-backs are read on the GPU by later shaders, as a dispatch's are. Set for the one draw (vk_draw__ clears it)
@@ -2362,7 +2369,9 @@ static int buf_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = ge
 static uint64_t g_buf_fwd[2];   // bindings read on the GPU from a pending write-back / written in place
 // al: the binding's offset alignment; write: the shader writes it too (a dispatch's only, in place on the current chunk's write-back)
 static int buf_fwd(uint64_t addr, uint64_t n, int write, VkDeviceSize al, VkBuffer *b, VkDeviceSize *o) {
-    if (vk_safe() || !addr || !n || !buf_fwd_on() || !C || (!C->nfwd && (write || !atomic_load(&g_inflight_fwd)))) return 0;
+    if (vk_safe() || !addr || !n || !buf_fwd_on() || !C) return 0;
+    int ipw = g_rd_cs && ip_read_on() && (C->nipw || atomic_load(&g_inflight_ipw));   // a draw's in-place write a dispatch may read where it lies
+    if (!C->nfwd && !ipw && (write || !atomic_load(&g_inflight_fwd))) return 0;
     uintptr_t lo = (uintptr_t)addr, hi = (uintptr_t)(addr + n); VkBuffer fb; VkDeviceSize fo; int r = 0;
     if (write) { int nw = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb; if (!fwd_hit(C, nw, lo, hi, &fb, &fo, &r) || !r) return 0; }
     else if (!fwd_find(lo, hi, &fb, &fo)) return 0;
@@ -2835,6 +2844,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         if (s->gm && u && u->addr) gm_lazy_ptrs(u->addr, n);   // chunks its pointers reach, placed (gfx_vk_gmem_lazy.inc)
         VkDeviceSize ao, ipr;   // ao: the arena offset (off above is the c0 / uniform buffer word); ipr: the range bound in place
         int wr_ = (sb->flags & 1) != 0;   // written by the shader
+        g_rd_cs = disp_like(s) || ((s->stage == SH_MS || s->stage == SH_TK) && !g_mesh);
         if (u && u->addr && (!wr_ || disp_like(s)) && sb_fwd(u->addr, n, wr_, &b, &ao)) g_buf_fwd[wr_]++;   // on the GPU from a dispatch's pending write (buf_fwd)
         else if (u && u->addr && wr_ && g_vdisp && rd_home_on() && rd_bind_w(u->addr, n, &b, &ao)) {}   // a discarded draw's write: on its home range's copy (rd_bind_w)
         else if (u && u->addr && !wr_ && gm_inplace(u->addr, n, &b, &ao, &ipr)) {   // read only, in a placed pool: bound there (gfx_vk_gmem_inplace.inc)
@@ -2980,8 +2990,9 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
 static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o, int *res) {
     for (int k = 0; k < c->ncop; k++) if (c->cop[k].dst < hi && lo < c->cop[k].dst + c->cop[k].n) { *res = 0; return 1; }
     for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, hi)) continue;
-        *res = w->fwd && (w->st < 0 || w->inpl) && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes;   // (in place: read where it was written)
-        if (*res) { *b = w->inpl ? w->ipb : c->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); }
+        int ipr = !w->fwd && w->inpl && g_rd_cs && ip_read_on();   // a draw's in-place write, read by a dispatch
+        *res = (w->fwd || ipr) && (w->st < 0 || w->inpl) && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes;   // (in place: read where it was written)
+        if (*res) { *b = w->inpl ? w->ipb : c->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); if (ipr) g_ip_read++; }
         else if (w->vd && w->rows == 1) {   // a discarded draw's write that the read is not inside: the two as one home range (rd_home.h)
             uintptr_t wl = (uintptr_t)w->dst, wh = wl + w->row_bytes, hl = lo < wl ? lo : wl, hh = hi > wh ? hi : wh;
             if (rd_home_learn(&g_rd_homes, hl, hh, RD_HOME_MAX) && g_rd_learned++ < 8)
@@ -3247,7 +3258,7 @@ static void dep_log(vshader *const sh[4], const rd_rng *r, const char *kd, const
         if (every ? (nhit++ % (uint64_t)every) != 0 : nlog++ >= 40) continue;
         const wb_t *b = &C->wb[w]; const vshader *rs = ks[q] >= 0 && sh[ks[q]] ? sh[ks[q]] : sh[0];
         LOG("[vk] draw dependency: shader %s (stage %d) reads %c %#lx+%#lx, pending write-back %d of %d: %s%s dst %p rows %zu x %zu", rs ? rs->key : "-", rs ? rs->stage : -1, kd[q], (unsigned long)r[q].lo,
-            (unsigned long)(r[q].hi - r[q].lo), w, C->nwb, b->st >= 0 ? "staging (texture copy)" : b->snap ? "arena with snapshot (storage buffer)" : "arena (feedback / buffer image)", b->fwd ? " of a dispatch" : "",
+            (unsigned long)(r[q].hi - r[q].lo), w, C->nwb, b->inpl ? "in place in a placed pool (storage buffer)" : b->st >= 0 ? "staging (texture copy)" : b->snap ? "arena with snapshot (storage buffer)" : "arena (feedback / buffer image)", b->fwd ? " of a dispatch" : "",
             (void *)b->dst, b->rows, b->row_bytes); }
 }
 // What a draw copies from guest memory lands first when an earlier draw, dispatch or copy wrote it and that write is still pending (gfx_vk.c ranges_view):
@@ -3265,7 +3276,9 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
             if (hh_ > hl_ && !fwd_find(hl_, hh_, &fb_, &fo_)) RNG(hl_, hh_ - hl_); break; }   /* a discarded draw's write: its home range, found whole on the GPU or landed (rd_bind_w) */ \
         if (!w_ && (a) && (s)) wb_promote((uintptr_t)(a), (uintptr_t)((a) + (s)));   /* a draw's write it reads whole: on the GPU after a barrier */ \
         if ((w_ && !cs) || !f((a), (s), w_, &fb_, &fo_)) RNG(a, s); } while (0)
-    g_fwd_nwb = C ? C->nwb : 0; const int cs = (sh[0] && sh[0]->stage == SH_CS) || g_vdisp;   // a dispatch (its stage alone), or a draw run as one (g_vdisp)
+    g_fwd_nwb = C ? C->nwb : 0;   // cs: a dispatch (its stage alone), a draw run as one (g_vdisp), or a task / mesh draw in compute form, whose kernels are dispatches behind full barriers (gfx_vk_meshemu.inc)
+    const int cs = (sh[0] && (sh[0]->stage == SH_CS || ((sh[0]->stage == SH_MS || sh[0]->stage == SH_TK) && !g_mesh))) || g_vdisp;
+    g_rd_cs = cs;
     if (vtx) { uint32_t seen = 0; for (int i = 0; i < 16; i++) { va_st a; memcpy(&a, &D.attr[i], 4); VkBuffer fb; VkDeviceSize fo;
         if (a.fmt && fwd_early()) { if (seen >> a.stream & 1) continue; seen |= 1u << a.stream; }   // each stream once (stream_fwd)
         if (a.fmt && !stream_fwd(sh[0], a.stream, &fb, &fo)) { uintptr_t sl, sh_; stream_rng(a.stream, &sl, &sh_); RNG(sl, sh_ - sl); } } }
@@ -3674,6 +3687,7 @@ static int vk_dispatch(const p_dispatch *dp) {
     if (ndve_left_out(s->key)) { if (!g_ndve_skipped++) LOG("[vk] nn::ndve movie network: its dispatches are left out (its picture stayed black without the U-Net, which Qualcomm's compiler does not finish, and the rest cost up to 1.2 s a frame; DM_VK_NDVE=1 runs them): first %s", s->key); return 1; }
     uint32_t g[3] = {(uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z};
     VkBuffer ib = VK_NULL_HANDLE; VkDeviceSize io = 0; int gpu_args = 0;   // the arguments read on the GPU from a pending write of them (ind_fwd_on)
+    g_rd_cs = 1;
     if (dp->ind && ind_fwd_on() && !s->tgs && !s->upsq && cur()) { g_fwd_nwb = -1; gpu_args = fwd_find((uintptr_t)dp->ind, (uintptr_t)dp->ind + 12, &ib, &io) && !(io % 4);
         // no pending write-back holds them (the writer stored them through the raw pool table, or the game wrote them): in a placed pool they are read where they lie, which a
         // raw store or the CPU wrote and the dispatch's barrier orders (gfx_vk_gmem_inplace.inc); on the Galaxy S25 Edge 18,600 of 25,600 indirect dispatches a run took the CPU path
