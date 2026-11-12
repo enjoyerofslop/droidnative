@@ -165,6 +165,10 @@ class RunFolders(unittest.TestCase):
         with mock.patch.object(ba, 'sh') as sh: ba.remove_run('s1', run)
         self.assertEqual(sh.call_args.args, ('s1', f'rm -rf {run} 2>/dev/null'))
 
+    def test_a_wifi_devices_folder_is_one_windows_takes(self):   # its serial is ip:port, and Windows refuses a ':' in a folder name
+        self.assertEqual(ba.device_folder({'model': 'Pixel 9 Pro XL', 'serial': '192.168.1.20:37123'}), 'Pixel_9_Pro_XL_192.168.1.20_37123')
+        self.assertEqual(ba.device_folder({'model': 'SM-S937B', 'serial': 'R5CY51ZLGKH'}), 'SM-S937B_R5CY51ZLGKH')   # a USB serial is kept as it was
+
     def test_never_bench_runs_itself_or_a_pattern(self):   # other sessions' run folders live beside this run's
         for bad in (ba.RUNS, ba.RUNS + '/', ba.RUNS + '/*', ba.RUNS + '/..', ba.RUNS + '/a/b', ba.EXT, '/sdcard/Download/x'):
             with self.subTest(bad), mock.patch.object(ba, 'sh') as sh:

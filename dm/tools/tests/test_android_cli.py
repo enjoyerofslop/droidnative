@@ -62,6 +62,19 @@ class Json(unittest.TestCase):
         t = ba.games_table()   # no game played on Android is one the table lists as drawing without NVN
         self.assertEqual([g for g in ba.ANDROID_TESTED if g in t and 'NVN' not in t[g]['graphics']], [])
 
+    def test_oodle_packs_stop_early(self):   # issue #310: Pokémon Legends: Arceus's split failed on its 678 GFPAKs after about 220 s, with no decoder for the game's Oodle
+        sys.path.insert(0, str(REPO / 'dm/games')); import profile_guess as pg   # noqa: E401
+        src = pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_gfpak=678)
+        why = ba.undecodable_packs(src['oodle_packs'], 'Pokémon Legends: Arceus', {})
+        self.assertIn("Arceus keeps its shaders in files compressed with the game's own Oodle (678 Game Freak GFPAK archive(s) with Oodle Kraken entries "
+                      '(Pokémon Legends: Arceus)). The Android build cannot decode those yet', why)
+        self.assertIn('droidplay-core/issues/310', why); self.assertNotIn('Mac host', why)
+        self.assertIsNone(ba.undecodable_packs(pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0)['oodle_packs'], 'Odyssey', {}))
+        self.assertIsNone(ba.undecodable_packs(src['oodle_packs'], 'Arceus', {'DM_OODLE_HOST': 'dmhost', 'DM_OODLE_MODULES': 'patched_v262144'}))   # a Mac host set up by hand
+        for s in (pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, trinity_packs=1), pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_pkz=1),
+                  pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_ue3=1)):   # Legends: Z-A, Bayonetta 3, Batman: Arkham Knight
+            self.assertIn('cannot decode those yet', ba.undecodable_packs(s['oodle_packs'], 'x', {}))
+
     def test_games_played_on_android_have_profiles(self):   # a mistyped title ID would leave its game shown as not played on Android
         t = ba.games_table()
         self.assertTrue(ba.ANDROID_TESTED)
@@ -481,9 +494,18 @@ class Phone(Base):
         self.font = self.tmp / 'font'; self.font.mkdir(); (self.font / 'f.ttf').write_bytes(b'f')
         (self.tmp / 'logs').mkdir()
 
-    def push(self):
-        ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'en-US', self.tmp, self.tmp / 'logs', {'title_id': GID})
+    def push(self, serial='S'):
+        ba.push_game(serial, GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'en-US', self.tmp, self.tmp / 'logs', {'title_id': GID})
         return [' '.join(c) for c in self.cmds]
+
+    def test_a_wifi_serial_makes_folders_windows_takes(self):   # after the desktop app's Connect, a phone's serial is ip:port; after adb's own, its mDNS name
+        for serial in ('192.168.1.20:37123', 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp', '[fe80::1%wlan0]:5555'):
+            self.cmds.clear(); self.push(serial)   # on Windows, push_<ip:port> raised WinError 123 here, before anything was copied
+            made = [p.relative_to(self.tmp / 'logs') for p in (self.tmp / 'logs').rglob('*')]
+            self.assertTrue(made)
+            for p in made:
+                for part in p.parts: self.assertFalse(set(part) & set('<>:"/\\|?*') or part.endswith(('.', ' ')), (serial, p))
+            self.assertTrue(any(c[0] == 'push' for c in self.cmds), serial)
 
     def test_copies_to_games_folder_and_opens_it(self):
         flat = self.push(); dst = f'{ba.REMOTE}/games/{GID}'

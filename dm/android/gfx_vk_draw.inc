@@ -1088,6 +1088,7 @@ static VkImageViewType view_type_of(int st) {   // Ryujinx's SamplerType
 }
 #include "gfx_vk_pool.inc"   // NVN2's texture and sampler pools read by ID: the pool set
 #include "gfx_vk_gmem.inc"   // raw global memory: the memory pools at device addresses and the raw pool table (DM_VK_RAW_GMEM)
+#include "gfx_vk_fileback.inc"   // memory pools backed by a file (DM_VK_POOL_FILEBACK)
 
 // ---------------- Render passes and framebuffers ----------------
 typedef struct { VkFormat color[8]; VkFormat depth; uint32_t ncolor, samples; } rp_key;
