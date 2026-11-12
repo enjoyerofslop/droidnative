@@ -101,6 +101,27 @@ class Json(unittest.TestCase):
             want = sorted(name(r[0]) for r in rows if r[2].lstrip('*').startswith(tier))
             self.assertEqual(sorted(name(r[0]) for r in rows if name(r[0]) in line.group(1)), want, f'README.md: the "{tier}" line under Playable now')
 
+    def test_game_status_captures_show_their_rows_tier(self):   # each capture's chip names its row's tier, so a row that moves tier moves its chip too
+        readme = (REPO / 'README.md').read_text(encoding='utf-8')
+        table = readme.split('| Game | Device | State |\n|---|---|---|\n', 1)[1].split('\n\n', 1)[0]
+        rows = [[c.strip() for c in line[1:-1].split('|')] for line in table.splitlines()]
+        name = lambda game: re.sub(r' \(Switch 2\)$', '', game.strip('*')).rsplit(' ', 1)[0]
+        chips = {'Playable – minor issues': 'playable-minor', 'Playable – major issues': 'playable-major', 'In-game, blocked': 'in-game-blocked',
+                 'In-game': 'in-game', 'Menus': 'menus', 'Boots': 'boots', "Doesn't run": 'doesnt-run'}   # "In-game, blocked" before the "In-game" it starts with
+        tier = {name(r[0]): next(t for t in chips if r[2].lstrip('*').startswith(t)) for r in rows}
+        self.assertIn('<a id="tiers"></a>', readme)
+        cells = re.findall(r'<td [^>]*><img src="docs/images/android/[^"]+"[^>]*>(.*?)</td>', readme)
+        self.assertGreater(len(cells), 10)
+        for cell in cells:
+            game = re.search(r'<b><a href="dm/games/[0-9A-F]{16}/README\.md">([^<]+)</a></b>', cell)
+            assert game, f'README.md: a capture without its game: {cell[:80]}'
+            chip = re.search(r'<br><a href="#tiers"><img src="docs/badges/([a-z-]+)\.svg" height="20" alt="([^"]+)"></a><br>', cell)
+            assert chip, f'README.md: the capture of {game.group(1)} has no tier chip under its name'
+            self.assertIn(game.group(1), tier, f'README.md: the capture of {game.group(1)} has no row in the status table')
+            want = tier[game.group(1)]
+            self.assertEqual((chip.group(1), chip.group(2)), (chips[want], want), f'README.md: the chip of {game.group(1)}')
+            self.assertIn(f'>{want}</text>'.replace("'", '&#39;'), (REPO / f'docs/badges/{chips[want]}.svg').read_text(encoding='utf-8'))
+
 
 class Windows(unittest.TestCase):
     def test_loads_where_python_has_no_fcntl(self):   # Windows: build_ipa_from_nsp.py loads tree_tar.py, which imports fcntl; dm/android/tools/compat's stand-in is found
