@@ -96,6 +96,17 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** Ocarina of Time (Switch 2) on an Ayn Odin 3 (the fork's measurements: frame time p50 33.3 ms instead of 50, back to hold 2 within 22 frames of a heavier moment), and Tears of the Kingdom on a Legion Y700 (one probe instead of 27 in 66 s).
 - **Check:** `make -C dm/gfx/tests GAME=01007EF00011E000 t_fstep && dm/gfx/tests/t_fstep`: 83 checks. The new ones (a stretched GPU at hold 3, an odd heavier frame, a scene that got heavier, a light reference) fail on the controller before.
 
+### A hold the GPU fits, held up by the replay pipeline's lateness
+
+- **Symptom:** a game under the frame step stays at hold 3 (20 fps) while its GPU time fits hold 2 with room, and holding 2 by hand (`DM_FPS_TARGET=30 DM_FPS_HOLD=off`) runs it near 30 fps. Ocarina of Time (Switch 2) in Kokiri Forest on a OnePlus Pad 3 (Adreno 830) with the replay's CPU work cut (#182, #301, the recorder): GPU 21.4 ms a frame at the GPU's top clock, replay CPU 14 ms, and the step at hold 3 for good, 19.9 fps; held at 2 by hand, 27.5 fps with frames of 35 ms (2.0–2.1 vsyncs), game time 0.977 of real time.
+- **Cause:** the step's cost is `max(cpu, gpu)` with `cpu` the frame's span less the acquire's wait and the present's sleep, so the game's `SyncWait` on its fence counts as work, and that fence lands when the frame's last chunk has gone through the recorder, the GPU and the completion thread: at hold 3 the cost read 2.15–2.2 vsyncs with 1.3 of GPU, more than the 1.7 (`FSTEP_FIT` × 2) the fit trial needs, and the probe goes to hold 1, which cannot hold. At hold 2 the frames are late by 0.05–0.3 vsyncs, the pipeline's few ms over the GPU's time, and three in a row stepped up again. A longer hold only paces the GPU slower (the clock governors follow the hold), so nothing brought 2 back.
+- **Fix (`nvn_fstep.h`, the caller sets `gpu` each frame):**
+  - a frame late by at most `FSTEP_LATE_SOFT` (0.3 vsyncs, 5 ms) at a hold its GPU fits with room (`gpu` ≤ `FSTEP_FIT` × k) is late for the debt, which pays it back, but does not count toward a step up;
+  - from a longer hold, once the GPU's time has fitted k − 1 for `FSTEP_RUN` frames, k − 1 is tried after the hold-off with a probe's grace, whatever the cost at k says; three such trials failing in a row stop them until the hold changes (`gfail`).
+  - A frame later than that, a GPU that does not fit, or no GPU time known: as before.
+- **Found on:** Ocarina of Time on a OnePlus Pad 3 (the oot-gpu session, 2026-11-11; nxplay-android plans/oot-gpu-time-2026-11-11.md).
+- **Check:** `t_fstep`: 94 checks; the new ones (soft-late frames hold 2, later ones step up, a GPU that does not fit steps up, no GPU time known steps up, the GPU-fit trial from 3 and its three-failure stop) fail on the controller before.
+
 ### A derived profile drops the frame step its build lacks
 
 - **Symptom:** a game whose profile has a frame step (`FRAME_STEP` in its `patches.py`) runs at double speed when packed from another update; the log has no `frame step in whole vsyncs` line, and the frame counter shows 60.
