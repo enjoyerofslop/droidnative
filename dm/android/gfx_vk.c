@@ -82,6 +82,7 @@ static int g_stencil_export;   // VK_EXT_shader_stencil_export enabled: a fragme
 static int g_nonuni, g_null_desc;   // for the texture pool by ID (gfx_vk_pool.inc): VK_EXT_descriptor_indexing's non-uniform sampled image indexing; VK_EXT_robustness2's null descriptors
 static int g_pool_texn;   // the IDs of the game's texture pools in the host table (mtl_set_tex_pool_n, hle_nvn.c): the pool set's image count (gfx_vk_pool.inc)
 static vkb_ctx g_vk; static pthread_mutex_t g_vk_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic int g_vk_made; static int g_vk_ok;   // vkb; vkb_fallback makes it again
+#include "gfx_vk_floor.inc"   // DM_VK_GPU_FLOOR: a GPU clock floor through KGSL (the launcher's Keep the GPU clock up, off by default)
 #include "gfx_vk_rec.inc"   // the vkCmd* calls below go through its wrappers (DM_VK_RECORDER)
 // Query resets (the chunks' query pools, "Query resets" below). DM_VK_QRESET_USED=0 (env.txt): every pool is reset whole in the command buffer at every chunk begin, as before
 // (no host resets either); DM_VK_HOST_QRESET=0: VK_EXT_host_query_reset is not enabled, and the used queries are reset in the command buffer at the chunk's next begin
@@ -248,9 +249,11 @@ static int vk_try(char *why, size_t nwhy) {
     VkDeviceCreateInfo dc = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = en, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qc, .enabledExtensionCount = nde, .ppEnabledExtensionNames = dext,
                              .pEnabledFeatures = &want};
     forced = vk_driver_fail("device");
+    fl_before_device();
     r = forced ? VK_ERROR_INITIALIZATION_FAILED : vkCreateDevice(g_vk.pd, &dc, NULL, &g_vk.dev);
     if (r != VK_SUCCESS) { g_vk.dev = VK_NULL_HANDLE; return vk_failed(why, nwhy, "no Vulkan device", "vkCreateDevice", r, forced); }
     vkGetDeviceQueue(g_vk.dev, g_vk.qf, 0, &g_vk.q);
+    fl_device_made();
     if (mesh) { g_draw_mesh = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdDrawMeshTasksEXT");
         g_mesh = g_draw_mesh != NULL && g_mesh_max[0] && g_mesh_max[1]; }
     LOG("[vk] task / mesh shaders: %s", g_mesh ? "on (VK_EXT_mesh_shader)" : mesh ? "[RED] VK_EXT_mesh_shader enabled but vkCmdDrawMeshTasksEXT was not found: their draws are skipped" : memu_on() ? "no VK_EXT_mesh_shader (or DM_VK_MESH=0): their draws run in compute form (gfx_vk_meshemu.inc)" : "no VK_EXT_mesh_shader (or DM_VK_MESH=0), and DM_VK_MESH_EMU=0: their draws are skipped");
@@ -2543,7 +2546,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     vtex *v = vt_get(t); flush(); rec_drain();   // the frame's chunks on the queue before the front end's blit of it (rec_submit)
     vt_evict();   // images no draw has used for a while (gfx_vk_evict.inc)
     spare_sweep(atomic_load(&g_presents));   // spare image memory unused for a while (gfx_vk_spare.inc)
-    dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents));
+    dump_poll(atomic_load(&g_presents)); prof_poll(atomic_load(&g_presents)); mid_poll(atomic_load(&g_presents)); fl_poll(atomic_load(&g_presents));
     if (prof_on()) { all_wait(); prof_write(); }
     if (atomic_load(&g_presents) == 30) prewarm_start();   // the pipelines of earlier sessions (gfx_vk_draw.inc), once the game draws
     if (dump_on()) { if (v) LOG("[dump] frame %ld presents ser=%llu %ux%u vk%d", dump_frame(), (unsigned long long)v->serial, v->w, v->h, v->fmt); all_wait(); dump_write();
@@ -2710,6 +2713,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
         (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6,
         (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)g_bind_shaders, (unsigned long long)g_bind_entries);
+    fl_stats();
     LOG("[vk] indirect dispatches: arguments read on the GPU %llu (vkCmdDispatchIndirect on the pending write, %llu of them in place in a placed pool; DM_VK_IND_FWD), on the CPU %llu, of them %llu after a wait for the GPU (cumulative)", (unsigned long long)g_ind_gpu, (unsigned long long)g_ind_inpl, (unsigned long long)g_ind_cpu, (unsigned long long)g_ind_cpu_wait);
     LOG("[vk] draws not made: shader missing %llu, targets %llu, pipeline %llu, descriptors %llu, invalid binding %llu, pass %llu, vertex buffers %llu; dropped in all %llu, task / mesh draws skipped %llu; shaders whose descriptor set fits no pool %llu; under rasterizer discard: made as dispatches %llu, left out (writing nothing) %llu, their storage buffer writes in place on a home copy %llu / through a scratch copy %llu, home copies made %llu (%llu from a chunk in flight on the GPU), home ranges learned %llu (cumulative)", (unsigned long long)g_drop[0], (unsigned long long)g_drop[1], (unsigned long long)g_drop[2], (unsigned long long)g_drop[3], (unsigned long long)g_drop[4], (unsigned long long)g_drop[5], (unsigned long long)g_drop[6], (unsigned long long)g_draws_dropped, (unsigned long long)g_mesh_skipped, (unsigned long long)g_ds_toobig, (unsigned long long)g_rd_made, (unsigned long long)g_rd_none, (unsigned long long)g_rd_w[0], (unsigned long long)g_rd_w[1], (unsigned long long)g_rd_w[2], (unsigned long long)g_rd_w[3], (unsigned long long)g_rd_learned);
     if (memu_on()) LOG("[vk] task / mesh draws in compute form: %llu drawn in %llu parts, %llu skipped, %llu left out while a kernel's pipeline was built; kernel pipelines made %llu (%llu from the driver's cache at once, %llu in the background, %.0f ms of compiles) (cumulative; gfx_vk_meshemu.inc)",

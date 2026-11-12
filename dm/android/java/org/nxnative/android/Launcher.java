@@ -73,7 +73,7 @@ public class Launcher extends Activity {
 
     // A setting: an environment variable the host reads (dm/games/settings.tsv's columns; only those the Android host honours)
     static final class Setting {
-        final String key, kind, section, label, note; String[] values, labels; float lo, hi, step; String def;
+        final String key, kind, section, label, note; String[] values, labels; float lo, hi, step; String def; String on = "1";   // on: the value a toggle writes when on
         Setting(String key, String kind, String section, String label, String note) { this.key = key; this.kind = kind; this.section = section; this.label = label; this.note = note; }
     }
     // A game folder on the phone
@@ -233,6 +233,11 @@ public class Launcher extends Activity {
                 "Leaves out the ferns, flowers and the trees' canopies: about 3 ms of GPU time a frame (a OnePlus Pad 3 went from 29.1 to 30.0 fps in Kokiri Forest). The trees stand bare.");
             s.def = "0"; settings.add(s);
         }
+        if (kgsl()) {   // any game, on a phone whose GPU clock the host can hold up (gfx_vk_floor.inc); on, the highest clock, as Ocarina of Time's Galaxy Z Fold 8 runs used
+            s = new Setting("DM_VK_GPU_FLOOR", "toggle", "Game", "Keep the GPU clock up",
+                "Holds the GPU at its highest clock: faster in some games on some phones, no faster on others, and slower on a warm phone, which then limits its GPU harder. The phone runs warmer and uses more battery.");
+            s.on = "100"; s.def = "0"; settings.add(s);
+        }
         s = new Setting("DM_PAD_ABXY", "choice", "Controls", "Controller face buttons",
             "By label for a controller that already gives its buttons Nintendo's letters (a Retroid in its Retro layout); by position for an Xbox-style controller.");
         s.values = new String[] {"position", "label"}; s.labels = new String[] {"By position", "By label"}; s.def = "position"; settings.add(s);   // front_android.c face_button
@@ -244,6 +249,12 @@ public class Launcher extends Activity {
             "Moves the stick, the D-pad and the buttons in from the sides. 0% is the standard layout, 100% brings them together in the middle.");
         s.lo = 0; s.hi = 1; s.step = 0.05f; s.def = "0"; settings.add(s);
         for (Setting t : settings) if (defaults.containsKey(t.key)) t.def = defaults.get(t.key);
+    }
+
+    // Qualcomm's kernel GPU driver (KGSL), the one whose clock floor the host can ask for: its device node, as vk_driver.c adreno() tests it (there, or there but not
+    // readable). A Mali, Xclipse or PowerVR GPU has none, and the setting would do nothing there
+    static boolean kgsl() {
+        try { Os.stat("/dev/kgsl-3d0"); return true; } catch (android.system.ErrnoException e) { return e.errno != android.system.OsConstants.ENOENT; }
     }
 
     View build(Game g) {
@@ -328,7 +339,7 @@ public class Launcher extends Activity {
             int[][] st = {{android.R.attr.state_checked}, {}};
             sw.setThumbTintList(new android.content.res.ColorStateList(st, new int[] {INK, TEXT2}));
             sw.setTrackTintList(new android.content.res.ColorStateList(st, new int[] {CREAM, SEG})); sw.setTrackTintMode(android.graphics.PorterDuff.Mode.SRC);
-            sw.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() { public void onCheckedChanged(android.widget.CompoundButton v, boolean on) { set(s, on ? "1" : "0"); } });
+            sw.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() { public void onCheckedChanged(android.widget.CompoundButton v, boolean on) { set(s, on ? s.on : "0"); } });
             ctl = sw;
         } else {
             LinearLayout box = new LinearLayout(this); box.setGravity(Gravity.CENTER_VERTICAL);

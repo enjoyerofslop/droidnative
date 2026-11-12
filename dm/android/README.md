@@ -62,7 +62,8 @@ cream on ink, with a monochrome layer), which `tools/build_apk.py` links unless 
 A game's settings screen (the iOS launcher's counterpart) shows its icon and name and the settings the Android host reads: console mode (`DM_OPMODE`), game language (`DM_LANG`, the game's own languages), game timing
 (`DM_AUDIO_PACE`), game rumble and its strength (`DM_RUMBLE`, `DM_RUMBLE_GAIN`). Defaults come from the game's `defaults.txt`: the packing script's `--language`, and the switches a game's profile lists in `dm/games/<id>/android_defaults.txt` (KEY=VALUE per line), which the host takes after `launcher.txt` without overriding it or `env.txt`. The frame-rate counter
 (`DM_SHOW_FPS`, drawn by `Gamepad.java` from the frames presented) and the render scale (`DM_RENDER_SCALE`, offered when `main.fixups.tsv` marks a render-scale stub: Mario 1.2.1 has
-one, `dm/games/010015100B514000/patches.py`) are there too. Play writes the game's `launcher.txt` and starts `GameActivity`, which reads it after `env.txt` without overriding it; a key
+one, `dm/games/010015100B514000/patches.py`) are there too, and Keep the GPU clock up (`DM_VK_GPU_FLOOR=100`, `gfx_vk_floor.inc`: a KGSL power constraint on the Vulkan
+device's own contexts), offered for every game on a phone with `/dev/kgsl-3d0` (Qualcomm's kernel GPU driver, tested as `vk_driver.c` does before loading Turnip), off by default. Play writes the game's `launcher.txt` and starts `GameActivity`, which reads it after `env.txt` without overriding it; a key
 `env.txt` sets is shown greyed out. The choices are kept per game. Not yet on Android: touch feedback.
 
 Write watches (`DM_PROBE_WATCH`, `dm/host/probe.c`) work here too: `heap+<offset>` names a guest-heap address (the guest address space moves between runs on Android), the page is made
