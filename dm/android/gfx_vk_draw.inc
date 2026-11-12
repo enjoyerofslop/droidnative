@@ -495,6 +495,21 @@ static size_t spv_fit_vsinit(const uint32_t *code, size_t nw, const char *what, 
     if (!atomic_exchange(&logged, 1)) LOG("[vk] vertex shader outputs start as (0,0,0,1), as on the hardware, where Vulkan leaves an unwritten component undefined (DM_SPV_VSINIT=0: as translated). First: %s", what);
     *out = o; return k;
 }
+// The module with each raw global memory helper keeping its last pool table entry's range and delta in private words (spv_gmcache.h), in *out (to free); 0 when it
+// has no such helper, or one not in the translator's form (said once). DM_SPV_GMCACHE=0 (env.txt): helpers as translated, reading the entry's six words on every access
+static size_t spv_fit_gmcache(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_GMCACHE"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_GMCACHE=0: raw global memory helpers read their last entry's range from the table on every access"); }
+    *out = NULL;
+    if (!on || nw < 5 || !spv_gmcache_wanted(code, nw)) return 0;
+    size_t cap = nw + SPV_GMCACHE_EXTRA(SPV_GMCACHE_MAX); uint32_t *s = malloc(4 * (size_t)code[3] * 4), *o = malloc(cap * 4); int why = 0;
+    size_t k = s && o ? spv_gmcache(code, nw, s, o, cap, &why) : 0; free(s);
+    if (!k) { free(o);
+        static _Atomic int told; if (why && !atomic_exchange(&told, 1)) LOG("[vk] %s: raw global memory helpers not in the translator's form (%d), made as translated (said once)", what, why);
+        return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1)) LOG("[vk] raw global memory helpers keep their last entry's range and delta in private words, so a hit reads no table word (DM_SPV_GMCACHE=0: as translated). First: %s", what);
+    *out = o; return k;
+}
 static size_t spv_fit_layer(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LAYER"); on = !(e && *e == '0'); }
     *out = NULL;

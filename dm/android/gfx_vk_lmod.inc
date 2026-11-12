@@ -45,6 +45,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, ui
             free(s); free(o);
         }
     }
+    uint32_t *gc = NULL; size_t gcn = spv_fit_gmcache(code, n, path, &gc); if (gcn) { free(code); code = gc; n = gcn; }   // raw memory helpers' last entry kept in private words (spv_gmcache.h)
     uint32_t *np = NULL; size_t npn = gm_np_code(code, n, path, first, &np); if (npn) { free(code); code = np; n = npn; }   // raw memory without physical pointers (spv_noptr.h)
     uint32_t *vi = NULL; size_t vn = spv_fit_vsinit(code, n, path, &vi); if (vn) { free(code); code = vi; n = vn; }   // vertex outputs start as (0,0,0,1)
     uint32_t *pf = NULL; size_t pn = spv_pool_fit(code, n, path, &pf); if (pn) { free(code); code = pf; n = pn; }   // the texture pool by ID moved into the pool set

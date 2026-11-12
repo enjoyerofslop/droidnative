@@ -435,6 +435,18 @@ static int gm_tab_new(gm_tab *t) {   // a new table buffer, host-visible and map
     g_gm_tab_new++; return 1;
 }
 static int gm_sink_ranges(uint64_t (**seg)[3], int *cap, int n); static int gm_sink_is(const uint64_t e[3]); static _Atomic uint64_t g_sink_hits;   // gfx_vk_gmem_lazy.inc
+// How much of the placed memory the helper's 2 MiB chunk hints reach (gmem_table.h): a hint covers a whole 2 MiB guest chunk inside one range, so a piece smaller than that, or
+// one not on a 2 MiB boundary, has none and every address in it that the invocation's cached entry doesn't hold takes the 13-step search (26 table loads). Said at 50, 100, 200
+// and 400 pieces (q291 diagnostic)
+static void gm_hint_stat(const uint64_t (*seg)[3], int n) {
+    static int said; int lvl = n >= 400 ? 4 : n >= 200 ? 3 : n >= 100 ? 2 : n >= 50 ? 1 : 0;
+    if (lvl <= said) return; said = lvl;
+    uint64_t tot = 0, hinted = 0; int none = 0;
+    for (int i = 0; i < n; i++) { uint64_t a = seg[i][0], z = seg[i][1], sz = 1ull << DMSH_GMEM_HINT_SHIFT, f = (a + sz - 1) & ~(sz - 1), l = z & ~(sz - 1);
+        tot += z - a; if (l > f) hinted += l - f; else none++; }
+    LOG("[vk] raw global memory: %d placed pieces, %.1f MiB; the 2 MiB chunk hints reach %.1f MiB of them (%.0f %%); %d pieces have no hint (an address in one that the cached entry doesn't hold searches)",
+        n, tot / 1048576.0, hinted / 1048576.0, tot ? 100.0 * hinted / tot : 0.0, none);
+}
 static int gm_seg_cmp(const void *x, const void *y) { uint64_t a = *(const uint64_t *)x, b = *(const uint64_t *)y; return a < b ? -1 : a > b; }
 static int gm_table(void) {
     uint64_t gen = atomic_load(&g_gm_gen);
@@ -457,6 +469,7 @@ static int gm_table(void) {
         if (g_ngt_free < 8) g_gt_free[g_ngt_free++] = g_gt; else { dead_add(5, (uint64_t)g_gt.b); dead_add(4, (uint64_t)g_gt.m); } }
     g_gt = t; g_gm_tabs++;
     { static int said; if (!said++) { LOG("[vk] raw global memory: pool table of %d placed pieces, built again whenever a pool is placed or given back", n - 1); gm_selftest(); } }
+    gm_hint_stat(seg, n - 1);
     return 1;
 }
 // A raw-memory binding of shader s (cb_offset 0 the table, DMSH_GMEM_LOG_CB_OFFSET the write log): the buffer, offset and range to bind

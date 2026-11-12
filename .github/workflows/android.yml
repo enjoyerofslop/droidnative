@@ -63,7 +63,7 @@ jobs:
         # test_wb_promote builds dm/android/wb_promote.h, when a read of a draw's pending storage buffer write takes its copy on the GPU after a barrier;
         # test_pool_fileback builds dm/android/pool_fileback.h, which memory pools are backed by a file and how placed ranges leave it (gfx_vk_fileback.inc);
         # test_spv_tgspill builds dm/android/spv_tgspill.h, compute shared memory past the GPU's limit moved into a storage buffer;
-        # test_spv_noptr builds dm/android/spv_noptr.h, raw global memory's physical pointers rewritten into accesses to a descriptor array, and validates each result with the NDK's shader-tools;
+        # test_spv_noptr test_spv_gmcache builds dm/android/spv_noptr.h, raw global memory's physical pointers rewritten into accesses to a descriptor array, and validates each result with the NDK's shader-tools;
         # test_spv_mesh and test_spv_meshemu (task / mesh shaders in compute form) assemble and validate with the NDK's shader-tools
         # test_spv_tffrag builds dm/android/spv_tffrag.h, transform feedback captured in the fragment stage (the vertex shader's wrapper and the fragment shader made from the layout);
         # test_rd_home builds dm/android/rd_home.h, the home ranges of storage buffers that draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w);
