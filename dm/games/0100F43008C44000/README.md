@@ -1,6 +1,6 @@
 # Pokémon Legends: Z-A (`0100F43008C44000`)
 
-Update 2.0.2 (v393216) over the base game, SDK 19.3.11 (NVN 55). Game Freak's Trinity engine with Havok 2022.2 on NVN. Modules `main` and `sdk`. Started from the provisional profile the NSP script wrote from its survey (`dm/games/profile_guess.py`). Playable on the iPhone at 30 fps with a memory footprint of about 2 GB; on the Mac brought up through the language select, character creation, the opening and the first minutes of play in Lumiose City at a steady 30 fps.
+Update 2.0.2 (v393216) over the base game, SDK 19.3.11 (NVN 55). Game Freak's Trinity engine with Havok 2022.2 on NVN. Modules `main` and `sdk`. Started from the provisional profile the NSP script wrote from its survey (`dm/games/profile_guess.py`). Playable on the iPhone at 30 fps with a memory footprint of about 2 GB; on the Mac brought up through the language select, character creation, the opening and the first minutes of play in Lumiose City at a steady 30 fps. On Android, the cartridge's base game 1.0.0 plays into Lumiose's station at 30 fps on an Adreno 740, saves and continues ([Android](#android)).
 
 ## What it needs
 
@@ -95,6 +95,33 @@ Each item was found from a red line or a pass dump on the way through the langua
 | Saved | 275.40 s (4m35s), 99.8% |
 
 - **Current:** this game's packs go through its own Oodle decoder in the Mac host, so an update that also changes another host source still splits again. The host itself is rebuilt for each chain, about 16 s of that stage in a full build.
+
+## Android
+
+First run on Android, 2026-11-12. The cartridge's base game 1.0.0 (v0, the Switch 1 edition), from DroidPlay Core `main` at `021fc6b6`.
+
+- **The build:** a profile derived from 2.0.2's.
+  - The split found 23,209 shaders (2.0.2 has 28,606). It read the Trinity packs with the game's own Oodle in the Mac host of a Mac build of the same 1.0.0 beside it (`mac_decoder`), so no phone was needed.
+  - All 23,209 translated to SPIR-V (4 min 50 s), none failed.
+  - **Not a game app:** the 2.49 GiB of SPIR-V passes what an APK can carry (1.94 GiB), so `--game-apk` refuses it. It was installed through DroidPlay, with an APK that carried only the test's hosts; the phones' own APKs went back after.
+- **Ayn Odin 2** (SM8550, Adreno 740 with Qualcomm's driver 0x802a4000), driven over adb with `DM_CTL`:
+  - **What was played:** a new game through the language (English), the appearance, the name (`DM_KBD=Taylor`: the host answers the game's keyboard, as on the Mac), Ready, and the opening (Prism Tower, the train's arrival). Then play on the Gare de Lumiose platform: walking both ways along it, the train door's "leave through the ticket gate" hint, the menu's save tutorial, and a save with R ("You saved your progress!").
+  - **Continue:** after a cold start, the title's A puts Taylor back on the platform.
+  - **Not reached:** the ticket gate out of the station, so not the first battle.
+  - **Frame rate:** 30 fps (the Switch's rate and the target), 27.2–30.4 in 30 s windows; GPU 3–9 ms in the opening and 13.5 ms on the platform.
+  - **Sound:** a stereo `AudioOut`, no underrun. The `DM_AUDIO_DUMP` has the music and voices (RMS about 260–4,300). Not listened to by a person.
+  - **Picture:** the opening, character creation and the platform match a Mac run of the same 1.0.0 build over the profile's route: the platform with the boy and his Pokémon, and the fence over the tracks, with the same lighting and shadows.
+    - Two `[RED]` lines: `render targets without an image` and the conditional-rendering note.
+  - **Memory:** 1.9–2.1 GB PSS (0.46 GB graphics). Not killed.
+- **Google Pixel 9 Pro XL** (Mali-G715, Android 17), the same route into the station:
+  - **The platform is drawn nearly black:** only dim outlines of Taylor, the boy and the Pokémon, against the lit platform on the Odin 2 and the Mac.
+  - **Frame rate:** 20 fps, GPU 25 ms.
+  - **Memory:** 3.18 GB PSS, 1.57 GB of it graphics (Mali has no BC, so the textures are decoded on the CPU). The memory cgroup peaked at 1.83 GB, far under Android 17's 8 GiB limit, and nothing killed it.
+  - **Sound:** 178 underruns in 135 reports at that frame rate.
+  - The same two red lines.
+- **A downloaded save** offered for deeper testing turned out to be a Pokémon Legends: Arceus save, so it wasn't used.
+- **Not Playable yet:** the stretch has to reach the first battle, and the battles are real-time, so it likely needs a person.
+- **Not tried:** past the station, update 2.0.2 (the profile's build), and the other devices.
 
 ## Found on this game
 
