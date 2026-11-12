@@ -7,6 +7,24 @@
 // CPU once the GPU's writes to it have landed, as the other indirect draws are (vk_draw).
 static uint64_t g_mesh_draws, g_mesh_groups, g_mesh_indirect, g_mesh_nopipe;   // drawn, their workgroups, of them indirect; draws whose pipeline was still building (or failed)
 static int vk_mesh_draw_(const p_draw *dw);
+// DM_VK_MESH_LEAVE_OUT=1 (the launcher's "Fewer plants (faster)", a game setting; env.txt) leaves out the task / mesh draws whose mesh shader is one of the game profile's
+// mesh_leave_out keys (DM_GAME_MESH_LEAVE_OUT); =<key>[,<key>...] names keys itself. A draw whose stage writes guest memory (a storage buffer or image) still runs: its compute
+// producers, and what reads what it wrote, stay as they are. Ocarina of Time's Kokiri Forest draws its ground cover and tree canopies with seven mesh pairs (a depth prepass
+// and a colour mesh each) that cost 1.7 to 3.0 ms of kernels a frame on an Adreno 840 / 830 in compute form, plus their pass pieces and fragment work: a OnePlus Pad 3 goes
+// from 29.1 to 30.0 fps (GPU 27.0 to 24.2 ms) without them. The ferns and flowers go and the trees stand bare, so it is off unless the player turns it on. The list and the
+// idea are nebadasSwifty's (Banana Native #167, its "Full vegetation" setting), MIT; written anew here
+static uint64_t g_mesh_leftout;
+static int mesh_left_out(const vshader *ms, const vshader *ts) {
+    static int n = -1; static char keys[64][17];
+    if (n < 0) { n = 0; const char *e = getenv("DM_VK_MESH_LEAVE_OUT"); if (e && (!strcmp(e, "1") || !strcmp(e, "on"))) e = DM_GAME_MESH_LEAVE_OUT; else if (e && !strcmp(e, "0")) e = NULL;
+        while (e && *e && n < 64) { size_t l = strcspn(e, ", "); if (l == 16) { memcpy(keys[n], e, 16); keys[n++][16] = 0; } e += l; while (*e == ',' || *e == ' ') e++; }
+        if (n) LOG("[vk] DM_VK_MESH_LEAVE_OUT: task / mesh draws of %d mesh shaders are not drawn (those writing guest memory are)", n); }
+    if (!n) return 0;
+    int hit = 0; for (int i = 0; i < n && !hit; i++) hit = !memcmp(keys[i], ms->key, 16);
+    if (!hit) return 0;
+    for (int k = 0; k < 2; k++) { const vshader *s = k ? ts : ms; if (!s) continue; if (s->nim) return 0; for (int i = 0; i < s->nsb; i++) if (s->sb[i].flags & 1) return 0; }
+    g_mesh_leftout++; return 1;
+}
 static int vk_memu_draw_(const p_draw *dw);   // gfx_vk_meshemu.inc: the same draw in compute form, without VK_EXT_mesh_shader
 static int vk_mesh_draw(const p_draw *dw) {
     p_draw d2;
@@ -30,6 +48,7 @@ static int vk_mesh_draw_(const p_draw *dw) {
             k.sh[q] = s; pst[q] = (int)i; pprog[q] = pr; break;
         } }
     if (!k.sh[0]) { RED_ONCE(160, "DrawMeshTasks with no mesh shader bound: draw skipped"); return 0; }
+    if (mesh_left_out(k.sh[0], k.sh[2])) return 1;
     draw_view(k.sh, NULL, 0);   // what the stages read of guest memory: pending GPU writes to it land first (no vertex streams)
     for (int i = 0; i < 4; i++) if (k.sh[i]) stage_textures(k.sh[i]);
     int pool = (k.sh[0] && k.sh[0]->pool) || (k.sh[1] && k.sh[1]->pool) || (k.sh[2] && k.sh[2]->pool);   // the texture pool by ID (gfx_vk_pool.inc), as vk_draw_

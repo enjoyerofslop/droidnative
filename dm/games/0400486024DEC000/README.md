@@ -82,6 +82,10 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 - **Adreno 830 and 840 (Qualcomm's driver):** Kokiri Forest, Saria's scene played through to Link back in control, and the Sacred Grove's Mad Scrub fight, all lit (Link, Saria and the scrubs), with no kill. Galaxy S25 Edge: 3 runs of 3. Galaxy Z Fold 8: 5 launches of the 0.8.0 build.
   - Frame rate 13–18 fps. On the Fold, the median frame interval gives 17 fps in Kokiri Forest, 16 in Saria's scene and 22 in the Grove. Submission is CPU-bound at about 20 µs a draw, and Saria's slow shots draw twice as often as the forest.
   - The Fold's frame rate falls by up to 1.5 fps once it reaches Android's thermal status 3 (severe), where the thermal cap closes the performance hint session. Compare runs only from the same starting thermal status.
+- **Fewer plants (faster), a game setting in the launcher, off by default:** leaves out the forest's ferns, flowers and tree canopies (seven mesh pairs the profile's `mesh_leave_out` names; `DM_VK_MESH_LEAVE_OUT=1`). OnePlus Pad 3 (Adreno 830, 1,100 MHz), Kokiri Forest at the game's own pacing: 29.1 → 30.0 fps, GPU 27.0 → 24.2 ms a frame (the mesh kernels 5.1 → 3.0 ms). The trees stand bare. The list and the idea are nebadasSwifty's (Banana Native #167, MIT).
+
+  ![Ocarina of Time on a OnePlus Pad 3: Kokiri Forest with every plant](../../../docs/images/android/ocarina-of-time-kokiri-plants-oneplus-pad-3.jpg)
+  ![The same spot with Fewer plants on: no ferns or flowers, the canopies bare](../../../docs/images/android/ocarina-of-time-kokiri-fewer-plants-oneplus-pad-3.jpg)
   - Memory on the Fold: about 10.4 GB of PSS at Saria's scene at most, the image memory 1.4–2.2 GB, raw global memory 0.4–0.46 GB placed.
 - **Xclipse 950 (Galaxy Z Flip 7):** lit at about 12 fps, 8.25 GB at most.
 - **Mali (Pixel 9 Pro XL):** lit at about 9 fps with the E5B9G9R9 storage view (#281); the native heap is about 0.4 GB with the dense binding numbers (#276).
