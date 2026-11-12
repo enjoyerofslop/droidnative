@@ -2,8 +2,9 @@
 .spv and .res.json, or what a test asks for); spv_android.py's post-pass runs as it does in a build, on a minimal fragment shader. Checked: the temporary folder (the code
 areas, the job lists and the translator's output) is made under WORK, the build's <id>_build/tmp, and removed however the run ends, a full disk included
 (droidplay-core#307: three failed Pokémon Pokopia runs each left tens of GB in the system's temp folder); a full disk, in the translator's lines or in this script's own
-writes, stops the run with a plain line before the post-pass, which stopped at the first empty .spv; and a run the drives can't hold stops before it translates anything.
-No game files, no translator, no spirv-as."""
+writes, stops the run with a plain line before the post-pass, which stopped at the first empty .spv; a run the drives can't hold stops before it translates anything; and
+an empty or cut-short output is a [RED] line, not a stop, the translator's failures come before the post-pass, and a shader's res.json is written last and whole, so one
+cut short is translated again. No game files, no translator, no spirv-as."""
 import contextlib
 import errno
 import io
@@ -49,11 +50,12 @@ class Harness(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp, True)
         self.pkg, self.out, self.work, self.sysdir = self.tmp / 'pkg', self.tmp / 'spv', self.tmp / 'work', self.tmp / 'system_temp'
         self.pkg.mkdir(); self.sysdir.mkdir(); (self.pkg / 'ps_0.bin').write_bytes(b''.join(record(i) for i in range(self.N)))
-        self.touts, self.lines = [], ''
+        self.touts, self.lines, self.before_post = [], '', ''
         self.post_fails = False
         real = subprocess.run
         def run(cmd, **k):
             if cmd[0] == sys.executable:   # the post-pass, run as spv_build runs it, its output kept for the test
+                self.before_post = sys.stdout.getvalue() if isinstance(sys.stdout, io.StringIO) else ''   # what spv_build had printed by then
                 if self.post_fails: raise subprocess.CalledProcessError(1, cmd)
                 r = real(cmd, capture_output=True, text=True); self.lines += r.stdout + r.stderr
                 if k.get('check') and r.returncode: raise subprocess.CalledProcessError(r.returncode, cmd, r.stdout, r.stderr)
@@ -212,6 +214,74 @@ class FreeSpace(Harness):   # spv_build.py room: 20 bytes free for each byte of 
             self.assertRegex(self.text, rf"the drive with {re.escape(str(self.work))}.spv_\w+ has .*: 0\.0 GB for the translator's temporary copy of them until the end, and")
             with self.free(self.N * self.REC * sb.TEMP_PER_BYTE + sb.ROOM_SPARE, self.work): self.build()   # the out folder's drive has 1 TB
         self.assertEqual(len(list(self.out.glob('*.res.json'))), self.N)
+
+
+class Unreadable(Harness):   # what a write that failed leaves: the translator's File.WriteAllBytes creates the file first
+    def setUp(self):
+        super().setUp(); self.bad = {}   # key → (.spv bytes or None for no file, res.json text or None, [RED] line or '')
+
+    def translate(self, job, tout):
+        k = job['key']
+        if k not in self.bad: return super().translate(job, tout)
+        spv, res, red = self.bad[k]
+        if spv is not None: (tout / f'{k}.spv').write_bytes(spv)
+        if res is not None: (tout / f'{k}.res.json').write_text(res, encoding='utf-8')
+        return red
+
+    def keys(self): return sorted(sb.key_of(*reversed(sb.split(record(i)))) for i in range(self.N))
+
+    def test_empty_or_cut_short_outputs_are_red_lines_and_the_rest_is_translated(self):
+        k = self.keys(); good = json.dumps({'key': 'x', 'stage': 'ps', 'cbufs': []})
+        self.bad = {k[0]: (b'', good, ''), k[1]: (FRAGMENT[:-4], good, ''), k[2]: (FRAGMENT, '', ''),   # empty; cut at an instruction's end; reflection empty
+                    k[3]: (None, None, f'[RED] {k[3]}: NotImplementedException: LDC with a bindless bank or an address mode\n')}   # a shader it can't translate
+        text = self.build()
+        self.assertEqual(sorted(p.name[:16] for p in self.out.glob('*.res.json')), [k[4]])
+        for key, why in ((k[0], '.spv empty (0 bytes)'), (k[1], f'.spv cut short ({len(FRAGMENT) - 4} bytes: it does not end in OpFunctionEnd)'), (k[2], '.res.json empty or cut short')):
+            self.assertIn(f"[RED] {key}: the translator's output can't be read: {why}", self.lines)
+        self.assertIn('spv_build: 1 translated, 0 already there (0 given their constant buffer extents), 4 failed', text)
+        self.assertIn(f'[RED] {k[3]}: NotImplementedException', self.before_post)   # printed before the post-pass, which a stop would lose
+        self.assertEqual(self.left(), [])
+
+    def test_a_res_json_cut_short_in_the_out_folder_is_translated_again(self):   # a post-pass that stopped on a full disk before main wrote res.json whole
+        k = self.keys()
+        self.out.mkdir(); (self.out / f'{k[0]}.spv').write_bytes(FRAGMENT); (self.out / f'{k[0]}.res.json').write_bytes(b'{"key": "')
+        text = self.build()
+        self.assertIn(f'spv_build: {self.N} translated, 0 already there', text)
+        self.assertEqual(json.loads((self.out / f'{k[0]}.res.json').read_text())['android'], sa.ANDROID_CHAIN)
+
+
+class PostPass(unittest.TestCase):   # spv_android.py post_one in this process
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.src, self.dst = self.tmp / 'out', self.tmp / 'spv'; self.src.mkdir(); self.dst.mkdir()
+        (self.src / 'k.spv').write_bytes(FRAGMENT); (self.src / 'k.res.json').write_text(json.dumps({'key': 'k', 'stage': 'ps', 'cbufs': []}))
+
+    def test_a_full_disk_while_the_files_are_written_leaves_no_res_json(self):   # res.json comes last: without it the shader is not translated, and the next run makes it
+        real = Path.write_bytes
+        def write(p, data):
+            if p.name.startswith('k.res.json'): raise OSError(errno.ENOSPC, 'No space left on device', str(p))
+            return real(p, data)
+        with mock.patch.object(Path, 'write_bytes', write), self.assertRaises(OSError): sa.post_one(self.src, self.dst, 'k')
+        self.assertTrue((self.dst / 'k.spv').exists()); self.assertFalse((self.dst / 'k.res.json').exists())
+
+    def test_files_are_written_whole_under_their_names(self):
+        sa.post_one(self.src, self.dst, 'k')
+        self.assertEqual(sorted(p.name for p in self.dst.iterdir()), ['k.res.json', 'k.spv'])   # no temporary names left
+        self.assertEqual(json.loads((self.dst / 'k.res.json').read_text())['android'], sa.ANDROID_CHAIN)
+
+    def test_an_unreadable_output_removes_an_older_runs_res_json(self):   # else an older chain's reflection would stand for a shader this run lost
+        (self.dst / 'k.res.json').write_text('{"android": 5}'); (self.src / 'k.spv').write_bytes(b'')
+        counts, lines = sa.post_one(self.src, self.dst, 'k')
+        self.assertEqual(counts, (0,) * 7); self.assertIn("[RED] k: the translator's output can't be read: .spv empty (0 bytes)", lines[0])
+        self.assertFalse((self.dst / 'k.res.json').exists())
+
+    def test_what_counts_as_unreadable(self):
+        self.assertIsNone(sa.unreadable(FRAGMENT))
+        n = len(FRAGMENT)
+        for data, why in ((b'', 'empty (0 bytes)'), (FRAGMENT[:-3], f'cut short ({n - 3} bytes)'), (FRAGMENT[:20], 'cut short (20 bytes)'), (bytes(64), 'not SPIR-V (64 bytes)'),
+                          (FRAGMENT[:-4], f'cut short ({n - 4} bytes: it does not end in OpFunctionEnd)'),
+                          (FRAGMENT[:32], 'cut short (32 bytes: an instruction runs past the end)')):   # the header, OpCapability, then OpMemoryModel's first word
+            with self.subTest(why=why): self.assertEqual(sa.unreadable(data), why)
 
 
 if __name__ == '__main__':

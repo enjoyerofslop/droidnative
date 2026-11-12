@@ -125,7 +125,9 @@ def job(key, stage, code, ctl, w, facts):
     return j, None
 
 def int_inputs_of(path):   # a pool job: one translated vertex shader's inputs that it only uses as integers, {location: type}, a few entries
-    return sa.int_inputs(sa.parse(Path(path).read_bytes())[1])
+    data = Path(path).read_bytes()
+    if sa.unreadable(data): return {}   # empty or cut short (a write that failed): the post-pass gives it its [RED] line
+    return sa.int_inputs(sa.parse(data)[1])
 
 CHUNK = 16   # vertex shaders per pool job
 
@@ -240,7 +242,9 @@ def translate(w):
             rp = out / f'{key}.res.json'   # translated by an earlier run of this chain version (the key covers the shader's bytes)
             prev = (out / f'{key}.spv').exists() and rp.exists()
             if prev:
-                rj = json.loads(rp.read_text(encoding='utf-8')); ch = rj.get('android')
+                try: rj = json.loads(rp.read_text(encoding='utf-8'))
+                except ValueError: rj = {}   # empty or cut short, by a disk that filled while it was written: translated again
+                ch = rj.get('android')
                 if ch == sa.EXT_FROM and sa.ANDROID_CHAIN == sa.EXT_FROM + 1: sa.upgrade(out, key); ch = sa.EXT_FROM + 1; upg += 1   # (its .spv files are chain EXT_FROM + 1's: only res.json's extents were missing; after a later bump of ANDROID_CHAIN, translated again)
                 # a task or mesh shader made before spv_android.py wrote their compute form (res.json mesh_emu: its facts, or null when it could not be made) is translated
                 # again, alone: the other shaders keep their chain
@@ -276,16 +280,21 @@ def translate(w):
     done = sorted(p.name[:-4] for p in tout.glob('*.spv') if not p.name.endswith('.reader.spv'))
     for k in done:   # the feedback layout and a task / mesh shader's facts go with the shader's reflection: spv_android.py makes the capture variant and the stage modules from them
         if k in tfs or 'mesh_stage' in jobs[k]:
-            rp = tout / f'{k}.res.json'; r = json.loads(rp.read_text(encoding='utf-8'))
+            rp = tout / f'{k}.res.json'
+            try: r = json.loads(rp.read_text(encoding='utf-8'))
+            except (FileNotFoundError, ValueError): continue   # none, or one cut short: the post-pass gives the shader its [RED] line
             if k in tfs: r['tf'] = tfs[k]
             if 'mesh_stage' in jobs[k]: r['mesh'] = {'info': jobs[k]['mesh_stage'], 'lay': jobs[k]['stage_memory']}
             rp.write_text(json.dumps(r), encoding='utf-8')
-    if done: subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
     for k in keys:
         if k not in done and k not in failed: failed[k] = 'no output from the translator'
     for k, why in sorted(skipped.items()): print(f'[RED] {k}: {why}')
-    for k, why in sorted(failed.items()): print(f'[RED] {k}: {why}')
-    print(f'spv_build: {len(done)} translated, {have} already there ({upg} given their constant buffer extents), {len(failed)} failed, {len(skipped)} skipped, {sum(1 for k in jobs if jobs[k].get("no_facts"))} without facts')
+    for k, why in sorted(failed.items()): print(f'[RED] {k}: {why}')   # before the post-pass, so a post-pass that stops doesn't lose them (#307's log had none of them)
+    sys.stdout.flush()   # the post-pass writes to the same log
+    if done: subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
+    lost = [k for k in done if not (out / f'{k}.res.json').exists()]   # outputs the post-pass couldn't read (its [RED] lines): res.json, written last, makes a shader translated
+    for k in lost: failed.setdefault(k, "the post-pass couldn't read its output")
+    print(f'spv_build: {len(done) - len(lost)} translated, {have} already there ({upg} given their constant buffer extents), {len(failed)} failed, {len(skipped)} skipped, {sum(1 for k in jobs if jobs[k].get("no_facts"))} without facts')
 
 if __name__ == '__main__':
     main()

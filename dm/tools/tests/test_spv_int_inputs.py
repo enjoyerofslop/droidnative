@@ -1,7 +1,7 @@
 """dm/android/tools/spv_build.py int_input_jobs, the second pass for vertex shaders, in several processes (a spawn pool, as Windows has): the shaders to translate again
 and the inputs added to their jobs are those of one process, in key order, over more shaders than one pool job takes. Translated output stands in as test_spv_cbsize's
 module (its input read only through a bit cast to an integer: int_inputs gives it uint) and test_spv_posrows' (read as a float: nothing to add), assembled with spirv-as.
-Skipped without spirv-as."""
+An empty or cut-short output (a write that failed) adds nothing and doesn't stop the pass. Skipped without spirv-as."""
 import copy
 from pathlib import Path
 import shutil
@@ -66,9 +66,17 @@ class IntInputJobs(unittest.TestCase):
     def test_a_shader_that_cannot_be_read_stops_the_pass(self):
         bad = self.tmp / 'bad'; shutil.copytree(self.tout, bad)
         k = next(k for k in self.keys[sb.CHUNK:] if self.jobs[k]['stage'] == 'vs' and (bad / f'{k}.spv').exists())
-        (bad / f'{k}.spv').write_bytes(bytes(64))
-        with self.assertRaises(AssertionError):   # spv_android.parse: not SPIR-V
+        (bad / f'{k}.spv').unlink(); (bad / f'{k}.spv').mkdir()   # a folder in its place: reading it fails
+        with self.assertRaises(OSError):
             sb.int_input_jobs(self.keys, copy.deepcopy(self.jobs), bad, 3)
+
+    def test_an_empty_or_cut_short_output_is_left_to_the_post_pass(self):   # what a write that failed leaves (a full disk): no inputs found, and the post-pass's [RED] line
+        cut = self.tmp / 'cut'; shutil.copytree(self.tout, cut)
+        ks = [k for k in self.keys[sb.CHUNK:] if self.jobs[k]['stage'] == 'vs' and (cut / f'{k}.spv').exists()][:2]
+        (cut / f'{ks[0]}.spv').write_bytes(b''); (cut / f'{ks[1]}.spv').write_bytes((cut / f'{ks[1]}.spv').read_bytes()[:40])
+        again = sb.int_input_jobs(self.keys, copy.deepcopy(self.jobs), cut, 3)
+        self.assertFalse(set(ks) & set(again))
+        self.assertEqual(again, [k for k in self.run_pass(3)[0] if k not in ks])
 
 
 if __name__ == '__main__':
