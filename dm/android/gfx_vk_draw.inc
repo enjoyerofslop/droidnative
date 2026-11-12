@@ -1188,7 +1188,7 @@ static VkRenderPass rp_get(const rp_key *k) {
     nvn_hm_put(&g_rps, k, rp);
     return rp;
 }
-static struct { int active, layered; VkRenderPass rp; rp_key key; uint32_t w, h, layers; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8];
+static struct { int active, layered; VkRenderPass rp; rp_key key; uint32_t w, h, layers; VkFramebuffer fb; vtex *cv[8], *dv; uint32_t clv[8], cly[8]; uint64_t vt_gen;   // vt_gen: g_vt_gen as it was prepared (gfx_vk.c OP_SET_RT)
                 uint8_t *snap[8]; size_t snap_cap[8], snap_n[8]; uint8_t *snap_dst[8]; VkImage snap_img[8]; } P;   // snap: a linear target's guest bytes at rp_prepare (lsnap_take), until its write-back takes them
 static uint64_t g_passes;
 // DM_VK_DUMP=<frame>: every render pass of that frame (counted in presents from 1) has its colour targets copied out when it ends, written to
@@ -1414,6 +1414,7 @@ static void lin_writeback(int i) {   // attachment i of the pass that ends
 }
 static void rp_end(void) {
     if (!P.active) return;
+    g_rpe[g_rpe_why >= 0 && g_rpe_why < 10 ? g_rpe_why : 0]++;
     occl_end(); vkCmdEndRenderPass(C->cb); prof_pass_end(); P.active = 0; if (dump_on()) dump_pass_end();   // the profile's end timestamp after the pass: on a tiler the tiles' stores are part of it (a timestamp inside a pass is written per tile, and only the last tile's draws came before it)
     for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) {
         if (g_bcrt_pend[i].base->conv) bcd_decode(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly);   // decoded on the GPU into the image the game samples
@@ -1422,6 +1423,7 @@ static void rp_end(void) {
     if (linwb_on()) for (int i = 0; i < 8; i++) if (P.cv[i]) lin_writeback(i);
     lsnap_drop_all();   // what no write-back took
 }
+static void rp_end_why(int why) { g_rpe_why = why; rp_end(); g_rpe_why = 0; }   // (the stats line counts why passes end)
 // a pass's target: drawn into in this present, and in how many presents in a row (apipe_ok)
 static void rt_note(vtex *v) { uint64_t p = atomic_load(&g_presents) + 1; if (v->rt_last != p) { v->rt_runs = v->rt_last + 1 == p ? v->rt_runs + 1 : 1; v->rt_last = p; } }
 // the render pass of the bound render targets (R.rt): images, views and framebuffer, made before the draw's textures are resolved (that may record uploads, outside a pass).
@@ -1506,7 +1508,7 @@ static void dup_check(void) {
 static int rp_prepare_(int layered) {
     layered = layered && layered_on();
     if (P.active && (P.layered || !layered)) return 1;
-    if (P.active) rp_end();   // a draw that writes the layer, in a pass of one layer: the pass again, layered
+    if (P.active) rp_end_why(8);   // a draw that writes the layer, in a pass of one layer: the pass again, layered
     lsnap_drop_all();   // an earlier rp_prepare's that no pass used
     if (!R.has_rt) { RED_ONCE(83, "draw with no render target set"); return 0; }
     memset(P.cv, 0, sizeof P.cv); P.dv = NULL; memset(g_bcrt_pend, 0, sizeof g_bcrt_pend); g_dup_mask = 0;
@@ -1569,7 +1571,7 @@ static int rp_prepare_(int layered) {
         if (vkCreateFramebuffer(g_vk.dev, &fc, NULL, &fb) != VK_SUCCESS) { RED_ONCE(85, "framebuffer %ux%u failed", w, h); lsnap_drop_all(); return 0; }
         nvn_hm_put(&g_fbs, &fk, fb);
     }
-    P.rp = rp; P.key = k; P.w = w; P.h = h; P.layers = layers; P.fb = fb; P.layered = layered; if (layers > 1) g_layered_passes++;
+    P.rp = rp; P.key = k; P.w = w; P.h = h; P.layers = layers; P.fb = fb; P.layered = layered; P.vt_gen = g_vt_gen; if (layers > 1) g_layered_passes++;
     return 1;
 }
 static int rp_prepare(void) { return rp_prepare_(0); }
@@ -3436,7 +3438,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     // under rasterizer discard: a transform feedback capture, nothing, or (a stage writes memory) the draw run as a dispatch, its fragment stage dropped and the
     // targets' pass ended before its bindings are made, as vk_dispatch does (an image it writes may be one of the targets)
     int rd = D.rast_discard && rd_draw(k.sh);
-    if (rd) { k.sh[1] = NULL; g_vdisp = 1; rp_end(); }
+    if (rd) { k.sh[1] = NULL; g_vdisp = 1; rp_end_why(6); }
     if (dw) { g_vr0 = dw->first; g_vr1 = (int64_t)dw->first + dw->count; }   // the vertices it fetches (stream_rng)
     draw_view(k.sh, di, 1);   // what this draw reads of guest memory: pending GPU writes to it land first
     if (D.rast_discard && !rd) return tf_capture(k.sh[0], pprog[0], pst[0], dw, di);   // the vertex stage only: a capture, or nothing
@@ -3609,7 +3611,7 @@ static int ndve_left_out(const char *key) {
 static uint64_t g_ndve_skipped;
 static int vk_dispatch(const p_dispatch *dp) {
     if (!g_d_init) draw_state_reset();
-    rp_end(); tc_clear();
+    rp_end_why(5); tc_clear();
     const prog_t *pr = D.cprog; if (!pr) { RED_ONCE(106, "dispatch with no compute program bound"); return 0; }
     vshader *s = NULL; int pst = -1;
     for (unsigned i = 0; i < pr->nstage && i < 6 && !s; i++) { uint8_t key[8]; char hx[17]; if (!prog_key(pr, i, key)) continue; key_hex(key, hx); vshader *x = sh_get(hx); if (x && x->stage == SH_CS) { s = x; pst = (int)i; } }

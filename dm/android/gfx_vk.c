@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include "dm.h"
 #include "nvn_obj.h"
+#include "rt_same.h"   // OP_SET_RT: the same targets again keep the pass open
 #include "nvn_mtl.h"
 #include "nvn_timestamp.h"
 #include "nvn_hmap.h"
@@ -383,8 +384,14 @@ static void crumb(char kind, const char *a, const char *b, uint32_t n, uint32_t 
 static _Atomic uint64_t g_chunk_wait_ns;   // the replay's time in cur() waiting for a free chunk
 static pthread_mutex_t g_cmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ccv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_seq, g_seq_done; static _Atomic int g_inflight_wb, g_inflight_cop, g_inflight_fwd; static int g_drawing;   // g_drawing: a draw is being made (its resources are in C)
-static void rp_end(void); static void views_drop(VkImage img); static void draw_chunk_reset(chunk *c); static void bf_reset(void); static int ds_recycle(void);   // gfx_vk_draw.inc
+static void rp_end(void); static void rp_end_why(int why); static void views_drop(VkImage img); static void draw_chunk_reset(chunk *c); static void bf_reset(void); static int ds_recycle(void);   // gfx_vk_draw.inc
 static void *chunk_thread(void *arg); static int stg_pool_on(void);
+// Why a render pass ended (rp_end_why; the stats line): 1 a command between draws that is not made on the CPU (by op, g_rpe_op), 2 a chunk sent in the middle of the pass (g_mid_draws),
+// 3 new render targets, 4 a transfer or upload, 5 a compute dispatch, 6 a draw under rasterizer discard, 7 a sync or the submission's end, 8 a draw writing the layer, 9 the mesh compute form
+static uint64_t g_rpe[10], g_rpe_op[64], g_rt_kept; static int g_rpe_why;   // g_rt_kept: OP_SET_RT naming the pass's own targets, the pass kept open (rt_keep_on)
+// DM_VK_RT_KEEP=0 (env.txt): OP_SET_RT ends the open render pass even when it names the targets the pass draws into, as before. By default such a pass goes on (rt_same.h), as the
+// Metal replay's does: Ocarina of Time sets its scene targets again between the draws of a pass, and each end loaded and stored the 1440x810 colour and depth targets again
+static int rt_keep_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RT_KEEP"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RT_KEEP=0: a render pass ends at every SetRenderTargets, the same targets included"); } return v; }
 // ---------------- Occlusion queries (NVN_COUNTER_TYPE_SAMPLES_PASSED) ----------------
 // NVN's samples passed is a counter on the queue: ResetCounter zeroes it, every draw after adds its samples, ReportCounter writes the sum at that point when the GPU gets
 // there. Here, as nvn_mtl.m does with visibility buffers: while counting, draws are inside an occlusion query, one per render pass stretch (a query cannot outlive its
@@ -501,7 +508,7 @@ static VkCommandBuffer cb(void) {
         if (C->tq && C->td) { vkCmdResetQueryPool(C->cb, C->tq, 0, (uint32_t)C->td); g_qr_cmd += (uint64_t)C->td; }
         if (C->pq && C->pd) { vkCmdResetQueryPool(C->cb, C->pq, 0, (uint32_t)C->pd); g_qr_cmd += (uint64_t)C->pd; }
         C->qd = C->td = C->pd = 0; C->nq = C->ntq = C->npq = 0; bf_reset(); }   // a new recording holds no bound state (gfx_vk_draw.inc bf_*)
-    rp_end();   // transfers and clears run outside a draw's render pass (only the draw path records inside one, through C->cb)
+    rp_end_why(4);   // transfers and clears run outside a draw's render pass (only the draw path records inside one, through C->cb)
     return C->cb;
 }
 // Every transfer / clear is ordered after everything before it (the images stay in GENERAL; one full barrier between operations; a chunk also ends with one, which
@@ -674,7 +681,7 @@ static void rb_record(chunk *c), rb_invalidate(chunk *c);   // gfx_vk_readback.i
 static uint64_t chunk_submit(uint64_t nvn_fence) {
     if (!C) return 0;
     if (g_drawing) RED_ONCE(3, "a chunk was closed while a draw was being made: that draw's resources went with it");
-    rp_end();
+    rp_end_why(g_rpe_why ? g_rpe_why : 7);
     int rec = C->open;   // a chunk whose command buffer was never begun is submitted with none: the fence alone
     int deferred = rec_on();   // the recorder ends the command buffer and submits it after the calls queued before (rec_submit): the replay goes on recording meanwhile
     if (rec && (C->gm_st || C->ip_wr)) {   // raw stores or storage buffers written in place wrote guest memory itself (gfx_vk_gmem.inc): made visible to the host, which reads it once the fence is signalled
@@ -1510,7 +1517,7 @@ static uint64_t g_up_free;
 static int up_range_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UP_RANGE"); v = e && !strcmp(e, "1"); if (v) LOG("[vk] DM_VK_UP_RANGE=1: a texture upload waits only for pending writes it reads (off by default: the grass flicker, see DM_VK_LINWB_SNAP)"); } return v; }
 static void up_view(const vtex *v, const tex_t *t) {
     if (!up_range_on() || vk_safe()) { g_vs = 2; cpu_view(); return; }
-    rp_end();
+    rp_end_why(4);
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); size_t n = t->L.size;
     if (bpb && !v->conv && is_linear(t)) {   // the rows vt_upload_ reads, at the stride clamped up to the pitch: possibly past the storage size
         size_t pitch = (size_t)((v->w + bw - 1) / bw) * bpb, rows = (v->h + bh - 1) / bh, srow = t->L.layer_size / (rows ? rows : 1); if (srow < pitch) srow = pitch;
@@ -2285,7 +2292,7 @@ void mtl_exec(const uint8_t *p) {
         int cpu_op = h.op == OP_UPDATE_UB || h.op == OP_SIGNAL_EVENT || h.op == OP_REPORT_COUNTER || h.op == OP_FENCE_SYNC || h.op == OP_COPY_STRIDE || h.op == OP_CALL
                      || h.op == OP_CLEAR_BUF || h.op == OP_COPY_B2B
                      || h.op == OP_CLEAR_COLOR || h.op == OP_CLEAR_DS || h.op == OP_RESET_COUNTER || h.op == OP_RENDER_COND;   // clears of the bound targets are made in their pass when they can be (clear_color); the others end it themselves (cb())
-        if (P.active && h.op != OP_DRAW && h.op != OP_DRAW_IDX && h.op != OP_SCISSOR && h.op != OP_JUMP && h.op != OP_END && !cpu_op && !draw_state_is(h.op)) rp_end();
+        if (P.active && h.op != OP_DRAW && h.op != OP_DRAW_IDX && h.op != OP_SCISSOR && h.op != OP_JUMP && h.op != OP_END && h.op != OP_SET_RT && !cpu_op && !draw_state_is(h.op)) { g_rpe_op[h.op & 63]++; rp_end_why(1); }
         switch (h.op) {
             case OP_END: return;
             case OP_JUMP: memcpy(&p, a, 8); continue;
@@ -2319,21 +2326,24 @@ void mtl_exec(const uint8_t *p) {
             case OP_SET_RT:   // new render targets: a chunk with enough work goes to the GPU now, so that it draws while the rest of the submission is recorded
                 // (one command buffer per frame kept the GPU idle until the CPU had recorded everything: Super Mario Bros. Wonder's level took CPU 29 ms + GPU 41 ms
                 // a frame one after the other). A dispatch's storage buffer read by later draws on the GPU is found in the chunks in flight too (fwd_find)
-                if (C && C->ndraw >= EARLY_DRAWS && !vk_safe()) flush();
-                R.rt = *(const p_set_rt *)a; R.has_rt = 1; g_sh_rt = shadow_rt(&R.rt); break;
+                { const p_set_rt *r = (const p_set_rt *)a;
+                  if (P.active && R.has_rt && rt_keep_on() && P.vt_gen == g_vt_gen && rt_same(&R.rt, r)) { R.rt = *r; g_rt_kept++; break; }   // the targets the pass draws into: it goes on (rt_same.h; no image was made or dropped since it began)
+                  rp_end_why(3);
+                  if (C && C->ndraw >= EARLY_DRAWS && !vk_safe()) flush();
+                  R.rt = *r; R.has_rt = 1; g_sh_rt = shadow_rt(&R.rt); break; }
             case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1; break;
             case OP_CLEAR_COLOR: if (!rc_skips()) clear_color((const p_clear_color *)a); break;
             case OP_CLEAR_DS: if (!rc_skips()) clear_ds((const p_clear_ds *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
             case OP_DRAW: if (rc_skips() || shadow_skips()) break;
-                if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
+                if (C && C->ndraw >= g_mid_draws && !vk_safe()) { g_rpe_why = 2; flush(); g_rpe_why = 0; }
                 { p_draw t; const p_draw *dw = draw_rec(a, h.size, &t);   // short records: draw_rec (nvn_obj.h)
                   if (dw->prim == DM_PRIM_MESH_TASKS) {   // NVN2's DrawMeshTasks: on VK_EXT_mesh_shader (gfx_vk_mesh.inc); the Adreno 7xx drivers and Turnip have none, and no lowering is ported
                       if (g_mesh || memu_on()) { if (!vk_mesh_draw(dw)) g_draws_dropped++; break; }   // VK_EXT_mesh_shader, else their compute form (gfx_vk_meshemu.inc)
                       RED_ONCE(131, "task / mesh shader draws (NVN2 DrawMeshTasks) are skipped: no VK_EXT_mesh_shader on this GPU (Mario Kart World's roadside bushes and grass tufts)"); g_mesh_skipped++; break; }
                   if (!vk_draw(dw, NULL)) g_draws_dropped++; break; }
             case OP_DRAW_IDX: if (rc_skips() || shadow_skips()) break;
-                if (C && C->ndraw >= g_mid_draws && !vk_safe()) flush();
+                if (C && C->ndraw >= g_mid_draws && !vk_safe()) { g_rpe_why = 2; flush(); g_rpe_why = 0; }
                 { p_draw_idx t; if (!vk_draw(NULL, draw_idx_rec(a, h.size, &t))) g_draws_dropped++; break; }
             case OP_DISPATCH: if (!vk_dispatch((const p_dispatch *)a)) g_draws_dropped++; break;
             case OP_BARRIER: case OP_VP_SWIZZLE: case OP_BEGIN: break;   // the replay's own syncs stand for barriers; viewport swizzles are not replayed (as before the unhandled-op line)
@@ -2678,6 +2688,12 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     shadow_line();
     LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu, other bindings %llu, written in place by a later dispatch %llu; bound on another binding's copy of the same shader %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd, own_alias)", (unsigned long long)g_fwd, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1], (unsigned long long)g_alias);
     LOG("[vk] render passes with every layer of their targets attached (a draw writes the layer): %llu (cumulative; gfx_vk_draw.inc rp_prepare_)", (unsigned long long)g_layered_passes);
+    { int top[3] = {-1, -1, -1}; for (int o = 0; o < 64; o++) for (int k = 0; k < 3; k++) if (top[k] < 0 || g_rpe_op[o] > g_rpe_op[top[k]]) { for (int j = 2; j > k; j--) top[j] = top[j - 1]; top[k] = o; break; }
+      LOG("[vk] render passes ended by: a chunk sent after %d draws %llu, new targets %llu (the same targets set again and the pass kept %llu; DM_VK_RT_KEEP %d), a dispatch %llu, a transfer or upload %llu, a sync or the submission's end %llu, "
+          "a command between draws %llu (op %d: %llu, op %d: %llu, op %d: %llu), a draw writing the layer %llu, a draw under rasterizer discard %llu, the mesh compute form %llu, other %llu (cumulative; rp_end_why)",
+          g_mid_draws, (unsigned long long)g_rpe[2], (unsigned long long)g_rpe[3], (unsigned long long)g_rt_kept, rt_keep_on(), (unsigned long long)g_rpe[5], (unsigned long long)g_rpe[4], (unsigned long long)g_rpe[7],
+          (unsigned long long)g_rpe[1], top[0], (unsigned long long)g_rpe_op[top[0] & 63], top[1], (unsigned long long)g_rpe_op[top[1] & 63], top[2], (unsigned long long)g_rpe_op[top[2] & 63],
+          (unsigned long long)g_rpe[8], (unsigned long long)g_rpe[6], (unsigned long long)g_rpe[9], (unsigned long long)g_rpe[0]); }
     if (slot0_fill_on()) LOG("[vk] render passes given a scratch target in their empty colour slot 0: %llu (cumulative; gfx_vk_draw.inc slot0_fill_on)", (unsigned long long)g_slot0_fills);
     if (dup_slots_on()) LOG("[vk] render passes attaching an image once that two colour slots name: %llu, draws whose write to the slot left unused was lost: %llu (cumulative; gfx_vk_draw.inc dup_slots)", (unsigned long long)g_dup_passes, (unsigned long long)g_dup_lost);
     if (stg_stat()) { static unsigned long long f0; static uint64_t a0, r0, s0; uint64_t a = atomic_load(&g_stg_allocs), r = atomic_load(&g_stg_frees), sl = g_sp_slices; double nf = frame > f0 ? (double)(frame - f0) : 1;
