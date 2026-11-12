@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -33,7 +34,8 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
         self.said = []
-        for cm in (mock.patch.object(ba.bi, 'PROG', mock.Mock()), mock.patch.object(ba, 'say', self.said.append), mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data')):
+        for cm in (mock.patch.object(ba.bi, 'PROG', mock.Mock()), mock.patch.object(ba, 'say', self.said.append), mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'),
+                   mock.patch.dict(ba._keys, clear=True)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
 
@@ -61,10 +63,43 @@ class Json(unittest.TestCase):
         t = ba.games_table()   # no game played on Android is one the table lists as drawing without NVN
         self.assertEqual([g for g in ba.ANDROID_TESTED if g in t and 'NVN' not in t[g]['graphics']], [])
 
+    def test_oodle_packs_stop_early_without_a_decoder(self):   # issue #310: Pokémon Legends: Arceus's split failed on its 678 GFPAKs after about 220 s, with no decoder for the game's Oodle
+        sys.path.insert(0, str(REPO / 'dm/games')); import profile_guess as pg   # noqa: E401
+        src = pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_gfpak=678)
+        why = ba.undecodable_packs(src['oodle_packs'], 'Pokémon Legends: Arceus', None)
+        self.assertIn("Arceus keeps its shaders in files compressed with the game's own Oodle (678 Game Freak GFPAK archive(s) with Oodle Kraken entries "
+                      "(Pokémon Legends: Arceus)), which only the game's own decoder reads", why)
+        self.assertIn('connect one', why); self.assertIn('DroidPlay for Mac', why); self.assertNotIn('DM_OODLE', why)
+        self.assertIsNone(ba.undecodable_packs(pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0)['oodle_packs'], 'Odyssey', None))
+        for decoder in ('SERIAL', {'DM_OODLE_HOST': 'dmhost', 'DM_OODLE_MODULES': 'patched_v262144'}, True):   # a phone, a Mac host, what an earlier build decoded
+            self.assertIsNone(ba.undecodable_packs(src['oodle_packs'], 'Arceus', decoder))
+        for s in (pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, trinity_packs=1), pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_pkz=1),
+                  pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_ue3=1)):   # Legends: Z-A, Bayonetta 3, Batman: Arkham Knight
+            self.assertIn('connect one', ba.undecodable_packs(s['oodle_packs'], 'x', None))
+
     def test_games_played_on_android_have_profiles(self):   # a mistyped title ID would leave its game shown as not played on Android
         t = ba.games_table()
         self.assertTrue(ba.ANDROID_TESTED)
         self.assertEqual(sorted(g for g in ba.ANDROID_TESTED if g not in t), [])
+
+    def test_game_status_rows_start_with_a_tier(self):   # the README's tiers spelled as its tier table spells them: a hyphen typed for the en dash, or a bare "Playable", fails
+        tiers = ('Playable – minor issues through ', 'Playable – major issues through ', 'In-game', 'Menus', 'Boots', "Doesn't run")
+        table = (REPO / 'README.md').read_text(encoding='utf-8').split('| Game | Device | State |\n|---|---|---|\n', 1)[1].split('\n\n', 1)[0]
+        rows = [[c.strip() for c in line[1:-1].split('|')] for line in table.splitlines()]
+        self.assertGreater(len(rows), 10)
+        self.assertEqual([r[0] for r in rows if len(r) != 3], [])
+        self.assertEqual([r[0] for r in rows if not r[2].lstrip('*').startswith(tiers)], [])
+
+    def test_playable_now_names_the_playable_rows(self):   # the README's "Playable now" lines above Game Status repeat the table for players, so a row that moves tier moves there too
+        readme = (REPO / 'README.md').read_text(encoding='utf-8')
+        table = readme.split('| Game | Device | State |\n|---|---|---|\n', 1)[1].split('\n\n', 1)[0]
+        rows = [[c.strip() for c in line[1:-1].split('|')] for line in table.splitlines()]
+        name = lambda game: re.sub(r' \(Switch 2\)$', '', game.strip('*')).rsplit(' ', 1)[0]   # the game without its version: "Persona 3 Portable 1.0.2"
+        for tier in ('Playable – minor issues', 'Playable – major issues'):
+            line = re.search(rf'^- \*\*{tier}:\*\* (.+)$', readme, re.M)
+            assert line, f'README.md: no "- **{tier}:**" line under Playable now'
+            want = sorted(name(r[0]) for r in rows if r[2].lstrip('*').startswith(tier))
+            self.assertEqual(sorted(name(r[0]) for r in rows if name(r[0]) in line.group(1)), want, f'README.md: the "{tier}" line under Playable now')
 
 
 class Windows(unittest.TestCase):
@@ -202,14 +237,19 @@ class GameApp(Base):   # droidplay-core issue #169: a game app whose DLC doesn't
         aoc = self.tmp / 'aoc'; (aoc / '2').mkdir(parents=True)
         with self.assertRaises(ba.BuildError): ba.dlc_images(aoc)
 
-    @unittest.skipUnless(JDK and ANDROID_JAR, 'needs a JDK (JAVA_HOME, or javac on PATH) and the Android SDK (ANDROID_HOME, or the Mac\'s default)')
-    def test_gamestart_reads_the_packers_pack(self):   # GameStart's own parser, run on a JVM over the SDK's android.jar stubs, against a pack this script wrote
-        assert JDK is not None and ANDROID_JAR is not None   # (the skip above)
+    def jvm(self, cls, code, *args):   # a class of GameStart's package compiled with the app's Java and run on a JVM over the SDK's android.jar stubs → its output
+        assert JDK is not None and ANDROID_JAR is not None   # (the callers' skip)
         javac, java = JDK; jar = ANDROID_JAR
+        src = self.tmp / f'jsrc_{cls}'; out = self.tmp / f'jout_{cls}'; src.mkdir(); out.mkdir()
+        (src / f'{cls}.java').write_text('package org.nxnative.android;   // GameStart\'s helpers are package-private\n' + code)
+        javas = [str(p) for p in (REPO / 'dm/android/java').rglob('*.java')] + [str(src / f'{cls}.java')]
+        subprocess.run([javac, '-source', '8', '-target', '8', '-Xlint:none', '-nowarn', '-bootclasspath', str(jar), '-cp', str(jar), '-d', str(out), *javas], check=True, capture_output=True)
+        return subprocess.run([java, '-cp', f'{jar}{os.pathsep}{out}', f'org.nxnative.android.{cls}', *map(str, args)], check=True, capture_output=True, text=True).stdout
+
+    @unittest.skipUnless(JDK and ANDROID_JAR, 'needs a JDK (JAVA_HOME, or javac on PATH) and the Android SDK (ANDROID_HOME, or the Mac\'s default)')
+    def test_gamestart_reads_the_packers_pack(self):   # GameStart's own parser, run on a JVM, against a pack this script wrote
         made, inside, info, stage, game, aoc = self.make(False, 512 << 10)
-        src = self.tmp / 'jsrc'; out = self.tmp / 'jout'; src.mkdir(); out.mkdir()
-        (src / 'PackCheck.java').write_text('''package org.nxnative.android;   // GameStart's parsers are package-private
-import java.io.RandomAccessFile;
+        out = self.jvm('PackCheck', '''import java.io.RandomAccessFile;
 public class PackCheck { public static void main(String[] a) throws Exception {
     RandomAccessFile f = new RandomAccessFile(a[0], "r"); long at = Long.parseLong(a[1]), size = Long.parseLong(a[2]);
     byte[] h = new byte[16]; f.seek(at); f.readFully(h); int n = GameStart.dlcCount(h);
@@ -217,12 +257,64 @@ public class PackCheck { public static void main(String[] a) throws Exception {
     for (long[] r : GameStart.dlcRecords(head, size - at)) System.out.println(r[0] + " " + r[1] + " " + r[2]);
     head[16] = 0; head[17] = 0; System.out.println(GameStart.dlcRecords(head, size - at) == null ? "bad index refused" : "bad index taken");
 } }
-''')
-        javas = [str(p) for p in (REPO / 'dm/android/java').rglob('*.java')] + [str(src / 'PackCheck.java')]
-        subprocess.run([javac, '-source', '8', '-target', '8', '-Xlint:none', '-nowarn', '-bootclasspath', str(jar), '-cp', str(jar), '-d', str(out), *javas], check=True, capture_output=True)
-        r = subprocess.run([java, '-cp', f'{jar}{os.pathsep}{out}', 'org.nxnative.android.PackCheck', str(made[1]), str(info['dlc_at']), str(info['data_bytes'])], check=True, capture_output=True, text=True)
+''', made[1], info['dlc_at'], info['data_bytes'])
         _, recs, _ = ba.dlc_pack(ba.dlc_images(aoc))
-        self.assertEqual(r.stdout.split('\n'), [f'{i} {o} {n}' for i, o, n in recs] + ['bad index refused', ''])
+        self.assertEqual(out.split('\n'), [f'{i} {o} {n}' for i, o, n in recs] + ['bad index refused', ''])
+
+    # droidplay-core issue #169 again: a ZIP without ZIP64 holds 65,535 entries, and Mario Kart 8 Deluxe's shaders with its DLC passed that at 492 MB
+    def spv_folder(self, n):   # a synthetic spv folder of n tiny files, as the translator names them (no game files)
+        spv = self.tmp / f'spv{n}'; spv.mkdir()
+        for i in range(n): (spv / f'{i:016x}{".z" if i % 3 == 0 else ""}.spv').write_bytes(i.to_bytes(4, 'little'))
+        return spv
+
+    def test_shaders_past_the_entry_limit_go_in_one_entry(self):
+        import zipfile
+        g, game, aoc = self.stage(); spv = self.spv_folder(65_600); out = self.tmp / 'out'; work = self.tmp / 'work'; (work / 'logs').mkdir(parents=True)
+        meta = {'title_id': GID, 'name': 'Test Game', 'romfs_bytes': (game / 'RomFS.img').stat().st_size}
+        with mock.patch.object(ba.bi, 'run', lambda cmd, *a, **k: Path(cmd[cmd.index('-o') + 1]).write_bytes(b'apk')):
+            ba.make_game_app('sdk', mock.Mock(id=GID), game, g / 'code', spv, g / 'font', aoc, 'DM_LANG=en-US\n', g / 'host.so', meta, work, work / 'logs', {}, out, False)
+        stage = work / 'game_app'; listed = (stage / 'files.txt').read_text().split()
+        self.assertFalse((stage / 'spv').exists()); self.assertIn(ba.SPV_ZIP, listed); self.assertLess(len(listed), 100)   # the APK's entries: a handful, not 65,600
+        with zipfile.ZipFile(stage / ba.SPV_ZIP) as z:
+            infos = z.infolist()
+            self.assertEqual(len(infos), 65_600); self.assertTrue(all(i.compress_type == zipfile.ZIP_STORED for i in infos))
+            self.assertEqual(z.read('0000000000000003.z.spv'), (3).to_bytes(4, 'little'))
+
+    def test_too_many_files_is_named(self):   # the files the APK must carry, past the entry limit even with the shaders packed
+        parts = {'code': 90 * MB, 'shaders': 500 * MB, 'font': 22 * MB, 'the rest': MB}
+        with self.assertRaises(ba.BuildError) as e:
+            ba.game_app_plan(parts, 0, 1 << 30, False, files={'code': 70_000, 'shaders': 1, 'font': 3, 'the rest': 6})
+        for want in ('70,010 files', 'code 70,000', 'shaders 1', '65,535 entries', 'without --game-apk'): self.assertIn(want, str(e.exception))
+        self.assertEqual(ba.game_app_plan(parts, MB, 1 << 30, False, files={'code': 100}, dlc_files=ba.GAME_APP_ENTRIES), (False, False))   # DLC whose files don't fit goes beside
+
+    def test_build_apk_names_the_limit_it_hit(self):   # zipfile raises one LargeZipFile for every limit; the message says which
+        import zipfile
+        spec = importlib.util.spec_from_file_location('build_apk', REPO / 'dm/android/tools/build_apk.py'); assert spec and spec.loader
+        bapk = importlib.util.module_from_spec(spec); spec.loader.exec_module(bapk)
+        writing = ['assets/game/spv/e94e9c942d2987fd.z.spv', 18_856, 65_535, 492_500_937]
+        m = bapk.zip64_message('x.apk', zipfile.LargeZipFile('Files count would require ZIP64 extensions'), writing)
+        self.assertIn('reached 65,535 entries', m); self.assertNotIn('2 GiB', m)
+        m = bapk.zip64_message('x.apk', zipfile.LargeZipFile('Zipfile size would require ZIP64 extensions'), writing)
+        self.assertIn('passed 2 GiB (492,500,937 bytes written)', m); self.assertNotIn('65,535', m)
+
+    @unittest.skipUnless(JDK and ANDROID_JAR, 'needs a JDK (JAVA_HOME, or javac on PATH) and the Android SDK (ANDROID_HOME, or the Mac\'s default)')
+    def test_gamestart_unpacks_the_packers_shaders(self):   # GameStart.unzip, run on a JVM, over the script's spv.zip, and a name that leaves the folder refused
+        import zipfile
+        spv = self.spv_folder(300); z = self.tmp / 'spv.zip'; ba.pack_spv(spv, z)
+        bad = self.tmp / 'bad.zip'
+        with zipfile.ZipFile(bad, 'w') as b: b.writestr('../outside.spv', b'x')
+        dst = self.tmp / 'unpacked'
+        out = self.jvm('UnzipCheck', '''import java.io.*;
+public class UnzipCheck { public static void main(String[] a) throws Exception {
+    System.out.println(GameStart.unzip(new FileInputStream(a[0]), new File(a[1]), new byte[1 << 16], null));
+    try { GameStart.unzip(new FileInputStream(a[2]), new File(a[3]), new byte[1 << 16], null); System.out.println("taken"); }
+    catch (IOException e) { System.out.println("refused"); }
+} }
+''', z, dst, bad, self.tmp / 'bad_dst')
+        self.assertEqual(out.split(), ['300', 'refused'])
+        self.assertEqual(sorted(p.name for p in dst.iterdir()), sorted(p.name for p in spv.iterdir()))
+        self.assertTrue(all((dst / p.name).read_bytes() == p.read_bytes() for p in spv.iterdir()))
+        self.assertFalse((self.tmp / 'outside.spv').exists())
 
 
 class Setup(unittest.TestCase):   # --setup (dm/android/tools/host_setup.py): what --check finds missing, installed where the script looks; nothing is downloaded here
@@ -370,22 +462,183 @@ class Journal(Base):
         self.assertEqual([e['done'] for e in evs if e['ev'] == 'progress' and e['name'] == 'one'][-1], 7)
 
 
+def popen(rc=0, out='', err='', hang=False):   # subprocess.Popen as run_adb uses it: one answer, or none until killed (hang)
+    class P:
+        cmds: list = []
+        def __init__(self, cmd, **k): P.cmds.append(cmd); self.returncode = None; self.killed = False
+        def communicate(self, timeout=None):
+            if hang and not self.killed: raise subprocess.TimeoutExpired('adb', timeout or 0)
+            self.returncode = -9 if self.killed else rc; return out, err
+        def kill(self): self.killed = True
+        def poll(self): return self.returncode
+    return P
+
+
 class AdbErrors(unittest.TestCase):
+    def adb(self, P, *a, **k):
+        with mock.patch.object(ba.subprocess, 'Popen', P): return ba.adb('S', *a, **k)
+
     def test_a_failure_names_its_exit_status_even_with_no_output(self):
-        r = subprocess.CompletedProcess([], 1, stdout='', stderr='')
-        with mock.patch.object(ba.subprocess, 'run', return_value=r):
-            with self.assertRaisesRegex(ba.BuildError, r'adb -s S shell true failed \(exit status 1\): no output'): ba.adb('S', 'shell', 'true')
-        r = subprocess.CompletedProcess([], 255, stdout='', stderr="adb: device 'S' not found\n")
-        with mock.patch.object(ba.subprocess, 'run', return_value=r):
-            with self.assertRaisesRegex(ba.BuildError, r"failed \(exit status 255\): adb: device 'S' not found$"): ba.adb('S', 'shell', 'true')
+        with self.assertRaisesRegex(ba.BuildError, r'adb -s S shell true failed \(exit status 1\): no output') as e: self.adb(popen(1), 'shell', 'true')
+        self.assertNotIsInstance(e.exception, ba.PhoneLost)
+        self.assertEqual(self.adb(popen(1, 'x\n'), 'shell', 'false', check=False), 'x\n')   # a command that failed, with check=False: its output
+
+    def test_adb_losing_the_phone_is_told_apart_whatever_check(self):   # a phone that dropped off Wi-Fi, or a cable pulled: survives_drops waits for it
+        for rc, err in ((1, "adb: device 'S' not found\n"), (1, 'error: device offline\n'), (1, 'error: closed\n'), (255, ''), (1, 'adb: error: failed to read copy response: EOF\n'),
+                        (1, 'adb: error: failed to read copy response\n'), (1, 'protocol fault (couldn\'t read status): Connection reset by peer\n')):
+            with self.subTest(err=err), self.assertRaises(ba.PhoneLost) as e: self.adb(popen(rc, '', err), 'shell', 'stat x', check=False)
+            self.assertTrue(e.exception.why); self.assertNotIn('lost the phone', e.exception.why)   # what adb said, or the exit status: not the same words twice
+
+    def test_a_phone_that_stops_answering_is_lost_after_its_wait(self):   # a Wi-Fi phone gone silent held the build at one percentage until TCP gave up
+        P = popen(hang=True)
+        with self.assertRaisesRegex(ba.PhoneLost, r'no answer from the phone in 5 s'): self.adb(P, 'shell', 'true', timeout=5)
+
+    def test_waits_follow_the_step(self):
+        f = Path(tempfile.mkdtemp()) / 'piece'; f.write_bytes(b'x' * (5 << 20)); self.addCleanup(shutil.rmtree, f.parent)
+        self.assertEqual(ba.adb_timeout(('push', str(f), '/sdcard/x')), 60 + 5 * 2)   # 5 MiB at 0.5 MiB/s
+        self.assertEqual(ba.adb_timeout(('push', '--sync', str(f.parent), '/sdcard/x/')), 70)
+        self.assertEqual(ba.adb_timeout(('shell', 'stat x')), ba.SHELL_SECS)
+
+    def test_calls_go_to_the_serial_the_phone_came_back_as(self):
+        P = popen(0, 'ok\n')
+        with mock.patch.dict(ba._now, {'S': '192.168.1.20:41011'}): self.adb(P, 'shell', 'true')
+        self.assertEqual(P.cmds[-1][:3], ['adb', '-s', '192.168.1.20:41011'])
+
+
+class Reconnect(Base):   # a phone adb lost on the way: waited for by its ID, connected to again where it can be, and the step taken again
+    S25 = 'R5CY51ZLGKH\n9774d56d682e549c\n'
+    MDNS = 'List of discovered mdns services\nadb-R5CY51ZLGKH-AbCdEf\t_adb-tls-connect._tcp\t192.168.1.20:41011\n'
+
+    def setUp(self):
+        super().setUp()
+        self.devices: dict[str, str] = {}; self.props: dict[str, str] = {}; self.mdns = ''; self.on_connect: dict[str, dict] = {}; self.stale: set[str] = set()
+        self.calls: list[list[str]] = []; self.ticks: list = []
+        def run_adb(args, log=None, check=True, timeout=None):
+            a = [str(x) for x in args]; self.calls.append(a)
+            if a == ['devices']: return 'List of devices attached\n' + ''.join(f'{s}\t{st}\n' for s, st in self.devices.items())
+            if a == ['mdns', 'services']: return self.mdns
+            if a[0] == 'connect': self.devices.update(self.on_connect.get(a[1], {})); self.stale.discard(a[1]); return ''
+            if a[0] == 'disconnect': self.devices.pop(a[1], None); return ''
+            if a[0] == '-s' and self.devices.get(a[1]) == 'device':
+                if a[2:] == ['shell', ba.phone_id.ID_CMD]: return self.props.get(a[1], '')
+                if a[2:] == ['shell', 'echo ok']: return '' if a[1] in self.stale else 'ok\n'
+                return 'done\n'
+            raise ba.PhoneLost(f"adb: device '{a[1]}' not found", 'not found')
+        def sleep(_):   # each wait between looks: what happens meanwhile, in turn
+            if self.ticks: self.ticks.pop(0)()
+        for cm in (mock.patch.object(ba, 'run_adb', run_adb), mock.patch.object(ba.time, 'sleep', sleep), mock.patch.dict(ba._now, clear=True),
+                   mock.patch.object(ba, '_drops', 0), mock.patch.object(ba, '_streak', 0), mock.patch.object(ba, '_progress', 0), mock.patch.object(ba, '_streak_at', -1),
+                   mock.patch.object(ba, 'RECONNECT_WAIT', 30.0)):
+            cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def took(self, serial):   # the run took the phone on serial: its ID read then, as phone() does
+        self.devices[serial] = 'device'; self.props.setdefault(serial, self.S25); ba.phone_key(serial)
+
+    def test_a_new_port_is_found_by_the_phones_mdns_name(self):   # wireless debugging restarted: same phone, another port
+        self.took('192.168.1.20:37123'); del self.devices['192.168.1.20:37123']
+        self.mdns = self.MDNS; self.on_connect['192.168.1.20:41011'] = {'192.168.1.20:41011': 'device'}; self.props['192.168.1.20:41011'] = self.S25
+        self.assertEqual(ba.reacquire('192.168.1.20:37123', 'error: closed'), '192.168.1.20:41011')
+        self.assertEqual(ba.adb('192.168.1.20:37123', 'shell', 'true'), 'done\n')
+        self.assertEqual(self.calls[-1][:2], ['-s', '192.168.1.20:41011'])   # every later call goes there
+        self.assertTrue(any('back as 192.168.1.20:41011' in m for m in self.said), self.said)
+
+    def test_a_cable_plugged_back_in(self):
+        self.took('R5CY51ZLGKH'); del self.devices['R5CY51ZLGKH']
+        self.ticks = [lambda: None, lambda: self.devices.update(R5CY51ZLGKH='device')]
+        self.assertEqual(ba.reacquire('R5CY51ZLGKH', 'device offline'), 'R5CY51ZLGKH')
+        self.assertFalse(any(c[0] in ('connect', 'disconnect', 'mdns') for c in self.calls), self.calls)   # nothing of Wi-Fi's for a cable
+        self.assertTrue(any('plug it back in' in m for m in self.said), self.said)
+
+    def test_a_phone_unplugged_and_found_over_wifi(self):   # a USB phone's ID is its serial: it is still known by it on Wi-Fi
+        self.took('R5CY51ZLGKH'); del self.devices['R5CY51ZLGKH']
+        self.ticks = [lambda: self.devices.update({'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp': 'device'})]
+        self.props['adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp'] = self.S25
+        self.assertEqual(ba.reacquire('R5CY51ZLGKH', 'device offline'), 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp')
+
+    def test_a_connection_that_answers_nothing_is_made_again(self):   # adb still lists a Wi-Fi phone whose connection died silently
+        self.took('192.168.1.20:37123'); self.stale.add('192.168.1.20:37123')
+        self.on_connect['192.168.1.20:37123'] = {'192.168.1.20:37123': 'device'}
+        self.assertEqual(ba.reacquire('192.168.1.20:37123', 'the copy made no progress in 90 s'), '192.168.1.20:37123')
+        self.assertLess(self.calls.index(['disconnect', '192.168.1.20:37123']), self.calls.index(['connect', '192.168.1.20:37123']))
+
+    def test_another_phone_is_not_taken_and_the_wait_ends(self):
+        self.took('192.168.1.20:37123'); del self.devices['192.168.1.20:37123']
+        self.devices['10.0.0.7:5555'] = 'device'; self.props['10.0.0.7:5555'] = 'e7879cce\nf00dfeed12345678\n'
+        with mock.patch.object(ba, 'RECONNECT_WAIT', 0.0):
+            with self.assertRaisesRegex(ba.BuildError, r'did not come back within 0 s .*same network as this computer.*Wireless debugging.*goes on from what the phone holds'):
+                ba.reacquire('192.168.1.20:37123', 'error: closed')
+        self.assertEqual(ba._now, {})
+
+    def test_a_step_runs_again_once_the_phone_is_back(self):
+        runs = []
+        @ba.survives_drops
+        def step(serial):
+            runs.append(ba._now.get(serial, serial))
+            if len(runs) == 1: raise ba.PhoneLost('adb -s 192.168.1.20:37123 push x: adb lost the phone: error: closed', 'error: closed')
+            return 'copied'
+        self.took('192.168.1.20:37123'); del self.devices['192.168.1.20:37123']
+        self.mdns = self.MDNS; self.on_connect['192.168.1.20:41011'] = {'192.168.1.20:41011': 'device'}; self.props['192.168.1.20:41011'] = self.S25
+        self.assertEqual(step('192.168.1.20:37123'), 'copied')
+        self.assertEqual(runs, ['192.168.1.20:37123', '192.168.1.20:41011'])
+
+    def test_a_phone_lost_again_and_again_stops_the_install(self):
+        @ba.survives_drops
+        def step(serial): raise ba.PhoneLost('adb -s 192.168.1.20:37123 push x: adb lost the phone: error: closed', 'error: closed')
+        with mock.patch.object(ba, 'reacquire', lambda serial, why: serial):
+            with self.assertRaisesRegex(ba.BuildError, r'lost the phone 6 times in a row with nothing copied in between.*closer to the router'): step('192.168.1.20:37123')
+
+    def test_drops_with_copying_between_them_never_stop_the_install(self):   # the Pad 3's run: a drop after every few pieces, each time a little further
+        n = []
+        @ba.survives_drops
+        def step(serial):
+            n.append(1); ba.moved()   # a piece reached the phone
+            if len(n) < 20: raise ba.PhoneLost('adb -s 192.168.1.20:37123 push x: adb lost the phone: failed to read copy response: EOF', 'failed to read copy response: EOF')
+            return 'copied'
+        with mock.patch.object(ba, 'reacquire', lambda serial, why: serial): self.assertEqual(step('192.168.1.20:37123'), 'copied')
+        self.assertEqual(ba._drops, 19)
+
+    def test_a_copy_that_stops_moving_is_stopped(self):   # STALL_SECS without a byte more: the running adb is stopped and its call raises PhoneLost
+        clock = [1000.0]; stopped = []
+        with mock.patch.object(ba.time, 'monotonic', lambda: clock[0]), mock.patch.object(ba, 'stop_stalled', stopped.append):
+            with ba.counting('sending', 100, 'B', lambda: 40):
+                poll = ba.bi.PROG.watch.call_args.args[0]
+                poll(); clock[0] += ba.STALL_SECS - 1; poll(); self.assertEqual(stopped, [])
+                clock[0] += 2; poll(); self.assertEqual(len(stopped), 1)
+            with ba.counting('unpacking', 100, 'files', lambda: 40):   # a count of files: one large file can take minutes
+                poll = ba.bi.PROG.watch.call_args.args[0]; poll(); clock[0] += 10 * ba.STALL_SECS; poll()
+        self.assertEqual(len(stopped), 1)
+        P = popen(hang=True)
+        p = P(['adb']); ba._running.add(p); self.addCleanup(ba._running.discard, p)
+        ba.stop_stalled('the copy made no progress in 90 s')
+        self.assertTrue(p.killed); self.assertEqual(getattr(p, 'stalled', ''), 'the copy made no progress in 90 s')
+
+
+class PickDevice(Base):   # the console's default phone: the only one ready, a phone on a cable and on Wi-Fi at once counting once
+    def pick(self, listed, props):
+        out = 'List of devices attached\n' + ''.join(f'{s}\t{st}\n' for s, st in listed)
+        with mock.patch.object(ba.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=out, stderr='')), \
+                mock.patch.object(ba, 'adb', lambda serial, *a, **k: props.get(serial, '')):
+            return ba.pick_device()
+
+    def test_one_phone_on_usb_and_wifi_is_used_over_the_cable(self):
+        props = dict.fromkeys(('192.168.1.20:37123', 'R5CY51ZLGKH', 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp'), 'R5CY51ZLGKH\n9774d56d682e549c\n')
+        self.assertEqual(self.pick([(s, 'device') for s in props], props), 'R5CY51ZLGKH')
+        self.assertEqual(self.pick([('192.168.1.20:37123', 'device'), ('adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp', 'device')], props),
+                         'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp')   # an mDNS name outlives the port
+
+    def test_two_phones_still_ask_which(self):
+        props = {'R5CY51ZLGKH': 'R5CY51ZLGKH\n9774d56d682e549c\n', '192.168.1.30:5555': 'e7879cce\nf00dfeed12345678\n'}
+        with self.assertRaisesRegex(ba.BuildError, r'2 adb devices ready'): self.pick([(s, 'device') for s in props], props)
+        self.assertEqual(self.pick([('R5CY51ZLGKH', 'device'), ('192.168.1.30:5555', 'offline')], props), 'R5CY51ZLGKH')
 
 
 class Phone(Base):
     def setUp(self):
         super().setUp()
         self.cmds = []; self.remote: dict[str, Any] = {}   # remote path → exists ('free': the phone's free KiB for df, 'mkdirs': what the folder script prints)
-        def adb(serial, *a, log=None, check=True):
+        def adb(serial, *a, log=None, check=True, timeout=None):
             c = [str(x) for x in a]; self.cmds.append(c)
+            if c == ['shell', ba.phone_id.ID_CMD]: return self.remote.get('props', {}).get(serial, '')   # the phone's ID (phone_key): '' gives none
             if c[:2] == ['shell', 'sh'] and c[2].endswith('nxnative_mkdirs.sh'):
                 out = self.remote.get('mkdirs', ba.MKDIRS_DONE + '\n')
                 if isinstance(out, Exception): raise out
@@ -404,9 +657,18 @@ class Phone(Base):
         self.font = self.tmp / 'font'; self.font.mkdir(); (self.font / 'f.ttf').write_bytes(b'f')
         (self.tmp / 'logs').mkdir()
 
-    def push(self):
-        ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'en-US', self.tmp, self.tmp / 'logs', {'title_id': GID})
+    def push(self, serial='S'):
+        ba.push_game(serial, GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'en-US', self.tmp, self.tmp / 'logs', {'title_id': GID})
         return [' '.join(c) for c in self.cmds]
+
+    def test_a_wifi_serial_makes_folders_windows_takes(self):   # after the desktop app's Connect, a phone's serial is ip:port; after adb's own, its mDNS name
+        for serial in ('192.168.1.20:37123', 'adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp', '[fe80::1%wlan0]:5555'):
+            self.cmds.clear(); self.push(serial)   # on Windows, push_<ip:port> raised WinError 123 here, before anything was copied
+            made = [p.relative_to(self.tmp / 'logs') for p in (self.tmp / 'logs').rglob('*')]
+            self.assertTrue(made)
+            for p in made:
+                for part in p.parts: self.assertFalse(set(part) & set('<>:"/\\|?*') or part.endswith(('.', ' ')), (serial, p))
+            self.assertTrue(any(c[0] == 'push' for c in self.cmds), serial)
 
     def test_copies_to_games_folder_and_opens_it(self):
         flat = self.push(); dst = f'{ba.REMOTE}/games/{GID}'
@@ -415,6 +677,11 @@ class Phone(Base):
         self.assertTrue(any(f"chmod -R a+rwX '{dst}' 2>&1; chmod a+rwx '{ba.REMOTE}/games' 2>&1" in c for c in flat), flat)
         writes = [c for c in flat if not c.startswith('shell [ -e ')]   # the one-game layout is only looked for
         self.assertFalse(any(f'{ba.REMOTE}/game/' in c or c.endswith(f'{ba.REMOTE}/game') for c in writes), writes)
+
+    def test_a_phones_logs_folder_keeps_its_name_over_wifi(self):   # named after the phone's ID: its serial over Wi-Fi changes with each new port
+        self.remote['props'] = {s: 'R5CY51ZLGKH\n9774d56d682e549c\n' for s in ('R5CY51ZLGKH', '192.168.1.20:37123', '192.168.1.20:41011')}
+        for serial in self.remote['props']: self.push(serial)
+        self.assertEqual([p.name for p in (self.tmp / 'logs').iterdir()], ['push_R5CY51ZLGKH'])
 
     def test_launcher_files_end_lines_with_newline_alone(self):   # on Windows too: the desktop app reads game.json by lines, and the \r of \r\n split its JSON
         ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'DM_LANG=en-US\n', self.tmp, self.tmp / 'logs', {'title_id': GID, 'name': 'x'})
@@ -452,7 +719,7 @@ class Phone(Base):
         import re
         files = {}; sent = []
         def q(s): return s.strip().strip("'")
-        def adb(serial, *a, log=None, check=True):
+        def adb(serial, *a, log=None, check=True, timeout=None):
             c = [str(x) for x in a]
             if c[0] == 'push':
                 if len(sent) == 1 and not getattr(adb, 'cut', False): adb.cut = True; raise ba.BuildError('no response: Broken pipe')
@@ -474,6 +741,95 @@ class Phone(Base):
         self.assertEqual(files['/r/RomFS.img'], big.read_bytes())
         self.assertEqual(len(sent), 3)   # the first piece once, then the two left
         self.assertTrue(any('going on from there' in s for s in self.said), self.said)
+
+    def test_a_large_copy_goes_on_in_the_same_install_after_a_drop(self):   # the phone lost after the first piece: the copy waits, then sends only what is left
+        files: dict[str, bytes] = {}; sent: list[str] = []
+        def q(s): return s.strip().strip("'")
+        def adb(serial, *a, log=None, check=True, timeout=None):
+            c = [str(x) for x in a]
+            if c[0] == 'push':
+                if len(sent) == 1 and not getattr(adb, 'cut', False): adb.cut = True; raise ba.PhoneLost('adb push: adb lost the phone: error: closed', 'error: closed')
+                sent.append(c[2]); files[c[2]] = Path(c[1]).read_bytes(); return ''
+            cmd = c[1]
+            if m := re.fullmatch(r"stat -c %s (.+) 2>/dev/null", cmd): p = q(m[1]); return f'{len(files[p])}\n' if p in files else ''
+            if m := re.fullmatch(r": > (.+)", cmd): files[q(m[1])] = b''; return ''
+            if m := re.fullmatch(r"dd if=(.+) bs=4096 skip=(\d+) count=(\d+) 2>/dev/null \| head -c (\d+) \| sha256sum", cmd):
+                b = files[q(m[1])][int(m[2]) * 4096:][:int(m[3]) * 4096][:int(m[4])]; return hashlib.sha256(b).hexdigest() + '  -\n'
+            if m := re.fullmatch(r"cat (.+) >> (.+) && rm (.+)", cmd): files[q(m[2])] += files.pop(q(m[1])); return ''
+            if m := re.fullmatch(r"mv -f (.+) (.+)", cmd): files[q(m[2])] = files.pop(q(m[1])); return ''
+            if cmd.startswith('df -k '): return ''
+            raise AssertionError(c)
+        big = self.tmp / 'RomFS.img'; big.write_bytes(bytes(range(256)) * 9000)
+        back = []
+        with mock.patch.object(ba, 'adb', adb), mock.patch.object(ba, 'CHUNK', 1 << 20), mock.patch.object(ba, '_drops', 0), mock.patch.object(ba, '_streak', 0), \
+                mock.patch.object(ba, 'reacquire', lambda serial, why: back.append(why) or serial):
+            ba.push_resumable('S', big, '/r/RomFS.img', self.tmp / 'logs' / 'p.log')
+        self.assertEqual(files['/r/RomFS.img'], big.read_bytes()); self.assertEqual(back, ['error: closed'])
+        self.assertEqual(len(sent), 3)   # the first piece once, then the two left
+
+    def phone_fs(self, files, pushed, cut=lambda c: False):   # a stand-in adb over the phone's files (path → bytes); cut(command) True: adb loses the phone there
+        import tarfile
+        def q(s): return s.strip().strip("'")
+        def adb(serial, *a, log=None, check=True, timeout=None):
+            c = [str(x) for x in a]
+            if cut(c): raise ba.PhoneLost(f'adb {" ".join(c)}: adb lost the phone: error: closed', 'error: closed')
+            if c[0] == 'push':
+                src, dst = Path(c[-2]), c[-1]; pushed.append((dst, src.read_bytes())); files[dst] = src.read_bytes(); return ''
+            cmd = ' '.join(c[1:])
+            if m := re.fullmatch(r"stat -c %s (.+) 2>/dev/null", cmd): p = q(m[1]); return f'{len(files[p])}\n' if p in files else ''
+            if m := re.fullmatch(r": > (.+)", cmd): files[q(m[1])] = b''; return ''
+            if m := re.fullmatch(r"dd if=(.+) bs=4096 skip=(\d+) count=(\d+) 2>/dev/null \| head -c (\d+) \| sha256sum", cmd):
+                b = files[q(m[1])][int(m[2]) * 4096:][:int(m[3]) * 4096][:int(m[4])]; return hashlib.sha256(b).hexdigest() + '  -\n'
+            if m := re.fullmatch(r"cat (.+) >> (.+) && rm (.+)", cmd): files[q(m[2])] += files.pop(q(m[1])); return ''
+            if m := re.fullmatch(r"mv -f (.+) (.+)", cmd): files[q(m[2])] = files.pop(q(m[1])); return ''
+            if m := re.fullmatch(r"cat (.+) 2>/dev/null", cmd): return files.get(q(m[1]), b'').decode()
+            if m := re.fullmatch(r"tar -xf (.+) -C (.+)", cmd):
+                with tarfile.open(fileobj=__import__('io').BytesIO(files[q(m[1])])) as t:
+                    for ti in t.getmembers(): files[f'{q(m[2])}/{ti.name}'] = t.extractfile(ti).read()   # pyright: ignore[reportOptionalMemberAccess]
+                return ''
+            if c[1:3] == ['rm', '-f']: files.pop(c[3], None); return ''
+            if c[1] == 'sh' and c[2].endswith('nxnative_mkdirs.sh'): return ba.MKDIRS_DONE + '\n'
+            if c[1:3] == ['mkdir', '-p'] or cmd.startswith(('df -k ', 'find ')): return ''
+            raise AssertionError(c)
+        return adb
+
+    def test_shaders_go_in_pieces_and_a_drop_costs_one(self):   # Final Fantasy Resonance's 8.4 GB archive started again from nothing after a drop over Wi-Fi
+        import tarfile, io
+        spv = self.tmp / 'spv'; spv.mkdir()
+        for i in range(ba.TAR_FILES + 10): (spv / f'{i:04}.spv').write_bytes(bytes([i % 256]) * 100)
+        files: dict[str, bytes] = {}; pushed: list = []; tars = [0]
+        def cut(c):   # the third archive's push: adb loses the phone
+            if c[0] == 'push' and c[-1].endswith('.tar'):
+                tars[0] += 1; return tars[0] == 3
+            return False
+        dst = f'{ba.REMOTE}/games/{GID}/spv'
+        with mock.patch.object(ba, 'adb', self.phone_fs(files, pushed, cut)), mock.patch.object(ba, 'CHUNK', 5000), mock.patch.object(ba, '_drops', 0), \
+                mock.patch.object(ba, 'reacquire', lambda serial, why: serial):
+            ba.push_dir('S', spv, f'{ba.REMOTE}/games/{GID}', 'spv', self.tmp / 'logs' / 'p.log', sync=True)
+        sent = [n for d, b in pushed if d.endswith('.tar') for n in tarfile.open(fileobj=io.BytesIO(b)).getnames()]
+        self.assertEqual(sorted(sent), sorted(f.name for f in spv.iterdir()))   # each file once: the two archives the phone had unpacked were not sent again
+        self.assertGreater(len([d for d, _ in pushed if d.endswith('.tar')]), 3)
+        for f in spv.iterdir(): self.assertEqual(files[f'{dst}/{f.name}'], f.read_bytes())
+        self.assertEqual(len(files[f'{dst}/{ba.MANIFEST}'].decode().splitlines()), ba.TAR_FILES + 10)
+        self.assertFalse(any(k.endswith('.tar') for k in files))   # no archive left on the phone
+        self.assertTrue(any('archives' in m for m in self.said), self.said)
+
+    def test_a_large_dlc_image_goes_on_from_what_the_phone_holds(self):   # issue #169's Booster Course Pass is gigabytes
+        aoc = self.tmp / 'aoc'; aoc.mkdir(); (aoc / '1.img').write_bytes(bytes(range(256)) * 9000); (aoc / '2.img').write_bytes(b'small')
+        files: dict[str, bytes] = {}; pushed: list = []; n = [0]
+        def cut(c):   # the second piece of the large image: adb loses the phone
+            if c[0] == 'push' and c[-1].endswith('1.img.piece'):
+                n[0] += 1; return n[0] == 2
+            return False
+        dst = f'{ba.REMOTE}/games/{GID}/aoc'
+        with mock.patch.object(ba, 'adb', self.phone_fs(files, pushed, cut)), mock.patch.object(ba, 'CHUNK', 1 << 20), mock.patch.object(ba, '_drops', 0), \
+                mock.patch.object(ba, 'reacquire', lambda serial, why: serial):
+            ba.push_dir('S', aoc, f'{ba.REMOTE}/games/{GID}', 'aoc', self.tmp / 'logs' / 'aoc.log', sync=True)
+            self.assertEqual(files[f'{dst}/1.img'], (aoc / '1.img').read_bytes()); self.assertEqual(files[f'{dst}/2.img'], b'small')
+            self.assertEqual(len([d for d, _ in pushed if d.endswith('1.img.piece')]), 3)   # three 1 MiB pieces, the cut one sent again only
+            pushed.clear(); ba.push_dir('S', aoc, f'{ba.REMOTE}/games/{GID}', 'aoc', self.tmp / 'logs' / 'aoc.log', sync=True)
+        self.assertEqual([d for d, _ in pushed if '1.img' in d], [])   # on the phone already: not sent again
+        self.assertTrue(any('1.img: on the phone already' in m for m in self.said), self.said)
 
     def test_folder_script_stops_at_the_first_failure_and_must_finish(self):   # droidplay-core issue #37: "nxnative_mkdirs.sh failed:" and nothing after it
         self.push()
@@ -502,14 +858,14 @@ class Phone(Base):
         self.assertFalse(any(c[0] == 'push' for c in self.cmds), self.cmds)
         spv = self.tmp / 'spv'; spv.mkdir()
         for i in range(ba.TAR_FILES + 1): (spv / f'{i:04}.spv').write_bytes(b'x' * 100)
-        with self.assertRaisesRegex(ba.BuildError, r'spv \(201 files in one archive, unpacked beside itself\) needs'):
+        with self.assertRaisesRegex(ba.BuildError, r'spv \(201 files, sent in archives of up to 268 MB\) needs'):
             ba.push_dir('S', spv, f'{ba.REMOTE}/games/{GID}', 'spv', self.tmp / 'logs' / 'p.log', sync=True)
         self.assertFalse(any(c[0] == 'push' for c in self.cmds), self.cmds)
         self.assertFalse((self.tmp / 'logs' / 'p.tar').exists())   # the archive made on this computer is removed too
 
     def test_leftovers_of_a_copy_cut_short_are_removed(self):
         flat = self.push(); dst = f'{ba.REMOTE}/games/{GID}'
-        self.assertIn(f"shell rm -f '{dst}'/.*.tar '{dst}/RomFS.img.piece'", flat)
+        self.assertIn(f"shell rm -f '{dst}'/.*.tar '{dst}/RomFS.img.piece' '{dst}/aoc'/*.piece", flat)
         self.assertFalse(any('rm' in c and 'RomFS.img.partial' in c for c in flat), flat)   # the next copy goes on from it
 
     def test_install_is_an_update(self):

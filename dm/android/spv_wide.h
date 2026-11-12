@@ -3,10 +3,12 @@
 // segment mask, the result valid up to lane 31 only) and shuffles to that lane, S2R SR_LANEID and the lane masks read the built-ins as they are, BALLOT takes
 // the ballot's first 32 bits and VOTE is the whole subgroup's. On 64-lane subgroups (the Adreno 830's fragment and compute shaders: subgroupSize 64, its minimum
 // and maximum) lanes 32-63 then read lanes 0-31, or keep their own value where Maxwell's derivative idiom (SHFL within the 2x2 quad, fwidth) wants a neighbour's: half
-// of each wave's pixels get a wrong derivative. spv_wide rewrites such a fragment shader into what Ryujinx makes for a host subgroup over 32 (QueryHostSubgroupSize
+// of each wave's pixels get a wrong derivative, and a compute shader's warp-aggregated atomic (BALLOT, the lane masks and a SHFL from the warp's leader) leaves
+// lanes 32-63 out of every count. spv_wide rewrites such a fragment or compute shader into what Ryujinx makes for a host subgroup over 32 (QueryHostSubgroupSize
 // in HelperFunctionManager, InstEmitMove, InstEmitWarp), each 32 lanes of the subgroup one warp:
 // - the lane ID: lane & 31, the lane within its warp;
 // - OpGroupNonUniformShuffle: the index | (lane & ~31), the lane of its own warp;
+// - OpGroupNonUniformShuffleXor (spv_xor's form of the butterfly): as it is, since the lane ^ a mask under 32 is in its own warp;
 // - a ballot's first component and a mask's component 0: its warp's component, lane >> 5;
 // - All, Any and AllEqual (of a predicate): from its warp's ballot, as Ryujinx's EmitVote;
 // - the subgroup size: 32.
@@ -19,9 +21,10 @@
 #include "spv_lit.h"
 
 enum { SPV_WIDE_DONE = 1, SPV_WIDE_KEPT = 2, SPV_WIDE_STAGE = 4 };   // rewritten; uses it cannot rewrite: as it is; of a stage it leaves: as it is
-// The stages spv_wide rewrites: fragment shaders, whose quad shuffles (Maxwell's derivatives) t_quad_shuffle checks on a device. A compute, mesh or task module's
-// shuffles and votes are left as translated, its stage named by spv_wide_wanted for the replay's log, until a device test covers that stage
-#define SPV_WIDE_STAGES 0x10u
+// The stages spv_wide rewrites: fragment shaders, whose quad shuffles (Maxwell's derivatives) t_quad_shuffle checks on a device, and compute shaders, whose
+// whole-warp reductions t_warp_reduce checks (on the Adreno 840, as translated, the second warp's steps keep its own values and its lane 32 never adds its result).
+// A mesh or task module's shuffles and votes are left as translated, its stage named by spv_wide_wanted for the replay's log, until a device test covers that stage
+#define SPV_WIDE_STAGES 0x30u
 // The most words one use becomes: AllEqual's 44 (two ballots, the lane's load and shift, two extracts, two compares, an OR). A shuffle becomes 20, a lane load 9
 #define SPV_WIDE_SITE 48u
 // The kinds of ids the scan follows: the built-in variables, a pointer to a mask's component 0, a ballot's result; 32-bit integer types and constants, the
@@ -95,6 +98,7 @@ static size_t spv_wide(const uint32_t *w, size_t n, uint32_t sg_stages, uint32_t
             used = 1; sites++;
             int ok = 0;
             if (op == 345) ok = len == 6;   // Shuffle: type result scope value id
+            else if (op == 346) ok = len == 6;   // ShuffleXor (spv_xor's, before this): by a mask under 32 it stays within the lane's 32-lane warp, kept as it is
             else if (op == 339) { ok = len == 5 && tv4u && x[1] == tv4u && ID(x[2]); if (ok) kind[x[2]] = SWK_BALLOT; }   // Ballot: type result scope predicate
             else if (op >= 334 && op <= 336) { ok = len == 5 && tb && x[1] == tb && ID(x[4]) && (kind[x[4]] & SWK_BOOL); votes++; }   // All, Any, AllEqual of a predicate
             if (!ok) bad = 1;

@@ -148,6 +148,7 @@ Where this GPU differs from the Adreno above:
 - **64-lane subgroups in every stage** (stages 0x3d3f, sizes 32 to 64, a required size in compute only): `spv_wide` rewrote Brilliant Diamond's 23 `fwidth` fragment shaders.
   No vertex shader of the nine games packed for Android on the Mac uses subgroup operations. Compute shaders in Final Fantasy Resonance (1,199) and Mario Kart World (184) do, and stay as
   translated, with `spv_wide`'s red line; neither game has run on this phone.
+- **16-bit normalized formats it cannot filter:** R16_UNORM, R16G16_UNORM, R16G16B16A16_UNORM and their SNORM forms are sampled without linear filtering on this GPU. Brilliant Diamond's water simulation needs it, and drew Twinleaf's pond as a grid of white dashes until such textures were made in the 16-bit float formats ([16-bit normalized textures a GPU cannot filter](../../docs/reference/rendering.md#16-bit-normalized-textures-a-gpu-cannot-filter)).
 - **The cover screen:** folding the phone while the game plays puts it in the background (focus states 2 and 3, audio suspended) and shows Samsung's own cover home on the cover
   screen. The game process keeps running, and nothing crashes. Opening the phone brings back its lock screen first. Not seen:
   - the game's return after unlocking (the next install stopped it);
@@ -168,7 +169,7 @@ The first Adreno 730, 2026-11-10: a Moto Razr Plus 2023.
 |---|---|
 | **Super Mario Odyssey 1.4.1**, the opening cutscene (Start pressed on a fresh save) | 57.4–58.1 · 16.8–17.0 / 20.2 · GPU 12.5–12.6 (the warm-up 52.5) |
 | **Pokémon Brilliant Diamond 1.3.0**, language menu and Eterna City | **Crashes** at boot, before its first frame, in every launch (6 of 6): the driver's shader compiler |
-| **Final Fantasy Resonance 1.0.1**, the first field (the `battlefield` save) | **The GPU hangs** as the field appears, about 56 s in, in every run (3 of 3); no frame after it |
+| **Final Fantasy Resonance 1.0.1**, the first field (the `battlefield` save) | **The GPU hung** as the field appeared, about 56 s in, in every run (3 of 3), with no frame after it. With `spv_xor` (`main` 5c21a252, two runs, no warm-up): 19.9–20.0 · 50.4–50.7 / 59.8–60.3 · GPU 30.5, no hang |
 
 Where this GPU differs from the Adreno above:
 
@@ -178,7 +179,8 @@ Where this GPU differs from the Adreno above:
   - The game boots on the Adreno 650 (driver V@0746), the 740 (V@0676) and the 830 (V@0800), all newer drivers than this one. Not narrowed down yet.
 - **Final Fantasy Resonance's hang:** 55–60 fps through the load and the field's first frames. Then one submission ran 10.2–10.6 s on the GPU until the driver's hang recovery cut it short, its end timestamp never written; its last commands were compute dispatches.
   - The game kept running (sound, vsync) and drew no further frame.
-  - Its red line `a compute shader with Maxwell's 32-lane warp instructions on the GPU's 64-lane subgroups` (`e918336692525691`) shows on the other 64-lane GPUs too, where the field plays. Whether it causes the hang isn't known.
+  - Its red line `a compute shader with Maxwell's 32-lane warp instructions on the GPU's 64-lane subgroups` (`e918336692525691`) shows on the other 64-lane GPUs too, where the field plays. It isn't the hang's cause.
+  - **Found and fixed:** the particle simulation's warp reduction through the translator's butterfly shuffle comes back as garbage on this driver, so a sprite draw asked for billions of instances. `spv_xor` makes that shuffle ShuffleXor: [Maxwell's butterfly shuffle on the Adreno 730](../../docs/reference/rendering.md#maxwells-butterfly-shuffle-on-the-adreno-730).
 - **The flames:** the field's last frame before the hang has black pixel-art shapes along the road where its flames burn. That's the Ayn Odin 2's Adreno 740 picture before droidplay-core#135, whose run-time rows it turns on for Qualcomm's Adreno 7xx. So it points the same way for the 730, from one frozen frame: the hang came before the route's walk, and #135 wasn't run here.
 - **Odyssey** plays the opening at 57–58 fps, with GPU 12.5 ms against the Odin 2's 5.5 ms; the picture is right.
 - **Vulkan:**
@@ -319,7 +321,7 @@ Numbered in the order they were found, so links to a number stay right:
     - **What differs.** Its pipeline key is the horizontal pass's byte for byte but for the write mask, with the same D16 depth image. Only the target image differs: it is also the sixth colour target of the G-buffer passes.
     - **Not on the Odin 2.** Its Adreno 740 (driver 0x802a4000) runs the same draw without a hang: seven launches of the same save on main 1e4dd802 with droidplay-core#108, nothing skipped, no slow submission reported.
     - **Cause.** An earlier pass of the frame binds that target alone in colour slot 5, with slots 0–4 empty (`VK_ATTACHMENT_UNUSED`). That pass runs; the later one drawing into the target as slot 0 hangs. A scratch target in every empty slot below a used one stops it, and so does one in slot 0 alone. Filling only a G-buffer pass's empty slot 6 below slot 7, or zeroing the write masks of empty slots, doesn't.
-    - **Fix.** On Adreno 8xx a render pass with colour slot 0 empty below a used slot gets a scratch RGBA8 target there (`DM_VK_SLOT0_FILL`, [rendering.md](../../docs/reference/rendering.md#a-render-pass-with-colour-slot-0-empty-hangs-a-later-pass-on-the-adreno-830-android)). About one pass a frame gets it in BotW.
+    - **Fix.** On every Adreno on Qualcomm's driver (Adreno 8xx at first; the 730 crashed on such a pass in Mario Kart 8 Deluxe) a render pass with colour slot 0 empty below a used slot gets a scratch RGBA8 target there (`DM_VK_SLOT0_FILL`, [rendering.md](../../docs/reference/rendering.md#a-render-pass-with-colour-slot-0-empty-hangs-or-crashes-qualcomms-adreno-driver-android)). About one pass a frame gets it in BotW.
     - **Check** (main 4743c9da with the fix, BotW's defaults from droidplay-core#108): 30.0 fps in three runs, no hang report. With `DM_VK_SLOT0_FILL=0` the GPU is lost as before. The picture is still wrong there (problem 15).
 
 15. **Fixed: Breath of the Wild's Shrine of Resurrection was drawn dark and blurred on the Adreno 830**: Link unlit, the walls a blur, on the Pad 3 and the Galaxy S25 Edge (Samsung's driver 0x80320001), where the Odin 2 draws them right.
@@ -341,6 +343,16 @@ Numbered in the order they were found, so links to a number stay right:
       (droidplay-core#161).
     - **Rare long frames** of 90–120 ms remain in warm battles: a few pipelines the background builder leaves to the replay thread (a target drawn for the first
       time), about 48 ms each, and an 84 ms submission with none, not explained yet.
+
+17. **Fixed: Final Fantasy Resonance's first field had no flames on the Odin 2**: the pixel-art flames along the road were black holes, where the Pad 3 and the S25 Edge
+    drew them.
+    - Its 35 flame cards a frame (vertex shader `19274e72bf8f5d0d`) were binned nowhere. Qualcomm's Adreno 740 driver bins a pass with a position-only copy of
+      the vertex shader, and that copy read Unreal's clip matrix (c3 rows 0-3, constant indices) as garbage. Turnip (`DM_VK_DRIVER`) drew them.
+    - **Fix.** `spv_android.py` `pos_rows` (`ANDROID_CHAIN` 6) lets a vertex shader's position read its constant buffer rows at run time, behind a specialization constant the
+      replay sets only on Qualcomm's Adreno 7xx driver and only for the vertex shaders a game's profile names (FF's `vk_pos_rows`: the flames' vertex shader)
+      ([rendering.md](../../docs/reference/rendering.md#a-vertex-shaders-position-lost-in-the-adreno-740s-binning-copy)).
+    - **Check** (the Odin 2, main `b75f9719` against the fix, a warm-up and 2 runs each): FF's field at 42.1 fps on both, GPU 12.4 ms on main without the flames and
+      13.0 ms with them; Animal Crossing's island 8.6–8.8 ms on both, Skyward Sword HD's Skyloft 3.7–3.8 ms on both, as their profiles name no shader.
 
 ## Reading the numbers
 

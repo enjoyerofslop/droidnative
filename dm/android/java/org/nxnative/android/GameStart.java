@@ -2,10 +2,12 @@
 // assets/game/, laid out as the launcher's games/<title ID>/ (build_android_from_nsp.py --game-apk): the rewritten code, the shaders, the font, any DLC, the icon,
 // the control data, defaults.txt and game.json, and the RomFS image when the APK can hold it (an APK stays under 4 GB: apksigner reads no ZIP64).
 //   First start, and after an update of the app: everything but the RomFS is unpacked to <external files>/games/<title ID>/, where front_android.c looks for a game.
+//   The translated shaders come as one stored ZIP, spv.zip, unpacked into spv/ (an APK holds at most 65,535 entries, and a game's shaders are files of their own:
+//   droidplay-core issue #169); the host reads them by path there.
 //   The RomFS is read where it is, never copied: the APK's own stored entry; else the app's OBB file, Android/obb/<package>/main.<version code>.<package>.obb, which an
 //   XAPK installer puts there (build_android_from_nsp.py --xapk); else the <name>.romfs file the player picked once with Android's file picker (kept as a persistable
 //   grant). Each is checked for the RomFS image's mark and the size game.json gives before the game starts. It reaches the host as DM_ROMFS=fd:<descriptor>:<offset>:<length> (dm/host/romfs_image.h romfs_image_spec), set in this process's
-//   environment before the NativeActivity starts in the same process, so the host reads it at its start; the descriptor stays open for the process's life.
+//   environment before `GameActivity` starts in the same process, so the host reads it at its start; the descriptor stays open for the process's life.
 //   defaults.txt (the game language picked when packing) is set the same way, without overriding the environment; env.txt still overrides both (front_android.c).
 //   DLC the APK couldn't hold (droidplay-core issue #169) follows the RomFS in that same file, the .romfs or the OBB, as a pack (build_android_from_nsp.py make_game_app
 //   says how it is laid out); game.json gives its offset (dlc_at) and the file's whole size (data_bytes). Its images are copied out once into games/<title ID>/aoc/, where
@@ -14,7 +16,6 @@
 package org.nxnative.android;
 
 import android.app.Activity;
-import android.app.NativeActivity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetFileDescriptor;
@@ -45,10 +46,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.zip.CRC32;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 import org.json.JSONObject;
 
 public class GameStart extends Activity {
-    static final String ROMFS = "RomFS.img", PREF_URI = "romfs_uri";
+    static final String ROMFS = "RomFS.img", PREF_URI = "romfs_uri", SPV_ZIP = "spv.zip";
     static final int PICK = 1;
     String id, name; long romfsBytes, dataBytes, dlcAt; File dir;
     TextView status; TextView choose;
@@ -87,12 +90,36 @@ public class GameStart extends Activity {
         dir.mkdirs(); byte[] buf = new byte[1 << 16]; int n = 0;
         for (String f : files) {
             if (++n % 200 == 1 || n == files.size()) say(String.format(Locale.ROOT, "Preparing %s for its first start… %d of %d files", name, n, files.size()));
+            if (f.equals("game/" + SPV_ZIP)) {   // the shaders: one entry, many files
+                try (InputStream in = am.open(f, AssetManager.ACCESS_STREAMING)) {
+                    unzip(in, new File(dir, "spv"), buf, new Count() { public void at(int k) { say(String.format(Locale.ROOT, "Preparing %s for its first start… %d shaders", name, k)); } });
+                }
+                continue;
+            }
             File out = new File(dir, f.substring("game/".length())); out.getParentFile().mkdirs();
             try (InputStream in = am.open(f, AssetManager.ACCESS_STREAMING); OutputStream o = new FileOutputStream(out)) {
                 for (int k; (k = in.read(buf)) > 0; ) o.write(buf, 0, k);
             }
         }
         try (OutputStream o = new FileOutputStream(mark)) { o.write(stamp.getBytes(StandardCharsets.UTF_8)); }
+    }
+
+    // A ZIP read as a stream (the packer's spv.zip: stored entries, their sizes in the local headers) → its files under dst, which a name may not leave; → how many.
+    // Pure Java, so a JVM runs it against the packer's ZIP (dm/tools/tests/test_android_cli.py). count, when given, hears every 2,000 files
+    interface Count { void at(int files); }
+    static int unzip(InputStream in, File dst, byte[] buf, Count count) throws IOException {
+        int n = 0; String root = dst.getCanonicalPath() + File.separator;
+        try (ZipInputStream z = new ZipInputStream(in)) {
+            for (ZipEntry e; (e = z.getNextEntry()) != null; ) {
+                File out = new File(dst, e.getName());
+                if (!out.getCanonicalPath().startsWith(root)) throw new IOException("a file outside the folder: " + e.getName());
+                if (e.isDirectory()) { out.mkdirs(); continue; }
+                out.getParentFile().mkdirs();
+                try (OutputStream o = new FileOutputStream(out)) { for (int k; (k = z.read(buf)) > 0; ) o.write(buf, 0, k); }
+                if (++n % 2000 == 0 && count != null) count.at(n);
+            }
+        }
+        return n;
     }
 
     static void list(AssetManager am, String path, List<String> out) throws Exception {
@@ -229,7 +256,7 @@ public class GameStart extends Activity {
             int eq = line.indexOf('='); if (line.startsWith("#") || eq <= 0) continue;
             Os.setenv(line.substring(0, eq).trim(), line.substring(eq + 1).trim(), false);
         }
-        startActivity(new Intent(this, NativeActivity.class)); overridePendingTransition(0, 0);
+        startActivity(new Intent(this, org.nxnative.android.GameActivity.class)); overridePendingTransition(0, 0);
         finish();
     }
 

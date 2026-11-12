@@ -105,6 +105,27 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** `nvnTextureBuilderGetSparseTileLayout` and `nvnTextureGetSparseTileLayout` answer from the host's [sparse layout](rendering.md#sparse-textures-laid-out-in-64-kb-tiles) (`nvn_tex_sparse_tiles`: the levels at least one tile wide, high and deep).
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md), at boot (`main+0x1f1a688`).
 
+### A refused virtual pool mapping left a hole in the pool's reservation on Android
+
+- **Symptom:** Android only, in a game with sparse virtual pools: a SIGSEGV now and then, minutes into a run, right after `[RED] virtual pool remap … failed: 5` lines. It lands
+  wherever something uses memory mapped not long before: the replay's `memcpy` into an arena block (`sb_copy`, `stage_set`), or inside Qualcomm's driver at a submission
+  (`mtl_sub_commit`). The fault address is the start of the mapping, and it lies inside the range a failed remap named as its destination.
+- **Cause:** `vpool_map` aliases a physical pool's pages into the virtual pool's reserved range with `vm_remap` at a fixed address. Android's stand-in
+  (`plat_android.c`) made that one `mremap` of the source with old size 0 and `MREMAP_FIXED`. The kernel unmaps the destination before it looks at the source, and it
+  refuses to duplicate a private mapping (`EINVAL`), which every pool is on Android. So each refused request left its destination unmapped: a hole in the reservation
+  that the next `mmap` of anyone (the driver's `vkMapMemory`, a heap) could take. The game's next request over the same range then unmapped whatever had landed there.
+- **Fix:** the duplicate is made where the kernel puts it (`mremap` without `MREMAP_FIXED`, which touches nothing when it is refused), and only then moved to the fixed
+  destination. Should the move fail, the destination is mapped inaccessible again, so it stays reserved.
+- **Check:**
+  - `dm/android/tests/t_vm_remap.c` (a device test, `-DDM_TESTS=ON`): after a refused request the reservation is whole and a mapping made afterwards lies
+    outside it; a shareable source is aliased at the destination and reads and writes the same memory. On a Galaxy S25 Edge (kernel 6.6.77) the old stand-in fails the
+    first two checks and the new one passes all eight.
+  - Mario Kart World on a Pixel 9 Pro XL (Mali-G715), menus into a Mushroom Cup race, default settings and raw global memory: 4 of 4 runs failed without the change
+    (three faults in Mali's driver, two of them `memset`s inside a failed request's destination, and one freeze) and 4 of 4 ran the race out with it.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), which makes about 9,000 such requests in the menus and a race. On a Galaxy S25 Edge an
+  84 MB request failed, a 17 MB arena block was mapped inside its destination, the same request failed again 71 s later, and the replay faulted writing the block 15 ms
+  after that. On a OnePlus Pad 3 the driver faulted at a submission right after a run of such requests.
+
 ### Textures read through a 4 KB page table of a sparse pool
 
 - **Symptom:** `CRASH sig=10` in `memmove` from `pkg_upload` → `nvn_deswizzle`, at an address 32 GB into a sparse virtual pool; textures with unaliased tails came out magenta.
@@ -200,6 +221,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Cause:** the memory-pool tracking table had a fixed 4,096 slots; a pool past the end would have its textures re-uploaded at every use.
 - **Fix:** it grows in blocks of 1,024 (`nvn_dirty.c`, up to 262,144).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the phone reached 4,006 pools (found while fixing GitHub issue #9: [Deferred-release drain without an autorelease pool](memory.md#deferred-release-drain-without-an-autorelease-pool)).
+
+### A pool registered over memory an earlier pool held counts older stamps as written
+
+- **Symptom:** Android, Skyward Sword HD from a new game on a Retroid Pocket 5: once out in Skyloft, Horwell's wooden crates are one flat grey shape or missing, the area's opening shot has large flat green, grey or magenta shapes, and patches of sky are flat grey, with no red line. After a cold start and Continue the same places draw right. `DM_VK_GEOCACHE=0` (or `DM_VK_SAFE=1`) draws them right too; `DM_VK_ASYNC_PIPE=0` does not.
+- **Cause:** the geometry cache (`gfx_vk_draw.inc` `gc_get`) keeps a range of vertex or index bytes on the GPU while `nvn_dirty_since` says no page of it was written since its stamp. When the game destroys a pool, `nvn_dirty_remove_range` makes its pages writable and retires the range; the game then writes the next area's meshes into that memory with no fault, and registers a new pool over it, which reuses the slot with every page's generation back at 0. A stamp from the old pool's time then saw no newer generation and the old copy was drawn: the opening's geometry under Skyloft's draws. A cold start loads Skyloft into memory no earlier pool held.
+- **Fix:** each range keeps the clock at its registration (`born`, `nvn_dirty.c`), and `nvn_dirty_since_cached` and `nvn_dirty_since_except` count a stamp older than it as written, through a kept handle too. A content check made after the registration is unaffected.
+- **Check:** `make -C dm/gfx/tests GAME=<id> t_dirty_slots`: a pool destroyed, a write with no pool registered, and a new pool over the same memory: the older stamp is dirty through `nvn_dirty_since`, a kept handle and `nvn_dirty_since_except` (all three clean before the fix), and a stamp taken after the new registration is clean. On the Retroid Pocket 5, a new game with this change and default settings drew the crates, the ground and the sky in Skyloft's opening shot right; the geometry cache still served 3.55 million bindings, replay CPU 4.25 ms a frame (6.17 with it off).
+- **Found on:** [The Legend of Zelda: Skyward Sword HD](../../dm/games/01002DA013484000/README.md).
 
 ### Dead texture serials kept in a ghost table
 
@@ -597,6 +626,28 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** `t_cpu_storage` (a rewrite of storage the GPU never wrote is uploaded and becomes a GPU texture again at the GPU's next write; one the GPU wrote over afterwards is the GPU's until the CPU rewrites it, also through a second texture object over the storage; a block-compressed rewrite is uploaded though a GPU copy followed); `t_cpu_tex` with a `tex_dirty_upload` profile (a texture left to the GPU stays registered, and the CPU's next rewrite is uploaded). In the log, `registered texture written by the CPU after its first use: uploaded from its storage` for the first four such uploads and `… left to the GPU until the CPU rewrites it` for the first four left to the GPU.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on the Mac: loading a Kokiri Forest save and turning the camera (M3 Pro, the first version of the fix, which kept textures by the span alone), 127–263 textures uploaded by the poll in the first 6,600–10,600 frames, nearly all terrain tiles, and 4 kept (RG8 normal tiles the GPU had drawn; a diagnostic showed the CPU writing zeros to their level 0 only); before, every one of them was dropped. With this fix (M4 Pro, the autosave and a walk onto the village floor, 160 s): about 250 uploaded by the poll (small lookup textures, 3×3×6 R8 arrays, the tiles' 260×260 height, blend and hole maps, and RG8 normal tiles caught between the CPU's zeroing and the GPU's drawing), 17 of them made GPU textures again when the GPU drew into them, the picture whole at 60 fps; 36 long frames against 57 on main.
 
+### Storage the CPU wrote before a texture's first use (Android)
+
+- **Symptom:** on Android, surfaces missing where a game fills a texture from the CPU before it makes the texture: Ocarina of Time's terrain tiles in Kokiri Forest. The water and fog pass then tints the far depth it sees through the gaps, so they look like flat, pale teal water patches. There's no red line. A frame dump shows the tiles' maps all zero, and the scene's depth copy holds the far plane there.
+- **Cause:**
+  - **What the replay took:** at a texture's first resolution (`vt_get_`, `gfx_vk.c`), the Vulkan replay took content from storage only for a packaged layout, a linear texture or a texture marked CPU-written.
+    - The one-time fill (`tex_init_fill`) takes only a pool the CPU can't access, an uncached pool, or flushed storage.
+    - The page-protection poll (`tex_dirty_upload`) sees only writes made after `nvnTextureInitialize`.
+  - **What the game does:** Ocarina of Time writes its terrain tiles' maps into a `CPU_CACHED | GPU_CACHED` pool before it makes the textures over them, with no flush. The maps are height (260x260 R32F), blend and hole (RGBA8, one and two layers) and detail (two BC formats).
+  - **The result:** none of those paths saw the writes, so the tiles became GPU images of zeros. A new texture object over the same storage got that image back from the sharing table.
+  - **The Mac:** it takes such storage at first use (`tex_cpu_content` in `nvn_mtl.m`, [uncompressed storage the CPU wrote](#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-has-not-written)), and the replay had no counterpart.
+- **Fix:** `storage_first_use` runs at a texture's first resolution.
+  - **What's taken:** a texture whose storage can hold its content and holds data is made CPU-written. It's uploaded then and again when its pages change. The test is `tex_storage_ok`, the rule the poll's question (`mtl_tex_cpu_rewritten`) already used.
+  - **Uncompressed 2D textures:** NVN has no render-target flag, so such a texture could be a render target. It's taken only when no image the GPU wrote lies over a whole page of its storage.
+    - The replay keeps no record of GPU-written storage, so the sharing table's images stand in for one.
+    - Part of a page doesn't count ([a span's sliver](#a-spans-sliver-inside-a-texture)).
+  - **The way back:** once the GPU writes a taken texture, it becomes a GPU texture again (`vt_get_w`), so a CPU write beside it no longer uploads the storage over the drawing.
+  - **Switch:** `DM_NVN_STORAGE_FIRST_USE=0` turns the rule off, as on the Mac.
+- **Check:**
+  - The log prints `texture written by the CPU before its first use … uploaded from its storage` for the first four.
+  - At the Kokiri save on a Galaxy Z Fold 8, the tiles' height, blend, hole and detail maps are taken at their first resolution. The dirt and leaves draw where the pale patches were.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a Galaxy Z Fold 8 (Adreno 840, Qualcomm's driver).
+
 ### `ReadTexels` on a texture of a sparse pool
 
 - **Symptom:** `[RED] upload batches belong to the submit thread only: up_begin called on thread '…'`, then an abort, with `pkg_upload` ← `tex_mtl` ← `mtl_read_texels` on the stack; or `CRASH sig=10` in `nvn_deswizzle` ← `mtl_read_texels`, at an address in a sparse virtual pool's reserved range.
@@ -810,6 +861,13 @@ Games read this count as a position in their own command memory and size their h
   - `nvnWindowGetCrop`: read back every few frames; before any `SetCrop` it is the whole first window texture.
   - `nvnSamplerBuilderGetLodClamp`.
 - **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the first two), [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2: the two getters).
+
+### An acceleration structure's size query left the game's sums unset
+
+- **Symptom:** a Switch 2 game commits a memory pool of about 4 GB before its first frame, then runs out of memory in its loader a few frames later. The log has the red stub line of `nvnDeviceCalculateAccelerationStructureMemoryRequirements` before the pool.
+- **Cause:** the call writes three sizes through its pointers: the structure's, its build scratch's and its update scratch's. The game sums them into the memory pool it makes for its acceleration structures, and it does not zero them first. The red stub wrote nothing, so the sum was stack garbage: `0xffffffff + 1 + 1`, a 4 GB pool, about half of the Switch 2's application memory.
+- **Fix:** `hle_nvn.c` answers 64 KB for each, with a red line once, since the host builds no acceleration structure and traces no ray. Small sizes in the pool's 4 KB granule keep every later offset the game takes valid.
+- **Found on:** Nintendo Switch 2 Welcome Tour (`040057C02159A000`) in DeathKhan/nx2android on an Ayn Odin 3: its pool from the sum at `main+0xfc2cc` and `main+0x11bf1c`, the query at `main+0x6130cc`. With the fix it boots to its title screen.
 
 ### `nvnDeviceRegisterFastClearDepth` is a hint
 

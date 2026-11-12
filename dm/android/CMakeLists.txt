@@ -51,7 +51,7 @@ endif()
 list(GET GLSLC 0 GLSLC)
 file(MAKE_DIRECTORY ${GEN}/shaders)
 set(SHADER_INC)
-foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag bc_decode.comp)
+foreach(s ds_copy.vert ds_copy_export.frag ds_copy_bits.frag bc_decode.comp gmem_test.comp upscale_square.comp)
   add_custom_command(OUTPUT ${GEN}/shaders/${s}.inc
     COMMAND ${GLSLC} --target-env=vulkan1.1 -O -mfmt=c ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s} -o ${GEN}/shaders/${s}.inc
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${s})
@@ -105,7 +105,7 @@ target_compile_options(dmcore PRIVATE
 target_compile_definitions(dmcore PRIVATE DM_ANDROID=1)
 
 # no libvulkan.so: vk_driver.c opens it, or DM_VK_DRIVER's driver in its place
-set(DM_LIBS vpx log android aaudio mediandk m dl)
+set(DM_LIBS vpx log android nativewindow aaudio mediandk m dl)   # nativewindow: AHardwareBuffer (raw global memory's pools without placed maps, gfx_vk_gmem.inc)
 
 set(GLUE ${ANDROID_NDK}/sources/android/native_app_glue)
 add_library(dmhost_app SHARED $<TARGET_OBJECTS:dmcore> ${CMAKE_CURRENT_SOURCE_DIR}/front_android.c ${CMAKE_CURRENT_SOURCE_DIR}/nvn_demo.c ${GLUE}/android_native_app_glue.c)
@@ -177,6 +177,7 @@ if(DM_TESTS)
   # the guest address space only 4 KiB alignment. A 16 KiB-page Android kernel runs t_svc_memory itself at its real page size
   dm_test(t_nro SOURCES ${T}/t_nro.c)
   dm_test(t_module_pack SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_module_pack.c ${CMAKE_CURRENT_SOURCE_DIR}/module_pack.c)
+  dm_test(t_vm_remap SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_vm_remap.c)   # vm_remap to a fixed destination: a refused duplication leaves no hole (plat_android.c)
   dm_test(t_audio SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_audio.c ${CMAKE_CURRENT_SOURCE_DIR}/coreaudio_aaudio.c)
   target_link_libraries(t_audio aaudio mediandk m)
   dm_test(t_media SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/t_media.c ${CMAKE_CURRENT_SOURCE_DIR}/media_android.c)

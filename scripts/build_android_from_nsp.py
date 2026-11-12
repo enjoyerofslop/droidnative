@@ -28,7 +28,7 @@
 #      A one-game install of the same game (files/game, the layout before the launcher) is moved there instead of copied again, and its save is copied by the app
 # The picture comes from the Vulkan replay of NVN (dm/android/gfx_vk.c).
 # Needs: Python with lz4, capstone, fonttools and backports.zstd (not on Python 3.14), the .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (ANDROID_HOME or --sdk), adb, keytool (a JDK).
-import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, re, shutil, struct, subprocess, sys, tarfile, tempfile, time
+import argparse, atexit, contextlib, datetime, functools, hashlib, json, os, platform, re, shutil, struct, subprocess, sys, tarfile, tempfile, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -56,19 +56,22 @@ BUILD_TOOLS, PLATFORM = '36.0.0', 'android-35'   # build_apk.py's defaults
 # libadrenotools and its hooks (dm/android/CMakeLists.txt), in every APK: DM_VK_DRIVER opens a Vulkan driver of the player's through them (dm/android/vk_driver.c), so trying
 # one needs no other build. Built beside the loader, and kept with it in the library
 VK_DRIVER_LIBS = ('libadrenotools.so', 'libhook_impl.so', 'libmain_hook.so')
-# Games played on an Android device: the rows of the README's Game Status whose tier is Playable or In-game from a run on current code, with a profile, kept in
-# step with that table. The desktop app shows the others as not played there yet. Left out: In-game, blocked (Frostpunk, Ocarina of Time) and Menus (Mario Kart
-# World), and the rows from before the nxnative merge (†: Super Mario Bros. Wonder, Super Mario 3D World + Bowser's Fury), which current code hasn't run
+# Games played on an Android device: the rows of the README's Game Status whose tier is Playable – minor issues, Playable – major issues or In-game from a run
+# on current code, with a profile, kept in step with that table. The desktop app shows the others as not played there yet. Left out: In-game, blocked (Frostpunk,
+# Ocarina of Time) and Menus (Mario Kart World), and the rows from before the nxnative merge (†: Super Mario Bros. Wonder, Super Mario 3D World + Bowser's Fury),
+# which current code hasn't run
 ANDROID_TESTED = {
-    '01008DB008C2C000',   # Pokémon Shield (Playable through Postwick)
-    '010027400CDC6000',   # Divinity: Original Sin 2 - Definitive Edition (Playable through the cabin deck)
-    '0100000011D90000',   # Pokémon Brilliant Diamond
-    '01006F8002326000',   # Animal Crossing: New Horizons
+    '01008DB008C2C000',   # Pokémon Shield (Playable – minor issues through Route 2 into Professor Magnolia's house)
+    '010027400CDC6000',   # Divinity: Original Sin 2 - Definitive Edition (Playable – major issues through the first combat)
+    '010003F003A34000',   # Pokémon: Let's Go, Pikachu! (Playable – minor issues through the rival's first battle)
+    '0100000011D90000',   # Pokémon Brilliant Diamond (Playable – minor issues through Lake Verity's first battle)
+    '0100DCD01525A000',   # Persona 3 Portable (Playable – minor issues through the first battle)
+    '01006F8002326000',   # Animal Crossing: New Horizons (Playable – major issues through the first night)
     '0100000000010000',   # Super Mario Odyssey
     '01006A800016E000',   # Super Smash Bros. Ultimate
     '01006BB00C6F0000',   # The Legend of Zelda: Link's Awakening
     '01002DA013484000',   # The Legend of Zelda: Skyward Sword HD
-    '01007EF00011E000',   # The Legend of Zelda: Breath of the Wild
+    '01007EF00011E000',   # The Legend of Zelda: Breath of the Wild (Playable – major issues through the Shrine of Resurrection onto the Great Plateau)
     '0100606026F12000',   # Final Fantasy Resonance
     '010069C01AB82000',   # SHIN MEGAMI TENSEI V: Vengeance (a contributor's report)
 }
@@ -121,7 +124,7 @@ def sdk_dir(arg):   # --sdk, the environment, then where Android Studio puts it:
     raise BuildError('Android SDK not found: give --sdk or set ANDROID_HOME')
 
 
-sys.path.append(str(REPO / 'dm/android/tools')); import host_setup   # noqa: E402  # pyright: ignore[reportMissingImports]  (--setup; dm/android/tools, put on the path here)
+sys.path.append(str(REPO / 'dm/android/tools')); import host_setup, phone_id   # noqa: E401, E402  # pyright: ignore[reportMissingImports]  (--setup, a phone's name in folder names; dm/android/tools, put on the path here)
 NDK, CMAKE = '28.2.13676358', '3.22.1'   # what --setup installs, and the CI builds with; a build takes the newest NDK and CMake the SDK has
 
 
@@ -228,22 +231,42 @@ def standard_font(font):   # <font>/standard.ttf: a hinted TrueType font; withou
     if not dst.is_file() or dst.stat().st_size != Path(src).stat().st_size: shutil.copyfile(src, dst)
 
 
-def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=()):
+def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derived='', oodle=None):
     """The game's NVN shaders for the Vulkan replay: the split (build_ipa_from_nsp.py split_shaders, checked against the profile's tables), then
-    dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. None when there are none"""
-    if not sv: return None
+    dm/android/tools/spv_build.py (the in-repository translator, dmsh_xlate_bin's dll run by dotnet) into <work>/spv. Returns that folder (None when there are none) and the profile.
+    A registered profile's tables may differ from the split in two ways the iPhone build accepts as well: installed DLC's own shaders, and compute kernels a newer reader decodes
+    from the registered build (compute_reader_additions). derive(reason) then makes the shader-only derived profile that the translation and the rest of the build use. Any other
+    failure of a registered profile's split stops the build: packed without shaders, AI: The Somnium Files played its sound over a black screen (droidplay-core#218).
+    derived: why main packs from a profile derived from a registered one ('' for a registered or provisional profile). Its split failing stops the build too, though the profile
+    is outside dm/games: its game has the shaders the registered tables list (Pokémon Pokopia's split failed on Windows, and the build packed it without them, droidplay-core#307).
+    oodle: build_ipa_from_nsp.py split_shaders' (a Mac host for the game's Oodle, mac_decoder), which puts the host in the split's inputs"""
+    if not sv: return None, g
     sh = work / 'shader'
-    own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
-    try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, dlc_roms=dlc_roms)   # its own stage (a DLC's shaders too)
-    except BuildError as e: bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None
+    own = not g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve())   # a provisional or derived profile (outside dm/games) takes the split's tables, as build_ipa_from_nsp.py does; the repository's are checked
+    got = {}
+    def promote(reason):   # the split calls it only after its strict DLC-only or additive-compute comparison passed, and only when derive was given
+        assert derive is not None
+        got['g'] = derive(reason); return got['g']
+    dd = (lambda: promote('the installed DLC shader content differs from the registered tables')) if derive and not own else None
+    dc = (lambda: promote('the reader decoded additional compute kernels from this registered build')) if derive and not own else None
+    try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own,   # its own stage (a DLC's shaders too)
+                          oodle=oodle, dlc_roms=dlc_roms, derive_dlc=dd, derive_compute=dc)
+    except BuildError as e:
+        if not own: raise BuildError(f'{e}\nThe game is not packed: without its shaders it would play its sound over a black screen. Check that the folder holds the versions game profile '
+                                     f'{g.id} registers (its game.tsv); if it does, report this build with {logs / "shader_split.log"}') from e
+        if derived: raise BuildError(f'{e}\nThe game is not packed: its profile is derived from game profile {g.id} ({derived}), whose registered tables list its shaders, and without '
+                                     f'them it would play its sound over a black screen. Packing a version and build that {g.id} registers (its game.tsv) uses the registered profile '
+                                     f'instead (--package picks the version); otherwise report this build with {logs / "shader_split.log"} and this message') from e
+        bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None, g   # a provisional profile: shaders compiled at run time, captured later
+    g = got.get('g', g)
     bi.PROG.stage('shaders for Vulkan', step='translating')
     out = work / 'spv'
     try: bi.run([sys.executable, REPO / 'dm/android/tools/spv_build.py', sh / 'pkg', out, '--xlate', REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.dll',
                  '--facts', g.table('shader_facts.tsv')], logs / 'spv_build.log', env=env)
-    except BuildError as e: bi.PROG.end(str(e), ok=False); say(f'[RED] shader translation failed (see {logs / "spv_build.log"}): the game is packed with the shaders translated so far'); return out if out.is_dir() else None
+    except BuildError as e: bi.PROG.end(str(e), ok=False); say(f'[RED] shader translation failed (see {logs / "spv_build.log"}): the game is packed with the shaders translated so far'); return (out if out.is_dir() else None), g
     last = [l for l in (logs / 'spv_build.log').read_text(errors='replace').splitlines() if l.startswith('spv_build:')]
     bi.PROG.end(last[-1][11:] if last else str(out))
-    return out
+    return out, g
 
 
 def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game):
@@ -266,13 +289,7 @@ def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, 
         raise BuildError('the game\'s Unreal shaders are Oodle-compressed, and only the game\'s own decoder undoes them: it runs on the phone here, so connect one (or build once without '
                          '--no-push, or build the game in DroidPlay for Mac first)')
     bi.PROG.set(step='the game\'s host and code to the phone, where its own Oodle decodes the shaders')
-    so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
-    library_add(g.id, so, loader, st, {'title_id': g.id, 'name': bi.nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
-                                       'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
-    install(serial, make_apk(sdk, logs, env), logs)
-    dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
-    push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
-    phone = android_oodle.Phone(adb, serial, g.id, REMOTE, PKG, work, logs, say)
+    phone = oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env)
     t0, total = time.time(), 0
     for v, d in todo.items():
         bi.PROG.set(step=f'{v}: decoding the shaders with the game\'s Oodle on the phone')
@@ -284,6 +301,72 @@ def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, 
         (out / 'stamp').write_text(bi.ue_stamp(d)); bi.swap_in(out, d / 'ue_shaders'); bi.rmtree(jd)
         total += n + sum(x['shaders'] for x in listing if x['compression'] == 'IoStore, decoded')
     bi.PROG.end(f'{total:,} shaders in {bi.hms(time.time() - t0)}, {phone.jobs} job(s) on the phone')
+
+
+def oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env):
+    """The game's host into the app and its rewritten code to the phone, for the jobs of scripts/android_oodle.py Phone (ue_decode, oodle_decode): the host does not depend on the
+    shaders, which do not exist yet. Only the code goes: a job reads no RomFS"""
+    import android_oodle   # pyright: ignore[reportMissingImports]
+    so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
+    library_add(g.id, so, loader, st, {'title_id': g.id, 'name': bi.nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
+                                       'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
+    install(serial, make_apk(sdk, logs, env), logs)
+    dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
+    push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
+    return android_oodle.Phone(adb, serial, g.id, REMOTE, PKG, work, logs, say)
+
+
+def mac_decoder(nsp_dir, work, g, pkg_ver, game, env):
+    """DM_OODLE_HOST / DM_OODLE_MODULES for the shader split's Oodle on this computer, or None: set by hand, or on an Apple-silicon Mac the Mac host and the Apple-rewritten modules
+    of DroidPlay for Mac's build of the same main (<game>/<title ID>_build beside the NSP folder, or this build's own folder when the Mac's NSP script ran on it too). The Android
+    build's own modules cannot stand in: they reach their thread slots through x18 (dm/tools/nso_asm.py), where the Mac host gives them through tpidrro_el0"""
+    if env.get('DM_OODLE_HOST') and env.get('DM_OODLE_MODULES'): return {k: env[k] for k in ('DM_OODLE_HOST', 'DM_OODLE_MODULES')}
+    if sys.platform != 'darwin' or platform.machine() != 'arm64' or os.environ.get('DM_UE_DECODE') == 'phone': return None
+    bid = bi.build_id(game / 'ExeFS/main')
+    for b in (nsp_dir.parent / f'{g.id}_build', work):
+        host, fx = b / 'tools/dmhost', b / f'patched_{pkg_ver}' / 'main.fixups.tsv'
+        if host.is_file() and fx.is_file() and f'# BUILD_ID\t{bid}' in fx.read_text(errors='replace').splitlines()[:20]:
+            say(f'the game\'s Oodle for the shader split: the Mac host of the Mac build in {b}')
+            return {'DM_OODLE_HOST': str(host), 'DM_OODLE_MODULES': str(fx.parent)}
+    return None
+
+
+def oodle_decode(roms, mains, dlc_roms, game, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk):
+    """The streams of the game's Oodle-compressed archives (profile_guess.py oodle_packs) decoded with the game's own Oodle on the phone before the shader split, into
+    <extraction>/oodle_cache, which the split then reads in place of the Mac host (DM_OODLE_CACHE; scripts/android_oodle.py fill). Pokémon Legends: Arceus's split failed on all
+    678 GFPAKs without it (issue #310). The record runs list what the split reads (the whole split each, decoding nothing); the phone is set up only when one lists a stream the
+    cache lacks. A cache that last ended on the same files, split code and decoder is taken as it is → its folder"""
+    import android_oodle   # pyright: ignore[reportMissingImports]
+    bi.PROG.add(1); bi.PROG.stage('Oodle decode')
+    cache = android_oodle.Cache(game / 'oodle_cache', hashlib.sha256((game / 'ExeFS/main').read_bytes()).hexdigest())   # streams are keyed by content; the decoder is main's
+    key = bi.fingerprint('oodle-record-v1', ('files', bi.python_tool_files(REPO, 'dm/gfx/tools/shader_split.py', ('dm/gfx/tools', 'dm/tools', 'dm/games'))), *[('tree', r) for r in roms],
+                         ('files', list(mains)), *[x for r in dlc_roms for x in (('dlc', Path(r).name), ('stat', r))])
+    if cache.done(key): bi.PROG.end(f'reused: {len(cache):,} streams'); return cache.d
+    runs, held = [0], contextlib.ExitStack()
+    def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
+        if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): bi.PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
+    def record(want):
+        runs[0] += 1; out = work / 'tmp/oodle_record'; bi.rmtree(out); out.mkdir(parents=True)
+        bi.PROG.set(step=f'run {runs[0]}: listing the streams the shader split reads')
+        cmd = [sys.executable, REPO / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), out / 'pkg'] + [out / n for n in ('map.tsv', 'facts.tsv', 'pairs.tsv', 'pso.tsv')]
+        # a failed run's listed streams still count, and the real split says again whatever else went wrong
+        bi.run(cmd + ([','.join(map(str, dlc_roms))] if dlc_roms else []), logs / 'oodle_record.log', env=dict(env, DM_OODLE_CACHE=str(cache.d), DM_OODLE_RECORD=str(want)),
+               on_line=counted, fatal=False)
+        bi.rmtree(out)
+    def decoder():
+        if not serial:
+            raise BuildError('the game\'s shaders are in archives compressed with its own Oodle, which only the game\'s own decoder reads: it runs on the phone here, so connect one '
+                             'and build without --no-push or --game-apk (or build the game in DroidPlay for Mac first)')
+        held.enter_context(phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Oodle archives'))   # only while the phone works: the record runs take minutes
+        bi.PROG.set(step='the game\'s host and code to the phone, where its own Oodle decodes the archives')
+        return oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env)
+    t0 = time.time()
+    with held:
+        try: _, n = android_oodle.fill(cache, record, decoder, work / 'tmp/oodle_want')
+        except ValueError as e: raise BuildError(str(e)) from e   # the phone's job (its log named), or a split that kept asking
+    cache.finish(key)
+    bi.PROG.end(f'{n:,} streams decoded on the phone in {bi.hms(time.time() - t0)}' if n else f'{len(cache):,} streams, none new ({runs[0]} run(s))')
+    return cache.d
 
 
 # ---------------- The library of game hosts ----------------
@@ -344,6 +427,12 @@ def stage_link(dst, src):   # a symbolic link, else the files cloned (clone): Wi
 # the images, each at a DLC_ALIGN offset. game.json gives romfs_bytes, data_bytes (the file's whole size) and dlc_at (none: no DLC in it), which GameStart checks.
 # → the files made, the APK (or XAPK) first
 GAME_APP_LIMIT = (2 << 30) - (64 << 20)   # an APK's size, kept clear of 2 GiB for the ZIP's own records
+# A ZIP without ZIP64 also holds at most 65,535 entries, and a game's translated shaders are files of their own (Mario Kart 8 Deluxe's with its DLC passed that at 492 MB:
+# droidplay-core issue #169). So a game app carries them as one entry, SPV_ZIP: a stored ZIP of the spv folder (ZIP64 allowed inside it: apksigner never reads it), which
+# GameStart unpacks into games/<title ID>/spv/ at the first start with the rest, where the host reads them by path as from a launcher install. The other files are counted
+# against GAME_APP_ENTRIES, which leaves room for the APK's own entries (classes.dex, the libraries, resources, the signature)
+GAME_APP_ENTRIES = 65535 - 1024
+SPV_ZIP = 'spv.zip'
 DLC_MAGIC, DLC_ALIGN = b'DMAOCPK1', 4096
 
 
@@ -356,15 +445,31 @@ def gib(n): return f'{n / (1 << 30):.2f} GiB'
 
 
 # Where a game app's RomFS and DLC go: → (RomFS in the APK, DLC in the APK). parts: the files the APK must carry, by name (code, shaders, font, the rest), with their
-# sizes. The RomFS leaves the APK first, then the DLC with it; what the APK must carry and can't is a BuildError naming each part
-def game_app_plan(parts, dlc, rom, xapk, limit=GAME_APP_LIMIT):
-    core = sum(parts.values())
+# sizes; files: how many entries each makes, dlc_files the DLC's. The RomFS leaves the APK first, then the DLC with it; what the APK must carry and can't, in bytes or in
+# entries, is a BuildError naming each part
+def game_app_plan(parts, dlc, rom, xapk, limit=GAME_APP_LIMIT, files=None, dlc_files=0, entries=GAME_APP_ENTRIES):
+    core = sum(parts.values()); n = sum((files or {}).values())
+    if n >= entries:
+        raise BuildError(f'a game app can\'t hold this game: the APK would carry {n:,} files ({", ".join(f"{k} {v:,}" for k, v in (files or {}).items())}), and an APK '
+                         f'without ZIP64, which apksigner needs, holds at most 65,535 entries ({entries:,} of them for the game). '
+                         'Install it through DroidPlay\'s library instead (without --game-apk), which has no such limit')
     if core >= limit:
         raise BuildError(f'a game app can\'t hold this game: the files the APK must carry are {gib(core)} ({", ".join(f"{k} {gib(v)}" for k, v in parts.items())}), and an APK '
                          f'holds {gib(limit)} (2 GiB less room for its records); the RomFS ({gib(rom)}) and the DLC ({gib(dlc)}) could go beside it, these can\'t. '
                          'Install it through DroidPlay\'s library instead (without --game-apk), which has no such limit')
-    if not xapk and core + dlc + rom < limit: return True, True
-    return False, core + dlc < limit
+    dlc_fits = core + dlc < limit and n + dlc_files < entries
+    if not xapk and dlc_fits and core + dlc + rom < limit: return True, True
+    return False, dlc_fits
+
+
+def pack_spv(spv, dst):   # the spv folder → one stored ZIP (SPV_ZIP), its files named as in the folder; → how many
+    import zipfile
+    n = 0
+    with zipfile.ZipFile(dst, 'w', zipfile.ZIP_STORED, allowZip64=True) as z:   # stored: the APK deflates its entries itself
+        for r, ds, fs in os.walk(spv, followlinks=True):
+            ds.sort()
+            for f in sorted(fs): p = Path(r, f); z.write(p, p.relative_to(spv).as_posix()); n += 1
+    return n
 
 
 def dlc_images(aoc):   # → [(index, path)] of aoc/<index>.img, by index; a DLC kept as a folder (an older extraction) can't go into the pack
@@ -414,16 +519,19 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
     if not bi.rfs.is_image(rom): raise BuildError(f'a game app reads the RomFS as one image ({game}/RomFS.img), and this extraction has a RomFS folder: extract the game again')
     stage = work / 'game_app'; shutil.rmtree(stage, ignore_errors=True); stage.mkdir(parents=True)
     def walk(p): return [(Path(r, f), Path(r, f).stat().st_size) for r, _, fs in os.walk(p, followlinks=True) for f in fs] if p and Path(p).is_dir() else []
-    for name, src in (('code', patched), ('spv', spv), ('font', font)):
+    for name, src in (('code', patched), ('font', font)):
         if src and Path(src).is_dir(): stage_link(stage / name, Path(src).resolve())
+    if spv and Path(spv).is_dir(): bi.PROG.set(step='packing the shaders into one file'); pack_spv(spv, stage / SPV_ZIP)
     for f in ('icon.jpg', 'control.nacp'):
         if (game / f).is_file(): stage_link(stage / f, (game / f).resolve())
     (stage / 'defaults.txt').write_text(defaults, encoding='utf-8', newline='\n')   # \n on Windows too, as the phone's files are
     staged = [(f.relative_to(stage).as_posix(), n) for f, n in walk(stage)]
     parts = {'code': 0, 'shaders': 0, 'font': 0, 'the rest': 4096 + sum(len(f) + 1 for f, _ in staged)}   # the rest: icon, control data, defaults; game.json and files.txt
-    for f, n in staged: parts[{'code': 'code', 'spv': 'shaders', 'font': 'font'}.get(f.split('/')[0], 'the rest')] += n
-    rom_bytes = Path(str(rom)).stat().st_size; dlc = sum(n for _, n in walk(aoc))
-    inside, dlc_inside = game_app_plan(parts, dlc, rom_bytes, xapk, game_app_limit())
+    files = {'code': 0, 'shaders': 0, 'font': 0, 'the rest': 2}
+    for f, n in staged:
+        k = {'code': 'code', SPV_ZIP: 'shaders', 'font': 'font'}.get(f.split('/')[0], 'the rest'); parts[k] += n; files[k] += 1
+    rom_bytes = Path(str(rom)).stat().st_size; dlc_walk = walk(aoc); dlc = sum(n for _, n in dlc_walk)
+    inside, dlc_inside = game_app_plan(parts, dlc, rom_bytes, xapk, game_app_limit(), files, len(dlc_walk))
     if dlc_inside and dlc: stage_link(stage / 'aoc', Path(aoc).resolve())
     out_images = dlc_images(aoc) if dlc and not dlc_inside else []
     dlc_at = -(-rom_bytes // DLC_ALIGN) * DLC_ALIGN if out_images else 0
@@ -507,36 +615,162 @@ def make_apk(sdk, logs, env):   # the app with every host in the library → thi
 WAIT_DEVICE = 0.0   # --wait-device
 
 
+_keys = {}   # serial → the phone's ID, or None when it gave none: asked once a run
+
+
+def phone_key(serial):   # the phone's stable ID (dm/android/tools/phone_id.py), or its serial when it gives none: what its lock and its logs folder are named after,
+    # so a phone on a cable and on Wi-Fi at once is one device with one lock, and a Wi-Fi phone keeps its folder when its port changes
+    if serial not in _keys:
+        try: _keys[serial] = phone_id.from_props(adb(serial, 'shell', phone_id.ID_CMD, check=False, timeout=15))
+        except (OSError, BuildError): _keys[serial] = None   # no adb at all, or no phone: the step that needs it says so
+    return _keys[serial] or serial
+
+
 @contextlib.contextmanager
 def phone(serial, what):   # the device to this build while it installs or runs something there (dm/android/tools/device_lock.py): a bench's runs on it, or another build's
     # install, would be force-stopped by this one, and this one's by them. Not held while it builds on the computer
     sys.path.insert(0, str(REPO / 'dm/android/tools')); import device_lock   # pyright: ignore[reportMissingImports]
-    try: lock = device_lock.held(serial, what, WAIT_DEVICE, say); lock.__enter__()
+    try: lock = device_lock.held(phone_key(serial), what, WAIT_DEVICE, say); lock.__enter__()
     except device_lock.DeviceBusy as e: raise BuildError(str(e)) from None
     try: yield
     finally: lock.__exit__(None, None, None)
 
 
 def pick_device():
-    """The one device adb lists as ready ('device'): an offline Wi-Fi entry left from an earlier connection does not count"""
+    """The one device adb lists as ready ('device'): an offline Wi-Fi entry left from an earlier connection does not count, and a phone on a cable and on Wi-Fi
+    at once is one device, used over the cable"""
     out = subprocess.run(['adb', 'devices'], capture_output=True, text=True, errors='replace').stdout.splitlines()[1:]
     rows = [l.split() for l in out if l.strip()]
     ready = [r[0] for r in rows if len(r) > 1 and r[1] == 'device']
+    if len(ready) > 1: ready = [d['serial'] for d in phone_id.one_per_phone([{'serial': r, 'id': phone_key(r)} for r in ready])]
     if len(ready) == 1: return ready[0]
     listed = ', '.join(f'{r[0]} ({r[1]})' for r in rows) or 'none'
     raise BuildError(f'{len(ready)} adb devices ready ({listed}): connect one, or pick it with --serial')
 
 
-def adb(serial, *a, log=None, check=True):
-    cmd = ['adb'] + (['-s', serial] if serial else []) + [str(x) for x in a]
-    r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', env=dict(os.environ, MSYS_NO_PATHCONV='1'))
-    if log: log.write_text(r.stdout + r.stderr)
+class PhoneLost(BuildError):   # adb lost the phone, or the phone stopped answering, as opposed to a command that failed: survives_drops waits for it and goes on
+    def __init__(self, msg, why):
+        super().__init__(msg); self.why = why
+
+
+# adb's own words when it has lost the phone, not the command's: a Wi-Fi phone that slept, roamed or restarted wireless debugging, or a cable that came out
+LOST = re.compile(r"device '[^']*' not found|device offline|device still (connecting|authorizing)|no devices/emulators found|error: closed|connection reset|"
+                  r"broken pipe|protocol fault|failed to (read|write|get feature set)|unexpected eof|connect failed", re.I)
+SHELL_SECS = 120        # a shell step's longest wait: ours take seconds, and a phone gone silent over Wi-Fi held the build at one percentage until TCP gave up (minutes)
+COPY_RATE = 512 << 10   # bytes a second: a copy slower than this (a tenth of a poor Wi-Fi link) counts as lost, so its wait is 60 s plus its bytes at this rate
+STALL_SECS = 90         # a copy whose byte count stops growing for this long is stopped and counted as lost (counting), well before its own wait runs out
+_now = {}               # the serial a run took the phone on → the one it answers on since it came back (reacquire): every later call goes there
+_running, _running_lock = set(), threading.Lock()   # the adb processes running now, for the stall watchdog to stop
+
+
+def adb_timeout(a):   # a call's longest wait, in seconds
+    if a[:1] in (('push',), ('install',)):   # its local files' bytes at COPY_RATE (a push's last argument is the phone's path)
+        n = sum(sum(f.stat().st_size for f in p.rglob('*') if f.is_file()) if p.is_dir() else p.stat().st_size if p.is_file() else 0
+                for p in (Path(str(x)) for x in (a[1:-1] if a[0] == 'push' else a[1:])))
+        return 60 + n / COPY_RATE
+    return 1800 if a[:1] == ('pull',) else SHELL_SECS   # a pull's size isn't known here: the Oodle job's output and the captures are the largest
+
+
+def run_adb(args, log=None, check=True, timeout=None):   # adb with these arguments (-s <serial> among them, as given) → its output
+    cmd = ['adb'] + [str(x) for x in args]
+    a = tuple(cmd[3:] if cmd[1:2] == ['-s'] else cmd[1:])
+    t = adb_timeout(a) if timeout is None else timeout
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace', env=dict(os.environ, MSYS_NO_PATHCONV='1'))
+    with _running_lock: _running.add(p)
+    try: out, err = p.communicate(timeout=t)
+    except subprocess.TimeoutExpired:
+        p.kill(); out, err = p.communicate(); p.stalled = f'no answer from the phone in {t:.0f} s'   # pyright: ignore[reportAttributeAccessIssue]
+    finally:
+        with _running_lock: _running.discard(p)
+    if log: log.write_text(out + err)
+    text, stalled = (out + err).strip(), getattr(p, 'stalled', '')
+    if stalled or (p.returncode and (LOST.search(text) or (p.returncode == 255 and not text))):
+        why = stalled or (text.splitlines()[-1][:200] if text else f'exit status {p.returncode} with no output')
+        raise PhoneLost(f'{" ".join(cmd)}: adb lost the phone: {why}', why)
     # the exit status too: a step that printed nothing left only "failed:" (droidplay-core issue #37), with no way to tell a missing program (127), adb losing the phone (255)
     # and a command that failed (1)
-    if r.returncode and check:
-        out = (r.stdout + r.stderr).strip()
-        raise BuildError(f'{" ".join(cmd)} failed (exit status {r.returncode}): {out[-400:] if out else "no output"}')
-    return r.stdout
+    if p.returncode and check: raise BuildError(f'{" ".join(cmd)} failed (exit status {p.returncode}): {text[-400:] if text else "no output"}')
+    return out
+
+
+def adb(serial, *a, log=None, check=True, timeout=None):   # timeout: the longest wait in seconds (default adb_timeout); PhoneLost when adb loses the phone, whatever check
+    serial = _now.get(serial, serial)
+    return run_adb((['-s', serial] if serial else []) + list(a), log=log, check=check, timeout=timeout)
+
+
+def stop_stalled(why):   # the stall watchdog's (counting): every adb process running now is stopped, and its call raises PhoneLost
+    with _running_lock: ps = list(_running)
+    for p in ps:
+        if p.poll() is None: p.stalled = why; p.kill()
+
+
+# ---------------- A phone lost on the way ----------------
+# Over Wi-Fi a phone drops off when it sleeps, roams to another access point or restarts wireless debugging (a new port), and comes back as the same serial, as
+# another address, or by its mDNS name. An install waits for it by its ID (phone_key), connects to it again where it can, and takes the step it was on again
+RECONNECT_WAIT = 180.0   # --reconnect-wait: how long a lost phone is waited for before the install stops
+MAX_DROPS = 5            # more losses than this in a row with nothing copied between them stop the run: the link is too poor to finish over. A count per run
+# stopped a real one: Link's Awakening over a Wi-Fi link that dropped after every few 256 MiB pieces, 5.9 of its 6.2 GB on the phone and still moving
+_drops, _streak, _progress, _streak_at = 0, 0, 0, -1   # losses this run; losses in a row; pieces copied so far (moved); _progress at the last loss
+
+
+def moved():   # a piece of a large copy reached the phone: the next loss starts a new run of them
+    global _progress; _progress += 1
+
+
+def ask_id(serial):   # a serial adb lists now → the phone's ID, or None; kept only when it answered
+    if _keys.get(serial): return _keys[serial]
+    try: pid = phone_id.from_props(run_adb(['-s', serial, 'shell', phone_id.ID_CMD], check=False, timeout=10))
+    except BuildError: return None
+    if pid: _keys[serial] = pid
+    return pid
+
+
+def answers(serial):
+    try: return run_adb(['-s', serial, 'shell', 'echo ok'], check=False, timeout=10).strip() == 'ok'
+    except BuildError: return False
+
+
+def reacquire(serial, why):   # → the serial the phone answers on once it is back (every later call goes there); BuildError after RECONNECT_WAIT
+    phone_key(serial); want, cur = _keys.get(serial), _now.get(serial, serial)   # want: the ID read when the run took the phone (a USB phone's is its serial)
+    usb = not phone_id.wifi(cur)
+    how = 'plug it back in' if usb else 'wake it, and keep it on the same network as this computer with Wireless debugging on'
+    say(f'[RED] adb lost the phone ({why}): waiting up to {RECONNECT_WAIT:.0f} s for it to come back ({how}); the copy goes on from there')
+    end = time.monotonic() + RECONNECT_WAIT
+    while True:
+        bi.PROG.set(note=f'waiting for the phone to come back: {how}')
+        try: listed = {r[0]: r[1] for r in (ln.split() for ln in run_adb(['devices'], check=False, timeout=15).splitlines()[1:]) if len(r) > 1}
+        except BuildError: listed = {}
+        for s, st in listed.items():   # its own serial again (a cable plugged back in, a connection that came back), or another one with its ID (a new port, its mDNS name)
+            if st == 'device' and (s == cur or (want and ask_id(s) == want)) and answers(s):
+                _now[serial] = s; say('the phone is back' + ('' if s == cur else f' as {s}') + ': going on'); return s
+        if not usb:   # a connection adb still lists that answers nothing is dropped and made again; the phone's address on the network, by its serial number, too
+            with contextlib.suppress(BuildError):
+                if cur in listed: run_adb(['disconnect', cur], check=False, timeout=10)
+                if phone_id.transport(cur) == 'tcp': run_adb(['connect', cur], check=False, timeout=10)
+                for sn, addr in phone_id.mdns_services(run_adb(['mdns', 'services'], check=False, timeout=10)):
+                    if sn == want: run_adb(['connect', addr], check=False, timeout=10)
+        if time.monotonic() >= end:
+            raise BuildError(f'the phone did not come back within {RECONNECT_WAIT:.0f} s after adb lost it ({why}). ' + ('Plug it back in' if usb else
+                             'Wake it, check that it is on the same network as this computer and that Wireless debugging is still on') +
+                             ', then install again: the copy goes on from what the phone holds')
+        time.sleep(3)
+
+
+def survives_drops(f):   # f taken again once the phone is back, when adb lost it on the way: each of these steps can run again, and the large copies go on from what
+    # the phone holds (push_resumable's part, push_tar's manifest)
+    @functools.wraps(f)
+    def run(serial, *a, **k):
+        global _drops, _streak, _streak_at
+        while True:
+            try: return f(serial, *a, **k)
+            except PhoneLost as e:
+                _drops += 1; _streak = _streak + 1 if _progress == _streak_at else 1; _streak_at = _progress
+                if _streak > MAX_DROPS:
+                    raise BuildError(f'{e}\nadb lost the phone {_streak} times in a row with nothing copied in between, so the connection is too poor to finish over: ' +
+                                     ('move the phone closer to the router (5 GHz), or use a USB cable' if phone_id.wifi(_now.get(serial, serial)) else 'try another cable or USB port') +
+                                     ', then install again') from e
+                reacquire(serial, e.why)
+    return run
 
 
 def sh_quote(s): return "'" + s.replace("'", "'\\''") + "'"
@@ -545,12 +779,12 @@ def sh_quote(s): return "'" + s.replace("'", "'\\''") + "'"
 # adb push prints no progress when its output is not a terminal: a copy's count is read from the phone while it runs (the files under the destination folder, or the
 # size of the file being written), so the desktop app sees it move
 def remote_files(serial, d):
-    n = adb(serial, 'shell', f'find {sh_quote(d)} -type f 2>/dev/null | wc -l', check=False).strip()
+    n = adb(serial, 'shell', f'find {sh_quote(d)} -type f 2>/dev/null | wc -l', check=False, timeout=30).strip()
     return int(n) if n.isdigit() else None
 
 
 def remote_size(serial, f):
-    n = adb(serial, 'shell', f'stat -c %s {sh_quote(f)} 2>/dev/null', check=False).strip()
+    n = adb(serial, 'shell', f'stat -c %s {sh_quote(f)} 2>/dev/null', check=False, timeout=15).strip()
     return int(n) if n.isdigit() else None
 
 
@@ -579,8 +813,10 @@ def says_when_phone_full(f):   # a failed step's error, plus the phone's free sp
     @functools.wraps(f)
     def run(serial, *a, **k):
         try: return f(serial, *a, **k)
+        except PhoneLost: raise   # no phone to ask
         except BuildError as e:
-            free = remote_free(serial, REMOTE)
+            try: free = remote_free(serial, REMOTE)
+            except BuildError: free = None   # the phone gone (reacquire gave up): the error as it is
             if free is None or free >= LOW_ROOM or 'free up' in str(e).lower(): raise
             raise BuildError(f'{e}\nThe phone has only {size_text(free)} free, which is likely why: free up space on the phone '
                              f'(a game\'s RomFS.img.partial is a copy cut short, kept so the next install goes on from it), then install again') from e
@@ -589,9 +825,16 @@ def says_when_phone_full(f):   # a failed step's error, plus the phone's free sp
 
 @contextlib.contextmanager
 def counting(note, total, unit, read):   # while the block runs: done = read() (None: not known yet) of total, in unit ('B': bytes)
+    # A byte count that stops growing for STALL_SECS stops the copy, which then counts as lost (a phone gone silent over Wi-Fi). Not a count of files: one large
+    # file can take minutes on its own
     bi.PROG.set(done=0, total=total, unit=unit, note=note)
+    seen = {'done': -1, 'at': time.monotonic()}
     def poll():
-        v = read()
+        try: v = read()
+        except BuildError: v = None   # the phone not answering: no count, and the clock runs on
+        now = time.monotonic()
+        if v is not None and v > seen['done']: seen.update(done=v, at=now)
+        elif unit == 'B' and now - seen['at'] > STALL_SECS: stop_stalled(f'the copy made no progress in {STALL_SECS} s'); seen['at'] = now
         return None if v is None else {'done': min(v, total)}
     bi.PROG.watch(poll)
     try: yield
@@ -602,9 +845,20 @@ TAR_FILES = 200   # a folder with more files than this goes over as one tar arch
 MANIFEST = '.nxnative_manifest'   # in a folder copied as a tar: each file's size and modification time, for the next copy to send only what changed
 
 
+def tar_pieces(local, rels, most):   # rels (sorted) → lists of them of about most bytes each, in order; a larger file alone
+    out, cur, n = [], [], 0
+    for r in rels:
+        size = (local / r).stat().st_size
+        if cur and n + size > most: out.append(cur); cur, n = [], 0
+        cur.append(r); n += size
+    return out + [cur] if cur else out
+
+
 def push_tar(serial, local, parent, name, files, log, sync):
     # adb push sends a folder file by file: Super Mario Bros. Wonder's 37,393 shader files took over 20 minutes to a phone that had none (about 30 files a second).
-    # One tar archive, unpacked by the phone's tar, takes a minute or two. With sync, the manifest a copy left in the folder keeps it incremental, as push --sync was
+    # Tar archives, unpacked by the phone's tar, take a minute or two. With sync, the manifest a copy left in the folder keeps it incremental, as push --sync was.
+    # The files go in archives of about CHUNK bytes, each named in the manifest once the phone has unpacked it: one archive of every file (8.4 GB for Final Fantasy
+    # Resonance) started again from nothing after a drop over Wi-Fi, needed twice its size free on the phone and as much again on this computer
     dst = f'{parent}/{name}'
     rows = {f.relative_to(local).as_posix(): f'{f.stat().st_size} {f.stat().st_mtime_ns}' for f in files}
     old = {}
@@ -612,29 +866,35 @@ def push_tar(serial, local, parent, name, files, log, sync):
         for line in adb(serial, 'shell', f'cat {sh_quote(dst + "/" + MANIFEST)} 2>/dev/null', check=False).splitlines():
             meta, _, rel = line.rstrip('\r').partition('\t')
             if rel: old[rel] = meta
-    send = [r for r in rows if old.get(r) != rows[r]]
+    send = sorted(r for r in rows if old.get(r) != rows[r])   # sorted: the same pieces on every try, so a piece the phone has is not sent again
+    kept = {r: m for r, m in rows.items() if old.get(r) == m}   # on the phone already, as its manifest says
     adb(serial, 'shell', 'mkdir', '-p', dst)
-    if send:
-        tar = log.with_suffix('.tar')
-        bi.PROG.set(done=0, total=len(send), unit='files', note='packing')
+    pieces, total = tar_pieces(local, send, CHUNK), sum((local / r).stat().st_size for r in send)
+    if send: need_room(serial, dst, total + min(CHUNK, total) + (1 << 20) * len(pieces), f'{name} ({len(send):,} files, sent in archives of up to {size_text(CHUNK)})')
+    man, remote, tar, done = log.with_suffix('.manifest'), f'{parent}/.{name}.tar', log.with_suffix('.tar'), 0
+    def manifest():   # what the phone holds now, for the next copy to send only the rest
+        man.write_text(''.join(f'{v}\t{k}\n' for k, v in sorted(kept.items())), encoding='utf-8', newline='\n')
+        adb(serial, 'push', man, f'{dst}/{MANIFEST}')
+    for i, piece in enumerate(pieces, 1):
+        bi.PROG.set(done=done, total=total, unit='B', note='packing' + (f' archive {i} of {len(pieces)}' if len(pieces) > 1 else ''))
         with tarfile.open(tar, 'w', format=tarfile.USTAR_FORMAT) as t:
-            for i, r in enumerate(send, 1):
+            for r in piece:
                 ti = t.gettarinfo(local / r, arcname=r); ti.mode = 0o666; ti.uid = ti.gid = 0; ti.uname = ti.gname = ''
                 with open(local / r, 'rb') as fh: t.addfile(ti, fh)
-                bi.PROG.set(done=i)
-        remote = f'{parent}/.{name}.tar'
         try:
-            need_room(serial, dst, 2 * tar.stat().st_size, f'{name} ({len(send):,} files in one archive, unpacked beside itself)')
-            with counting('sending', tar.stat().st_size, 'B', lambda: remote_size(serial, remote)):
+            with counting('sending' + (f' archive {i} of {len(pieces)}' if len(pieces) > 1 else ''), total, 'B',
+                          lambda base=done: (lambda n: None if n is None else base + n)(remote_size(serial, remote))):
                 adb(serial, 'push', tar, remote, log=log)
-            have = len(rows) - len(send)   # the files kept from an earlier copy are counted by the phone too
-            with counting('unpacking on the phone', len(send), 'files', lambda: (lambda n: None if n is None else max(n - have, 0))(remote_files(serial, dst))):
-                adb(serial, 'shell', f'tar -xf {sh_quote(remote)} -C {sh_quote(dst)}')
+            bi.PROG.set(note='unpacking on the phone')
+            adb(serial, 'shell', f'tar -xf {sh_quote(remote)} -C {sh_quote(dst)}', timeout=SHELL_SECS + tar.stat().st_size / (10 << 20))
         finally:
-            adb(serial, 'shell', 'rm', '-f', remote, check=False); tar.unlink(missing_ok=True)
-    man = log.with_suffix('.manifest'); man.write_text(''.join(f'{v}\t{k}\n' for k, v in sorted(rows.items())), encoding='utf-8', newline='\n')
-    adb(serial, 'push', man, f'{dst}/{MANIFEST}')
-    say(f'{name}: {len(send):,} of {len(rows):,} files sent in one archive' + ('' if len(send) == len(rows) else ' (the others were on the phone already)'))
+            with contextlib.suppress(BuildError): adb(serial, 'shell', 'rm', '-f', remote, check=False, timeout=15)   # a lost phone's: the next install removes it
+            tar.unlink(missing_ok=True)
+        done += sum((local / r).stat().st_size for r in piece); kept.update((r, rows[r]) for r in piece); moved()
+        if i < len(pieces): manifest()
+    manifest()   # the last one too when nothing was sent: files gone from this computer leave it
+    say(f'{name}: {len(send):,} of {len(rows):,} files sent' + (f' in {len(pieces)} archives' if len(pieces) > 1 else ' in one archive' if pieces else '') +
+        ('' if len(send) == len(rows) else ' (the others were on the phone already)'))
 
 
 CHUNK = 256 << 20   # push_resumable's piece
@@ -654,6 +914,7 @@ def same_ends(serial, local, remote):   # the first and last MiB of a local file
     return True
 
 
+@survives_drops
 def push_resumable(serial, local, remote, log):
     # A large file (a game's RomFS.img, gigabytes) in pieces appended to <remote>.partial, renamed when whole: adb push cannot resume a file, and wireless adb dropped
     # twice in the middle of Bowser's Fury's 2.8 GB image, each time from zero. A copy cut short goes on from what the phone holds, once the last MiB of it matches
@@ -678,7 +939,7 @@ def push_resumable(serial, local, remote, log):
                 data = f.read(min(CHUNK, size - have)); piece.write_bytes(data)
                 adb(serial, 'push', piece, tmp, log=log)
                 adb(serial, 'shell', f'cat {sh_quote(tmp)} >> {sh_quote(part)} && rm {sh_quote(tmp)}')
-                have += len(data)
+                have += len(data); moved()
     piece.unlink(missing_ok=True)
     if remote_size(serial, part) != size: raise BuildError(f'{part} is not {size:,} bytes after the copy: run the install again')
     adb(serial, 'shell', f'mv -f {sh_quote(part)} {sh_quote(remote)}')
@@ -687,6 +948,7 @@ def push_resumable(serial, local, remote, log):
 MKDIRS_DONE = 'nxnative_mkdirs_done'   # the last line push_dir's folder script prints
 
 
+@survives_drops
 def push_dir(serial, local, parent, name, log, sync=False):
     files = [f for f in local.rglob('*') if f.is_file()]
     if len(files) > TAR_FILES: return push_tar(serial, local, parent, name, files, log, sync)
@@ -703,10 +965,22 @@ def push_dir(serial, local, parent, name, log, sync=False):
     out = adb(serial, 'shell', 'sh', '/data/local/tmp/nxnative_mkdirs.sh')
     if MKDIRS_DONE not in out:
         raise BuildError(f'the folders for {name} were not made on the phone: the folder script stopped early, ' + (f'printing {out.strip()[-300:]}' if out.strip() else 'printing nothing'))
-    with counting('sending', len(files), 'files', lambda: remote_files(serial, dirs[0])):
-        adb(serial, 'push', *(['--sync'] if sync else []), local, f'{parent}/', log=log)
+    if any(f.stat().st_size > CHUNK for f in files): push_files(serial, local, dirs[0], files, log, sync)   # DLC images (gigabytes): adb push started a file cut short
+        # again from zero, so those go through the RomFS image's resumable copy
+    else:
+        with counting('sending', len(files), 'files', lambda: remote_files(serial, dirs[0])):
+            adb(serial, 'push', *(['--sync'] if sync else []), local, f'{parent}/', log=log)
     if local.name != name:
         adb(serial, 'shell', 'rm', '-rf', f'{parent}/{name}'); adb(serial, 'shell', 'mv', f'{parent}/{local.name}', f'{parent}/{name}')
+
+
+def push_files(serial, local, dst, files, log, sync):   # a folder's files one by one into dst (made already): those over CHUNK through push_resumable, kept when the
+    # phone has the same (size, first and last MiB), the others by adb push (--sync with sync)
+    for f in sorted(files):
+        remote = f'{dst}/{f.relative_to(local).as_posix()}'
+        if f.stat().st_size <= CHUNK: adb(serial, 'push', *(['--sync'] if sync else []), f, remote, log=log); continue
+        if sync and remote_size(serial, remote) == f.stat().st_size and same_ends(serial, f, remote): say(f'{f.name}: on the phone already (same size, first and last MiB)'); continue
+        push_resumable(serial, f, remote, log.with_name(f'{log.stem}.{f.name}.log'))
 
 
 # Shaders a game compiles at run time with its own GLSLC: the app saves each new one on the phone (front_android.c DM_GLSLC_CAPTURE: games/<title ID>/glslc_capture, or
@@ -735,11 +1009,12 @@ def open_tree(serial, d):
     # Opened to everyone; Android/data/<package> is reachable only by the app and the shell, so this gives no other app access
     # One chmod -R (rw for files, rwx for folders: X): find -exec chmod {} + overflowed the argument list on 37,000 shader files. The games folder too, which adb made the same way
     # A file the app made there itself (launcher.txt, its settings) is the app's: the shell may not chmod it ("Operation not permitted"), and the app needs no help to read it
-    out = adb(serial, 'shell', f"chmod -R a+rwX {sh_quote(d)} 2>&1; chmod a+rwx {sh_quote(d.rsplit('/', 1)[0])} 2>&1", check=False)
+    out = adb(serial, 'shell', f"chmod -R a+rwX {sh_quote(d)} 2>&1; chmod a+rwx {sh_quote(d.rsplit('/', 1)[0])} 2>&1", check=False, timeout=600)
     bad = [ln for ln in out.splitlines() if ln.strip() and 'Operation not permitted' not in ln]
     if bad: raise BuildError(f'opening {d} to the app failed: {"; ".join(bad)[:400]}')
 
 
+@survives_drops
 def install(serial, apk, logs):   # an update (-r): the app's data, saves included, stay. Never uninstalled here: that would delete the saves
     if not KEYSTORE.is_file(): raise BuildError(f'no signing key {KEYSTORE}: the app on the phone could not be updated')
     try: adb(serial, 'install', '-r', apk, log=logs / 'adb_install.log')
@@ -770,13 +1045,15 @@ def migrate_legacy(serial, gid, nacp_local=None):
     return True
 
 
+@survives_drops
 @says_when_phone_full
 def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, meta):
     """The game's files → files/games/<gid>/ (the RomFS with --sync: a repeat copies only what changed)"""
     dst = f'{REMOTE}/games/{gid}'
     # each device's copy logs, and the tar archives and RomFS pieces named after them, in a folder of its own: two installs at once (one per device) shared
-    # adb_push_spv.tar, and one's cleanup removed the archive the other was sending
-    logs = logs / f'push_{serial}'; logs.mkdir(parents=True, exist_ok=True)
+    # adb_push_spv.tar, and one's cleanup removed the archive the other was sending. Named by phone_id.safe: a Wi-Fi phone's serial, 192.168.1.20:37123, made a
+    # folder Windows refuses, and every install over Wi-Fi from the desktop app stopped there. After the phone's ID, not its serial, which changes with its port
+    logs = logs / f'push_{phone_id.safe(phone_key(serial))}'; logs.mkdir(parents=True, exist_ok=True)
     parts = ['the one-game install', 'font', 'code'] + ['shaders'] * bool(spv) + ['RomFS'] + ['DLC'] * aoc.is_dir() + ['launcher files', 'permissions']
     def part(name, step=None):   # the part in the step's name; the count is the part's files or bytes (counting), or the parts when it has none
         bi.PROG.set(step=f'{step or name} · part {parts.index(name) + 1} of {len(parts)}'); bi.PROG.set(done=parts.index(name), total=len(parts), unit='parts')
@@ -784,7 +1061,7 @@ def push_game(serial, gid, game, patched, spv, font, aoc, defaults, work, logs, 
     adb(serial, 'shell', 'rm', '-rf', f'{dst}/code', f'{dst}/font', f'{dst}/{patched.name}'); adb(serial, 'shell', 'mkdir', '-p', dst)
     # an install cut short (the phone full, the cable out) can leave a folder's archive (push_tar) or a RomFS piece (push_resumable) behind: gigabytes that kept the
     # phone full, and that no install reuses. RomFS.img.partial stays, as the next copy goes on from it
-    adb(serial, 'shell', f'rm -f {sh_quote(dst)}/.*.tar {sh_quote(dst + "/RomFS.img.piece")}', check=False)
+    adb(serial, 'shell', f'rm -f {sh_quote(dst)}/.*.tar {sh_quote(dst + "/RomFS.img.piece")} {sh_quote(dst + "/aoc")}/*.piece', check=False)
     part('font'); push_dir(serial, font, dst, 'font', logs / 'adb_push_font.log')
     part('code'); push_dir(serial, patched, dst, 'code', logs / 'adb_push_code.log')
     if spv: part('shaders', 'shaders (only the changed files)'); push_dir(serial, spv, dst, 'spv', logs / 'adb_push_spv.log', sync=True)
@@ -879,6 +1156,16 @@ def unsupported_graphics(gfx, name):   # why a game cannot be built for Android,
             f'so this game cannot be built for Android yet')
 
 
+def undecodable_packs(packs, name, decoder):   # why a game's shaders cannot be split here, from profile_guess.build_sources' oodle_packs; None when the split can read them
+    # Only the game's own Oodle reads these archives: the phone (oodle_decode), a Mac host (mac_decoder), or what an earlier build with the phone decoded. Without one, Pokémon
+    # Legends: Arceus's split failed on all 678 GFPAKs after about 220 s, then the build stopped (issue #310). ue_legacy is left out, as Python reads its Zlib and LZ4 paks
+    on, why = packs
+    if not on or decoder: return None
+    return (f'{name} keeps its shaders in files compressed with the game\'s own Oodle ({why.split(", Oodle-compressed")[0]}), which only the game\'s own decoder reads. '
+            'An Android build runs it on the phone: connect one and build without --no-push or --game-apk (later builds and game apps take what it decoded), '
+            'or build the game in DroidPlay for Mac first')
+
+
 def games_table():   # {title ID: {engine, graphics, build, sdk}} from dm/games/README.md's Games table
     out = {}
     for line in (REPO / 'dm/games/README.md').read_text(encoding='utf-8').splitlines():
@@ -960,6 +1247,7 @@ def main(argv):
     ap.add_argument('--no-push', action='store_true', help='build the APK only; do not install it or copy the game files to the phone')
     ap.add_argument('--push-only', action='store_true', help='install the app and copy a game built before to the phone, without building')
     ap.add_argument('--wait-device', type=float, default=0, help='wait up to this many seconds for a phone a bench or another build holds (default: stop at once)')
+    ap.add_argument('--reconnect-wait', type=float, default=180.0, help='wait up to this many seconds for a phone adb lost on the way, over Wi-Fi or USB, then go on (default 180)')
     ap.add_argument('--update-shaders', action='store_true', help='pull the shaders a game compiled at run time on the phone, translate the new ones and copy them (no app build)')
     ap.add_argument('--apk-only', action='store_true', help='pack the app with every game host built on this computer and install it')
     ap.add_argument('--migrate', action='store_true', help="move a one-game install's files/game to files/games/<--title> on the phone")
@@ -978,6 +1266,7 @@ def main(argv):
     # ANDROID_HOME and no adb on PATH, --sdk built the app and then stopped at its install with "No such file or directory: 'adb'"
     if a.sdk: tool_paths(a.sdk)
     global WAIT_DEVICE; WAIT_DEVICE = a.wait_device
+    global RECONNECT_WAIT; RECONNECT_WAIT = a.reconnect_wait
     if a.xapk: a.game_apk = True
     if a.game_apk:
         if a.push_only or a.update_shaders or a.apk_only or a.migrate: raise BuildError('--game-apk builds the game; it goes with none of --push-only, --update-shaders, --apk-only, --migrate')
@@ -1064,7 +1353,8 @@ def main(argv):
         bi.PROG.plan((0 if a.update_shaders else 3) + 2 * bool(new) + bool(a.update_shaders))
         if new:   # the split again with the new captures, and the new ones translated (the others are kept)
             aoc = work / 'aoc'; dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc.is_dir() else []
-            spv = build_shaders(g.words('shader_versions') or [pkg_ver], {pkg_ver: game}, work, logs, env, g, dlc_roms) or spv
+            if (game / 'oodle_cache/complete').is_file(): env['DM_OODLE_CACHE'] = str(game / 'oodle_cache')   # what the full build decoded on the phone (oodle_decode)
+            spv = build_shaders(g.words('shader_versions') or [pkg_ver], {pkg_ver: game}, work, logs, env, g, dlc_roms)[0] or spv
         if a.update_shaders:
             if not new: say('no new run-time shaders on the phone'); bi.PROG.end(); return
             bi.PROG.stage('copy the shaders to the phone'); dst = f'{REMOTE}/games/{g.id}'
@@ -1085,9 +1375,10 @@ def main(argv):
             if kind == 'folder': return bi.extract_dump(ex, v, u or b, app)
             return bi.extract(nx, keys, ex, v, b, u, None, logs, g, app)
         game = extract(pkg_ver)
-        why = unsupported_graphics(bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['graphics'],
-                                   nacp.name(game / 'control.nacp') or g.get('name', '') or g.id)
-        if why: raise BuildError(why)   # before the rewrite and the shaders, which take minutes and make an app that cannot start
+        src, name = bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main']), nacp.name(game / 'control.nacp') or g.get('name', '') or g.id
+        mac_oodle = mac_decoder(nsp_dir, work, g, pkg_ver, game, env) if src['oodle_packs'][0] else None   # not only with sv: a build mismatch below sets it
+        why = unsupported_graphics(src['graphics'], name) or (undecodable_packs(src['oodle_packs'], name, mac_oodle or serial or (game / 'oodle_cache/complete').is_file()) if sv else None)
+        if why: raise BuildError(why)   # before the rewrite and the shaders, which take minutes and make an app that cannot start (or no app at all)
         bad = [] if derived or prov else bi.build_mismatch(game, pkg_ver, g)
         if bad:   # files of another build under a registered version's tag: packed like any other version
             derived = f'not the builds game profile {g.id} registers: {"; ".join(bad)}'; sv = [pkg_ver]
@@ -1111,7 +1402,19 @@ def main(argv):
         if sv and bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['ue_decode'][0]:   # Unreal's Oodle-compressed shaders (ue_decode)
             with phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Unreal shaders') if serial else contextlib.nullcontext():
                 ue_decode(sdirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game)
-        spv = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms)
+        if sv and src['oodle_packs'][0] and not mac_oodle:   # the archives' Oodle streams, decoded on the phone before the split
+            env['DM_OODLE_CACHE'] = str(oodle_decode([bi.rfs.source(sdirs[v]) for v in sv], [sdirs[v] / 'ExeFS/main' for v in sv], dlc_roms, game, pkg_ver, nsp_dir, patched,
+                                                     work, logs, env, g, serial, sdk))
+        def derive_shader_tables(reason):   # build_ipa_from_nsp.py main's: the registered profile with the split's shader tables, everything else as registered
+            assert g is not None   # main stopped earlier without a profile; a nested function keeps no narrowing
+            pdir = work / 'profile'
+            bi.derive_profile(g, pdir / g.id, pkg_ver, game, g.words('modules'), app, shader_only=True)
+            os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = os.pathsep.join([str(pdir)] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d and d != str(pdir)])
+            os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
+            dg = gamemod.load(g.id)
+            say(f'{reason}: using a shader-only derived profile at {dg.dir}; registered module fixes are preserved')
+            return dg
+        spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables, derived, (lambda: mac_oodle) if mac_oodle else None)
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         if not a.game_apk: library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                             'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})

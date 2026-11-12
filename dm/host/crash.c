@@ -27,6 +27,7 @@ static char g_watch_stage[2][256] = {"startup", "startup"};
 static unsigned g_watch_stall;
 static void (*g_dump_hook)(void);
 static void (*g_gfx_hook)(void);   // the graphics backend's part of a crash dump (crash_set_gfx_hook)
+static void (*g_pc_hook)(int sig, uint64_t pc, uint64_t lr, uint64_t fp);   // told where a crash is, before the dump (crash_set_pc_hook)
 static void (*g_wait_dump)(void);
 
 static uint64_t watch_now_ns(void) {
@@ -131,7 +132,7 @@ void dm_backtrace(uint64_t fp) {
 // ---------- Page fault hooks (write-protect dirty page tracking) ----------
 // Called in registration order before on_crash prints the crash state; returning 1 = handled (return directly and re-execute the faulting instruction); the crash path is taken only when all return 0.
 // Hooks run in signal handler context: only table lookups / atomic operations / mprotect are allowed, no memory allocation and no locking.
-#define MAX_FAULT_HOOK 4
+#define MAX_FAULT_HOOK 8   // the sandbox check, the dirty tracker, raw global memory's and the pool file's freeze windows, DM_PROBE_WATCH
 static int (*g_fault_hook[MAX_FAULT_HOOK])(void *addr, int is_write, void *uc);
 static void (*g_write_prep[MAX_FAULT_HOOK])(void *addr, size_t len);
 static int g_nfault_hook, g_nwrite_prep;
@@ -155,6 +156,8 @@ void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { g_trap_hook = fn; }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
 // The Android Vulkan backend lists the pipelines it is building (gfx_vk_draw.inc pb_dump): a crash in a driver's shader compiler (libllvm-qgl.so) said nothing of which one
 void crash_set_gfx_hook(void (*fn)(void)) { g_gfx_hook = fn; }
+// The Android host's driver guard: a crash in the code of a Vulkan driver the player chose (DM_VK_DRIVER) is recorded, so the next start runs the system's (vk_driver.c)
+void crash_set_pc_hook(void (*fn)(int sig, uint64_t pc, uint64_t lr, uint64_t fp)) { g_pc_hook = fn; }
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
 // Dump the current state on demand (without exiting): the iOS app has no no-progress watchdog, so when the smoke test fails it sends dump through DM_LOG_PORT to trigger this -- what each guest thread is waiting on + the graphics-side wait points, the same thing the watchdog prints
 void crash_dump_now(const char *why) { fprintf(stderr, "[dm] state dump (%s): tick %u / stage %s\n", why, atomic_load(&g_watch_tick), g_watch_stage[atomic_load(&g_watch_stage_idx)]); if (g_dump_hook) g_dump_hook(); if (g_wait_dump) g_wait_dump(); }
@@ -175,6 +178,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
     }
     crash_gate(sig);
+    if (g_pc_hook) g_pc_hook(sig, DM_SS(uc).__pc, DM_SS(uc).__lr, DM_SS(uc).__fp);   // first: the dump below can hang or die
     // The stderr lock may be held by another thread (stuck or suspended): the fprintf below would hang with it, the time limit's SIGALRM could not end the run, and the log would get nothing.
     // If it still cannot be taken after 1 s, write a single line with write() (pc / lr as module offsets) and exit. When this thread itself holds the lock, ftrylockfile still succeeds (file locks are recursive), unaffected
     for (int i = 0; ftrylockfile(stderr); i++) {
