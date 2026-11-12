@@ -113,6 +113,9 @@ static void pcache_made(void) {   // pipe_get made a pipeline (under g_bk)
 // ---------------- Shaders ----------------
 typedef struct { int binding, slot; uint32_t ext; } rb_cbuf;   // ext: bytes the shader reads of it (cb_ext_pick: res.json's or spv_cb_ext2's; 0 = all)
 typedef struct { int binding, slot, cb_slot, cb_off, flags; } rb_sbuf;
+// The elements of a stage's texture or image array that stage_set writes at most; spv_harr.h shortens a module's longer arrays to it (spv_fit_harr), so that its
+// layout holds no more descriptors than are written
+enum { TEX_ARR_MAX = 1024 };
 typedef struct { int binding, type, cbuf_slot, handle, array, separate, flags; VkFormat fmt; int samp_slot; } rb_tex;   // fmt: an image's declared format (0: Unknown); cbuf_slot / samp_slot: the banks of the texture and sampler handles (rb_tex_read)
 enum { SH_VS, SH_PS, SH_GS, SH_TS, SH_CS };
 // constant buffers a shader may bind: up to 18 of banks 0 to 17, plus NVN2's push constants (c24, DMSH_PUSH_BANK) and the uniform slots' size table (c25,
@@ -132,7 +135,7 @@ typedef struct {
     int wlayer;   // a vertex, tessellation or geometry shader that writes the layer (spv_layer_out): its draws get every layer of their targets (rp_prepare)
     struct { uint32_t miss; struct lmod *m; } avar[4]; int navar;   // alpha-test variants (ps_alpha_mod, spv_alpha.h) by the inputs variant; a NULL module: the transform does not apply
     ds_list *dsf;   // its descriptor sets kept by each chunk, [2 chunk + tf] (dsl, dsl_tf): made at its first set (ds_get), never freed (as the shader)
-    uint32_t ndesc;   // descriptors in dsl, an array's counted up to 1024 (what stage_set writes of it): DM_VK_SET_STATS=1 checks each stage_set writes them all
+    uint32_t ndesc;   // descriptors in dsl, an array's counted up to TEX_ARR_MAX (what stage_set writes of it): DM_VK_SET_STATS=1 checks each stage_set writes them all
     uint8_t dsbig;   // bit tf: one set of its layout (dsl, dsl_tf) does not fit an empty pool (sh_get ds_fits, else ds_alloc_n, RED 93): ds_get gives none for it, without making another pool
     uint8_t cbdyn[18], ndyn;   // set_reuse: cb[i] a dynamic uniform buffer, its offset at cbdyn[i] of the bind's (0xff: a plain one, its offset in the set); ndyn of them
     uint8_t pool;   // reads the texture pool by ID: its modules read the pool set (gfx_vk_pool.inc), which its pipelines' layouts take at POOL_SET
@@ -543,6 +546,7 @@ static size_t spv_fit(const uint32_t *code, size_t nw, const char *what, uint32_
     *out = o; return k;
 }
 static size_t spv_pool_fit(const uint32_t *code, size_t nw, const char *what, uint32_t **out);   // gfx_vk_pool.inc
+static size_t spv_fit_harr(const uint32_t *code, size_t nw, const char *what, uint32_t **out);   // after gfx_vk_pool.inc (POOL_SET)
 static int pool_on(void); static void pool_note_shader(vshader *s, int info); static void pool_drop_view(VkImageView iv);
 #include "gfx_vk_lmod.inc"   // shader modules made when a pipeline needs them: lmod, lm_new, lm_pipeline
 static lmod *ps_variant(vshader *s, uint32_t miss) {
@@ -665,7 +669,7 @@ static vshader *sh_get(const char *key) {
     for (int b = 0; a && a->t == 3 && b < a->n && b < 4; b++) if (a->kid[b].t == 3 && a->kid[b].n == 2) s->tf_stride[b] = (uint32_t)a->kid[b].kid[1].num;
     js_free(&r);
     sh_bind_map(s);   // before its modules: they and the layout below take the same numbers
-    t_pool_info = 0;
+    t_pool_info = 0; t_harr_info = 0;
     snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(s, p, &s->b0);
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
       if (w) { if (s->stage == SH_CS) s->tgs = tgs_bytes(w, nw, s->key); spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
@@ -676,6 +680,11 @@ static vshader *sh_get(const char *key) {
     // a pool read spv_pool left, or pool arrays res.json names that it found no variable for: their arrays would be in no layout
     if (s->pool && !(t_pool_info & (SPV_POOL_IMG | SPV_POOL_SMP)) && !(t_pool_info & SPV_POOL_FAIL)) { t_pool_info |= SPV_POOL_FAIL; static int nl; if (nl++ < 8) LOG("[RED] [vk] shader %s: res.json names texture pool arrays its module does not have as spv_pool knows them: its draws are dropped", s->key); }
     pool_note_shader(s, t_pool_info); if (t_pool_info & SPV_POOL_FAIL) return NULL;
+    // arrays spv_harr shortened in every module of the shader: the layout as long as they are now (a module it left keeps the whole array, and so does the layout)
+    if ((t_harr_info & SPV_HARR_SHRUNK) && !(t_harr_info & SPV_HARR_FAIL)) {
+        for (int i = 0; i < s->ntx; i++) if (s->tx[i].array > TEX_ARR_MAX) s->tx[i].array = TEX_ARR_MAX;
+        for (int i = 0; i < s->nim; i++) if (s->im[i].array > TEX_ARR_MAX) s->im[i].array = TEX_ARR_MAX;
+    }
     // the set's layout: support buffer, constant buffers, storage buffers, textures, images
     VkDescriptorSetLayoutBinding b[1 + CB_MAX + 16 + 64 + 16 + 5]; uint32_t nb = 0;
     b[nb++] = (VkDescriptorSetLayoutBinding){0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};
@@ -687,7 +696,7 @@ static vshader *sh_get(const char *key) {
     if (s->tgs) b[nb++] = (VkDescriptorSetLayoutBinding){SPV_TGS_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};   // its shared memory (spv_tgspill)
     VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = nb, .pBindings = b};
     if (vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &s->dsl) != VK_SUCCESS) { LOG("[RED] [vk] descriptor layout of shader %s failed", s->key); return NULL; }
-    for (uint32_t i = 0; i < nb; i++) s->ndesc += b[i].descriptorCount > 1024 ? 1024 : b[i].descriptorCount;
+    for (uint32_t i = 0; i < nb; i++) s->ndesc += b[i].descriptorCount > TEX_ARR_MAX ? TEX_ARR_MAX : b[i].descriptorCount;
     if (!ds_fits(b, nb)) { s->dsbig |= 1; g_ds_toobig++;
         uint32_t big = 0; for (uint32_t i = 0; i < nb; i++) if (b[i].descriptorCount > big) big = b[i].descriptorCount;
         static int n; if (n++ < 4) LOG("[RED] [vk] shader %s: one descriptor set of its layout is larger than a whole pool (an array of %u elements): its draws are dropped", s->key, big); }
@@ -1081,6 +1090,26 @@ static VkImageViewType view_type_of(int st) {   // Ryujinx's SamplerType
     }
 }
 #include "gfx_vk_pool.inc"   // NVN2's texture and sampler pools read by ID: the pool set
+// The module with its texture, sampler and image arrays longer than stage_set writes shortened to TEX_ARR_MAX (spv_harr.h), in *out (to free); 0 when it has none or
+// they cannot be (t_harr_info says which). Why: a layout must hold as many descriptors as the module's array is long, and Paper Mario: The Thousand-Year Door's
+// reflection shaders, whose handle array from a uniform buffer is 8,192 long, filled a descriptor pool every two sets: 539 pools, 6.7 GB on a Galaxy S25 Edge,
+// before the low-memory killer ended the game in the prologue. DM_VK_HARR=0 (env.txt): the arrays as the translator declared them, as before
+static uint64_t g_harr_shaders, g_harr_left;   // modules shortened; modules with such an array left as they are (SPV_HARR_FAIL)
+static size_t spv_fit_harr(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    *out = NULL;
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_HARR"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_VK_HARR=0: descriptor arrays as long as the translator declared them"); }
+    if (!on || nw < 5) return 0;
+    uint32_t *s = malloc((size_t)SPV_HARR_SCRATCH * code[3] * 4); if (!s) return 0;
+    size_t need = 0, k = 0; int info = 0; uint32_t *o = NULL;
+    k = spv_harr(code, nw, POOL_SET, TEX_ARR_MAX, s, NULL, 0, &need, &info);
+    if (need && (o = malloc(need * 4))) k = spv_harr(code, nw, POOL_SET, TEX_ARR_MAX, s, o, need, &need, &info);
+    free(s);
+    t_harr_info |= info;
+    if (info & SPV_HARR_FAIL) { g_harr_left++; static int nl; if (nl++ < 8) LOG("[RED] [vk] %s uses a descriptor array longer than %d in a way spv_harr does not rewrite: its layout keeps the whole array", what, TEX_ARR_MAX); }
+    if (!k) { free(o); return 0; }
+    if (!g_harr_shaders++) LOG("[vk] %s: descriptor arrays longer than %d shortened to the %d elements written (spv_harr.h; DM_VK_HARR=0: off)", what, TEX_ARR_MAX, TEX_ARR_MAX);
+    *out = o; return k;
+}
 #include "gfx_vk_gmem.inc"   // raw global memory: the memory pools at device addresses and the raw pool table (DM_VK_RAW_GMEM)
 #include "gfx_vk_fileback.inc"   // memory pools backed by a file (DM_VK_POOL_FILEBACK)
 
@@ -2021,7 +2050,7 @@ static pipe_t *pipe_get(const pipe_key *k) {
 //   - they are free again only in draw_chunk_reset, on the completion thread after vkWaitForFences on that chunk's fence, before its command pool's reset and before busy = 0 under
 //     g_cmu; cur() takes a chunk only with busy == 0 under g_cmu, so its next recording, the only one that writes them again, comes after. A held chunk (fwd_find) stays busy
 //   - within a recording each set is handed out once (used only grows): a set bound earlier in the command buffer is never written again
-// Why it reads nothing stale: stage_set writes every binding of the layout, every element of an array (up to 1024: dsl's elements past 1024 are never written, RED 92, undefined in
+// Why it reads nothing stale: stage_set writes every binding of the layout, every element of an array (up to TEX_ARR_MAX: in a module spv_harr left, dsl's elements past it are never written, RED 92, undefined in
 // a new set too), in one vkUpdateDescriptorSets before the set is bound, and tf_capture each feedback binding of dsl_tf. Binding 0 (the support buffer) stays unwritten only in
 // the sets of a shader none of whose modules uses it (s->b0, fixed per shader: no set of its lists ever had it written), and a descriptor not statically used need not be valid.
 // A failed stage_set leaves its set unbound (the draw is dropped). A set handed out again may still name a texel buffer view or image view destroyed since its last use: Vulkan
@@ -2422,13 +2451,13 @@ static void stage_textures(vshader *s) {
         tc_stage *c = &g_tc[tc_slot(s->stage)]; c->s = NULL; c->n = 0;
         uint64_t gen = g_vt_gen, tok = nvn_dirty_now(); int nel = 0;
         for (int pass = 0; pass < 2; pass++) for (int i = 0; i < (pass ? s->nim : s->ntx); i++) { const rb_tex *t = pass ? &s->im[i] : &s->tx[i];
-            if ((t->type & 0xff) != 2) nel += t->array > 1 ? (t->array > 1024 ? 1024 : t->array) : 1; }
+            if ((t->type & 0xff) != 2) nel += t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1; }
         if (nel > c->cap) { int nc = nel > 16 ? nel : 16; tc_ent *ne = realloc(c->e, (size_t)nc * sizeof *ne); if (!ne) goto each; c->e = ne; c->cap = nc; }
         uint8_t c2buf[C2_SIZE]; const uint8_t *c2p = c2_bank(nst, c2buf); int n = 0;
         pthread_mutex_lock(&g_reg_mu);
         for (int pass = 0; pass < 2; pass++) for (int i = 0; i < (pass ? s->nim : s->ntx); i++) {
             const rb_tex *t = pass ? &s->im[i] : &s->tx[i]; if ((t->type & 0xff) == 2) continue;
-            int cnt = t->array > 1 ? (t->array > 1024 ? 1024 : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff;
+            int cnt = t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff;
             for (int e = 0; e < cnt; e++, n++) { int tid = (int)(bank_word(nst, c2p, t->cbuf_slot, (w0 + 2u * e) * 4) & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
                 tc_ent *x = &c->e[n]; x->tid = tid; if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) x->r = g_treg[tid]; else x->r.ok = 0; }
         }
@@ -2445,7 +2474,7 @@ static void stage_textures(vshader *s) {
         uint8_t c2buf[C2_SIZE]; const uint8_t *c2p = c2_bank(nst, c2buf);
         for (int pass = 0; pass < 2; pass++) for (int i = 0; i < (pass ? s->nim : s->ntx); i++) {
             const rb_tex *t = pass ? &s->im[i] : &s->tx[i]; if ((t->type & 0xff) == 2) continue;
-            int cnt = t->array > 1 ? (t->array > 1024 ? 1024 : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff;
+            int cnt = t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff;
             for (int e = 0; e < cnt; e++) { int tid = (int)(bank_word(nst, c2p, t->cbuf_slot, (w0 + 2u * e) * 4) & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
                 pthread_mutex_lock(&g_reg_mu); tex_t tt; int ok = tid > 0 && tid < g_ntreg && g_treg[tid].ok; if (ok) tt = g_treg[tid].t; pthread_mutex_unlock(&g_reg_mu);
                 if (ok) vt_get(&tt); }
@@ -2648,8 +2677,8 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         else { VkDeviceSize to; if (!ar_alloc(sz, &b, &to)) return 0;
             bi[nbi] = (VkDescriptorBufferInfo){b, to, sz}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, SPV_TGS_BINDING, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL}; }
     }
-    size_t nel = 0; for (int i = 0; i < s->ntx; i++) nel += s->tx[i].array > 1 ? (size_t)(s->tx[i].array > 1024 ? 1024 : s->tx[i].array) : 1;
-    for (int i = 0; i < s->nim; i++) nel += s->im[i].array > 1 ? (size_t)(s->im[i].array > 1024 ? 1024 : s->im[i].array) : 1;
+    size_t nel = 0; for (int i = 0; i < s->ntx; i++) nel += s->tx[i].array > 1 ? (size_t)(s->tx[i].array > TEX_ARR_MAX ? TEX_ARR_MAX : s->tx[i].array) : 1;
+    for (int i = 0; i < s->nim; i++) nel += s->im[i].array > 1 ? (size_t)(s->im[i].array > TEX_ARR_MAX ? TEX_ARR_MAX : s->im[i].array) : 1;
     // the texture and image descriptors' infos in a scratch kept from call to call, grown to nel + 1 here, before any pointer into it is in wr[], and never in the middle: a malloc
     // and a free of each per stage cost Breath of the Wild 1.6 ms a frame on the Odin 2 (30,000 calls, mostly scudo's lock atomics). One scratch serves because stage_set is
     // the replay's alone: its callers (vk_draw, tf_capture, vk_dispatch) run only in mtl_exec, between mtl_sub_begin and mtl_sub_commit under g_bk, nothing it calls reaches
@@ -2664,8 +2693,8 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
     if (tex_once()) { tc_stage *c = &g_tc[tc_slot(s->stage)]; if (c->s == s) tc = c; c->s = NULL; }
     pthread_mutex_lock(&g_reg_mu);
     for (int i = 0; i < s->ntx; i++) {
-        const rb_tex *t = &s->tx[i]; int cnt = t->array > 1 ? (t->array > 1024 ? 1024 : t->array) : 1;
-        if (t->array > 1024) RED_ONCE(92, "texture array of %d elements: the first 1024 are bound", t->array);
+        const rb_tex *t = &s->tx[i]; int cnt = t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1;
+        if (t->array > TEX_ARR_MAX) RED_ONCE(92, "texture array of %d elements: the first %d are bound", t->array, TEX_ARR_MAX);
         VkImageViewType vt = view_type_of(t->type); int tbuf = (t->type & 0xff) == 2;
         uint32_t w0 = (uint32_t)t->handle & 0x3fff, w1 = ((uint32_t)t->handle >> 14) & 0x3fff, ty = (uint32_t)t->handle >> 28;
         if (tbuf) {   // a buffer texture: a uniform texel buffer
@@ -2718,7 +2747,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         nii += cnt;
     }
     for (int i = 0; i < s->nim; i++) {   // images (load / store / atomics): the handle names a texture pool entry, as a texture's does (hle_nvn.c BindImages)
-        const rb_tex *t = &s->im[i]; int cnt = t->array > 1 ? (t->array > 1024 ? 1024 : t->array) : 1, tbuf = (t->type & 0xff) == 2;
+        const rb_tex *t = &s->im[i]; int cnt = t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1, tbuf = (t->type & 0xff) == 2;
         VkImageViewType vt = view_type_of(t->type); uint32_t w0 = (uint32_t)t->handle & 0x3fff;
         for (int e = 0; e < cnt; e++) {
             uint32_t hw = bank_word(nst, c2, t->cbuf_slot, (w0 + 2u * e) * 4); int tid = (int)(hw & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
@@ -3019,7 +3048,7 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
     if (tbuf_range_on()) { pthread_mutex_lock(&g_reg_mu);
         for (int k = 0; k < 4; k++) { const vshader *s = sh[k]; if (!s) continue; int nst = nvn_stage_of(s->stage); KS = (signed char)k;
             for (int pass = 0; pass < 2; pass++) for (int i = 0; i < (pass ? s->nim : s->ntx); i++) { const rb_tex *t = pass ? &s->im[i] : &s->tx[i]; if ((t->type & 0xff) != 2) continue;
-                int cnt = t->array > 1 ? (t->array > 1024 ? 1024 : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff; K = pass ? 'm' : 't';
+                int cnt = t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff; K = pass ? 'm' : 't';
                 for (int e = 0; e < cnt; e++) { int tid = (int)(bank_word(nst, NULL, t->cbuf_slot, (w0 + 2u * e) * 4) & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
                     if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) FWD(tb_fwd, (uint64_t)(uintptr_t)g_treg[tid].t.mem, tbuf_bytes(&g_treg[tid].t), pass); } } }
         pthread_mutex_unlock(&g_reg_mu); }

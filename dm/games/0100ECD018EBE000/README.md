@@ -92,6 +92,7 @@ General host changes first needed here; each applies to every game:
 - **`nn::fs::Unmount` of a mount in the SDK's own table** (`hle_fs.c`): [A mount in the SDK's own table stays until the SDK releases it](../../../docs/reference/services.md#a-mount-in-the-sdks-own-table-stays-until-the-sdk-releases-it).
 - **Uniform reads past the bound size give 0** (the translator's `MetalUniformBounds`, the size table `DMSH_CBSIZE_BANK`): [Reads past a uniform binding's size](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size).
 - **The host's StandardAllocator cap** (`hle_svc.c`, the `stdalloc_cap` key): [StandardAllocators over 12 to 62 GB of address space](../../../docs/reference/memory.md#standardallocators-over-12-to-62-gb-of-address-space).
+- **Descriptor arrays shortened to what the Vulkan replay writes** (Android, `spv_harr.h`): the reflection shaders' 8,192-element handle arrays reserved 8,192 descriptors per set, and the pools reached 6.7 GB in the prologue: [Descriptor arrays longer than the replay writes (Android)](../../../docs/reference/rendering.md#descriptor-arrays-longer-than-the-replay-writes-android).
 
 ## Open
 
