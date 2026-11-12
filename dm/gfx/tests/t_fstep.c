@@ -152,6 +152,26 @@ int main(void) {
         snprintf(b, sizeof b, "  game time %.0f against real time %.2f (debt %.2f, dropped %.0f)", m.game, m.real, m.s.debt, m.s.dropped);
         check(m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01 && m.s.dropped == 0, b);
     }
+    {   // probe_near (Android): from hold 3 the probe goes to hold 2, not to kmin; its frames take 2.4 vsyncs for 20 frames while the clock rises, then 1.7, and it holds
+        sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 2.3, 1, 3, 0); m.slow = 1; m.s.probe_near = 1; m.gpu = 2.2;
+        int at2 = 0, at1 = 0; uint64_t ups = m.s.ups;
+        for (int i = 0; i < 400; i++) {
+            double w = m.s.k == 2 ? (at2++ < 20 ? 2.4 : 1.7) : m.s.k == 1 ? 1.4 : 2.3; m.gpu = m.s.k == 2 ? (at2 < 20 ? 2.2 : 1.6) : m.s.k == 1 ? 1.3 : 2.2;
+            run(&m, 1, w, 1, 3, 0); if (m.s.k == 1) at1++;
+        }
+        snprintf(b, sizeof b, "probe_near: the probe from hold 3 goes to 2 and holds (k %d, probes %llu, failed %llu, frames at hold 1 %d)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed, at1);
+        check(m.s.k == 2 && m.s.probes == 1 && m.s.failed == 0 && m.s.ups == ups && at1 == 0, b);
+    }
+    {   // probe_near's headroom rule: at hold 2 with a GPU of 1.6 vsyncs (busy 80 %: the clock could fall its time to 1.28 at best, past 0.85), no probe to hold 1 is made;
+        // with a GPU of 1.2 (its time could fall to 0.72) the probe is
+        sim m = {0}; run(&m, 60, 0.5, 1, 2, 0); run(&m, 300, 1.7, 1, 2, 0); m.slow = 1; m.s.probe_near = 1; m.gpu = 1.6;
+        uint64_t probes = m.s.probes; run(&m, 600, 1.7, 1, 2, 0);
+        snprintf(b, sizeof b, "probe_near, GPU 1.6 at hold 2: no probe to hold 1 (probes %llu, k %d)", (unsigned long long)(m.s.probes - probes), m.s.k);
+        check(m.s.probes == probes && m.s.k == 2, b);
+        m.gpu = 1.2; run(&m, 600, 1.7, 1, 2, 0);
+        snprintf(b, sizeof b, "  GPU 1.2 at hold 2: a probe to hold 1 is made (probes %llu)", (unsigned long long)(m.s.probes - probes));
+        check(m.s.probes > probes, b);
+    }
     {   // slowed, hold 1 holds for a while: a probe that holds but whose run at hold 1 ends within 8 s counts as failed, and the next waits twice as long
         sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 1.3, 1, 3, 0); m.slow = 1;
         for (int i = 0; i < 1000 && m.s.probe != 2; i++) run(&m, 1, m.s.k == 1 ? 0.6 : 1.2, 1, 3, 0);
