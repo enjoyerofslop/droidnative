@@ -2464,6 +2464,21 @@ static VkFormat view_format(const vtex *v, const view_t *vv) {
     return f;
 }
 static int g_bind_bad;   // set by stage_set when a binding has no valid descriptor: the draw / dispatch is skipped
+// The aspect a texture slot reads of its image. A depth-stencil texture reads its depth, unless it is in stencil mode: a view that sets it
+// (nvnTextureViewSetDepthStencilMode STENCIL) or, with no view setting it, a texture built in it (nvnTextureBuilderSetDepthStencilMode, tex_t stencil), which reads the
+// stencil, as nvn_mtl.m's X32_Stencil8 views do. The shader declares a float texture and takes the stencil value from the raw bits it reads (the translator has no
+// integer texture type). Xenoblade Chronicles 2 classifies its deferred lighting this way: a full-screen pass tests stencil bits 3 and 4 (floatBitsToInt(texel) & 24)
+// and writes a material class into a 16-bit depth buffer, and each lighting variant draws only where that depth is equal to its own. Reading depth instead, the bits
+// followed the depth's mantissa, two thirds of a lit surface's pixels took the wrong class, and no variant lit them: a dark stipple and stripes over the characters
+// and the world. A stencil-only image (S8) reads its stencil
+static int g_st_reads;   // stencil-mode slots bound (the first one is logged)
+static VkImageAspectFlags tex_aspect(const vtex *v, const treg_t *rg, const view_t *vv, const vshader *s) {   // (tex_aspect.h)
+    int missing; unsigned a = tex_aspect_pick((unsigned)v->aspect, vv && vv->set_dsmode, vv && vv->dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL, rg->t.stencil, &missing);
+    if (missing) RED_ONCE(185, "shader %s reads a depth texture of format %d in stencil mode, which has no stencil: its depth is read (said once)", s->key, v->fmt);
+    else if (a == VK_IMAGE_ASPECT_STENCIL_BIT && (v->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && !g_st_reads++)
+        LOG("[vk] a texture slot in stencil mode reads the stencil of its depth-stencil image, as raw bits (shader %s, format %d)", s->key, v->fmt);
+    return (VkImageAspectFlags)a;
+}
 static uint64_t g_e5_need;   // compute: the storage image bindings stage_set bound to E5B9G9R9 textures (vk_dispatch takes cpipe_e5 for them)
 // An image slot's texture made without storage use takes it (vt_storage_up), unless it is a target of the pass a draw prepared (rp_prepare ran before stage_set): rp_start would
 // begin that pass's framebuffer, made on the image the upgrade replaces. A dispatch's copy ends the pass, and the next rp_prepare makes the targets' views again
@@ -2859,7 +2874,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
                     if (has_swz) { uint16_t sz = vv && vv->set_swizzle ? (uint16_t)(vv->swz[0] | vv->swz[1] << 3 | vv->swz[2] << 6 | vv->swz[3] << 9) : rg->t.swz; for (int q = 0; q < 4; q++) swz[q] = (sz >> (3 * q)) & 7; }
                     g_view_fmt = view_format(v, vv);
                     iv = view_get(v, vt, vv && vv->set_levels ? vv->base_level : 0, vv && vv->set_levels ? vv->nlevels : 0, vv && vv->set_layers ? vv->min_layer : 0,
-                                  vv && vv->set_layers ? vv->nlayers : 0, v->aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, has_swz ? swz : NULL);
+                                  vv && vv->set_layers ? vv->nlayers : 0, tex_aspect(v, rg, vv, s), has_swz ? swz : NULL);
                     g_view_fmt = VK_FORMAT_UNDEFINED;
                     if (s->upsq && !g_upsq_src) { g_upsq_src = v; g_upsq_src_iv = iv; } }   // a listed upscaler's input (gfx_vk_upsq.inc)
             }

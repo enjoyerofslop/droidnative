@@ -12,7 +12,7 @@ opening movies, the first enemy defeat, destination tutorials, walking and the
 engagement-area collision boundary work. All 27,055 base/update shaders compile
 for Mac and iOS. The unsigned IPA is built and its archive checks pass.
 
-On Android, the cartridge's base game 1.0.0 reaches the first battle without losing the device, but draws its world striped and its characters only in cutscenes ([Android](#android)).
+On Android, the cartridge's base game 1.0.0 reaches the first battle without losing the device, but draws its characters only in cutscenes; its world, once striped, is drawn with its textures since the replay reads stencil-mode texture slots' stencil ([Android](#android)).
 
 iOS runtime testing, DLC gameplay and later-game allocation peaks remain open.
 The supplied four DLC packs are included; their additional shaders have not been
@@ -211,7 +211,7 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - **The picture, both phones:**
   - **Characters drawn only in cutscenes:** in the opening's cutscenes Noah, Eunie, Lanz and the soldiers draw. In battle and in the field the party doesn't: no Noah behind the camera, only the effects of his arts.
     - Both phones log one `[RED] transform feedback with vertex shader 0b8bcbe86791ef65, which has no capture variant: nothing captured`. Gameplay skins the characters through transform feedback, and this vertex shader's capture variant is missing.
-  - **The world striped:** the titans on the title screen, the plain's ground, its rocks and the wreckage are drawn as black-and-white zebra stripes instead of their textures. The sky, the UI, the fire and the arts' effects look right.
+  - **Resolved, the world striped:** the titans on the title screen, the plain's ground, its rocks and the wreckage were drawn as black-and-white zebra stripes instead of their textures; the sky, the UI, the fire and the arts' effects looked right. The lighting reads a depth-stencil buffer in stencil mode, and the Vulkan replay read its depth there ([Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android), found on Xenoblade Chronicles 2). With the fix (2026-11-12, the S25 Edge, this game app with only the host swapped), the title's titans and the plain are drawn with their textures.
   - The Mac's 2.2.1 runs drew the terrain and the characters; 1.0.0 wasn't run on the Mac.
   - On the S25 Edge, Qualcomm's driver also logged 842 "Failed to link shaders" lines with no `[RED]` from the host; the Z Flip 7's driver logged none.
 - **Frame rate:** the target is 30 (the Switch's rate).
@@ -230,6 +230,7 @@ Both in handheld mode, driven over adb with `DM_CTL`.
 - [Subgroup operations rewritten for a one-lane subgroup](../../../docs/reference/shaders.md#subgroup-operations-rewritten-for-a-one-lane-subgroup).
 - [IMAGE usage does not split texture storage](../../../docs/reference/rendering.md#image-usage-does-not-split-texture-storage).
 - [Rasterizer discard preserves vertex storage writes](../../../docs/reference/rendering.md#rasterizer-discard-preserves-vertex-storage-writes).
+- [Stencil-mode texture slots read the stencil](../../../docs/reference/rendering.md#stencil-mode-texture-slots-read-the-stencil-android): the world's zebra stripes on Android; see [Android](#android).
 - [Primitive barriers order vertex storage writes](../../../docs/reference/rendering.md#primitive-barriers-order-vertex-storage-writes).
 - [Transform feedback captured by a vertex entry point](../../../docs/reference/rendering.md#transform-feedback-captured-by-a-vertex-entry-point): interleaved outputs and geometry capture.
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff): contended native decoder waits must release a handoff.
