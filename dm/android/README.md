@@ -43,7 +43,18 @@ cream on ink, with a monochrome layer), which `tools/build_apk.py` links unless 
   folder to `files/games/<id>/` when it packs the same game (the same `control.nacp`), or with `--migrate --title <id>`, and leaves a `legacy_save` marker there. At its next start
   the launcher backs every internal save up to `files/backups/<time>/` and copies `files/save` (and `save_device`) into `saves/<id>`, through a temporary folder; `files/save`
   itself is left as it was. **Back up saves** in the game list makes the same backup on demand (xattrs, the guest names of case collisions, go to its `xattrs.tsv`: external
-  storage does not keep them); a backup pushed to `files/backups/restore/` is copied back into internal storage at the next start, after a backup of what is there.
+  storage does not keep them); a backup pushed to `files/backups/restore/` is copied back into internal storage at the next start, after a backup of what is there,
+  a game at a time (a game the backup has no save of keeps its own).
+- **A game's save in and out** (the settings screen's Save rows, `LauncherSaves.java`; the logic, plain Java that `dm/tools/tests/test_android_saves.py` runs on a JVM, in
+  `Saves.java`). Export writes `saves/<id>/` (and `saves/<id>_device/`) as a ZIP laid out as a backup, through Android's file picker. Import takes a ZIP or a folder from the
+  picker, staged in internal `files/import-staging/`, and finds the save in the layouts other tools write (a DroidPlay export or backup; yuzu and its successors,
+  `nand/user/save/0000000000000000/<user>/<title ID>/`; Ryujinx, `bis/user/save/<save ID>/0/` with the title ID in `ExtraData0`; JKSV with `.nx_save_meta.bin`; EdiZon
+  with `edizon_save_metadata.json`; Checkpoint's `0x<title ID> <name>/`), else takes the folder as the save itself, matched by file names against the game's save on the
+  phone when there is one. It keeps the game's save as a backup (`files/backups/<time>-<id>/`) before swapping the new one in by renames through `<save>.swap`, the
+  host's own convention (`plat_android.c`), and never while the game runs. Earlier saves lists the backups that hold the game's save, and puts one back the same way.
+  A save from the computer (`build_android_from_nsp.py --import-save` / `--restore-backup`, the desktop app's Import a save and Restore a backup) is pushed to
+  `files/import/<id>/`, opened to the app, and taken by the launcher when it comes to the front, through the same find, dialogs and swap (`LauncherSaves.incoming`).
+  Only `user.*` extended attributes travel with a save: a backup's `security.selinux` rows name its own phone's labels.
 - **Updates keep the saves.** Every APK is signed with `~/.android/nxnative-debug.jks` and installed with `adb install -r`; the scripts never uninstall.
 
 ## Settings screen
@@ -143,7 +154,8 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   on phone* (no build) and *Play*. A game without a profile gets *Experimental build* (`--no-push`: the survey, a provisional profile in `<NSP folder>/<id>_build/profile`,
   found through `DM_GAMES_DIR`); once built it is marked *Experimental* and installs like the others.
 - **Phones**: the adb devices over USB and Wi-Fi (*Pair over Wi-Fi*, *Connect*, *Discover*, *Disconnect*); for the phone picked at the top, the app version and the games
-  on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`) and *Remove game from phone* (its save stays).
+  on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`), *Restore a backup* and *Remove game from
+  phone* (its save stays); a game's *Manage* menu has *Import a save to the phone* and *Restore its save from a backup*.
   A phone is known by its ID (`dm/android/tools/phone_id.py`: `ro.serialno`, or the shell's Android ID where that is empty or a placeholder), asked once per adb
   serial: the picker shows a phone on USB and Wi-Fi once, over USB; the picked phone, its backups (`<data>/backups/<id>`) and the first-start notice are kept by ID, as
   are the script's device lock and `logs/push_<id>`, so a Wi-Fi port that changes loses nothing and one phone's two serials can't run two installs at once.
