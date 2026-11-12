@@ -2472,6 +2472,25 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - Galaxy S25 Edge (Adreno 830, Android 16), with this change: all three drawn on the same route, a steady 30 fps (battle frame p50 33.2, p95 34.1 ms), submit+present 22.6 ms, GPU 22.1 ms, about one wait a frame, no `[RED]` line.
 - **Found on:** [Xenoblade Chronicles 2](../../dm/games/0100E95004038000/README.md#android): every character in the opening and the tutorial battle on a Galaxy S25 Edge (Adreno 830) and the Razr (Adreno 730). Skinning shaders `fa456dcb6b05c2ce`, `0cf988e8a8ea2aee`, `bce3419b07cb2f3d`, `3fb8ebc13eb37ad7` (`shd_post.wishp` var122, the bone buffer) and `bd4b7f58c16f180f` (it updates a vertex buffer whose bytes it also reads as vertex streams).
 
+### An indexed draw's vertex stream read only as far as the write-back it starts in (Android)
+
+- **Symptom:** Android only: a game whose characters are skinned by draws under rasterizer discard (run as dispatches since [Draws under rasterizer discard that write memory](#draws-under-rasterizer-discard-that-write-memory-android)) plays at a fraction of its speed while its cutscenes run at full speed. The GPU sits at its lowest clock and is busy a third of each frame. The `[vk] guest reads of draws` line counts dozens of waits for the current submission a frame.
+- **Cause:** an indexed draw's vertex stream is looked up among the forwardable write-backs as bound (`stream_rng`), since which vertices it fetches isn't known. Games bind a stream at its first vertex or attribute with the whole buffer's size, so the range runs past the buffer.
+  - Xenoblade Chronicles 3 skins each character into a 576,000-byte buffer, two of them 0x30 bytes apart, and its draws bind the vertices up to 1,120 bytes in, each binding as long as the buffer.
+  - Such a range met the next buffer's write too, so `fwd_hit` learned the two buffers as one home range of 1,152,048 bytes (`rd_home.h`). Every skinning write then took a copy of both, 54 copies of 1.15 MB a frame, each with its snapshot.
+  - In that copy the second buffer starts 48 bytes off the 64-byte storage buffer alignment. So the character draws that read it as a storage buffer (each inside the write-back) could not bind it there (`buf_fwd`), and waited for the GPU: 53 waits a frame.
+- **Fix:** an indexed draw's stream that starts in a forwardable write-back, runs past its end and is no longer than it (a binding into the written buffer, with that buffer's size) is looked up only as far as that end (`stream_clip`, the rule in `dm/android/stream_clip.h`).
+  - Only the newest write-back holding the stream's first byte counts, in the current chunk (from before the draw) or the chunks in flight, as `fwd_find` looks.
+  - It is clipped before `fwd_find`, so the overrun no longer teaches a home range. Each buffer keeps a write-back of its own, which starts aligned.
+  - An index past the vertices the write-back holds would read bytes nothing wrote, on the Switch as here.
+  - `DM_VK_STREAM_CLIP=0` looks such streams up as bound, as before. The `[vk] read on the GPU from a dispatch's pending write` line counts the streams clipped.
+- **Check (2026-11-12):** `dm/tools/tests/test_stream_clip.py` (XC3's offsets, streams inside, ranges longer than the write-back, the write-back's kind and place). Xenoblade Chronicles 3 1.0.0 on a Galaxy S25 Edge (Adreno 830, Android 16), its game app with only the host swapped, from a fresh start through the opening to the first battle and the field after it:
+  - Without this change (q258, and the same diagnostic build without it): the first battle at 5.5–5.8 fps and the field at 6.4–7.1, the GPU at 160 MHz most of the time and busy about a third of each frame. 55 waits for the current submission a frame (53 of them these reads), 54 home copies of 1.15 MB, and the replay thread's CPU 77.7 ms a frame, 29 ms of it in `memcpy`.
+  - With it: the battle and the field at 12.0 fps, the median of 127 two-second windows, all at 160 MHz. Each skinned buffer has a write-back of its own. 2 waits for the current submission and 6 for submissions in flight a frame remain. The replay thread's CPU is 37.6 ms a frame (3.5 ms in `memcpy`), the GPU 48.8 ms.
+  - With the two fixes for those waits as well (a draw's write read after a barrier, and the first draw of a submission reading on the GPU; their own pull requests): 30 fps, the Switch's rate, with the GPU at 342–443 MHz.
+  - The picture is unchanged: the party, the soldiers and the enemies are drawn, the world textured.
+- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md#android) (q258's 5.6–7 fps gameplay).
+
 ### Stencil-mode texture slots read the stencil (Android)
 
 - **Symptom:** Android only: a dark stipple and stripes over lit surfaces that follow their depth. Xenoblade Chronicles 2 shows it on the characters' skin, hair and clothes in close-ups and over much of the world (crates, walls, the rock spires on the deck), on Adreno and Mali alike; Xenoblade Chronicles 3 draws its titans and terrain as black-and-white zebra stripes. The Mac's frames are clean. No red line.

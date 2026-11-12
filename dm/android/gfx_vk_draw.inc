@@ -2995,12 +2995,31 @@ static void stream_rng(int s, uintptr_t *lo, uintptr_t *hi) {
     if (h > r->size) h = r->size;
     *lo = (uintptr_t)(r->address + l); *hi = (uintptr_t)(r->address + h);
 }
+// An indexed draw's stream that starts in a forwardable write-back and runs past its end is looked up only as far as that end (stream_clip.h says when), so its overrun
+// neither misses the write-back nor teaches a home range two buffers wide. Only the newest write-back holding the stream's first byte counts. DM_VK_STREAM_CLIP=0 (env.txt):
+// such streams are looked up as bound, as before
+static int stream_clip_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_STREAM_CLIP"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_STREAM_CLIP=0: an indexed draw's stream is looked up as bound, past a write-back's end"); } return v; }
+static uint64_t g_stream_clip;   // streams looked up as far as the end of the write-back they start in
+static uintptr_t wb_clip(const chunk *c, int nwb, uintptr_t lo, uintptr_t hi, int *found) {   // (stream_clip_end) in c's write-backs; *found: one of them holds lo
+    for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, lo + 1)) continue;
+        *found = 1; return stream_clip_end(lo, hi, (uintptr_t)w->dst, w->row_bytes, w->fwd && w->rows == 1); }
+    return 0;
+}
+static void stream_clip(uintptr_t lo, uintptr_t *hi) {   // the current chunk's write-backs from before the draw, then the chunks in flight, newest first (as fwd_find)
+    if (!C || !stream_clip_on()) return;
+    int n = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb, found = 0; uintptr_t e = wb_clip(C, n, lo, *hi, &found);
+    if (!found && atomic_load(&g_inflight_wb)) { pthread_mutex_lock(&g_cmu);
+        for (int f = g_fifo_n - 1; f >= 0 && !found; f--) e = wb_clip(g_fifo[f], g_fifo[f]->nwb, lo, *hi, &found);
+        pthread_mutex_unlock(&g_cmu); }
+    if (e) { *hi = e; g_stream_clip++; }
+}
 static int stream_fwd(const vshader *vs, int s, VkBuffer *b, VkDeviceSize *o) {   // *o: where the stream's address is in the copy (bind_vbufs adds its first vertex's offset)
     if (vk_safe()) return 0;
     const NVNbufferRange *r = &D.vbuf[s]; if (!r->address || !r->size) return 0;
     if (fwd_early() && (!C || (!C->nfwd && !atomic_load(&g_inflight_fwd)))) { g_fwd_early++; return 0; }
     if (!stream_direct(vs, s)) return 0;
     g_fwd_look++; uintptr_t lo, hi; stream_rng(s, &lo, &hi);
+    if (g_vr1 <= g_vr0 || g_vr0 < 0) stream_clip(lo, &hi);   // indexed: the bound range (before fwd_find, which would learn its overrun as a home range)
     if (!fwd_find(lo, hi, b, o)) return 0;
     VkDeviceSize back = (VkDeviceSize)(lo - (uintptr_t)r->address); if (*o < back) return 0;   // (a copy that starts past the stream's address: its binding cannot start there)
     *o -= back; return 1;
