@@ -64,7 +64,15 @@ First run on Android, 2026-11-11: a Moto Razr Plus 2023 (SM8475, Adreno 730 with
 - **Picture:** nothing wrong seen: the movie, the title art, Nell, the 3D board with its forests, mountains and cities, the troops and their HP, the movement and attack ranges, the menus, the blur behind "Lesson complete!", and the plains and mountain battle animations with their sky and effects. No `[RED]` line in any launch. Not compared with the Mac, as nothing needed it.
 - **Memory:** the alias region mapped to 2.26 GB (as on the Mac); 2.35 GB PSS 20 minutes into both long launches (1.4–1.6 GB resident, the rest in zram), high-water mark 2.18 GB. On this 8 GB phone (7.46 GB usable) lmkd killed 13 background apps over the session ("PSI critical event"), never the game.
 - **Driving it over adb:** `env.txt` with `DM_CTL` in the game app's external files (`chmod 666`). The movie starts about 22 s in; A skips it and `L+R~0.5` opens the main menu. Nell's introduction takes about 20 A presses. On the board each D-pad press moves the cursor one tile. Nell's lines and the troops' tips (Quick Fire, holding ZR) appear without warning and take the next presses, so look after every move. A selects a unit, a tile, then the command; A on an empty tile opens the Map menu (End Turn is its third item). To leave a lesson: + → Options → Exit Map, then Left to Yes (No is preselected).
-- **Not tried:** past Field Training's second lesson, the other devices, Mali (the Pixel 9 Pro XL) and Xclipse (the Galaxy Z Flip 7). Another Android port of this game draws no troops or map on a Samsung Xclipse GPU, so the Z Flip 7 is the one to try next.
+- **On Xclipse too:** a Galaxy Z Flip 7 (SM-F766U1: Exynos 2500, Xclipse 950 with Samsung's driver 24.0.533 / 0x6000215, Vulkan 1.3.279, Android 16), unfolded, 2026-11-11, the same game app. Two launches, about 20 minutes.
+  - **What was played:** a new Casual campaign through Field Training's first lesson (won on day 2), the save (`save commit #6` at "Lesson complete!"), then a cold start (the file shows "Next Lesson: Cities & Terrain"), and the second lesson through its first day and the enemy's turn.
+  - **The picture:** troops, the map, its cities and the battle scenes (plains and mountain) all draw, as on the Adreno. Another Android port of this game draws no troops or map on Xclipse; this build doesn't share that fault. The textures are BC, which Xclipse lacks, so they are decoded on the CPU. No `[RED]` line.
+  - **Frame rate:**
+    - Battles: 29.7–30.0 fps in every 30 s window (frame p50 33.3 ms, p95 about 36 ms, GPU about 12 ms). Frames over 60 ms were 12 of 11,300 in the first lesson: animation scene switches and one first-time pipeline build of 0.42 s.
+    - Menus: 60 fps, including back on Field Training's menu after the battle (GPU 5 ms). The Razr's post-battle 30 fps menu didn't happen here.
+  - **Sound:** no underrun; the dump has signal in the movie, the menus and the battle.
+  - **Memory:** 2.94 GB PSS after the first lesson and 3.23 GB in the second, of which 0.59–0.86 GB is graphics. VmHWM 2.49 GB, no swap used, 11.2 GB on the phone. No lmkd kill.
+- **Not tried:** past Field Training's second lesson, the other devices and Mali (the Pixel 9 Pro XL).
 
 ## Found on this game
 
