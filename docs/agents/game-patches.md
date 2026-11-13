@@ -36,6 +36,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | render scale: the 3D view's dynamic-resolution factor x the host's | rendering | gap | judgement | 1 | [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) | 1.2.1's main at a fixed offset (the Android fork's render-scale setting); a function-matched frame step (MATCH_FRAME_STEP) could carry it over updates |
 | `build` → `game` | scene initialization mode 7: its depth clear also clears the stencil | rendering | gap | checked: 1.0.12 and 1.1.404's mains: the same mode table and clears (2026-11-13) | 1 | [The Elder Scrolls V: Skyrim](../../dm/games/01000A10041EA000/README.md) | the game's own scene initializer; the same switch is at 1.0.12's main+0xb551c0, so a function-matched rule could carry it |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
+| `build` → `game` | the audio buffer pool's four deque functions under one mutex | race | gap | checked: 1.1.404's main: the four functions are the only callers of the deques (8 call sites, 4 loads of the pool), the padding and the bss tail unused (2026-11-13) | 1 | [The Elder Scrolls V: Skyrim](../../dm/games/01000A10041EA000/README.md) | a data race in the game's own audio pool: its free lists have no lock, and BSTaskManager and LibAudioUpdate use them at once |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
 | `build` → `sdk` | VammManager node area and alignment, SDK 4.4.0 (9de92bad) | address space | blocked: one game ships it | judgement | 1 | [sdk_patches.py](../../dm/tools/sdk_patches.py) | an older implementation no rule covers (its large regions aligned to 32 MB, not the rules' 2 MB); a rule once a second game ships it |
@@ -78,7 +79,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Super Mario Bros. Wonder](#super-mario-bros-wonder) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Elder Scrolls V: Skyrim](#the-elder-scrolls-v-skyrim) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [The Elder Scrolls V: Skyrim](#the-elder-scrolls-v-skyrim) | 9 | 0 | 0 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
@@ -487,9 +488,18 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [The Elder Scrolls V: Skyrim](../../dm/games/01000A10041EA000/README.md), `01000A10041EA000`, [patches.py](../../dm/games/01000A10041EA000/patches.py).
 
 - **`build` → `game`**, rendering, gap, checked: 1.0.12 and 1.1.404's mains: the same mode table and clears (2026-11-13): scene initialization mode 7: its depth clear also clears the stencil. The game's own scene initializer; the same switch is at 1.0.12's main+0xb551c0, so a function-matched rule could carry it
+- **`build` → `game`**, race, gap, checked: 1.1.404's main: the four functions are the only callers of the deques (8 call sites, 4 loads of the pool), the padding and the bss tail unused (2026-11-13): the audio buffer pool's four deque functions under one mutex. A data race in the game's own audio pool: its free lists have no lock, and BSTaskManager and LibAudioUpdate use them at once
 
-- **1.1.404.0 `main`** `0c0cac3f…` ([patches.py:12](../../dm/games/01000A10041EA000/patches.py#L12))
+- **1.1.404.0 `main`** `0c0cac3f…` ([patches.py:29](../../dm/games/01000A10041EA000/patches.py#L29))
   - cut `+0xbf7d5c`: scene initialization mode 7: its depth clear also clears the stencil (mov w3, wzr -> neg w3, w21), which the compute pass writes only into the buffer
+  - cut `+0x1265a00`: audio pool: wrapper of main+0xabd428, which takes an ADPCM header record (pop_front of the deque at +0x1f0): the pool mutex held around it
+  - cut `+0xabd428`: audio pool: main+0xabd428 enters its locked wrapper at +0x1265a00
+  - cut `+0x1265a50`: audio pool: wrapper of main+0xabd4b8, which gives an ADPCM header record back (push_back to the deque at +0x1f0): the pool mutex held around it
+  - cut `+0xabd4b8`: audio pool: main+0xabd4b8 enters its locked wrapper at +0x1265a50
+  - cut `+0x1265aa0`: audio pool: wrapper of main+0xabd548, which takes a wave buffer (pop_front of the deque at +0x1c0) and copies the samples into it: the pool mutex held around it
+  - cut `+0xabd548`: audio pool: main+0xabd548 enters its locked wrapper at +0x1265aa0
+  - cut `+0x1265af0`: audio pool: wrapper of main+0xabd5f0, which gives a wave buffer back (push_back to the deque at +0x1c0): the pool mutex held around it
+  - cut `+0xabd5f0`: audio pool: main+0xabd5f0 enters its locked wrapper at +0x1265af0
 
 ### The Legend of Zelda: Breath of the Wild
 
