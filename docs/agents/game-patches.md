@@ -38,6 +38,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | scene initialization mode 7: its depth clear also clears the stencil | rendering | gap | checked: 1.0.12 and 1.1.404's mains: the same mode table and clears (2026-11-13) | 1 | [The Elder Scrolls V: Skyrim](../../dm/games/01000A10041EA000/README.md) | the game's own scene initializer; the same switch is at 1.0.12's main+0xb551c0, so a function-matched rule could carry it |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
 | `build` → `game` | the audio buffer pool's four deque functions under one mutex | race | gap | checked: 1.1.404's main: the four functions are the only callers of the deques (8 call sites, 4 loads of the pool), the padding and the bss tail unused (2026-11-13) | 1 | [The Elder Scrolls V: Skyrim](../../dm/games/01000A10041EA000/README.md) | a data race in the game's own audio pool: its free lists have no lock, and BSTaskManager and LibAudioUpdate use them at once |
+| `build` → `game` | the frame period, and the present interval made from it, from the host's frame step | frame rate | gap | judgement | 1 | [Pokémon: Let's Go, Pikachu!](../../dm/games/010003F003A34000/README.md) | the game's own frame-time object, which Pokémon Legends: Arceus also has (the same getter bytes, setter and period table): MATCH_FRAME_STEP could carry the two stubs (the getter and the present), not tried: 1.0.0, the cartridge's, is the only build on hand. A rule keyed on the getter could serve Game Freak's other mains, each keeping its own interval part |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
 | `build` → `sdk` | VammManager node area and alignment, SDK 4.4.0 (9de92bad) | address space | blocked: one game ships it | judgement | 1 | [sdk_patches.py](../../dm/tools/sdk_patches.py) | an older implementation no rule covers (its large regions aligned to 32 MB, not the rules' 2 MB); a rule once a second game ships it |
@@ -76,6 +77,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 3 | 1 | 0 | `game`, `build` → `game` |
+| [Pokémon: Let's Go, Pikachu!](#pokémon-lets-go-pikachu) | 0 | 0 | 2 | 0 | 0 | `build` → `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Mario Bros. Wonder](#super-mario-bros-wonder) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
@@ -437,6 +439,16 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x278303c`: frame step: the frame period read is the host's vsyncs × 16,666,667 ns (state page target fps; 0 = the stored period)
   - frame step `+0x279a6f4`: frame step: counts the vsyncs the scene update steps
 - **function-matched** (`main` of builds without CUTS): capture demo: the empty result when the weak reference at +0x88 is unset or dead: 1 function, 5 cuts
+
+### Pokémon: Let's Go, Pikachu!
+
+[Pokémon: Let's Go, Pikachu!](../../dm/games/010003F003A34000/README.md), `010003F003A34000`, [patches.py](../../dm/games/010003F003A34000/patches.py).
+
+- **`build` → `game`**, frame rate, gap, judgement: the frame period, and the present interval made from it, from the host's frame step. The game's own frame-time object, which Pokémon Legends: Arceus also has (the same getter bytes, setter and period table): MATCH_FRAME_STEP could carry the two stubs (the getter and the present), not tried: 1.0.0, the cartridge's, is the only build on hand. A rule keyed on the getter could serve Game Freak's other mains, each keeping its own interval part
+
+- **1.0.0 `main`** `1c375692…` ([patches.py:48](../../dm/games/010003F003A34000/patches.py#L48))
+  - frame step `+0x29e80`: frame step: counts the vsyncs each present steps
+  - frame step `+0x395f0`: frame step: the frame period read (and the present interval made from it) is the host's vsyncs × 16,666,667 ns (state page target fps; 0 = the stored period)
 
 ### Super Mario 3D All-Stars: Super Mario Sunshine
 

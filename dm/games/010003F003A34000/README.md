@@ -3,7 +3,8 @@
 The base game 1.0.0 (v0, no update), SDK **5.4.150** (`nnSdk-5_4_150`, `NintendoSDK_NVN-5_4_150`). Game Freak's engine before Sword and Shield's, on NVN, with Wwise sound and NEX networking. Modules `main`, `subsdk0` (GLSLC), `subsdk1` (`NintendoSDK_movie`) and `sdk`. The RomFS holds 27,818 files in 4.1 GB.
 
 - **On Android:** plays at 30 fps (as on the Switch) on a Galaxy Z Fold 8, a Pixel 9 Pro XL and a Galaxy Z Flip 7, from a new game through Pallet Town and Professor Oak's lab to Route 1, with Pikachu and the first catches made with buttons, then on the Pixel through Route 1 to Viridian City, Oak's Parcel and the rival's first battle. Saves and Continue work. Route 2 and Viridian Forest not reached yet. See [Android](#android).
-- **On the Mac:** not run yet.
+- **60 fps on Android by default** since 2026-11-13, with game time at real time; 30 on the Mac and iOS: [60 fps](#60-fps). The Android runs below were at 30, the target then.
+- **On the Mac:** runs from an Android-made save in handheld mode (`DM_OPMODE=0`), at 30 by default and at 60 with `DM_FPS_TARGET=60` ([60 fps](#60-fps)); not played further than Pallet Town and the house. In docked mode the controller screen ("Press a button on the controller you want to use") didn't take `DM_CTL`'s A presses (the game assigns its pads as single Joy-Cons); not looked into.
 
 ## What it needs
 
@@ -13,8 +14,9 @@ The base game 1.0.0 (v0, no update), SDK **5.4.150** (`nnSdk-5_4_150`, `Nintendo
 | `sys_resource 0x0`, `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | the NPDM declares no system resource, so no virtual address memory. `main` sets a heap of at most the pool − 64 MB |
 | `shader_groups /bin/=bin /system_resource/=systemresource` | [`game.tsv`](game.tsv) | the shaders are under `bin/` and `system_resource/shader`. See [Shaders](#shaders) |
 | `zip_store .arc:.bfotf:.gfpak:.ptcl:.webm:.metallib` | [`game.tsv`](game.tsv) | already-compressed archives, fonts, effects and movies |
+| `DM_FPS_TARGET=60` and the frame step stub | [`android_defaults.txt`](android_defaults.txt), [`patches.py`](patches.py) `FRAME_STEP` | Android: 60 fps (30 on the Switch) with game time at real time: [60 fps](#60-fps). `fps_target` in [`game.tsv`](game.tsv) stays 0, so the Mac and iOS keep 30 |
 
-The profile is the provisional one `build_android_from_nsp.py` made from the survey (`dm/games/profile_guess.py`), unchanged but for its comments. `pso_manifest.tsv` is still the empty provisional list.
+The profile is the provisional one `build_android_from_nsp.py` made from the survey (`dm/games/profile_guess.py`), unchanged but for its comments and the frame rate ([60 fps](#60-fps)). `pso_manifest.tsv` is still the empty provisional list.
 
 ## Shaders
 
@@ -124,6 +126,41 @@ First run on Android, 2026-11-10: a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Eli
 - **Before:** on every Android GPU, the party, bag and Catching Pocket sprites (68×56 RGB5A1 textures) had red and blue exchanged: a cyan Pikachu, a blue Pidgey, a brown Oddish, a blue Poké Ball and blue pocket frames. The menus' own art was right. Reported on an Adreno 825; reproduced with 0.8.4 on the OnePlus Pad 3 (Adreno 830) and the Pixel 9 Pro XL (Mali-G715).
 - **The fix:** [RGB565-family and RGBA4 textures in Vulkan's channel order](../../../docs/reference/rendering.md#rgb565-family-and-rgba4-textures-in-vulkans-channel-order-android).
 - **Checked** from `saves/viridian_forest_flip` on the Pad 3, the Pixel and the Galaxy Z Flip 7 (Xclipse 950): the party (yellow Pikachu, brown Pidgey, purple Rattata, blue Oddish), the bag's pocket frames and the Catching Pocket (red and white Poké Ball, red Razz Berry) in their own colours. A control host from `main` without the fix, on the same Pixel and save, still swapped them. The title, the X menu and the field are otherwise the same with and without it.
+
+## 60 fps
+
+The game runs at 30 on the Switch. Its engine is Pokémon Legends: Arceus's older sibling, with the same frame-time object ([Arceus's 60 fps](../01001F5010DFA000/README.md#60-fps)), and here the present interval is made from that object's period too, so one frame step stub in `patches.py` moves both to the host's frame step ([`fps_target`](../README.md), the launcher's **Frame rate**):
+
+- **The frame period.** The game steps its time by a stored period, not by the clock. The frame-time object (built at `main+0x38b84`, at +0x110 of its owner, vtable `main+0x1529968`) holds two {0, ns} pairs, both 33,333,334 ns from the table {16,666,667, 33,333,334, 50,000,000, 66,666,667, 83,333,334} at `main+0xf7eeb8`. The game's updates read pair 1 through the getter (`main+0x395f0`) and turn it into seconds (11 callers, `main+0x5fc338` and `main+0x687584` among them). The owner's class sets both pairs to the table's 1/30 (`main+0x7af0`, `main+0x7b10`, overriding the base class's measured choice); no code picks 1/60. The stub in the getter stores the host's step, the vsyncs the frame stays on screen, times 16,666,667 ns in the pair read: 1/60 s at 60 fps, 1/30 s when the host holds 30 (target 30, heat, a movie, late frames).
+- **The present interval.** The present (`main+0x29d30`, once a frame) reads pair 0 and hands clamp(period / 16,666,666, 1, 5) to `main+0x5e7960`, which calls `nvnWindowSetPresentInterval` when it differs from the window's: with the stub, interval 1 at a one-vsync step and 2 at two. The host presents by its own hold while the frame step is on, so the game's interval only follows. A byte at owner +0x659d would skip the read and ask for interval 0 (no vsync), but only the owner's constructor writes it, clearing it (`main+0x28924`), so the retail game never takes that path. A second stub at `main+0x29e80` counts the vsyncs each present steps, for the host's `frame step: game time` line.
+- **Target 0** keeps the game's own period and interval 2. It is the profile's `fps_target`, so the Mac and iOS run at 30 as before; Android's default is 60 ([`android_defaults.txt`](android_defaults.txt)).
+- **The interval lines.** The game sets its interval again whenever the host's step changes (a vsync paid back after a late frame, a change of hold), and the host logs each change (`the game sets present interval 1 → 2`): 26–40 lines in runs of 3–11 minutes on the Z Fold 8 at 60 (7 at 30), 104 in 13 minutes on the Mac at 60, 217 in 6 minutes on the Pixel 9 Pro XL in Viridian Forest, where the hold went between 1 and 2. Nothing else follows from them.
+- **Checked on the Mac** (M5 Max, a `--platform mac` build, headless, handheld mode, the pipeline archive of the build's prebuild; from the Z Fold 8's Pallet Town save, 2026-11-13):
+
+  | Target | Frame rate (30 s windows) | Frame p50 / p95 | Host |
+  |---|---|---|---|
+  | 60 | 59.7–59.9 fps, worst window 58.6 (13 minutes) | 16.7 / 18.1–18.9 ms | every frame held 1 vsync; `game time` 0.999–1.001 of real time in all 26 windows of 1,800 frames |
+  | 30 | 30.0 | 33.3 / 34.5 ms | every frame held 2; `game time 60.00 s in 60.00 s` |
+  | 0 | 29.9–30.0 | 33.3 / 33.8 ms | `frame step as the game sets it`; the game sets interval 1 → 2 itself |
+
+  A save made at 60 (play time 0:14) loads at target 0, in Pallet Town where it was saved.
+- **Checked on a Galaxy Z Fold 8** (Adreno 840, its cover screen, handheld; the Let's Go host from this branch's `main` in a one-game test APK, 2026-11-13), from Android-made saves (the Z Fold 8's Pallet Town save, the Galaxy Z Flip 7's Viridian Forest save) in a private save folder. The first run built its pipelines (new shaders), the others had them:
+
+  | Target, place | Frame rate (30 s windows) | Frame p50 / p95 | GPU p50 / p95 | Host |
+  |---|---|---|---|---|
+  | 60, Pallet Town (2 runs, 4.6 min) | 59.6–60.0 fps, worst window 58.6 | 16.7 / 17.2–17.3 ms | 12.4 / 12.5–12.7 ms | held 1; one step to 2 and a probe back in each run (31 frames); `game time` 0.999–1.001 |
+  | 60, Viridian Forest (11 min) | 60.0, worst window 59.9 | 16.7 / 17.2 ms | 13.6 / 13.6 ms | held 1 but for 31 frames; `game time` 0.999–1.001 |
+  | 60, a wild Pidgey there, thrown at and caught | 59.3–59.9 | 16.7 / 17.2–18.8 ms | 7.9–11.6 / 13.6–13.8 ms | |
+  | 60, walking past the forest's first Bug Catcher (21–28 fps on the Galaxy Z Flip 7 at 30) | 60.0 | 16.7 / 19.1 ms | 12.8 / 13.2 ms | |
+  | 30, Pallet Town (3 min) | 30.0 | 33.3 / 38.0 ms | 15.0 / 15.1 ms | held 2; `game time 60.00 s in 60.00 s` |
+  | 0, Pallet Town (2.7 min) | 30.0 | 33.3 / 34.0 ms | 15.0 / 15.3 ms | the game's own interval 2 |
+
+  The GPU takes less time at 60 than at 30: the governor raises the clock for the shorter frame. A save made at 60 (play time 0:12) loads at target 0 where it was saved. The phone went from thermal status 0 to 1 (battery 30.4 → 35.0 °C) over about 25 minutes, mostly at 60. No new red line.
+- **Checked on a Pixel 9 Pro XL** (Mali-G715, the same test APK), at 60 only: Pallet Town 57.8 fps (30 s windows 57.8–58.2; frame p50 16.9 / p95 22.1 ms; GPU 10.0 / 12.9 ms), the frames that run long paid back so that `game time` stays 1.000. Viridian Forest's field doesn't fit 60 there (GPU 16.4–16.7 ms p50, 20–21 p95, at 2 vsyncs): the frame step holds 2 vsyncs, 30.1–30.3 fps with probes back to 1, and 48.7 fps through the wild catch; `game time` 0.996–1.000 in every window.
+- **Game speed.** Beside the host's own `game time` lines:
+  - **Play time:** the game's play time (the save screen and the title's card) moved with the clock at 60: 0:10 → 0:14 in about 3.5 minutes on the Mac, 0:10 → 0:12 in about 2 minutes on the Z Fold 8.
+  - **Walks:** the scenery's shift between screenshots before and after a held stick (`DM_CTL` `LLeft~<seconds>`, the camera settled), from the save's spot in Pallet Town. The walking speed, the 1.2 s walk less the 0.6 s one, is the same at every target: 184 / 176 / 190 px (of the 1280×720 picture) at 60 / 30 / 0 on the Mac, 266 / 256 / 261 px (of the Z Fold 8's 1,758-pixel-wide picture) on the Z Fold 8. A walk at 60 covers a little less ground in all: the 0.6 s walk 174–176 px at 60 against 169–208 at 30 and 0 on the Mac, 247–256 against 298–305 on the Z Fold 8, the 1.2 s walk 359 against 382–383 and 518 against 558–562. The difference is the same for both lengths, about 0.1 s of walking per walk, so something at a walk's start or end (not its speed) differs at 60; what, isn't known. It was the same with the player already facing the way he walks.
+- **Not run:** iOS; the stretch of the Game Status row (Viridian City and the rival's battle) at 60 by hand; a trainer battle at 60; a movie at 60 (the host holds 30 while one plays); the OnePlus Pad 3 and the Galaxy Z Flip 7.
 
 ## Found on this game
 
