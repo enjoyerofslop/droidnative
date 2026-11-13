@@ -58,7 +58,7 @@ Qualcomm's Adreno GPUs have had the most testing; Mali and Xclipse are newer to 
 ### Another Vulkan driver (Turnip)
 
 On an Adreno GPU, a game can run on a Vulkan driver you put on the phone instead of the system's, as in Switch emulators: usually a build of Mesa's
-open-source Turnip driver. Trying one needs no new build, and whether it helps depends on the game and the device. The steps:
+open-source Turnip driver (on a Samsung Xclipse GPU, a build of Mesa's RADV for Xclipse). Trying one needs no new build, and whether it helps depends on the game and the device. The steps:
 [Another Vulkan driver](docs/android.md#another-vulkan-driver-turnip).
 
 ## Get started
@@ -294,7 +294,7 @@ DroidPlay for Mac's build of the game, its Mac host does it instead. Without eit
 - [DroidPlay for Windows](docs/android.md#droidplay-for-windows): installing, Get started and every page of the app, in detail.
 - [The Android app](docs/android.md#the-android-app): the launcher, a game's settings, the first start, controls, saves and the log.
 - [Game apps](docs/android.md#game-apps): a game as an app of its own.
-- [Another Vulkan driver (Turnip)](docs/android.md#another-vulkan-driver-turnip): on an Adreno GPU, a driver you put on the phone.
+- [Another Vulkan driver (Turnip)](docs/android.md#another-vulkan-driver-turnip): on an Adreno or Xclipse GPU, a driver you put on the phone.
 - [Games that compile their shaders while they run](docs/android.md#games-that-compile-their-shaders-while-they-run): The Binding of Isaac, for one.
 - [Packing from the command line](docs/android.md#packing-from-the-command-line): what it needs, and its options.
 - [Seeing what a game draws](docs/android.md#seeing-what-a-game-draws): screenshots, frame dumps and thread states from a running game.

@@ -308,7 +308,7 @@ The replay has shaders of its own too, for what Vulkan has no command for: `dm/a
 
 The host does not link `libvulkan.so`. Every `vk*` function the replay and the front end call is a pointer (`gfx_vk.h`, `VK_NO_PROTOTYPES` with the list in
 `VKB_FNS`), filled by `vk_driver.c` when `vkb()` makes the device: from the system's `libvulkan.so`, opened then, by default; with `DM_VK_DRIVER=<file>`, from a
-driver the player put beside `env.txt` (a Turnip build, as for Switch emulators: [Another Vulkan driver](../../docs/android.md#another-vulkan-driver-turnip)).
+driver the player put beside `env.txt` (a Turnip build, as for Switch emulators, or RADV for Xclipse: [Another Vulkan driver](../../docs/android.md#another-vulkan-driver-turnip)).
 
 - The file is copied into the internal files (`vk_driver/<name>`, read-only, again when its size or time changes): Android maps no code from shared storage.
 - It is opened through libadrenotools ([dm/third_party/libadrenotools](../third_party/libadrenotools/README.md)): `adrenotools_open_libvulkan` loads a second copy of
@@ -337,7 +337,7 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators:
   `crashed`, `device lost` or `trying` (a start that ended before `ok`) runs the system's driver once and writes `skipped`, with a `[RED]` line and a line on the
   status screen, which also names the driver in use or why it isn't; the next start tries the driver again. `crashed elsewhere` doesn't skip (a game that crashes at
   boot in its own code would otherwise change drivers at every start); the next start says it in the log and on the status screen. A hang in the driver after `ok`
-  isn't caught: the records can't tell a hang past 30 s from a long first compile, as the plan accepts. A start without `DM_VK_DRIVER` removes the game's result file; on a phone without KGSL the result is
+  isn't caught: the records can't tell a hang past 30 s from a long first compile, as the plan accepts. A start without `DM_VK_DRIVER` removes the game's result file; on a phone with neither GPU (below) the result is
   `not used`. The host's crash handler goes in as the host starts (`main.c`), after the device and the first window, so a crash in the driver before then is
   left as `trying`, which skips the driver once too. `DM_VK_DRIVER_FAIL=crash` crashes in the driver's code (a `vkCreateSampler` with no create info) at the
   replay's first use of the device, to try the guard; `crash_host` crashes in the host's code there, for `crashed elsewhere`.
@@ -347,8 +347,11 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators:
   folder is known; the host writes it when the device is made, within 2 s of a change (`vk_start_tick`, from the front end's loop, not under the replay's lock), and at
   once when the GPU is lost. A refused pipeline drops its draws: Frostpunk's Generator on a Razr's Adreno 730 (54 pipelines on the way into its city, where the log
   names only the first 16 of each kind), Ocarina of Time's characters on an Odin 2's 740. DroidPlay for Windows reads the record to suggest a driver its catalog marks tested for that game on that GPU; it never switches one on by itself.
-- A phone without `/dev/kgsl-3d0` (a Mali or Xclipse GPU) doesn't open `DM_VK_DRIVER` at all, with one plain `[vk] DM_VK_DRIVER` line: Turnip drives Qualcomm's
-  kernel driver, KGSL, and `libadrenotools.so` is not loaded, so its constructor doesn't patch the linker.
+- `DM_VK_DRIVER` is opened only on a GPU another driver can run on, told by its kernel GPU driver: an Adreno (`/dev/kgsl-3d0`, Qualcomm's KGSL, which Turnip drives)
+  or a Samsung Xclipse (a DRM render node whose driver name is `amdgpu`, as RADV tells its GPU: Samsung's sgpu, AMD's amdgpu adapted). libadrenotools' custom-driver
+  load is the same for any vendor: the hook swaps the file the system's loader opens as `vulkan.<ro.hardware.vulkan>.so` (`vulkan.samsung.so` on an Xclipse,
+  through `android_load_sphal_library`). Elsewhere (a Mali) it isn't opened, with one plain `[vk] DM_VK_DRIVER` line, and `libadrenotools.so` is not loaded, so its
+  constructor doesn't patch the linker. Which GPU let it try is logged (`trying it on this Xclipse GPU`), and the driver line after it names the driver that ran.
 - Each driver keeps its own pipeline cache: `DM_PIPELINE_CACHE` with `.<driver file name>` after it (`gfx_vk_draw.inc` `pcache`).
 - `build_android_from_nsp.py` builds the three libraries with every host and packs them into both kinds of app (`build_apk.py --lib`).
 - Tried with Mr. Purple's Turnip T30 (Mesa 26.3.0-devel, Vulkan 1.4.359) on an Odin 2 (Adreno 740, Android 13) and a Retroid Pocket 5 (Adreno 650, Android 13), with

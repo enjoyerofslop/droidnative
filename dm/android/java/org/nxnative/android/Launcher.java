@@ -127,7 +127,7 @@ public class Launcher extends Activity {
             if (!new File(d, "code/main.fixups.tsv").exists()) continue;
             Game g = new Game(); g.id = d.getName().toUpperCase(Locale.ROOT); g.dir = d; g.nacp = readAll(new File(d, "control.nacp"));
             g.name = title(g.nacp, g.id); g.version = displayVersion(g.nacp); g.hosted = new File(libs, "libdmhost_" + g.id + ".so").exists();
-            File img = new File(d, "RomFS.img"); g.bytes = img.length();
+            File img = new File(d, "RomFS.img"); g.bytes = img.exists() ? img.length() : romfsBytes(d);
             out.add(g);
         }
         return out;
@@ -642,6 +642,10 @@ public class Launcher extends Activity {
         if (nacp == null || nacp.length < 0x3070) return null;
         int e = 0x3060; while (e < 0x3070 && nacp[e] != 0) e++;
         return e > 0x3060 ? new String(nacp, 0x3060, e - 0x3060, StandardCharsets.UTF_8) : null;
+    }
+    // game.json's size of the RomFS, whose image is in another folder (build_android_from_nsp.py --romfs-dir): 0 when it can't be read
+    static long romfsBytes(File d) {
+        try { return new org.json.JSONObject(new String(readAll(new File(d, "game.json")), StandardCharsets.UTF_8)).optLong("romfs_bytes", 0); } catch (Exception e) { return 0; }
     }
     static byte[] readAll(File f) {
         try (FileInputStream in = new FileInputStream(f)) { byte[] b = new byte[(int) f.length()]; int n = 0; while (n < b.length) { int k = in.read(b, n, b.length - n); if (k < 0) break; n += k; } return b; }
