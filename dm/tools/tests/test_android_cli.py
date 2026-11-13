@@ -1041,6 +1041,11 @@ class RomfsDir(PhoneSetup):   # --romfs-dir / --no-romfs: the RomFS image in ano
         self.phone({'sm list-volumes public 2>/dev/null': '', 'ls /storage 2>/dev/null': 'emulated\nself\n6FB7-F185\n'})
         self.assertEqual(ba.romfs_path('S', 'SD', GID), self.AT)
 
+    def test_the_card_ids_alone_for_the_desktop_app(self):   # the same reading, from the two outputs the app gets with its own adb calls
+        self.assertEqual(ba.sd_card_ids('public:179,1 mounted 6FB7-F185\n', ''), ['6FB7-F185'])
+        self.assertEqual(ba.sd_card_ids('', 'emulated\nself\n6FB7-F185\n'), ['6FB7-F185'])
+        self.assertEqual(ba.sd_card_ids('public:179,1 unmounted null\n', 'emulated\nself\n'), [])
+
     def test_sd_with_no_card_or_two_says_so(self):
         self.phone({'sm list-volumes public 2>/dev/null': 'public:179,1 unmounted null\n', 'ls /storage 2>/dev/null': 'emulated\nself\npersist\n'})
         with self.assertRaisesRegex(ba.BuildError, 'no SD card'): ba.romfs_path('S', 'sd', GID)

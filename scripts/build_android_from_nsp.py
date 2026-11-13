@@ -1153,10 +1153,15 @@ def migrate_legacy(serial, gid, nacp_local=None):
 ROMFS_SD = f'Android/data/{PKG}/files/romfs'   # --romfs-dir sd: the app's own folder on the card, which Android 11 and later let it read with no storage permission
 
 
+def sd_card_ids(volumes, storage):   # the SD cards in `sm list-volumes public`'s output, else the card folders in `ls /storage`'s: their volume IDs (the desktop app asks the same, with its own adb calls)
+    ids = [w[2] for w in (ln.split() for ln in volumes.splitlines()) if len(w) == 3 and w[0].startswith('public:') and w[1] == 'mounted' and w[2] != 'null']
+    return ids or [n for n in storage.split() if re.fullmatch(r'[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}|[0-9A-Fa-f-]{16,}', n)]
+
+
 def sd_card(serial):   # the phone's SD card, its volume ID (/storage/<ID>): a mounted public volume (sm list-volumes), else a card's folder in /storage
     out = adb(serial, 'shell', 'sm list-volumes public 2>/dev/null', check=False)
-    ids = [w[2] for w in (ln.split() for ln in out.splitlines()) if len(w) == 3 and w[0].startswith('public:') and w[1] == 'mounted' and w[2] != 'null']
-    if not ids: ids = [n for n in adb(serial, 'shell', 'ls /storage 2>/dev/null', check=False).split() if re.fullmatch(r'[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}|[0-9A-Fa-f-]{16,}', n)]
+    ids = sd_card_ids(out, '')
+    if not ids: ids = sd_card_ids('', adb(serial, 'shell', 'ls /storage 2>/dev/null', check=False))
     if not ids: raise BuildError('--romfs-dir sd: the phone has no SD card mounted (sm list-volumes, /storage): put one in, or give --romfs-dir a folder')
     if len(ids) > 1: raise BuildError(f'--romfs-dir sd: the phone has {len(ids)} cards ({", ".join(ids)}): give the folder, --romfs-dir /storage/<ID>/{ROMFS_SD}')
     return ids[0]

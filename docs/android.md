@@ -63,6 +63,7 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 
 - **Library:** the games you added (**+ Build game** picks a folder with a game's NSP or XCI files, or a Switch 2 game's `.nup` or dump; Windows' folder picker shows no files, so pick the folder that holds them), each with its box art, version and status on the phone picked at the top.
   The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
+  **Options** has the game's version, language and **Game data** (Phone storage, or the SD card when the picked phone has one: [the game data on an SD card](#the-game-data-on-an-sd-card)),
   build only, update the app on the phone, remove the game, import a save to the phone, restore its save from a backup ([Saves](#saves)). A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
   provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.
 - **Builds:** the running build's stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console shows here too.
@@ -195,7 +196,7 @@ those backups along with the saves, so export the saves you care about first.
 A game can also be built as an app of its own, with its name, icon and saves, opening straight into the game. It installs on any arm64 device with Vulkan
 without the DroidPlay app or a connection to your computer: copy the file over and open it. Several install side by side, apart from the DroidPlay app.
 
-- **DroidPlay for Windows:** **Manage › Build a game app…**, then APK or XAPK. No phone needs to be connected; the file goes in the game's folder.
+- **DroidPlay for Windows:** **Manage › Build a game app…**, then APK or XAPK. No phone needs to be connected; the file goes in the game's folder. For an APK, **Keep the game data for an SD card** is `--romfs-beside`.
 - **DroidPlay on a Mac:** **Build Game App**.
 - **The command line:** `--game-apk`, or `--game-apk --xapk` ([Packing from the command line](#packing-from-the-command-line)).
 
@@ -276,9 +277,12 @@ with no storage permission. The rest of the game (code, shaders) stays on the ph
 - **Copying it yourself:** `--romfs-dir sd --no-romfs` copies no data, sets the path, and prints it. Copy the extraction's image there, for example with
   `adb push "<NSP folder>/<title ID>_build/extract/<version>/RomFS.img" /storage/<card ID>/Android/data/org.nxnative.android/files/romfs/<title ID>/RomFS.img`, or with
   a card reader.
+- **In DroidPlay for Windows:** a game's **Options** has **Game data**, Phone storage (the default) or SD card, saved per game. SD card is offered only when the picked
+  phone has exactly one card (the script's own reading of `sm list-volumes`, else `/storage`); an install with it chosen passes `--romfs-dir sd`, and **Build a game app**
+  passes `--romfs-beside` for an APK. If the card is out when you install, DroidPlay says so and doesn't start. Going back to Phone storage copies the data back, as above.
 - **When the image isn't there** (the card taken out, or the image not copied yet), the game doesn't start, and the log says so: `[RED] the game's RomFS … is missing`.
 - **Going back:** an install without `--romfs-dir` copies the image to the phone's storage again and leaves the card's copy, which you delete yourself. So does an
-  install from DroidPlay for Windows or DroidPlay on a Mac, which don't pass the option yet. Removing the game leaves the card's copy too; uninstalling the app deletes
+  install from DroidPlay on a Mac, which doesn't pass the option yet. Removing the game leaves the card's copy too; uninstalling the app deletes
   it, with the app's other folders.
 
 ## Free space
