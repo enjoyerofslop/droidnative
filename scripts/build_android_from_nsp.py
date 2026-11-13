@@ -333,7 +333,9 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
         if derived: raise BuildError(f'{e}\nThe game is not packed: its profile is derived from game profile {g.id} ({derived}), whose registered tables list its shaders, and without '
                                      f'them it would play its sound over a black screen. Packing a version and build that {g.id} registers (its game.tsv) uses the registered profile '
                                      f'instead (--package picks the version); otherwise report this build with {logs / "shader_split.log"} and this message') from e
-        bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped)'); return None, g   # a provisional profile: shaders compiled at run time, captured later
+        bi.PROG.end(str(e), ok=False); say('[RED] the game is packed without shaders (its draws are skipped). If it compiles its shaders while it runs, play it for a while (black is expected), '
+            'then run this build again with --update-shaders (DroidPlay for Windows: Manage › Update shaders from the phone) to bring them in: '
+            'docs/android.md, "Games that compile their shaders while they run"'); return None, g   # a provisional profile: shaders compiled at run time, captured later
     g = got.get('g', g)
     bi.PROG.stage('shaders for Vulkan', step='translating')
     out = work / 'spv'
