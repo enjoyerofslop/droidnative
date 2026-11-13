@@ -46,6 +46,11 @@ The cutscenes are MP4 files (`Movie/*.mp4`, H.264 1080p and AAC stereo) played t
 - The opening movie plays at every boot and Plus skips it (about 18 s in); then L+R on the title, A for file 1 (level select) and A for level 1-1, which starts about 15 s later.
 - In level 1-1, `LRight~0.3`, `LRight+A~0.25` hits the blue switch and `LRight~0.55`, `LRight+A~0.15` the red one.
 
+## Android
+
+- **60 fps through `android_defaults.txt`'s `DM_PRESENT_INTERVAL=display`** (issue #435). After one slow frame (about 20 s in on an AYN Thor Pro: a 40.9 ms frame with 0.9 ms of GPU) the game sets present interval 2 at `main+0x438110` and never sets 1 again. Its logic steps once per frame, so it then ran at half speed: the level timer ticked slower than real seconds. Display mode shows one frame per display tick whatever the game asks. With it the tester's Thor Pro (Adreno 740, PurpleVK) held 60 fps through world 2 at the right speed.
+- **Open: a slight audio crackle now and then** on that phone with display mode. Its log has no underruns and an audio clock rate of 1.000, but the renderer made about 45 catch-up frames a second (`catch-up renders so far` 3,264 → 6,865 over about 80 s): the game asked for renderer updates before a frame had been rendered since the last one. Not yet compared with the game at interval 2.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:
