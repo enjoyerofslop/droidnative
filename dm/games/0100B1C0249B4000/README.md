@@ -146,4 +146,5 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 - **Android: hull and domain shaders** (terrain, terrain shadow map, water and 8 `meshsolid` variants). None were seen in the first city view; a tessellated scene was not looked for.
 - **Mac: the two domain shaders' attribute clash and the 40 shaders without a texture slot**, above.
 - **Not played past day 1's first night:** no storm, no law signed, no other scenario. The DLC scenarios were not opened. Hand play on the Mac, the iPhone, a physical controller, docked mode, and past the city's first minutes on the other Android devices were not tried.
+- **Toward Playable – minor issues:** the game has no battle or race, and no level end short of a whole scenario's, so the tier asks for a stretch that takes in the end of its opening, where it hands the player its everyday play. Where that is hasn't been named; the hand runs reached day 1's night (02:16 of day 2 on the Z Flip 7). The opening view's darker picture (above) also needs comparing with the Mac under the same capture.
 - **`pso_manifest.tsv`** is still empty: no prewarm list was recorded.
