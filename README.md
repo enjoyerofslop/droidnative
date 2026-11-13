@@ -304,7 +304,7 @@ DroidPlay for Mac's build of the game, its Mac host does it instead. Without eit
 ## Guides
 
 - [DroidPlay for Windows](docs/android.md#droidplay-for-windows): installing, Get started and every page of the app, in detail.
-- [The Android app](docs/android.md#the-android-app): the launcher, a game's settings, the first start, controls, saves and the log.
+- [The Android app](docs/android.md#the-android-app): the launcher, a game's settings, the first start, controls, saves, removing a game and the log.
 - [Game apps](docs/android.md#game-apps): a game as an app of its own.
 - [Another Vulkan driver (Turnip)](docs/android.md#another-vulkan-driver-turnip): on an Adreno or Xclipse GPU, a driver you put on the phone.
 - [Games that compile their shaders while they run](docs/android.md#games-that-compile-their-shaders-while-they-run): The Binding of Isaac, for one.

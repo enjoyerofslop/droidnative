@@ -55,6 +55,12 @@ cream on ink, with a monochrome layer), which `tools/build_apk.py` links unless 
   A save from the computer (`build_android_from_nsp.py --import-save` / `--restore-backup`, the desktop app's Import a save and Restore a backup) is pushed to
   `files/import/<id>/`, opened to the app, and taken by the launcher when it comes to the front, through the same find, dialogs and swap (`LauncherSaves.incoming`).
   Only `user.*` extended attributes travel with a save: a backup's `security.selinux` rows name its own phone's labels.
+- **Removing a game** (the settings screen's Remove game row, and a tap on a game the APK has no host for: `LauncherRemove.java`; the logic, plain Java that
+  `dm/tools/tests/test_android_remove.py` runs on a JVM, in `Removal.java`). It deletes what the install put there: `files/games/<id>/`, the internal `cache/<id>/`, and the
+  RomFS image of an install with `--romfs-dir` when the game's `defaults.txt` names it as `DM_ROMFS=<folder>/<id>/RomFS.img` (with a copy's `.partial` / `.piece`). Saves,
+  backups and the game's settings stay. The prompt gives the size first (added up off the UI thread) and offers Export save; the game is closed first, after asking.
+  The folder is renamed to `games/.removing-<id>` before it is deleted, so the list skips a removal cut short, and the launcher finishes one at its next start.
+  Links are deleted, not followed. A game app is uninstalled instead: its files are in its own package's folders.
 - **Updates keep the saves.** Every APK is signed with `~/.android/nxnative-debug.jks` and installed with `adb install -r`; the scripts never uninstall.
 
 ## Settings screen

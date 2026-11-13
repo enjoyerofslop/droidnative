@@ -11,7 +11,7 @@
 //   folder into games/<title ID> and leaves a legacy_save marker there, and this launcher then backs every save up to <external files>/backups/<time>/ and copies
 //   files/save into saves/<title ID> (files/save itself is left as it was). Back up saves does the same backup on demand; a folder pushed to backups/restore/ is copied
 //   back into internal storage at the next start (after a backup of what is there), a game at a time. A game's settings screen also exports, imports and puts back
-//   that game's save (its Save rows: LauncherSaves.java).
+//   that game's save (its Save rows: LauncherSaves.java), and removes the game from the phone, keeping its save (Remove game: LauncherRemove.java, Removal.java).
 package org.nxnative.android;
 
 import android.app.Activity;
@@ -84,7 +84,7 @@ public class Launcher extends Activity {
     File ext, games, internal; SharedPreferences app, prefs; Map<String, String> envFile, defaults;
     Game game;   // the one whose settings are shown
     final List<Setting> settings = new ArrayList<>();
-    LauncherSaves saves;
+    LauncherSaves saves; LauncherRemove remove;
     final Map<String, String> chosen = new HashMap<>();
     LinearLayout list; float dp;
     final Handler ui = new Handler(Looper.getMainLooper());
@@ -92,7 +92,8 @@ public class Launcher extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         ext = getExternalFilesDir(null); if (ext == null) ext = getFilesDir();
-        games = new File(ext, "games"); internal = getFilesDir(); saves = new LauncherSaves(this);
+        games = new File(ext, "games"); internal = getFilesDir(); saves = new LauncherSaves(this); remove = new LauncherRemove(this);
+        new Thread(new Runnable() { public void run() { Removal.sweep(games); } }, "sweep").start();   // a game folder a removal cut short left (Removal.java)
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         dp = getResources().getDisplayMetrics().density;
         app = getSharedPreferences("app", MODE_PRIVATE);
@@ -190,7 +191,13 @@ public class Launcher extends Activity {
         TextView s = text(sub, 12, g.hosted ? TEXT2 : BUILD, 400); s.setFontFeatureSettings("tnum"); t.addView(s);
         press(t);
         t.setOnClickListener(new View.OnClickListener() { public void onClick(View v) {
-            if (!g.hosted) { toast(g.name + ": this app has no host for it yet (libdmhost_" + g.id + ".so). Update the app from the computer."); return; }
+            if (!g.hosted) {   // no settings screen to remove it from, so here
+                new AlertDialog.Builder(Launcher.this, LauncherSaves.DIALOG).setTitle(g.name)
+                    .setMessage("This app has no host for it yet (libdmhost_" + g.id + ".so): update the app from your computer to play it, or remove the game from this phone.")
+                    .setPositiveButton("OK", null)
+                    .setNeutralButton("Remove…", new DialogInterface.OnClickListener() { public void onClick(DialogInterface d, int w) { remove.ask(g); } }).show();
+                return;
+            }
             showSettings(g); } });
         return t;
     }
@@ -307,6 +314,7 @@ public class Launcher extends Activity {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, px(44)); lp.topMargin = px(12);
         list.addView(reset, lp);
         list.addView(saves.rows(game));
+        list.addView(remove.rows(game));
     }
 
     View row(final Setting s) {
@@ -488,7 +496,7 @@ public class Launcher extends Activity {
     String migrate() {
         File[] ds = games.listFiles(); if (ds == null) return null;
         for (File d : ds) {
-            File mark = new File(d, "legacy_save"); if (!mark.exists()) continue;
+            File mark = new File(d, "legacy_save"); if (!mark.exists() || !Removal.ID.matcher(d.getName()).matches()) continue;   // not a folder being removed
             String id = d.getName().toUpperCase(Locale.ROOT);
             File old = new File(internal, "save"), dst = new File(internal, "saves/" + id);
             if (!old.isDirectory() || hasFiles(dst)) { mark.renameTo(new File(d, "legacy_save.done")); continue; }   // nothing to copy, or saves/<id> holds a save already

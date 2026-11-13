@@ -153,6 +153,11 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   ([Saves](#saves)), and the desktop app backs them all up to the computer. The log is
   `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`). The start before's is kept as `log.prev.txt`, so a game the system closed
   for memory and that opened again still leaves its last log.
+- **Removing a game:** **Remove game**, at the bottom of the game's screen, deletes the game from the phone after saying how much space that frees. It deletes the
+  game's folder (`files/games/<title ID>`: code, shaders, game data), its pipeline cache, and its game data on the SD card when it was installed there
+  ([the game data on an SD card](#the-game-data-on-an-sd-card)). Its save stays, and so do its settings, so installing the game again picks up where you left off.
+  **Export save first** in the prompt makes a copy elsewhere. A running game is closed first, after asking. A game whose host the installed app lacks offers
+  **Remove…** when you tap it. It can't be undone: to play the game again, install it again from your computer. A game app is removed by uninstalling it ([Game apps](#game-apps)).
 
 ## Saves
 
@@ -204,6 +209,9 @@ A game whose data is more than an APK holds (2 GB) gets it beside the APK, as `<
 once when the game first starts. On the command line, `--romfs-beside` does this for a smaller game too, so the APK stays small and the data can live on the SD card
 (DLC that fits stays in the APK). An XAPK carries the data as the app's OBB file instead, for an XAPK installer app. A game app is for your own devices only: it
 carries the game, so never share it. How it is packed: [A game app](../dm/android/README.md#a-game-app).
+
+To remove a game app, uninstall it as you would any app (long-press its icon, then **Uninstall**, or **Settings › Apps**). That deletes its save too: a game app keeps
+its save in its own storage, and has no screen to export it. A `<name>.romfs` file you copied over stays where you put it, for you to delete.
 
 ## Another Vulkan driver (Turnip)
 
@@ -283,8 +291,8 @@ with no storage permission. The rest of the game (code, shaders) stays on the ph
   passes `--romfs-beside` for an APK. If the card is out when you install, DroidPlay says so and doesn't start. Going back to Phone storage copies the data back, as above.
 - **When the image isn't there** (the card taken out, or the image not copied yet), the game doesn't start, and the log says so: `[RED] the game's RomFS … is missing`.
 - **Going back:** an install without `--romfs-dir` copies the image to the phone's storage again and leaves the card's copy, which you delete yourself. So does an
-  install from DroidPlay on a Mac, which doesn't pass the option yet. Removing the game leaves the card's copy too; uninstalling the app deletes
-  it, with the app's other folders.
+  install from DroidPlay on a Mac, which doesn't pass the option yet. **Remove game** on the phone deletes the card's copy with the rest of the game; removing
+  the game from the computer (**Manage › Remove from the phone…**) leaves it, for you to delete. Uninstalling the app deletes it, with the app's other folders.
 
 ## Free space
 
