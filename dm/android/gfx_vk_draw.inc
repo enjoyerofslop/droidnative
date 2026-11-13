@@ -2098,20 +2098,24 @@ static void pipe_prep(const pipe_key *k) {   // under the lock: what pipe_make w
 // the game draws every frame. A target drawn for the first time (an environment map made once at a scene's load) builds at once, as before: its one drawing would be lost
 // for good. So do a linear render target's (the CPU reads it back: Super Mario Odyssey's fog solver feeds what it reads into the next step) and transform feedback (later draws
 // read what it writes). The keys' shaders and pass are made under the replay's lock as pipe_get does (pipe_prep), the compile without it, as the start-up list does
-// (prewarm_thread). DM_VK_ASYNC_PIPE=0 (env.txt): every pipeline built at once, on the replay thread
+// (prewarm_thread). DM_VK_ASYNC_PIPE=0 (env.txt): every pipeline built at once, on the replay thread. A draw that re-draws geometry whose depth an earlier pass laid down
+// (depth EQUAL, not written) builds at once too: left out, the target's clear colour shows through that depth (apipe_rule.h; DM_VK_ASYNC_EQUAL=1 leaves it out, as before).
+// DM_VK_ASYNC_DELAY_MS=<n> (diagnostic): each background build waits that long first, which shows what a slow driver leaves out
 enum { APQ = 256 };
 #define APQ_PENDING ((uintptr_t)1)   // a queued pipeline's pl until its thread fills it in (or, the build failed, clears it): never a layout of its own
 typedef struct { pipe_key k; pipe_t *pp; vshader *kern; } apq_t;   // kern: a task / mesh kernel's compute pipeline instead (gfx_vk_meshemu.inc memu_cpipe_bg)
 static void memu_cpipe_bg(vshader *s);
 static apq_t g_apq[APQ]; static unsigned g_apq_h, g_apq_t; static int g_apq_on;   // under g_apq_mu: the queue (head, tail), its threads started
 static pthread_mutex_t g_apq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_apq_cv = PTHREAD_COND_INITIALIZER;
-static uint64_t g_apq_queued, g_apq_built, g_apq_failed, g_apq_left;   // under g_bk: pipelines queued, built, failed; draws left out waiting for one
+static uint64_t g_apq_queued, g_apq_built, g_apq_failed, g_apq_left, g_apq_redraw;   // under g_bk: pipelines queued, built, failed; draws left out waiting for one; pipelines of depth-equal re-draws built at once
 static void *apipe_thread(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-apipe");
     for (;;) {
         pthread_mutex_lock(&g_apq_mu); while (g_apq_h == g_apq_t) pthread_cond_wait(&g_apq_cv, &g_apq_mu);
         apq_t q = g_apq[g_apq_t % APQ]; g_apq_t++; pthread_mutex_unlock(&g_apq_mu);
         if (q.kern) { memu_cpipe_bg(q.kern); continue; }
+        { static int d = -1; if (d < 0) { const char *e = getenv("DM_VK_ASYNC_DELAY_MS"); d = e && atoi(e) > 0 ? atoi(e) : 0; if (d) LOG("[vk] DM_VK_ASYNC_DELAY_MS=%d: each background pipeline build waits that long first (diagnostic)", d); }
+          if (d) usleep((useconds_t)d * 1000); }
         pipe_t tmp; memset(&tmp, 0, sizeof tmp); uint32_t ns = 0, nva = 0; VkPrimitiveTopology tp = 0; uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
         VkResult pr = pipe_make(&q.k, &tmp, &ns, &nva, &tp);
         double ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6;
@@ -2130,12 +2134,18 @@ static int apipe_any(void) {   // DM_VK_ASYNC_PIPE: pipelines may be built in th
     static int on = -1; if (on < 0) { const char *e = getenv("DM_VK_ASYNC_PIPE"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_VK_ASYNC_PIPE=0: pipelines met for the first time are built at once, on the replay thread"); }
     return on;
 }
-static int apipe_ok(const pipe_key *k) {   // under g_bk, right after rp_prepare (P is the draw's pass): whether a new pipeline may be built in the background
-    if (!apipe_any() || k->tf) return 0;
-    int n = 0;
-    for (int i = 0; i < 8; i++) { const vtex *v = P.cv[i]; if (!v) continue; n++; if (v->rt_runs < 3 || (v->desc.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) return 0; }
-    if (P.dv) { n++; if (P.dv->rt_runs < 3) return 0; }
-    return n > 0;
+static int apipe_redraw_too(void) {   // DM_VK_ASYNC_EQUAL=1: depth-equal re-draws are left out as well (the rule before droidplay-core#444, for an A/B)
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_ASYNC_EQUAL"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_ASYNC_EQUAL=1: draws that test depth EQUAL without writing it are left out while their pipeline builds, as before"); }
+    return v;
+}
+static int apipe_ok(const pipe_key *k) {   // under g_bk, right after rp_prepare (P is the draw's pass): whether a new pipeline may be built in the background (apipe_rule.h)
+    if (!apipe_any()) return 0;
+    apr_target t[9]; int n = 0;
+    for (int i = 0; i < 8; i++) { const vtex *v = P.cv[i]; if (v) t[n++] = (apr_target){v->rt_runs > 3 ? 3 : (int)v->rt_runs, !!(v->desc.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)}; }
+    if (P.dv) t[n++] = (apr_target){P.dv->rt_runs > 3 ? 3 : (int)P.dv->rt_runs, 0};
+    if (apr_leave_out(k->tf, t, n, k->ds.dt, k->ds.dw, k->ds.df, apipe_redraw_too())) return 1;
+    if (apr_leave_out(k->tf, t, n, k->ds.dt, k->ds.dw, k->ds.df, 1)) g_apq_redraw++;   // would have been left out before: a depth-equal re-draw built at once
+    return 0;
 }
 static int apipe_queue(const pipe_key *k, pipe_t *pp, vshader *kern) {   // under g_bk: 1 = queued (pp stays without a pipeline until a thread has built it; kern: that kernel's pipeline instead)
     (void)pcache();   // made here, under the lock: pcache makes it on first use, which a build outside the lock must not race

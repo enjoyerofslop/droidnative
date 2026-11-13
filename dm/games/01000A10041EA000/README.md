@@ -41,7 +41,14 @@ The NPDM declares 8 MB of system resource and `main` never sets a heap: the game
 - **The report (droidplay-core#444):** inside Helgen Keep the lights flicker, the room switching between bright and dark, on an AYN Thor Pro (Adreno 740) with Qualcomm's driver and with PurpleVK; occlusion queries off (`DM_VK_OCCLUSION=0`) change nothing. seedds/nxnative PR #444 found the cause on 1.0.12: [Raw depth/stencil storage written as a buffer](../../../docs/reference/rendering.md#raw-depthstencil-storage-written-as-a-buffer).
 - **The same code in 1.1.404:** the scene initializer (`main+0xbf7690`) switches on its mode at `+0xbf7cd8` with 1.0.12's table (1.0.12: `+0xb551c0`): modes 0 and 6 clear depth and stencil, 2 the stencil, 1 the depth, and 7 the depth and then dispatches `a76fe13a8630d619` (main's FXP record at `main@0x20d0a60`) with storage buffer 0 laid over the 1600x900 D24S8 target (6,553,600 bytes). The interior's shadow mask (`f83614ab6954bec4`) takes its shadow class from the stencil's upper three bits, which the dispatch writes as 0 into the buffer only; the image's stencil keeps what the interface left there (255 on 1.0.12, class 7: secondary-shadow data the scene does not have).
 - **Cut (current):** `main+0xbf7d5c` `mov w3, wzr` → `neg w3, w21`: w21 is 1 in mode 7 and 0 in mode 1, so mode 7's depth clear also clears the stencil to 0 (mask 0xffffffff) and mode 1 stays depth-only. On the Mac the pass dump shows it: mode 7's clear was `stencil_mask=0` with the stencil plane left unwritten before the dispatch, and is `stencil_mask=0xffffffff` with the plane cleared and stored with the cut. Mode 7 runs every frame outdoors too (the execution yard, the tower); the shadow mask is not drawn there, and screenshots of the same outdoor stretch show the same lighting and shadows with and without the cut.
-- **Not confirmed:** the keep's flicker itself. Reaching it means following Hadvar through Helgen under the dragon, which was not driven here, so the flicker was not seen before or after the cut on any device. PR #444's user confirmed the same cut on 1.0.12 on an iPhone.
+- **Confirmed:** the tester saw no flicker in the keep with the cut (droidplay-core#444, AYN Thor Pro). PR #444's user confirmed the same cut on 1.0.12 on an iPhone. The keep's first room, reached on the Mac by following Hadvar, runs mode 7 too and draws no shadow mask; the lit rooms further in were not reached here.
+- **The lower bits:** the dispatch writes a 4x4 ordered-dither matrix into the stencil's lower five bits ([Raw depth/stencil storage written as a buffer](../../../docs/reference/rendering.md#raw-depthstencil-storage-written-as-a-buffer)), which the cut leaves 0; no draw of the frames dumped tests or reads them.
+
+## First-person draws left out while their pipeline builds
+
+- **What:** the first-person model's colour draw tests depth `EQUAL` against a copy of its own depth-only draw, and the world's colour passes test `EQUAL` against that depth too, so where the model stands nothing else draws. On Android a draw whose new pipeline is still building in the background is left out until it exists; for this draw that shows the scene target's clear colour, (59, 77, 74) through the tone mapping, for those frames, not a frame-late model. Leaving out its colour draw on the Mac (`DM_NVN_SKIP_FS=af549618df61ad30`) gives the same colour.
+- **Seen:** on an Ayn Odin 2 with an empty pipeline cache and slow background builds forced (`DM_VK_ASYNC_DELAY_MS=1500`), the old rule left the first-person view in the clear colour for seconds after a load. Such draws now build their pipeline at once ([Draws left out while their pipeline builds, over a depth pre-pass](../../../docs/reference/rendering.md#draws-left-out-while-their-pipeline-builds-over-a-depth-pre-pass-android)): the first two frames after that load took 447 and 92 ms, against 144 and 112.
+- **Not the report's flat model:** droidplay-core#444's flat hands and weapons stayed with background builds off (`DM_VK_ASYNC_PIPE=0`) on the tester's phone. That was Qualcomm's stale low-resolution depth after the copy ([below](#the-first-person-model-drawn-in-one-flat-colour-resolved)).
 
 ## The first-person model drawn in one flat colour (resolved)
 
@@ -90,13 +97,14 @@ On an M5 Max, a new game from the title through the cart ride, Helgen, character
 - [A linear texture whose stride is shorter than its rows](../../../docs/reference/nvn-objects.md#a-linear-texture-whose-stride-is-shorter-than-its-rows).
 - [Raw depth/stencil storage written as a buffer](../../../docs/reference/rendering.md#raw-depthstencil-storage-written-as-a-buffer).
 - [A depth image a copy wrote keeps a stale low-resolution depth on Qualcomm's Adreno driver](../../../docs/reference/rendering.md#a-depth-image-a-copy-wrote-keeps-a-stale-low-resolution-depth-on-qualcomms-adreno-driver-android).
+- [Draws left out while their pipeline builds, over a depth pre-pass](../../../docs/reference/rendering.md#draws-left-out-while-their-pipeline-builds-over-a-depth-pre-pass-android).
 
 ## Open
 
 - **`[RED] stage 1 cb11 has no uniform buffer bound`** on the Mac, once, when the opening loads, and Android's `shader e8910903259b956c reads uniform slot 11` (PR #444's 1.0.12 note has it too). Nothing missing was seen.
 - **The main menu's "Start a new game?" box** draws as two vertical lines the height of the screen beside its text, on the Mac and on the S25 alike; not compared with the Switch.
 - **The 1280x720 texture of 3840-byte rows** (made at "Start a new game?" → Yes) is uploaded as the GPU would read it; what it holds and where it shows is not known.
-- **Helgen Keep's flicker after the cut:** not seen in the keep on any device yet ([Helgen Keep's lighting](#helgen-keeps-lighting)).
+- **Helgen Keep's flicker after the cut:** fixed on the tester's AYN Thor Pro (droidplay-core#444); not seen in the keep's lit rooms on our devices ([Helgen Keep's lighting](#helgen-keeps-lighting)).
 - **The unlocks before `SignalLightEvent`:** see [Unlocks before SignalLightEvent](#unlocks-before-signallightevent-open).
 - **The audio pool cut on a device:** not yet run on Android or played by hand at the report's doors and knockdowns ([The audio pool crashes](#the-audio-pool-crashes-resolved)).
 - **The iPhone:** the regions need more than its alias region holds (see [Memory](#memory)).
