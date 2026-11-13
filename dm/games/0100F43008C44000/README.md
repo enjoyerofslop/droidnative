@@ -120,7 +120,8 @@ First run on Android, 2026-11-12. The cartridge's base game 1.0.0 (v0, the Switc
   - **Sound:** 178 underruns in 135 reports at that frame rate.
   - The same two red lines.
 - **A downloaded save** offered for deeper testing turned out to be a Pokémon Legends: Arceus save, so it wasn't used.
-- **Not Playable yet:** the stretch has to reach the first battle, and the battles are real-time, so it likely needs a person.
+- **Playable – major issues** (2026-11-13): this run shows everything that tier asks: played by hand over adb from a new game, at least half the target frame rate, a save made on Android loaded by Continue after a cold start, and sound checked. The first battle is asked only by Playable – minor issues.
+- **Not yet Playable – minor issues:** the stretch has to reach the first battle, and the battles are real-time, so it likely needs a person.
 - **Update 2.0.2 (v393216, the registered build), the same day:** packed from the cartridge with the update beside it, from `main` at `52941f97`.
   - **The build:** the registered profile, no derived one. The split found 28,603 shaders through the Mac host's Oodle, as above. 5,587 new ones translated (23,016 were 1.0.0's already), none failed. Installed through DroidPlay again.
   - **Ayn Odin 2:** the 1.0.0 save made on Android loads on 2.0.2, onto the Gare de Lumiose platform.
