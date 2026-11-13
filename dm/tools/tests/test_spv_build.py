@@ -379,6 +379,25 @@ class Progress(Harness):   # 'progress: <done>/<total>', which build_android_fro
         for n in ('a.spv', 'b.spv', 'b.reader.spv', 'a.res.json'): (d / n).write_bytes(b'')
         self.assertEqual(sb.translated(d), 2); self.assertEqual(sb.translated(self.tmp / 'missing'), 0)
 
+    def test_the_final_pass_is_a_step_with_its_own_count(self):   # #437: after 100 % the post-pass ran with nothing said
+        lines = [ln for ln in self.build().splitlines() if ln.startswith(('progress: ', 'step: '))]
+        at = lines.index('step: final pass')
+        self.assertEqual(lines[at - 1], f'progress: {self.N}/{self.N}')   # the first pass ended
+        self.assertEqual(lines[at + 1:], [f'progress: 0/{self.N}', f'progress: {self.N}/{self.N}'])   # the post-pass's res.json files, counted
+
+    def test_written_counts_the_res_json_files_made_since_the_start(self):   # an older run's res.json is older; one the post-pass hasn't reached yet is missing
+        d = self.tmp / 'out'; d.mkdir()
+        for k in ('old', 'new'): (d / f'{k}.res.json').write_text('{}')
+        os.utime(d / 'old.res.json', (1_000_000, 1_000_000))
+        self.assertEqual(sb.written(d, ['old', 'new', 'missing'], time.time() - 60), 1)
+
+    def test_counting_says_the_start_and_the_end(self):
+        n, buf = [0], io.StringIO()
+        with mock.patch.object(sb, 'PROGRESS_SECS', 0.01), contextlib.redirect_stdout(buf):
+            with sb.counting(3, lambda: n[0]): n[0] = 3; time.sleep(0.1)
+        c = self.counts(buf.getvalue())
+        self.assertEqual((c[0], c[-1]), ('progress: 0/3', 'progress: 3/3'))
+
     def test_the_watch_says_a_count_that_moved_once(self):
         d = self.tmp / 'tout'; d.mkdir(); (d / 'a.spv').write_bytes(b'')
         stop, buf = threading.Event(), io.StringIO()

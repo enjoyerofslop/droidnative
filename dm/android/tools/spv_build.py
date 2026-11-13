@@ -14,7 +14,7 @@
 # A run that had shaders to translate and translated none of them stops (none_made): the build must not pack the game without them.
 # Usage: spv_build.py <package dir> <out dir> --xlate <dmsh_xlate.dll or executable> [--facts <shader_facts.tsv>] [-j N]
 import spv_android as sa   # beside this file
-import argparse, concurrent.futures as cf, errno, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile, threading
+import argparse, concurrent.futures as cf, contextlib, errno, hashlib, json, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -141,11 +141,14 @@ def int_input_jobs(keys, jobs, tout, j):
     if sys.platform == 'win32': j = min(j, 61)   # ProcessPoolExecutor's limit on Windows (WaitForMultipleObjects); -j defaults to os.cpu_count()
     n = max(1, min(j, -(-len(vs) // CHUNK)))
     ex = cf.ProcessPoolExecutor(n, mp_context=multiprocessing.get_context('spawn')) if n > 1 else None
-    paths, again = [str(tout / f'{k}.spv') for k in vs], []
+    paths, again, seen = [str(tout / f'{k}.spv') for k in vs], [], [0]
+    if vs: step('checking vertex shaders')
     try:
-        for k, found in zip(vs, ex.map(int_inputs_of, paths, chunksize=CHUNK) if ex else map(int_inputs_of, paths)):
-            extra = {l: t for l, t in found.items() if l not in jobs[k]['attr']}
-            if extra: jobs[k]['attr'].update(extra); again.append(k)
+        with counting(len(vs), lambda: seen[0]) if vs else contextlib.nullcontext():
+            for k, found in zip(vs, ex.map(int_inputs_of, paths, chunksize=CHUNK) if ex else map(int_inputs_of, paths)):
+                extra = {l: t for l, t in found.items() if l not in jobs[k]['attr']}
+                if extra: jobs[k]['attr'].update(extra); again.append(k)
+                seen[0] += 1
     except BaseException:
         if ex: ex.shutdown(cancel_futures=True)   # a shader that stops it stops it at once, not after every other job
         raise
@@ -250,11 +253,35 @@ def translated(tout):   # the shaders the translator has finished so far in this
     except OSError: return 0
 
 
-def progress(tout, total, stop):   # 'progress: <done>/<total>' every PROGRESS_SECS while the first pass runs, when the count moved (droidplay-core#307: hours with nothing to show)
+def progress(tout, total, stop, count=None):   # 'progress: <done>/<total>' every PROGRESS_SECS while the first pass runs, when the count moved (droidplay-core#307: hours with nothing to show)
     last = -1
     while not stop.wait(PROGRESS_SECS):
-        n = translated(tout)
+        n = count() if count else translated(tout)
         if n != last: print(f'progress: {n}/{total}', flush=True); last = n
+
+
+def step(name):   # 'step: <name>', which build_android_from_nsp.py shows as the step of the translation stage, its count starting again
+    print(f'step: {name}', flush=True)
+
+
+@contextlib.contextmanager
+def counting(total, count):
+    """'progress: <done>/<total>' at the start, from count() every PROGRESS_SECS while the block runs, and at its end: the steps after the first pass, which said nothing,
+    so a build showed 100 % for the rest of the stage (droidplay-core#437: Pokémon Legends: Z-A's 28,603 shaders sat at 100 % with only the clock moving)"""
+    print(f'progress: 0/{total}', flush=True)
+    stop = threading.Event(); watch = threading.Thread(target=progress, args=(None, total, stop, count), daemon=True); watch.start()
+    try: yield
+    finally:
+        stop.set(); watch.join()
+    print(f'progress: {count()}/{total}', flush=True)
+
+
+def written(out, keys, since):   # the shaders whose res.json the post-pass has written in out since it started (res.json is written last; an older run's is older)
+    n = 0
+    for k in keys:
+        try: n += os.stat(out / f'{k}.res.json').st_mtime >= since
+        except OSError: pass
+    return n
 
 
 def main():
@@ -320,8 +347,9 @@ def translate(w):
     stop_if_full(failed, tout, 'first pass')
     again = int_input_jobs(keys, jobs, tout, a.j)
     if again:
-        with cf.ThreadPoolExecutor(a.j) as ex:
-            for r in ex.map(run, [c for c in [again[i::a.j] for i in range(a.j)] if c]): take(r, failed, said, other, 'integer-input retranslation: ', 130)
+        step('translating vertex shaders again'); cs, redone = [c for c in [again[i::a.j] for i in range(a.j)] if c], [0]
+        with cf.ThreadPoolExecutor(a.j) as ex, counting(len(again), lambda: redone[0]):
+            for c, r in zip(cs, ex.map(run, cs)): take(r, failed, said, other, 'integer-input retranslation: ', 130); redone[0] += len(c)
         print(f'spv_build: {len(again)} vertex shaders translated again with integer inputs')
         stop_if_full(failed, tout, 'integer-input pass')   # it rewrites good .spv files in place, so a disk that fills here cuts them short
     done = sorted(p.name[:-4] for p in tout.glob('*.spv') if not p.name.endswith('.reader.spv'))
@@ -338,7 +366,10 @@ def translate(w):
     for k, why in sorted(skipped.items()): print(f'[RED] {k}: {why}')
     for k, why in sorted(failed.items()): print(f'[RED] {k}: {why}')   # before the post-pass, so a post-pass that stops doesn't lose them (#307's log had none of them)
     sys.stdout.flush()   # the post-pass writes to the same log
-    if done: subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
+    if done:
+        step('final pass'); since = time.time() - 2   # exFAT keeps modification times to 2 s
+        with counting(len(done), lambda: written(out, done, since)):
+            subprocess.run([sys.executable, str(HERE / 'spv_android.py'), '-j', str(a.j), str(tout), str(out)], check=True)   # every key in tout (this run's): no list on the command line, which Windows limits to 32 K characters; as many processes as the translation
     lost = [k for k in done if not (out / f'{k}.res.json').exists()]   # outputs the post-pass couldn't read (its [RED] lines): res.json, written last, makes a shader translated
     for k in lost: failed.setdefault(k, "the post-pass couldn't read its output")
     made = len(done) - len(lost)

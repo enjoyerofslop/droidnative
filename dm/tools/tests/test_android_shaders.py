@@ -37,9 +37,10 @@ class BuildShaders(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()); self.work = self.tmp / 'work'; self.logs = self.work / 'logs'; self.logs.mkdir(parents=True)
         self.registered = Profile(REPO / 'dm/games' / GID)
         self.provisional = Profile(self.tmp / 'profile' / GID)
-        self.ran = []; self.translation_stops = False; self.log_text = 'IndexError: list index out of range\n'
+        self.ran = []; self.translation_stops = False; self.log_text = 'IndexError: list index out of range\n'; self.printed = []
         def run(cmd, log, env=None, on_line=None):   # spv_build.py: its output folder and its last line, or what bi.run raises for its exit code
             self.ran.append([str(c) for c in cmd]); (self.work / 'spv').mkdir(exist_ok=True)
+            for ln in self.printed: on_line and on_line(ln)   # what spv_build.py prints as it runs, line by line
             if self.translation_stops:   # the post-pass stopped at an empty .spv after a few shaders were done (Pokopia's log)
                 (self.work / 'spv' / '0123456789abcdef.spv').write_bytes(b'\3\2\x23\7'); Path(log).write_text(self.log_text)
                 raise ba.BuildError(f'spv_build.py exit code 1 (full output: {log})')
@@ -141,6 +142,15 @@ class BuildShaders(unittest.TestCase):
         msg = str(cm.exception)
         self.assertIn(line[6:], msg); self.assertIn('The game is not packed: its shaders were not translated.', msg)
         self.assertNotIn('Shader translation failed', msg); self.assertNotIn('ran out of disk space', msg)
+
+    def test_the_steps_after_the_first_pass_are_shown_with_their_counts(self):   # #437: Z-A's 28,603 shaders sat at 100 % for an hour with nothing said
+        self.printed = ['progress: 0/4', 'progress: 4/4', 'step: checking vertex shaders', 'progress: 0/2', 'progress: 2/2', 'step: final pass', 'progress: 0/4',
+                        'spv_build: 4 translated']
+        self.build(self.registered, lambda *a, **k: None)
+        sets = [c.kwargs for c in ba.bi.PROG.set.call_args_list]
+        self.assertEqual(sets, [{'done': 0, 'total': 4, 'unit': 'shaders'}, {'done': 4, 'total': 4, 'unit': 'shaders'}, {'step': 'checking vertex shaders'},
+                                {'done': 0, 'total': 2, 'unit': 'shaders'}, {'done': 2, 'total': 2, 'unit': 'shaders'}, {'step': 'final pass'},
+                                {'done': 0, 'total': 4, 'unit': 'shaders'}])
 
     def test_a_translation_with_red_lines_still_packs(self):   # a shader the translator can't handle is a line in the log, and spv_build.py exits 0
         (out, g), _ = self.build(self.registered, lambda *a, **k: None)

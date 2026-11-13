@@ -342,6 +342,7 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
     out = work / 'spv'
     def counted(ln):   # spv_build.py's 'progress: <done>/<total>': the shaders left to translate in this run (droidplay-core#307, a translation of hours showed no count)
         if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): bi.PROG.set(done=int(m[1]), total=int(m[2]), unit='shaders')
+        elif ln.startswith('step: '): bi.PROG.set(step=ln[6:].strip())   # the steps after the first pass, each counted again (droidplay-core#437: 100 % for an hour)
     try: bi.run([sys.executable, REPO / 'dm/android/tools/spv_build.py', sh / 'pkg', out, '--xlate', REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.dll',
                  '--facts', g.table('shader_facts.tsv')], logs / 'spv_build.log', env=env, on_line=counted)
     except BuildError as e:
