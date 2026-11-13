@@ -94,7 +94,14 @@ def main():
         src = os.path.join(HERE, '..', 'java'); cls = os.path.join(d, 'classes'); os.makedirs(cls)
         javas = [os.path.join(r, f) for r, _, fs in os.walk(src) for f in fs if f.endswith('.java')]
         run('javac', '-source', '8', '-target', '8', '-Xlint:-options', '-encoding', 'UTF-8', '-bootclasspath', jar, '-d', cls, *javas)
-        run(os.path.join(bt, 'd8' + bat), '--lib', jar, '--min-api', '29', '--output', d, *[os.path.join(r, f) for r, _, fs in os.walk(cls) for f in fs if f.endswith('.class')])
+        # d8 gets the classes as one jar: on Windows d8.bat runs through cmd.exe, whose 8,191-character line the class files' paths passed in 0.8.7 (89 classes under
+        # a temporary folder), so every APK build there failed (droidplay-core issue #462)
+        cjar = os.path.join(d, 'classes.jar')
+        with zipfile.ZipFile(cjar, 'w') as z:
+            for r, _, fs in os.walk(cls):
+                for f in sorted(fs):
+                    if f.endswith('.class'): z.write(os.path.join(r, f), os.path.relpath(os.path.join(r, f), cls).replace(os.sep, '/'))
+        run(os.path.join(bt, 'd8' + bat), '--lib', jar, '--min-api', '29', '--output', d, cjar)
         # a game app's ZIP without ZIP64 (allowZip64=False: past 2 GiB zipfile raises instead of writing records apksigner can't read). What was being written when it
         # did is named: the message used to advise packing the RomFS beside the APK, which a game whose other files passed 2 GiB already did (droidplay-core issue #169)
         writing = ['', 0, 0, 0]
