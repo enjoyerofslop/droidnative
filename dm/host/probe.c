@@ -22,7 +22,7 @@ void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 // The trampoline borrows x16: place probes only at function entries or at points where x16 is dead; the original instruction must not be PC-relative (adr/adrp/b/bl/ldr literal/cbz...).
 #define MAX_PROBE 16
 typedef void (*probe_fn)(ucontext_t *uc);
-static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
+static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; long sleep_us; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
 
 // !xN: treat xN as a sead::ExpHeap and print its free and used blocks (block size at block +0x18, alignment pad at +0x12). Settings (docs/agents/05-debugging.md):
 // DM_PROBE_HEAP=<name>,<start>,<size>,<free list>,<used list> layout by sead version (hex; node offset at list +0x14), default SMBW 0,28,30,b0,c8 (no name), BotW 28,38,40,e0,f8;
@@ -111,6 +111,7 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
     uint64_t pc = DM_SS(uc).__pc;
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
         if (g_probe[i].fn) { g_probe[i].hits++; g_probe[i].fn(uc); DM_SS(uc).__pc = (uint64_t)g_probe[i].slot; return 1; }
+        if (g_probe[i].sleep_us) { struct timespec ts = { g_probe[i].sleep_us / 1000000, g_probe[i].sleep_us % 1000000 * 1000 }; g_probe[i].hits++; nanosleep(&ts, NULL); DM_SS(uc).__pc = (uint64_t)g_probe[i].slot; return 1; }   // ~us: widen a race window
         uint64_t frame = dm_guest_frame();
         if (g_probe_every && frame >= g_probe_frame_first && frame <= g_probe_frame_last && ++g_probe[i].seen % g_probe_every) { DM_SS(uc).__pc = (uint64_t)g_probe[i].slot; return 1; }
         if (frame < g_probe_frame_first || frame > g_probe_frame_last || (g_probe_limit && g_probe[i].hits >= g_probe_limit)) {
@@ -409,6 +410,7 @@ void probe_install(void) {
             char *qm = strchr(c + 1, '?'), *bang = strchr(c + 1, '!');
             probe_add(m, strtoull(c + 1, 0, 16), dump, NULL);
             g_probe[g_nprobe - 1].dpost = post;
+            { char *tl = strchr(c + 1, '~'); if (tl) g_probe[g_nprobe - 1].sleep_us = strtol(tl + 1, 0, 10); }
             if (bang && bang[1] == 'x') { g_probe[g_nprobe - 1].hreg = (int)strtol(bang + 2, 0, 10) & 31; probe_heapcfg(); }
             if (qm) {   // Filter: ?x0=706c400000 or ?[x0+38]=781548 (hex)
                 const char *q = qm + 1; int br = *q == '[';

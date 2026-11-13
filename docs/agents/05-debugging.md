@@ -50,6 +50,7 @@ Per-probe suffixes, in this order:
 | `@off`, `@*off`, `@xN+off`, `@*xN+off`, `@*xN+off+add` | Print 16 bytes at x0+off (or xN+off); `*` dereferences that address first, and `+add` moves on that many bytes from the pointer read (`@*x0+48+8` on an `al::LiveActor` is its position, `al::getTrans`) |
 | `?xN=val`, `?[xN+off]=val` | Only report hits where the register (or the 64-bit word at xN+off) equals `val` (hex); others pass silently. E.g. `main:4743c0?[x0+30]=781548` = only allocations into the heap whose size field is 0x781548 |
 | `!xN` | Treat xN as a `sead::ExpHeap` and print its free and used blocks (offset+size, `p` + alignment pad) |
+| `~us` | Print nothing; sleep that many microseconds, then run on: widens a race window between a read and its write-back |
 
 The `!xN` heap walk takes the layout of the game's sead version from `DM_PROBE_HEAP=<name>,<start>,<size>,<free list>,<used list>` (hex offsets in the heap object; default Mario's `0,28,30,b0,c8`, Breath of the Wild's `28,38,40,e0,f8`; find them in the heap's constructor and `tryAlloc`). `DM_PROBE_HEAPNAME=<text>` reports only hits whose heap name contains the text (resource heaps are named after their file), `DM_PROBE_HEAPWORDS=1` adds the first two words of each used block (a vtable names the object), `DM_PROBE_HEAPFRAME=<vtable offset in main>` prints heaps of that class as frame heaps (head, tail, free), and `DM_PROBE_HEAPRAW=1` dumps the heap object's first 0x130 bytes, to find another class's fields.
 
@@ -66,7 +67,7 @@ An exclusive or atomic store (`STXR`, `STLR`, `CAS`, `SWP`, `LD<op>`) that reach
 
 **A heap block overwritten by something else (Unreal):** the crashes move around between runs, in allocator code or on pointers that look fine one run and bogus the next. Unreal's own `-purgatorymallocproxy` (on the game's command line: `DM_ROMFS_OVERLAY` on a folder with `UE4CommandLine.txt`, the game's line with the switch added) fills freed blocks with 0xDC, keeps them back for a few frames and checks them before the real free; a probe on the branch that reports a modified byte gives the block, the offset and the value. Making the parked blocks read-only (a temporary probe handler in `probe.c` on the proxy's park and release points, `mprotect` of the block's whole 16 KB pages) then faults the stray store itself, with its backtrace. Yoshi's Crafted World: a texture mip copy that wrote past its upload buffer ([Sparse textures of 8- and 16-byte blocks](../reference/rendering.md#sparse-textures-of-8--and-16-byte-blocks-blocks-at-most-8-gobs-high)), 3 of 3 runs.
 
-A probe's backtrace reads each frame with `vm_read_overwrite`: code built without frame pointers keeps data in x29, and the walk used to fault in the host on such a value (x29 = 0x430 at `main+0x38921c` in the same game).
+Probe backtraces read frames with `vm_read_overwrite`: data in x29 (no frame pointers) cannot fault the host.
 
 Use it when lldb is unavailable: after macOS revokes the debugger authorization (`DevToolsSecurity -status` says developer mode is disabled), `lldb` launches hang waiting for a GUI approval prompt. `sudo DevToolsSecurity -enable` (run by the user) restores it.
 
