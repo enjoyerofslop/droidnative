@@ -1494,12 +1494,15 @@ static uint32_t rt_layers(const vtex *v, const view_t *cv, uint32_t lv, uint32_t
 // slot 3; with slot 0 filled it runs. So it is on for every Adreno on Qualcomm's driver (its driver ID, g_qcom_driver; not Turnip, however a build names it). One RGBA8 image serves every
 // such pass (an attachment may be larger than the framebuffer), made again larger when a pass is larger; the earlier ones are kept, as cached framebuffers name their views.
 // Its sides are rounded up to 512: Mario Kart 8 Deluxe's dynamic resolution grows that pass a few texels at a time (480x270, 484x272, 493x277...), which used up the 8
-// sizes in seconds and left a larger pass's slot 0 empty again. DM_VK_SLOT0_FILL: 1 on any GPU, 0 off
-static uint64_t g_slot0_fills;
+// sizes in seconds and left a larger pass's slot 0 empty again. Divinity: Original Sin 2 crashed the 730 the same way (address 4 in vkCmdEndRenderPass) 8 s into every
+// start, on a pass with one colour slot, empty, and a D32_S8 target: a one-draw depth-stencil pass that writes no colour. A pass whose colour slots are all empty is made with
+// none (g_slot0_none): a depth-only pass, which the driver runs. A scratch target in slot 0 ran it too, but would be loaded and stored in each such pass (28 a frame at
+// Divinity's title), and layered or multisample ones would keep slot 0 empty. DM_VK_SLOT0_FILL: 1 on any GPU, 0 off (both)
+static uint64_t g_slot0_fills, g_slot0_none;
 static int slot0_fill_on(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_VK_SLOT0_FILL"); v = e ? *e == '1' : g_qcom_driver;
-                 LOG("[vk] a render pass with colour slot 0 empty below a used slot: %s", v ? "a scratch target in slot 0 (DM_VK_SLOT0_FILL)" : "slot 0 left empty"); }
+                 LOG("[vk] a render pass with colour slot 0 empty: %s", v ? "a scratch target in slot 0 below a used slot, no colour slot when every one is empty (DM_VK_SLOT0_FILL)" : "slot 0 left empty"); }
     return v;
 }
 static vtex *slot0_scratch(uint32_t w, uint32_t h) {
@@ -1599,6 +1602,10 @@ static int rp_prepare_(int layered) {
     if (!nv || w == UINT32_MAX) { RED_ONCE(84, "render targets without an image"); lsnap_drop_all(); return 0; }
     if (layers == UINT32_MAX) layers = 1;   // only BC shadows: one layer
     if (k.ncolor > 1 && dup_slots_on()) dup_slots(&k, cvw);   // before slot 0 is filled: a copy left unused there leaves slot 0 empty
+    if (k.ncolor && slot0_fill_on()) {   // no colour slot holds a target: the pass gets none, so it has no empty slot 0 (slot0_fill_on)
+        uint32_t i = 0; while (i < k.ncolor && !cvw[i]) i++;
+        if (i == k.ncolor) { k.ncolor = 0; g_slot0_none++; }
+    }
     if (!cvw[0] && k.ncolor > 1 && slot0_fill_on()) {
         int used = 0; for (uint32_t i = 1; i < k.ncolor; i++) used |= cvw[i] != VK_NULL_HANDLE;
         if (used && (layers > 1 || k.samples > 1)) RED_ONCE(153, "a layered or multisample render pass with colour slot 0 empty below a used slot: slot 0 left empty (slot0_fill_on)");

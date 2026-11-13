@@ -88,6 +88,14 @@ Played by hand on a Google Pixel 9 Pro XL (Mali-G715, Android 16) from `saves/co
 - Sound: 187 s of AudioOut #0 from the cold start through Continue (`DM_AUDIO_DUMP`): 5 s of silence at boot, then L and R about −33 dBFS, the rear pair about −39, centre −77, LFE silent, no clipping, spectra like music (flatness 0.00–0.01); 0 underruns in the log.
 - Red lines: the same as the Odin 2's, `SetRenderEnableConditional` and the four alpha-test shaders ([Below deck](#below-deck)). 2,254 draws were left out while new pipelines built in the background, over the first launch's 15 minutes of title, menus, two loads and the fight. Nothing Mali-only showed, on screen or in the log.
 
+## On the Moto Razr Plus 2023
+
+- **Resolved: every start crashed** on a Moto Razr Plus 2023 (Adreno 730, Qualcomm's driver V@0615.98, Android 16), about 8 s in, before the title: `CRASH sig=11 addr=0x4 pc=…(vulkan.adreno.so+0x16ff5c)` on the replay thread, in `vkCmdEndRenderPass` (`rp_end`). The pass it ended: one colour slot, empty, a 1152×648 `D32_SFLOAT_S8_UINT` target, and one full-screen draw with every colour channel masked off. Qualcomm's driver crashes on this shape as on the empty colour slot 0 that crashed Mario Kart 8 Deluxe. A pass whose colour slots are all empty is now made with none ([rendering.md](../../../docs/reference/rendering.md#a-render-pass-with-colour-slot-0-empty-hangs-or-crashes-qualcomms-adreno-driver-android)). The game's 1536×1536 shadow-map passes have this shape too ([Shadows](#shadows)).
+- **Played** on 2026-11-13 with the phone's own APK and Divinity's host from `main` 25bcaf95 plus that change, from a private copy of `saves/combat`'s `AutoSave_2`, with `DM_CTL` presses:
+  - at the game's interval: Continue, the walk below deck and the top deck's first fight, about 7 minutes. 30.0 fps below deck (frame p50 33.3 / p95 35.3 ms, GPU 24.9 ms, replay CPU 21.8 ms). 23.4 fps in the fight (42.4 / 48.8 ms, GPU 34 ms, replay CPU 41 ms), as the GPU and the replay both run past 33 ms. The party lost the fight to the blind presses (Game Over), not to the host.
+  - with `DM_PRESENT_INTERVAL=display`, a second launch: 58.7 fps below deck (GPU 13.0 ms).
+  - red lines: the usual `SetRenderEnableConditional` and the four alpha-test shaders ([Below deck](#below-deck)).
+
 ## Routes
 
 [`bench_android.tsv`](bench_android.tsv), for `scripts/bench_android.py`:
