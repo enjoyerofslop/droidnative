@@ -13,8 +13,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
-    import unicorn as uc
-    from unicorn import arm64_const as arm
+    import unicorn as uc   # pyright: ignore[reportMissingImports]  (optional; lint's environment has no unicorn)
+    from unicorn import arm64_const as arm   # pyright: ignore[reportMissingImports]  (optional; lint's environment has no unicorn)
 except ImportError:
     uc = arm = cast(Any, None)   # Any, so pyright reads the unicorn calls below, which run only when it imported (skipIf)
 
