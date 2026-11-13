@@ -58,7 +58,9 @@ public final class Gamepad extends View {
     static final float K_ZL_X = 44, K_ZL_Y = 40, K_ZL_R = 26, K_L_X = 44, K_L_Y = 108, K_L_R = 24, K_DROP_TIP = 1.45f, K_CORNER_IN = 0.5f,
         K_FACE_X = 81, K_PAD_Y = 82, K_FACE_GAP = 50, K_FACE_R = 27, K_PILL_DX = 52, K_PILL_Y = 22, K_PILL_W = 50, K_PILL_H = 28, K_SWAP_R = 15,
         K_STICK_X = 81, K_STICK_R = 77, K_KNOB_R = 30, K_STICK_GRAB = 1.4f, K_FULL = 0.8f, K_DEAD = 0.1f,
-        K_LOW_X = 231, K_LOW_Y = 64, K_DPAD_R = 48, K_ARM_W = 17, K_ARM_IN = 11, K_DPAD_GRAB = 1.3f, K_RSTICK_R = 60, K_RSWIPE = 1f / 3, K_CLICK_X = 102, K_CLICK_R = 17;
+        K_LOW_X = 231, K_LOW_Y = 64, K_DPAD_R = 48, K_ARM_W = 17, K_ARM_IN = 11, K_DPAD_GRAB = 1.3f, K_RSTICK_R = 60, K_RSWIPE = 1f / 3, K_CLICK_X = 102, K_CLICK_R = 17,
+        // the diamond's touch area past its drawn buttons, in face radii: 3D gives what's past them to the camera, so a swipe that starts beside the buttons turns it (#433)
+        K_FACE_GRAB = 1.6f, K_FACE_GRAB_3D = 1.15f;
     static final int[] K_BTNS = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};
     static final String[] NAMES = {"A", "B", "X", "Y", "L3", "R3", "L", "R", "ZL", "ZR", "+", "−", null, null, null, null};
 
@@ -245,7 +247,7 @@ public final class Gamepad extends View {
             else if (tap) g = gameBegin(p);
             else {   // the diamond, the D-pad, the left stick: the smallest distance / grab radius, if it is <= 1
                 float best = 1; int kind = C_NONE, idx = 0;
-                float f = dist(x, y, faceCx(), faceCy()) / (faceGap() + faceR() * 1.6f); if (f <= best) { best = f; kind = C_FACE; }
+                float f = dist(x, y, faceCx(), faceCy()) / (faceGap() + faceR() * (full ? K_FACE_GRAB_3D : K_FACE_GRAB)); if (f <= best) { best = f; kind = C_FACE; }
                 if (full) { float d = dist(x, y, dpadCx(), dpadCy()) / (dpadR() * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
                 if (stick[0] < 0) { float s = dist(x, y, homeX(), homeY()) / (stickR(0) * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
                 if (kind == C_NONE && full && stick[1] < 0 && inRightArea(x)) { kind = C_STICK; idx = 1; rcx = x; rcy = y; }
@@ -513,6 +515,11 @@ public final class Gamepad extends View {
         press(rx, ry); send(ev(MotionEvent.ACTION_MOVE, new int[]{0}, new float[][]{{rx - stickR(1), ry}}));
         check("right stick left = -32767", lastAx[2] == -32767 && lastAx[3] == 0);
         release(rx - stickR(1), ry); check("right stick released = 0", lastAx[2] == 0 && lastAx[3] == 0);
+        // beside the face buttons, past their drawn edge: the camera, not a face button (#433: right swipes there did nothing)
+        float bx = faceX(B_X), by = faceY(B_X) - faceR() * 1.4f;
+        press(bx, by); send(ev(MotionEvent.ACTION_MOVE, new int[]{0}, new float[][]{{bx + stickR(1), by}}));
+        check("beside the face buttons: right stick right = +32767", lastBtn == 0 && lastAx[2] == 32767 && lastAx[3] == 0);
+        release(bx + stickR(1), by); check("and released = 0", lastAx[2] == 0 && lastAx[3] == 0);
         // two fingers: A held while the left stick moves
         downT = android.os.SystemClock.uptimeMillis();
         send(ev(MotionEvent.ACTION_DOWN, new int[]{0}, new float[][]{{faceX(B_A), faceY(B_A)}}));
