@@ -40,7 +40,7 @@ class BuildShaders(unittest.TestCase):
         self.ran = []; self.translation_stops = False; self.log_text = 'IndexError: list index out of range\n'; self.printed = []
         def run(cmd, log, env=None, on_line=None):   # spv_build.py: its output folder and its last line, or what bi.run raises for its exit code
             self.ran.append([str(c) for c in cmd]); (self.work / 'spv').mkdir(exist_ok=True)
-            for ln in self.printed: on_line and on_line(ln)   # what spv_build.py prints as it runs, line by line
+            for ln in self.printed if on_line else []: on_line(ln)   # what spv_build.py prints as it runs, line by line
             if self.translation_stops:   # the post-pass stopped at an empty .spv after a few shaders were done (Pokopia's log)
                 (self.work / 'spv' / '0123456789abcdef.spv').write_bytes(b'\3\2\x23\7'); Path(log).write_text(self.log_text)
                 raise ba.BuildError(f'spv_build.py exit code 1 (full output: {log})')
