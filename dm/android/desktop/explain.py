@@ -51,9 +51,31 @@ NETWORK = ('urlopen error', 'timed out', 'getaddrinfo failed', 'name or service 
 PC_FULL = ('not enough space on the disk', 'errno 28', 'winerror 112', 'no space left on device')
 
 
-def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=False):
+def script_error(stdout, stderr):
+    """What a failed run of the script said, as explain() reads it: the lines before its error, then its [RED] lines, the error last. --info and --check send
+    their notes to stderr and the error, printed after, to stdout; the app read stderr alone whenever it held anything, so a folder with a file the scan skipped
+    showed that note, or nothing, where the reason belonged (Skyward Sword HD on Windows, 2026-11-13)"""
+    lines = [x for x in f'{(stderr or "").strip()}\n{(stdout or "").strip()}'.splitlines() if x.strip()]
+    reds = [x for x in lines if x.lstrip().startswith('[RED]')]
+    if not reds: return '\n'.join(lines[-8:]) or 'no output'
+    return '\n'.join([x for x in lines if x not in reds][-6:] + reds)[-2000:]
+
+
+# The scan's words for a file it passed over (build_ipa_from_nsp.py scan_nsps): the file, and why
+SKIPPED = re.compile(r'skipping (.+?): (neither an NSP.*|its content meta could not be read.*|no base game, update or DLC content meta.*)$', re.M)
+
+
+def skipped_files(t):   # → rich text naming up to three files the scan passed over, and why, or ''
+    s = SKIPPED.findall(t)
+    if not s: return ''
+    shown = '; '.join(f'<b>{esc(f)}</b> ({esc(why[:120])})' for f, why in s[:3])
+    return f' It passed over {shown}' + (f' and {len(s) - 3} more' if len(s) > 3 else '') + '.'
+
+
+def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=False, read=False):
     """text: what failed said (its [RED] lines, the last line); phone, game: their names; stage: the script's name of the stage it stopped in; setup: it was
-    --setup (Install tools); folder: the game's folder; wifi: the phone was connected over Wi-Fi (wireless debugging). → Help"""
+    --setup (Install tools); folder: the game's folder; wifi: the phone was connected over Wi-Fi (wireless debugging); read: the Library's read of a game
+    folder (--info), not a build. → Help"""
     t = text or ''; low = t.lower(); wifi = wifi or 'wireless debugging is still on' in low   # the script's own words for a Wi-Fi phone that didn't come back
     ph, the_phone, g = esc(phone) if phone else 'Your phone', esc(phone) if phone else 'your phone', esc(game) if game else 'The game'
     adb_said = re.search(r'\badb\b', low) is not None   # an adb command's failure: "No space left on device" is then the phone's, not this PC's
@@ -109,6 +131,30 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
                       'dump prod.keys again, and pick the new file.', 'keys', 'Choose prod.keys…')
     if 'no title key for rights id' in low or 'has no common ticket' in low:
         return Help("This game file can't be opened with your keys", 'The file has no ticket for it. Dump the game again from your Switch, with its ticket.')
+    # the game reader (nx_extract, built with .NET the first time a game is read) couldn't get its NuGet packages: NU1100 "Unable to resolve 'LibHac'" with
+    # nuget.org missing or turned off in .NET's sources, NU1301 when the source can't be reached. It showed as "The build stopped" on a Windows PC (2026-11-13)
+    if re.search(r'\bNU1(100|101|301)\b', t) or "unable to resolve 'libhac" in low or 'unable to load the service index' in low:
+        return Help("DroidPlay couldn't download its game reader", "The first time it reads a game, DroidPlay builds a small game reader with .NET, which "
+                    "downloads its parts from nuget.org, and .NET couldn't get them. Check this PC is online. If it is, nuget.org may be missing or turned off in "
+                    ".NET's settings: in a Command Prompt, <b>dotnet nuget list source</b> shows them; <b>dotnet nuget enable source nuget.org</b> turns it back "
+                    "on, or <b>dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org</b> adds it. Then open DroidPlay again.")
+    # what reading the folder found (build_ipa_from_nsp.py scan_nsps), before anything is built: said as what to change in the folder, which the button opens
+    show = ('folder', 'Open the folder') if folder else ('', '')
+    m = re.search(r'more than one game in the folder: ([^;]+);', t)
+    if m:
+        return Help('More than one game in this folder', 'DroidPlay reads one game per folder: the game with its own updates and DLC. This folder holds the games '
+                    f'{esc(m[1])}. Move each game into a folder of its own, then add those folders.', *show)
+    if 'no base game nsp found' in low:
+        return Help('The game itself is missing from this folder', "This folder has the game's update or DLC but not the game: put the base game's XCI (the "
+                    'cartridge) or NSP in the same folder, beside the update.', *show)
+    m = re.search(r'no NSP for update (\S+) \(the game profile needs these versions: ([^)]+)\)', t)
+    if m:
+        return Help('An update the build needs is missing', f"{g} is built from versions {esc(m[2])}, and this folder has no NSP for update {esc(m[1])}. Put "
+                    "that update's NSP in the game's folder, beside the base game.", *show)
+    if 'no game package with a readable content meta' in low:
+        return Help('No game DroidPlay can open in this folder', "DroidPlay needs the game's own .nsp or .xci files: not a .zip or .rar, not a dump split into "
+                    'parts (join them into one file first), and fully on this PC (OneDrive\'s online-only files can\'t be read). If the files are right, pick '
+                    'your prod.keys again: keys from another Switch can\'t open them.' + skipped_files(t), *show)
     if 'give -k' in low or ('prod.keys' in low and 'needs' in low and 'keys' in low and 'master key' not in low):
         return Help('DroidPlay needs your keys', 'NSP and XCI games are encrypted: pick your prod.keys first.', 'keys', 'Choose prod.keys…')
     if 'needs dotnet' in low or 'install the .net 10 sdk' in low:
@@ -118,6 +164,9 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
                     'on your network is changing downloads.', 'retry', 'Try again')
     if any(x in low for x in NETWORK):
         return Help('The download stopped', f'Check your internet connection, then {"Install tools" if setup else "try"} again.', 'retry', 'Try again')
+    if read:   # the Library's read of a folder, not a build: no report to copy there, so the message itself (shown under it) is what to post
+        return Help("DroidPlay couldn't read this game", 'This is probably a bug in DroidPlay, not something you did. Post what it said (below) in <b>#help</b> '
+                    'on the Discord.', *show, bug=True)
     what, at = 'Installing the tools' if setup else 'The build', stage_name(stage)
     return Help(f'{what} stopped at "{at}"' if at else f'{what} stopped', 'This is probably a bug in DroidPlay, not something you did. Copy the report and post it in '
                 '<b>#help</b> on the Discord.', bug=True)

@@ -129,7 +129,7 @@ PLAY_LABELS = {'build': 'Build and install', 'install': 'Install on phone', 'pla
 def game_step(folders, games, reading):
     """folders: the game folders added; games: what reading them gave, as dicts (folder, name, state as Game.status gives it, tested, error); reading: a read runs"""
     title = 'Your first game'
-    ok = [g for g in games if g['state'] not in ('keys', 'tools', 'none')]
+    ok = [g for g in games if g['state'] not in ('keys', 'tools', 'none', 'folder')]   # folder: the read found something to change in it
     if ok:
         g = ok[0]; label = PLAY_LABELS.get(g['state'], '')
         how = 'not supported yet' if g['state'] == 'survey' else 'played on Android' if g.get('tested') else 'not played on Android yet'

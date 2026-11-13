@@ -407,6 +407,46 @@ class Explain(unittest.TestCase):   # the messages as the script, nx_extract and
         self.assertEqual(ex.explain('boom', stage='extract v393216').title, 'The build stopped at "Reading the game files"')
         self.assertEqual(ex.explain('boom', setup=True, stage='Android SDK packages').title, 'Installing the tools stopped at "Installing the Android SDK"')
 
+    # what --info prints when it can't read a game folder: its notes on stderr, the error on stdout (scan_nsps); the Library showed the generic "The build stopped"
+    # with "Can't read it" and no reason for a Skyward Sword HD folder on Windows (2026-11-13)
+    D = 'D:\\Games\\SSHD'
+
+    def test_script_error_puts_the_error_last(self):
+        err = '[12:00:01] skipping game.zip: neither an NSP (PFS0) nor an XCI (HEAD at 0x100)\n[RED] skipping update.nsp: its content meta could not be read: bad header'
+        t = ex.script_error('[RED] no game package with a readable content meta in D:\\Games\\SSHD\n', err)
+        self.assertTrue(t.splitlines()[-1].startswith('[RED] no game package'))   # the Library shows the last line: the reason, not a note
+        self.assertIn('skipping game.zip', t); self.assertIn('skipping update.nsp', t)
+        self.assertEqual(ex.script_error('', 'Traceback (most recent call last):\n  File "x"\nValueError: boom'), 'Traceback (most recent call last):\n  File "x"\nValueError: boom')
+        self.assertEqual(ex.script_error('', ''), 'no output')
+
+    def test_folder_reads_say_what_to_change(self):
+        h = ex.explain('[RED] more than one game in the folder: 01002DA013484000, 0100000000010000; keep one game per folder, or name the one to pack with '
+                       '--title-id / TITLE_ID', folder=self.D, read=True)
+        self.assertEqual((h.title, h.action, h.bug), ('More than one game in this folder', 'folder', False)); self.assertIn('0100000000010000', h.body)
+        h = ex.explain('[RED] no base game NSP found in D:\\Games\\SSHD (title ID 01002DA013484000)', folder=self.D, read=True)
+        self.assertEqual((h.title, h.action), ('The game itself is missing from this folder', 'folder'))
+        h = ex.explain('no NSP for update 1.0.1 (the game profile needs these versions: 1.0.0, 1.0.1)', game='The Legend of Zelda: Skyward Sword HD', folder=self.D)
+        self.assertEqual(h.title, 'An update the build needs is missing'); self.assertIn('update 1.0.1', h.body)
+
+    def test_a_folder_with_nothing_readable_names_the_files_it_passed_over(self):
+        t = ex.script_error('[RED] no game package with a readable content meta in D:\\Games\\SSHD', '[12:00:01] skipping SSHD.zip: neither an NSP (PFS0) nor an '
+                            'XCI (HEAD at 0x100)\n[RED] skipping SSHD.nsp: its content meta could not be read: NCA header')
+        h = ex.explain(t, folder=self.D, read=True)
+        self.assertEqual((h.title, h.action, h.bug), ('No game DroidPlay can open in this folder', 'folder', False))
+        self.assertIn('<b>SSHD.zip</b>', h.body); self.assertIn('<b>SSHD.nsp</b>', h.body); self.assertIn('prod.keys', h.body)
+        self.assertNotIn('passed over', ex.explain('[RED] no game package with a readable content meta in D:\\x', read=True).body)
+
+    def test_the_game_reader_without_nuget_org(self):   # dotnet's restore for nx_extract, as a Windows PC printed it, then the script's own line
+        t = ex.script_error('[RED] dotnet exit code 1 (full output: C:\\Temp\\title_probe_x\\logs\\nx_extract_build.log)',
+                            "C:\\DroidPlay\\core\\dm\\tools\\nx_extract\\nx_extract.csproj : error NU1100: Unable to resolve 'LibHac (>= 0.19.0)' for 'net10.0'.\n"
+                            '    0 Warning(s)\n    1 Error(s)\n\nTime Elapsed 00:00:00.76')
+        h = ex.explain(t, read=True)
+        self.assertEqual(h.title, "DroidPlay couldn't download its game reader"); self.assertIn('dotnet nuget enable source nuget.org', h.body); self.assertFalse(h.bug)
+
+    def test_an_unknown_read_failure_says_read_not_build(self):
+        h = ex.explain('[RED] something new', folder=self.D, read=True)
+        self.assertTrue(h.bug); self.assertEqual(h.title, "DroidPlay couldn't read this game"); self.assertNotIn('stopped', h.title)
+
     # build_android_from_nsp.py run_time_stop's words, on Windows and on a Mac: a registered profile's tables name shaders the game compiles while it runs (droidplay-core#441)
     STOP = ("[RED] Fire Emblem: Three Houses compiles 9 of its shaders while it runs, with its own shader compiler (GLSLC), and game profile 010055D009F78000's shader tables "
             "need them. ")
