@@ -822,21 +822,30 @@ def guarded_count(ctx, kc, kl):
             return n + (p.mnemonic == 'b.ls') if inside and before is not None and before.mnemonic in ('b', 'br', 'ret') else None
         if p.mnemonic in sets_flags or p.mnemonic.startswith('b.') or p.mnemonic in ('b', 'br', 'ret'): return None
     return None
-def check_before_copy(insl, ctx, ld, idx):
+def check_before_copy(insl, ctx, ld, idx, base=None):
     """The index copied from the checked register before the check, far back (DRAGON QUEST XI S main+0x2dd8cd0: mov w0,w18, then 41 instructions with two other jump tables on x0, then
     cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18). Accepted when the cmp and its b.hi come right before the load and the mov is the last writer of the index and of the
     checked register before them. Kingdom Battle's GLSLC (subsdk0+0x7340b8) copies w17 into w18 71 instructions before the load, across two switches that preserve both registers: an arbitrary
     64-instruction limit missed that copy. Follow the writers to the function's start, stopping at calls that can clobber either register or at gaps in decoded code. Blocks in between that branch out
     and back (main+0x2dd8ce0 → main+0x2dd8cb8) write neither. Tried only when every other form has failed (jump_offsets copy_first), so sites that rewrote before come out the same:
-    the one br x18 of its kind among the 25,508 x18 sites of that main. → the cmp, or None"""
+    the one br x18 of its kind among the 25,508 x18 sites of that main. → the cmp, or None
+    With base (the table base register), the table base is built between the check and the load instead, as compilers schedule it: Crash Bandicoot N. Sane Trilogy 1.0.0 main+0x997b5c has
+    mov w18,w14; cmp w14,#3; b.hi; adrp x2; add x2,x2,#0x3a0; ldrsw x18,[x2,x18,lsl #2]; add x18,x18,x2; br x18. Only that adrp + add pair may stand between the b.hi and the load, it may not
+    write the index, and no branch or jump table may land after the mov up to the load, where the index would not be the checked register's copy or the check would be passed by.
+    Tried after every other form has failed (jump_offsets base_after_check), so sites that rewrote before come out the same"""
     k = ctx.index(ld)
-    if k < 2 or ctx[k - 1].mnemonic != 'b.hi' or ctx[k - 2].mnemonic != 'cmp': return None
-    m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', ctx[k - 2].op_str)
+    if base:   # the gap must be exactly adrp base; add base,base,#lo, writing neither the index nor any copy of it
+        if k < 4 or ctx[k - 2].mnemonic != 'adrp' or not ctx[k - 2].op_str.startswith(base + ',') or 'w' + base[1:] in idx: return None
+        if ctx[k - 1].mnemonic != 'add' or not re.fullmatch(rf'{base}, {base}, #(0x[0-9a-f]+|\d+)', ctx[k - 1].op_str): return None
+    kc = k - 4 if base else k - 2   # the cmp
+    if kc < 0 or ctx[kc + 1].mnemonic != 'b.hi' or ctx[kc].mnemonic != 'cmp': return None
+    if base and any(b.address != a.address + 4 for a, b in zip(ctx[kc:k], ctx[kc + 1:k + 1])): return None   # no undecodable word hidden between the cmp and the load
+    m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', ctx[kc].op_str)
     if not m: return None
-    src, kl = m.group(1), insl.index(ld)
+    src, kl = m.group(1), insl.index(ctx[kc])
     def writes(p):   # capstone lists a compare's first operand as written (cmp w18,#4 at main+0x2dd8c30); it only sets the flags
         return set() if p.mnemonic in ('cmp', 'cmn', 'tst') else written_w(p)
-    for q in range(kl - 3, -1, -1):
+    for q in range(kl - 1, -1, -1):
         p = insl[q]
         if p.address + 4 != insl[q + 1].address: return None
         if p.mnemonic in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx | {src}): return None
@@ -844,8 +853,14 @@ def check_before_copy(insl, ctx, ld, idx):
         if mm and mm.group(1) in idx and mm.group(2) == src: break
         if writes(p) & (idx | {src}): return None
     else: return None
-    return ctx[k - 2]
-def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
+    if base:
+        lo, hi = p.address, ld.address
+        for x in insl:
+            if (x.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or x.mnemonic.startswith('b.')) and lo < x.operands[-1].imm <= hi: return None
+        if any(lo < t <= hi for targets in tabjumps.values() for t in targets): return None
+        if any(b <= hi and b + 4 * width > lo + 4 for b, width in jumps.values()): return None
+    return ctx[kc]
+def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False, base_after_check=False):
     """The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
     The index may be another register, and the bounds check may be on a register copied into it: Link's Awakening's GLSLC (subsdk0+0x1be6e8) has
     sub w0,w18,#0xd1; cmp w0,#0x31; b.hi; ldrsw x18,[x17,x0,lsl #2], its movie module (subsdk1+0xae9a4) cmp w21,#7; b.hi; ...; mov w18,w21; ldrsw x18,[x4,x18,lsl #2].
@@ -854,7 +869,9 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     For the table base xB, search back for the nearest writer: it must be add xB,xB,#lo, and the writer before it must be adrp xB. With far_base, a base that nothing writes in those
     256 instructions was set further back, and its writer chain is followed to the function's start (table_base far), every target an instruction of the function: ASTRAL CHAIN main+0x6db498
     and +0x6db70c load bases set 441 and 549 instructions before, x24 in the function's first block and x3 after it, which the loop around their dispatches keeps. A function-wide search
-    for the one adrp + add pair that fits (table_cands, as jump_adr_offsets does) finds two for x3 there, the other a table of its own further on. Returns all targets, or None if not recognized"""
+    for the one adrp + add pair that fits (table_cands, as jump_adr_offsets does) finds two for x3 there, the other a table of its own further on.
+    With base_after_check (with copy_first), the index copied before the check may have the table base built between the check and the load (check_before_copy base), every target an
+    instruction of the function. Returns all targets, or None if not recognized"""
     ctx = insl[max(0, j - 16):j]
     add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
     if not add: return None
@@ -896,7 +913,7 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
             if cmp: break
     if cmp and changed: return None   # the index changes after the check. Before a check it does not matter, so this waits for the walk to find one
     if not cmp and copy_first:
-        cmp = check_before_copy(insl, ctx, ld, idx | copies)   # cmp; b.hi right before the load
+        cmp = check_before_copy(insl, ctx, ld, idx | copies, rb if base_after_check else None)   # cmp; b.hi right before the load, or before the base's adrp + add
         if cmp: n = int(cmp.op_str.split('#')[1], 0) + 1
     if not cmp: return None
     k = insl.index(ld); lo = page = None
@@ -927,6 +944,11 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
         return t if all(fa <= x < fb and x % 4 == 0 for x in t) else None
     if page is None: return None
     tb = page + lo
+    if base_after_check:
+        if not 0 <= tb <= len(IMG) - 4 * n: return None
+        t = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
+        addresses = {p.address for p in insl}
+        return t if all(x in addresses for x in t) else None
     return [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
 def jump_zero_extended(insl, j):
     """cmp wS,#N; b.hi exit; and xI,xS,#0xffffffff; ldrsw xE,[xB,xI,lsl #2]; add x18,xE,xB; br x18.
@@ -1404,6 +1426,7 @@ for fa, fb in funcs:
                 if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
                 if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
+                if not tgt: tgt = jump_offsets(insl, j, copy_first=True, base_after_check=True)   # the index copied before the check, the table base built after it
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)

@@ -423,6 +423,146 @@ class IndexCopiedBeforeCheck(unittest.TestCase):
                 self.assertIsNone(self.run_site([NOP] * 65 + [word])[0])
 
 
+LDR_W14 = 0xb940540e                                   # ldr w14, [x0, #0x54]
+LDRSW_X18_X2 = 0xb8a07800 | 18 << 16 | 2 << 5 | 18      # ldrsw x18, [x2, x18, lsl #2]
+
+
+class BaseBuiltAfterCheck(unittest.TestCase):
+    """Crash Bandicoot N. Sane Trilogy 1.0.0 main+0x997b5c: the index copied right before the check on its source, and the table base built between the check and the load:
+    ldr w14,[x0,#0x54]; mov w18,w14; cmp w14,#3; b.hi exit; adrp x2; add x2,x2,#lo; ldrsw x18,[x2,x18,lsl #2]; add x18,x18,x2; br x18, then the cases.
+    Word addresses with nothing inserted: 0x04 the mov, 0x08 the cmp, 0x0c the b.hi, 0x10 / 0x14 the adrp / add, 0x18 the load, 0x20 the br, 0x24-0x2c the cases, 0x30 the exit."""
+    TABLE = 0x4040
+
+    def setUp(self): tabjumps.clear(); jumps.clear()
+
+    def words(self, org=0, copy=None, between=(), check=None, guard=None, gap=None, load=LDRSW_X18_X2, tail=()):
+        """→ (words, the four targets, the table's words); guard and callable tail items take (their address, the exit)"""
+        cmp_at = org + 4 * (2 + len(between))
+        if gap is None: gap = [ADRP(2, cmp_at + 8, self.TABLE), ADDI(2, 2, self.TABLE & 0xfff)]
+        br_at = cmp_at + 8 + 4 * len(gap) + 8; exit_ = br_at + 16
+        targets = [br_at + 4, br_at + 8, br_at + 12, br_at + 4]   # as in Crash's table, cases 0 and 3 share a target
+        words = [LDR_W14, mov(18, 14, False) if copy is None else copy, *between, cmp_w(14, 3) if check is None else check,
+                 (guard or bhi)(cmp_at + 4, exit_), *gap, load, ADDR(18, 18, 2), BR(18), NOP, NOP, NOP, RET]
+        words += [w(org + 4 * (len(words) + i), exit_) if callable(w) else w for i, w in enumerate(tail)]
+        return words, targets, targets + [exit_ + 0x100]   # a fifth word, which cmp #3; b.hi does not allow
+
+    def site(self, **kw):
+        words, targets, table = self.words(**kw)
+        for i, t in enumerate(table): struct.pack_into('<i', IMG, self.TABLE + 4 * i, t - self.TABLE)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = [p for i, w in enumerate(words) for p in md.disasm(struct.pack('<I', w), 4 * i)]
+        return ins, next(i for i, p in enumerate(ins) if p.mnemonic == 'br'), targets
+
+    def run_site(self, **kw):
+        ins, j, targets = self.site(**kw)
+        return scope['jump_offsets'](ins, j, copy_first=True, base_after_check=True), targets
+
+    def test_reads_the_four_entries_the_check_allows(self):
+        actual, targets = self.run_site()
+        self.assertEqual(actual, targets)
+
+    def test_no_older_form_takes_it(self):
+        # the shape that stopped Crash's rewrite at `jump table 997b78`: the walk meets cmp w14 while the index is still w18, and check_before_copy wanted the b.hi right before the load
+        ins, j, _ = self.site()
+        for kw in ({}, {'copy_first': True}, {'copy_first': True, 'far_base': True}, {'copy_first': True, 'far_base': True, 'forward_base': True}):
+            with self.subTest(**kw):
+                self.assertIsNone(scope['jump_offsets'](ins, j, **kw))
+        for fn in ('jump_adr_offsets', 'jump_masked_pred', 'jump_masked_not', 'jump_zero_extended'):
+            with self.subTest(fn=fn):
+                self.assertIsNone(scope[fn](ins, j))
+
+    def test_the_check_must_be_of_the_copys_32_bit_source(self):
+        self.assertIsNone(self.run_site(check=cmp_w(15, 3))[0])        # cmp w15 says nothing of w14
+        self.assertIsNone(self.run_site(copy=mov(18, 15, False))[0])   # mov w18,w15; cmp w14
+        self.assertIsNone(self.run_site(copy=mov(18, 14))[0])          # mov x18,x14: the load takes all of x18, whose upper half the check never saw
+
+    def test_source_and_index_unchanged_from_the_copy_to_the_check(self):
+        for word in (ADDI(14, 14, 1) & 0x7fffffff, mov(14, 0, False), mov(18, 0, False), ADDI(18, 18, 1), 0x94000040, BLR(0)):
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site(between=[word])[0])
+        for word in (NOP, ldr_s(14), ldr_s(18), mov(9, 0), cmp_w(14, 7)):   # no general-purpose write of either (a compare only sets the flags)
+            with self.subTest(word=hex(word)):
+                actual, targets = self.run_site(between=[word])
+                self.assertEqual(actual, targets)
+
+    def test_only_the_bases_adrp_and_add_stand_between_the_check_and_the_load(self):
+        adrp, add = ADRP(2, 0x10, self.TABLE), ADDI(2, 2, self.TABLE & 0xfff)
+        for gap in ([], [adrp, add, NOP], [NOP, adrp, add], [add, adrp], [ADRP(3, 0x10, self.TABLE), ADDI(3, 3, self.TABLE & 0xfff)], [adrp, ADDI(2, 3, self.TABLE & 0xfff)]):
+            with self.subTest(gap=[hex(w) for w in gap]):
+                self.assertIsNone(self.run_site(gap=gap)[0])
+        # mov w2,w14; ...; adrp x2 + add x2; ldrsw x18,[x2,x2,lsl #2]: the base's adrp + add replace the checked copy
+        self.assertIsNone(self.run_site(copy=mov(2, 14, False), load=0xb8a07800 | 2 << 16 | 2 << 5 | 18)[0])
+
+    def test_undecodable_words_break_the_proof(self):
+        adrp, add = ADRP(2, 0x10, self.TABLE), ADDI(2, 2, self.TABLE & 0xfff)
+        self.assertIsNone(self.run_site(gap=[adrp, 0xe7ffdefe, add])[0])   # decoding skips the trap word, which leaves the adrp and the add side by side in the list
+        self.assertIsNone(self.run_site(gap=[0xe7ffdefe, adrp, add])[0])
+        self.assertIsNone(self.run_site(between=[0xe7ffdefe])[0])
+
+    def test_the_guard_must_be_b_hi_out_of_the_dispatch(self):
+        for cond in (9, 2, 0):   # b.ls, b.hs, b.eq
+            with self.subTest(cond=cond):
+                self.assertIsNone(self.run_site(guard=lambda at, out, c=cond: bcond(c, at, out))[0])
+        for guard in (lambda at, out: NOP, lambda at, out: bhi(at, at + 4), lambda at, out: bhi(at, at + 12)):   # none; b.hi onto the adrp or the load
+            self.assertIsNone(self.run_site(guard=guard)[0])
+
+    def test_no_entry_after_the_copy_up_to_the_load(self):
+        # a branch onto the check, the guard, the base or the load brings an index the check never saw, or passes the check by
+        for target in (0x08, 0x0c, 0x10, 0x14, 0x18):
+            for word in (lambda at, out, t=target: B(at, t), lambda at, out, t=target: BEQ(at, t), lambda at, out, t=target: 0xb4000000 | ((t - at) >> 2 & 0x7ffff) << 5):
+                with self.subTest(target=hex(target), word=word(0x34, 0)):
+                    self.assertIsNone(self.run_site(tail=[word])[0])
+        actual, targets = self.run_site(tail=[lambda at, out: B(at, 0x04)])   # onto the copy itself: the index is copied again
+        self.assertEqual(actual, targets)
+        tabjumps[0x1000] = [0x10]
+        self.assertIsNone(self.run_site()[0])
+        tabjumps.clear(); jumps[0x1000] = (0x0c, 2)
+        self.assertIsNone(self.run_site()[0])
+        jumps[0x1000] = (0x00, 2)   # a byte table onto the ldr and the mov
+        actual, targets = self.run_site()
+        self.assertEqual(actual, targets)
+
+    def test_targets_must_be_instructions_of_the_function_and_the_table_in_the_image(self):
+        for bad in (0x1000, 0x26):   # past the function's end; between two instructions
+            with self.subTest(bad=hex(bad)):
+                ins, j, _ = self.site()
+                struct.pack_into('<i', IMG, self.TABLE + 8, bad - self.TABLE)
+                self.assertIsNone(scope['jump_offsets'](ins, j, copy_first=True, base_after_check=True))
+        end = len(IMG) - 8   # room for two of the four entries
+        self.assertIsNone(self.run_site(gap=[ADRP(2, 0x10, end), ADDI(2, 2, end & 0xfff)])[0])
+
+    def test_the_rewriter_reads_the_table_and_keeps_guest_x18_in_its_slot(self):
+        # the full rewriter on a synthetic module, as in ZeroExtendedIndex: one T row with the four targets, and every x18 instruction of the site (the copy, the load, the add, the br)
+        # sent to a patch block that keeps guest x18 in its thread slot: no block writes x18, which holds the slot block on Android and belongs to Apple's kernel on the Mac
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_nso_match import image
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        org, table = 0x100, 0x2040
+        for target in ('apple', 'android'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                words, targets, entries = self.words(org=org, gap=[ADRP(2, org + 0x10, table), ADDI(2, 2, table & 0xfff)])
+                raw = image({org: words})
+                for i, t in enumerate(entries): struct.pack_into('<i', raw, table + 4 * i, t - table)
+                raw[0x1100:0x111c] = raw[0x20:0x3c]; struct.pack_into('<I', raw, 4, 0x1100)
+                struct.pack_into('<ii', raw, 0x1110, 0x3000 - 0x1100, 0x3014 - 0x1100)
+                raw[0x10:0x14] = b'NRO0'; struct.pack_into('<I', raw, 0x18, len(raw))
+                struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000); struct.pack_into('<I', raw, 0x38, 0)
+                src = Path(tmp) / 'input.nro'; src.write_bytes(raw)
+                run = subprocess.run([sys.executable, str(TOOLS / 'patch_nso.py'), str(src), tmp, 'nro0'],
+                                     env=os.environ | {'DM_GAME': '010015100B514000', 'DM_REWRITE_J': '1', 'DM_TARGET': target}, capture_output=True, text=True)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                rows = [line.split('\t') for line in (Path(tmp) / 'nro0.sites.tsv').read_text().splitlines()]
+                self.assertEqual([[int(t, 0) for t in row[2].split()] for row in rows if row[1] == 'T'], [targets])
+                out = (Path(tmp) / 'nro0.patched.bin').read_bytes()
+                for at in (org + 0x04, org + 0x18, org + 0x1c, org + 0x20):   # mov w18,w14; ldrsw; add; br
+                    site = next(md.disasm(out[at:at + 4], at))
+                    self.assertEqual(site.mnemonic, 'b', hex(at))
+                    block = list(md.disasm(out[site.operands[0].imm:site.operands[0].imm + 4 * 40], site.operands[0].imm))
+                    self.assertTrue(block)
+                    for p in block:
+                        self.assertNotIn('w18', scope['written_w'](p), f'{p.address:#x} {p.mnemonic} {p.op_str}')
+
+
 class ZeroExtendedIndex(unittest.TestCase):
     TABLE = 0x4040
     TARGETS = [52 + i * 4 for i in range(5)]
