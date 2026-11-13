@@ -5,6 +5,7 @@ are hooks, the function's first instruction (moved into the wrapper) is the real
 Optional dependency: unicorn. On macOS its JIT needs execution outside the sandbox.
 """
 import importlib.util
+from typing import Any, cast
 from pathlib import Path
 import struct
 import sys
@@ -15,9 +16,10 @@ try:
     import unicorn as uc
     from unicorn import arm64_const as arm
 except ImportError:
-    uc = arm = None
+    uc = arm = cast(Any, None)   # Any, so pyright reads the unicorn calls below, which run only when it imported (skipIf)
 
 spec = importlib.util.spec_from_file_location('skyrim_patches', Path(__file__).resolve().parents[2] / 'games/01000A10041EA000/patches.py')
+assert spec and spec.loader
 patch = importlib.util.module_from_spec(spec); spec.loader.exec_module(patch)
 
 TEXT_END, RO_OFF, BSS_USED_END, BSS_END = 0x1265968, 0x1266000, 0x3a857d0, 0x3a86000
@@ -81,7 +83,7 @@ class Wrapper(unittest.TestCase):
         u.reg_write(arm.UC_ARM64_REG_PC, u.reg_read(arm.UC_ARM64_REG_X30))
 
     def clobber(self):   # what a call may do to the caller-saved registers
-        for n in list(range(0, 4)) + list(range(9, 18)): self.setx(n, 0xdead0000 + n)
+        for n in list(range(4)) + list(range(9, 18)): self.setx(n, 0xdead0000 + n)
 
     def lock(self, u, address, size, data):
         self.events.append(('lock', self.x(0), self.word()))
