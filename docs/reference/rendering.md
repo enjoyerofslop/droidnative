@@ -2144,6 +2144,14 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - With it skipped, the next one named was `e2a5bd13907993e3`, the same kind of shader.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) on a Galaxy S25 Edge (the hang itself is open there).
 
+### A refused submission doesn't stop the game (Android)
+
+- **Symptom:** Android only: `[RED] [vk] vkQueueSubmit failed: <n>` with `<n>` not -4 (an AYN Thor Pro's Qualcomm driver gave -3 in Skyrim's Riverwood), after which no frame comes, the sound goes on, and Android reports the app as not responding.
+- **Cause:** the chunk's fence went with the refused submission, so it was never on the queue and never signalled, and the completion thread waited on it for good (`vkWaitForFences` with no timeout). The replay waited behind that chunk. -3 isn't one of `vkQueueSubmit`'s results; the specification's failures leave the fence as it was, so it can go again.
+- **Fix:** `submit_or_fence` (`gfx_vk.c`), for the replay's and the recorder's submissions: a refused one goes again without its command buffer, so its fence reaches the queue and the chunk completes with its work dropped (`[RED] … its fence went alone`). When the queue refuses that too, the GPU counts as lost (`gpu_fault_log`: the start record's `device_lost=`, and the next start on the system's driver after a `DM_VK_DRIVER` one), and the chunk keeps the queue's result in `sub_r`, so the completion thread doesn't wait on its fence. The present's own submission (`front_android.c`) is unchanged.
+- **Check:** `DM_VK_REFUSE_SUBMIT=<n>` refuses the nth submission as that driver did, `=-<n>` its fence alone too.
+- **Found on:** [The Elder Scrolls V: Skyrim](../../dm/games/01000A10041EA000/README.md) on an AYN Thor Pro (Adreno 740), droidplay-core#444.
+
 ### Command recording on a thread of its own (Android)
 
 - **Symptom:** a game with thousands of draws a frame is held by the replay thread's CPU time. In a profile of that thread the driver's recording calls are a large share: Breath of the Wild on a OnePlus Pad 3, `vkCmdDrawIndexed` 9.9%, `vkCmdBindDescriptorSets` 8.2%, `vkCmdBeginRenderPass` 1.4%, and binds, copies and dynamic state besides. Meanwhile the phone's other cores are idle.

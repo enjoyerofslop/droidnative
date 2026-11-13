@@ -31,6 +31,7 @@ static uint64_t g_rq_records, g_rq_drains, g_rq_direct; static _Atomic uint64_t 
 static void *rq_thread(void *arg);
 static void hint_note(void);   // gfx_vk.c: the recorder is in the frame's performance hint session, with the threads it records for
 static void gpu_fault_log(VkResult r);   // gfx_vk.c: what VK_EXT_device_fault says of a lost device, once
+static VkResult submit_or_fence(VkCommandBuffer cb, VkFence f, const char *who);   // gfx_vk.c: a submission whose fence reaches the queue even when its work is refused
 static int rec_on(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_VK_RECORDER"); v = e && *e == '1';
@@ -262,10 +263,10 @@ static VkResult rec_vkBeginCommandBuffer(VkCommandBuffer cb, const VkCommandBuff
 // every call queued before, so the queue gets the chunks in the order the replay closed them. The replay does not wait: the completion thread waits for the fence, which
 // signals only once the recorder has submitted it. The front end blits a presented frame on the same queue, so mtl_present drains first (its chunks submitted before it)
 // → the submission's ticket: the completion thread waits for it (rec_wait_submitted) before it waits for the fence, since a fence not yet submitted is not one to wait on
-typedef struct { VkFence f; } a_submit;
+typedef struct { VkFence f; VkResult *res; } a_submit;   // res: the chunk's sub_r, written before g_rq_subs_done counts the submission
 static uint64_t g_rq_subs_queued; static _Atomic uint64_t g_rq_subs_done; static _Atomic int g_rq_swait; static pthread_cond_t g_rq_csub = PTHREAD_COND_INITIALIZER;
-static uint64_t rec_submit(VkCommandBuffer cb, VkFence f) {
-    uint8_t *r = rq_take(R_SUBMIT, cb, sizeof(rq_hdr) + sizeof(a_submit)); *(a_submit *)(void *)(r + sizeof(rq_hdr)) = (a_submit){f}; rq_push(r);
+static uint64_t rec_submit(VkCommandBuffer cb, VkFence f, VkResult *res) {
+    uint8_t *r = rq_take(R_SUBMIT, cb, sizeof(rq_hdr) + sizeof(a_submit)); *(a_submit *)(void *)(r + sizeof(rq_hdr)) = (a_submit){f, res}; rq_push(r);
     return ++g_rq_subs_queued;
 }
 static void rec_wait_submitted(uint64_t ticket) {   // the completion thread: until the recorder has submitted that one
@@ -352,9 +353,7 @@ static void rq_make(const uint8_t *rec) {   // one record's call
         case R_SUBMIT: { const a_submit *a = (const void *)s;
                          // a command buffer that did not end is not submitted: its fence goes alone, so the chunk still completes (its work dropped) and no wait hangs on it
                          if (cb) { VkResult e = vkEndCommandBuffer(cb); if (e != VK_SUCCESS) { RED_ONCE(150, "vkEndCommandBuffer failed on the recorder: %d (the chunk's work dropped)", e); if (e == VK_ERROR_DEVICE_LOST) gpu_fault_log(e); cb = VK_NULL_HANDLE; } }
-                         VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = cb ? 1u : 0u, .pCommandBuffers = &cb};
-                         pthread_mutex_lock(&g_vk.qmu); VkResult q = vkQueueSubmit(g_vk.q, 1, &si, a->f); pthread_mutex_unlock(&g_vk.qmu);
-                         if (q != VK_SUCCESS) { RED_ONCE(151, "vkQueueSubmit failed on the recorder: %d", q); if (q == VK_ERROR_DEVICE_LOST) gpu_fault_log(q); }
+                         *a->res = submit_or_fence(cb, a->f, " on the recorder");   // before the count below: the completion thread reads it once the submission is counted
                          atomic_fetch_add(&g_rq_subs_done, 1);
                          if (atomic_load(&g_rq_swait)) { pthread_mutex_lock(&g_rq_mu); pthread_cond_broadcast(&g_rq_csub); pthread_mutex_unlock(&g_rq_mu); }
                          break; }

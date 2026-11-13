@@ -371,6 +371,7 @@ typedef struct chunk {
     VkDescriptorSet *bcd; int nbcd, cbcd, bcd_used;   // the GPU BC decodes' sets (gfx_vk_bcdec.inc bcd_set), the same way
     VkDescriptorSet *ups; int nups, cups, ups_used;   // the upscaler replacement's sets (gfx_vk_upsq.inc upsq_set), the same way
     uint64_t rq_ticket;   // its submission's ticket with the recorder on (gfx_vk_rec.inc rec_submit), 0 when submitted by the replay
+    VkResult sub_r;   // VK_SUCCESS once its fence is on the queue; else what the queue said, and the completion thread doesn't wait on the fence (submit_or_fence)
     ds_list **dl; int ndl, cdl; ds_list **dt; int ndt, cdt; int nds;   // recycled descriptor sets (gfx_vk_draw.inc ds_get): the lists holding sets, those handed out from in this recording, the sets held
     gm_logref *gml; int ngml, cgml, gm_st, ip_wr;   // its raw store write logs; gm_st: a shader with raw stores ran in it (gfx_vk_gmem.inc); ip_wr: one wrote a storage buffer in place
     struct { const char *a, *b; uint32_t n, m; char kind; } cr[CR_MAX]; int ncr;   // what it recorded, the last CR_MAX of ncr (crumb): named when the GPU hangs or is lost in it (gpu_slow)
@@ -693,13 +694,34 @@ static void gpu_fault_log(VkResult r) {   // once, from whichever thread sees th
         LOG("[vk]   vendor: \"%s\", code %#llx, data %#llx", vd[i].description, (unsigned long long)vd[i].vendorFaultCode, (unsigned long long)vd[i].vendorFaultData);
     bc_report("device lost", 0);
 }
+// A submission the queue refuses leaves its fence off the queue, and the completion thread waited on that fence for good: on an AYN Thor Pro (Adreno 740, Qualcomm's
+// driver) Skyrim's vkQueueSubmit gave -3, which isn't one of a submission's results, the replay stopped behind it and Android called the app not responding
+// (droidplay-core#444). The fence goes again alone, its work dropped, as a command buffer that didn't end does on the recorder. When the queue refuses that too, the GPU
+// counts as lost (gpu_fault_log: the start record, and the next start on the system's driver after a DM_VK_DRIVER one) and the chunk keeps the result, so the completion
+// thread doesn't wait on its fence. who: "" from the replay, " on the recorder". → VK_SUCCESS once the fence is on the queue, else the queue's result
+// DM_VK_REFUSE_SUBMIT=n (env.txt), to test this: the nth submission is refused with -3 as that one was, and its fence alone goes; -n refuses that too
+static int refuse_at(void) { static int v = -1; static int n; if (v < 0) { const char *e = getenv("DM_VK_REFUSE_SUBMIT"); n = e ? atoi(e) : 0; v = 1; } return n; }
+static VkResult submit_or_fence(VkCommandBuffer cb, VkFence f, const char *who) {
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = cb ? 1u : 0u, .pCommandBuffers = &cb};
+    static long nsub; int ra = refuse_at();
+    pthread_mutex_lock(&g_vk.qmu);
+    long k = ++nsub; int refuse = ra && k == (ra < 0 ? -(long)ra : (long)ra);
+    VkResult r = refuse ? VK_ERROR_INITIALIZATION_FAILED : vkQueueSubmit(g_vk.q, 1, &si, f), alone = r;
+    if (r != VK_SUCCESS && r != VK_ERROR_DEVICE_LOST && cb) { si.commandBufferCount = 0; alone = refuse && ra < 0 ? r : vkQueueSubmit(g_vk.q, 1, &si, f); }
+    pthread_mutex_unlock(&g_vk.qmu);
+    if (r == VK_SUCCESS) return VK_SUCCESS;
+    if (alone == VK_SUCCESS) { RED_ONCE(166, "vkQueueSubmit failed%s: %d; its fence went alone, so the chunk completes with its work dropped", who, r); return VK_SUCCESS; }
+    RED_ONCE(2, "vkQueueSubmit failed%s: %d%s", who, r, alone != r || (cb && r != VK_ERROR_DEVICE_LOST) ? ", and its fence alone too: the GPU counts as lost" : "");
+    gpu_fault_log(alone);
+    return alone;
+}
 // the completion thread: c took ns on the GPU, its fence gave fr; cut: its end timestamp was never written (the driver's hang recovery skipped the rest of it)
 static void gpu_slow(chunk *c, VkResult fr, uint64_t ns, int cut) {
     if (fr != VK_SUCCESS) gpu_fault_log(fr);
     static int nrep; if (nrep >= 3) return;
     nrep++; bc_report("a slow submission", c->seq); int n = c->ncr < CR_MAX ? c->ncr : CR_MAX;
     LOG("[RED] [vk] submission %llu took %.0f ms on the GPU%s%s (the one before had completed): it recorded %d passes, draws and dispatches, the last %d of them:", (unsigned long long)c->seq, ns / 1e6,
-        cut ? ", its end timestamp never written (the driver's hang recovery cut it short)" : "", fr == VK_ERROR_DEVICE_LOST ? ", and its fence reports the device lost" : "", c->ncr, n);
+        cut ? ", its end timestamp never written (the driver's hang recovery cut it short)" : "", fr == VK_ERROR_DEVICE_LOST ? ", and its fence reports the device lost" : fr != VK_SUCCESS ? ", never on the queue (it refused the submission)" : "", c->ncr, n);
     for (int k = 0; k < n;) {   // a run of the same crumb (Breath of the Wild's chunks hold runs of 17 alike draws) is one line, "× run"
         int i = (c->ncr - n + k) % CR_MAX, run = 1; char kd = c->cr[i].kind; int at = c->ncr - n + k;
         while (k + run < n) { int j = (c->ncr - n + k + run) % CR_MAX;
@@ -726,11 +748,9 @@ static uint64_t chunk_submit(uint64_t nvn_fence) {
     if (rec) { cb_barrier(); rb_record(C); if (C->ts) vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsq, 2 * (uint32_t)(C - g_ch) + 1); if (!deferred) vkEndCommandBuffer(C->cb); C->open = 0; }
     C->nvn_fence = nvn_fence;
     chunk *c = C; C = NULL;
-    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = rec ? 1u : 0u, .pCommandBuffers = &c->cb};
-    VkResult r = VK_SUCCESS;
-    c->rq_ticket = 0; if (deferred) c->rq_ticket = rec_submit(rec ? c->cb : VK_NULL_HANDLE, c->fence);   // its failures are the recorder's to report (rq_make R_SUBMIT)
-    else { pthread_mutex_lock(&g_vk.qmu); r = vkQueueSubmit(g_vk.q, 1, &si, c->fence); pthread_mutex_unlock(&g_vk.qmu); }
-    if (r != VK_SUCCESS) { RED_ONCE(2, "vkQueueSubmit failed: %d", r); if (r == VK_ERROR_DEVICE_LOST) gpu_fault_log(r); }
+    c->sub_r = VK_SUCCESS; c->rq_ticket = 0;
+    if (deferred) c->rq_ticket = rec_submit(rec ? c->cb : VK_NULL_HANDLE, c->fence, &c->sub_r);   // the recorder submits it and keeps what the queue said in sub_r (rq_make R_SUBMIT)
+    else c->sub_r = submit_or_fence(rec ? c->cb : VK_NULL_HANDLE, c->fence, "");
     g_flushes++;
     pthread_mutex_lock(&g_cmu);
     if (c->nwb || (c->gm_st && gm_store_wait())) atomic_fetch_add(&g_inflight_wb, 1);   // (raw stores: as a write-back of unknown range, chunk_hits)
@@ -1094,7 +1114,7 @@ static void *chunk_thread(void *arg) {
         pthread_mutex_lock(&g_cmu); while (!g_fifo_n) pthread_cond_wait(&g_ccv, &g_cmu); chunk *c = g_fifo[0]; pthread_mutex_unlock(&g_cmu);
         rec_wait_submitted(c->rq_ticket);   // a deferred submission reached the queue first (gfx_vk_rec.inc); before w0, so the recorder's lag is not taken for GPU time
         uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
-        VkResult fr = vkWaitForFences(g_vk.dev, 1, &c->fence, VK_TRUE, UINT64_MAX);
+        VkResult fr = c->sub_r != VK_SUCCESS ? c->sub_r : vkWaitForFences(g_vk.dev, 1, &c->fence, VK_TRUE, UINT64_MAX);   // a fence never on the queue never signals
         uint64_t waited = clock_gettime_nsec_np(CLOCK_MONOTONIC) - w0; int cut = 0;   // the chunk's time on the GPU (the one before had completed), at most (gpu_slow)
         int ts = c->ts, nq = c->nq, ntq = c->ntq, npq = c->npq;   // the queries it used, reset once read (qr_done): the counts are zeroed on the way
         c->t_end = 0; uint64_t busy = 0;
