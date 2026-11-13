@@ -850,6 +850,13 @@ The Vulkan replay has no side libraries: `dm/android/spv_alpha.h` rewrites the f
 - **Fix:** the builder's mode now goes to the texture (`tex_t.stencil`), whose sampling view is the `X32_Stencil8` one a stencil-mode texture view already got.
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the character occlusion mask, `edbfc7a088be545e`).
 
+### Raw depth/stencil storage written as a buffer
+
+- **Symptom:** indoor lights flicker, the scene switching between bright and dark from frame to frame while the camera stands still, on the Mac and on Android, on every driver, with occlusion queries off too.
+- **Cause:** a compute pass writes a depth-stencil texture's stencil through a storage buffer laid over the texture's storage. The hosts keep depth and stencil in a Metal or Vulkan image of their own, so those writes land in the pool's buffer and never reach the image, and the draws that sample the stencil read whatever an earlier pass left in it. The stencil-mode view is right ([Stencil-mode texture views read through `X32_Stencil8`](#stencil-mode-texture-views-read-through-x32_stencil8)): it is the plane's contents that are stale.
+- **Fix / limitation:** keeping raw buffer writes and a depth-stencil image in step is open: neither API exposes the GPU's block-linear depth-stencil layout to write it from. For Skyrim a build-gated cut makes the scene initializer's own depth clear also clear the stencil, which puts in the image the upper bits the compute pass writes. The dispatch, ordinary depth-only clears, the interface and the shadows are unchanged.
+- **Found on:** [The Elder Scrolls V: Skyrim](../../dm/games/01000A10041EA000/README.md#helgen-keeps-lighting) (compute `a76fe13a8630d619`, shadow mask `f83614ab6954bec4`; droidplay-core#444), found on 1.0.12 by seedds/nxnative PR #444.
+
 ### Conservative rasterization remains unimplemented
 
 - **Symptom:** `[nvn] SetConservativeRasterEnable on: ignored by host for now`, followed by `[RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate`.
