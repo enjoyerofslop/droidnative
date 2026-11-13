@@ -277,8 +277,12 @@ static void *text_input_thread(void *p) {
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
     if (!g_gp || out_cap <= 0) return -1;
     text_req q = {title, sub, guide, initial, max_chars, g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0, out_cap, -1, out}; pthread_t th;
-    if (pthread_create(&th, NULL, text_input_thread, &q)) return -1;
+    // The game's thread waits here, so no vibration update comes while the box is up, and haptics_android.c would keep renewing the last level
+    // (droidplay-core#449: Cult of the Lamb's naming rumble lasted as long as the box). On the Switch the keyboard applet takes the controllers, and their vibration stops
+    dm_haptics_suspend(DM_HAPTICS_DIALOG, 1);
+    if (pthread_create(&th, NULL, text_input_thread, &q)) { dm_haptics_suspend(DM_HAPTICS_DIALOG, 0); return -1; }
     pthread_join(th, NULL);
+    dm_haptics_suspend(DM_HAPTICS_DIALOG, 0);
     if (q.ok < 0) return -1;
     LOG("software keyboard: %s", q.ok ? "confirmed" : "cancelled");
     return q.ok;
