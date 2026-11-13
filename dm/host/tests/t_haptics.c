@@ -38,6 +38,11 @@ int main(void) {
     dm_haptics_suspend(DM_HAPTICS_INTERRUPTED, 0);
     assert(dm_haptics_actual(1, 0).amplitude_low == 0);
     send(1, 0, 0.8); assert(dm_haptics_actual(1, 0).amplitude_low == 0.8f);
+    dm_haptics_suspend(DM_HAPTICS_DIALOG, 1);   // a box the game waits on (the software keyboard's): the level it left is cleared, and no update plays under it
+    assert(dm_haptics_actual(1, 0).amplitude_low == 0);
+    send(1, 0, 0.5); assert(dm_haptics_actual(1, 0).amplitude_low == 0);
+    dm_haptics_suspend(DM_HAPTICS_DIALOG, 0);
+    send(1, 0, 0.5); assert(dm_haptics_actual(1, 0).amplitude_low == 0.5f);
     dm_vibration_update bad = {1, 1, {NAN, INFINITY, 2, -1}};
     dm_haptics_send(&bad, 1);
     dm_vibration v = dm_haptics_actual(1, 1);

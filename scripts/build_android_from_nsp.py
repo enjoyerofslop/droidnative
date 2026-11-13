@@ -129,6 +129,7 @@ class Journaled(bi.Progress):   # the console's progress, and the same build's e
         super().end(summary, ok)
         if not self.inner: self.j.end(summary, ok)
     def say(self, msg): super().say(msg); self.j.say(msg)
+    def event(self, ev, **fields): super().event(ev, **fields); self.j.event(ev, **fields)   # the desktop app follows a console build's journal: run_time_shaders reaches it there too
     def close(self, ok=True): super().close(ok); self.j.close(ok)
     def exit(self, code): self.close(ok=code == 0); self.write({'ev': 'exit', 'code': code}); self.f.close()
 
@@ -1110,6 +1111,59 @@ def pull_captures(serial, gid, dest, logs):   # → how many new captures were c
     return new
 
 
+# A registered profile whose shader map names captures (build_ipa_from_nsp.py glslc_wanted: DRAGON QUEST BUILDERS 2, Fire Emblem: Three Houses, Portal, Portal 2, Hyrule
+# Warriors: Definitive Edition, Catherine: Full Body) needs them in the split, or its table check stops the build. Only the Mac build captures them (capture_glslc boots the
+# game in the Mac host). On Windows, Three Houses' build extracted the game and then stopped at the split with a table difference that named no cause (issue #441)
+GLSLC_ISSUE = 'droidplay-core#441 (https://github.com/enjoyerofslop/droidplay-core/issues/441)'
+
+
+def capture_folders(g, v, ex, nsp_dir, env):   # where version v's run-time captures may be, in the order taken: DM_GLSLC_CAPTURE (which the split then reads), this build's own
+    # extraction (build_ipa_from_nsp.py captures into it when it ran on the same folder), then DroidPlay for Mac's build beside the NSP folder (<game>/<title ID>_build, where ue_decode looks too)
+    if env.get('DM_GLSLC_CAPTURE'): return [Path(env['DM_GLSLC_CAPTURE'])]
+    return [ex / v / 'glslc_capture', nsp_dir.parent / f'{g.id}_build' / 'extract' / v / 'glslc_capture']
+
+
+def run_time_missing(g, want, sv, ex, nsp_dir, env, take=False):
+    """The shader versions (sv) none of whose folders (capture_folders) holds every capture in want, the profile's shader map's. Asked before the extraction, which takes minutes,
+    and again before the split, since a version extracted again has lost its own folder. take: a Mac build's captures are copied into this build's extraction, where the split reads them"""
+    left = []
+    for v in sv:
+        have = next((d for d in capture_folders(g, v, ex, nsp_dir, env) if bi.glslc_done(d) >= want), None)
+        own = ex / v / 'glslc_capture'
+        if have is None: left.append(v)
+        elif take and have != own and not env.get('DM_GLSLC_CAPTURE'):
+            own.mkdir(parents=True, exist_ok=True)
+            for n in sorted(want): shutil.copyfile(have / n, own / n)
+            say(f'{v}: the {len(want)} shaders the game compiles while it runs, from the Mac build in {have.parents[2]}')
+    return left
+
+
+def run_time_stop(g, want, name):   # why a registered profile's game is not built: its shader tables name shaders the game compiles while it runs, and no game file holds them
+    head = f'{name} compiles {len(want)} of its shaders while it runs, with its own shader compiler (GLSLC), and game profile {g.id}\'s shader tables need them. '
+    if sys.platform == 'darwin':   # the Android build's modules can't boot in the Mac host (mac_decoder says why): the Mac build captures them, and this build takes them
+        return head + ('Only a build for the Mac captures them so far: build the game for the Mac first (DroidPlay for Mac, or scripts/build_ipa_from_nsp.py on this folder), '
+                       f'then build it for Android again, which takes them from that build. {GLSLC_ISSUE}')
+    return head + f'Only a build on a Mac can capture them so far, so this game can\'t be built on Windows or Linux yet: {GLSLC_ISSUE}'
+
+
+def run_time_note(on, name, gid, prov, want, derived, captured, game_app=False):
+    """What the build says before its long steps about a game that compiles some of its shaders while it runs, or None. Until then only a provisional build whose split found
+    no shaders at all said anything, at its end. on: the game files say it does (profile_guess.py shader_sources glslc_capture); want: the registered profile's shader map names
+    them (a build from that profile takes them or stops: run_time_missing); captured: how many the packed version's extraction holds, which a derived profile's split reads"""
+    if prov:   # the phone captures each one the first time the game compiles it (front_android.c DM_GLSLC_CAPTURE), and pull_captures brings them in
+        if not on: return None
+        if game_app: return (f'[RED] {name} compiles some of its shaders while it runs, so a game app built now may draw some things black, and it can\'t take them in later. '
+                             'To pack them, install the game with DroidPlay first, play it to its first scene, run --update-shaders (DroidPlay for Windows: Manage › Update '
+                             'shaders from the phone), then build the game app again: docs/android.md, "Games that compile their shaders while they run"')
+        return (f'[RED] {name} compiles some of its shaders while it runs, so its first install may draw some things black. Play it to its first scene, then bring them in '
+                'with --update-shaders (DroidPlay for Windows: Manage › Update shaders from the phone): docs/android.md, "Games that compile their shaders while they run"')
+    if want:   # a profile derived from it splits its own tables, without whatever no capture in this extraction holds; --update-shaders pulls nothing for it
+        return (f'[RED] {name} compiles {len(want)} of its shaders while it runs, and this build, from a profile derived from game profile {gid}, packs without them: '
+                f'whatever they draw may be black. Only a build on a Mac captures them so far: {GLSLC_ISSUE}') if derived and not captured else None
+    return (f'{name} has its own shader compiler (GLSLC), and game profile {gid}\'s shader tables list no shader it compiles while it runs, so none are pulled from the phone '
+            'for it') if on else None
+
+
 def open_tree(serial, d):
     # adb makes the folders as the shell user, drwxrws--- (group ext_data_rw): on Android 15 (a Galaxy S21 Ultra) the app could not enter them, found no game and ran its self test.
     # Opened to everyone; Android/data/<package> is reachable only by the app and the shell, so this gives no other app access
@@ -1484,6 +1538,8 @@ def info(src, keys=None, want=None):
                                        'built': (work / f'patched_android_{v}' / 'main.fixups.tsv').is_file(),
                                        'captures': len(list((d / 'glslc_capture').glob('*.glslc')))}   # run-time shaders on this computer (pull_captures)
         h = library().get(g.id); out['host'] = h[1] if h else None
+        if not prov and (want := bi.glslc_wanted(g)):   # shaders it compiles while it runs, which its tables name: built only with a Mac build's captures (run_time_missing)
+            out['run_time_shaders'] = {'count': len(want), 'ready': not run_time_missing(g, want, g.words('shader_versions') or [out['newest']], ex, nsp_dir, env)}
     return out
 
 
@@ -1586,13 +1642,15 @@ def main(argv):
     sys.path.insert(0, str(REPO / 'dm/tools')); import nacp; bi.nacp = nacp
     sdk = sdk_dir(a.sdk)
     env = dict(os.environ); bi.configure_dotnet(env)
-    nsp_dir, app, fam, kind = scan(src, keys, env, want=title_id(a.title_id))
+    nsp_dir, app, fam, kind = scan(src, keys, env, nsz=False, want=title_id(a.title_id))   # NSZ files are decompressed once the profile is known: a game this computer can't build stops first
+    def unpack(fam): return bi.decompress_nsz(nsp_dir, app, fam, keys, env) if kind is None else fam   # nothing left to do for a fam decompressed already
     g = gamemod.by_title(app)
     if g is None:   # no game profile: surveyed and packed from a provisional profile outside the repository, as build_ipa_from_nsp.py does (the game may not boot)
         pdir = nsp_dir / f'{app:016X}_build' / 'profile'
         if (pdir / f'{app:016X}' / 'game.tsv').exists(): say(f'no game profile for {app:016X}: reusing the provisional profile from the last run (delete it to survey again)')
         else:   # the first experimental build only packs; once its provisional profile exists, it is built and installed like a profiled game's (to try it on a phone)
             if not a.no_push: raise BuildError(f'no game profile for {app:016X}: a game without one is first packed with --no-push (a survey, a provisional profile and an APK that may not boot)')
+            fam = unpack(fam)   # the survey reads the packages
             facts = bi.survey(nsp_dir, app, fam, keys, REPO, sys.executable, env)
             facts['survey'] = str(nsp_dir / f'{app:016X}_survey' / 'survey.md')
             bi.write_profile(pdir / f'{app:016X}', app, facts)
@@ -1614,6 +1672,10 @@ def main(argv):
         elif not all(v in have for v in need): derived = f'the folder has no {", ".join(v for v in need if v not in have)}, whose files game profile {g.id}\'s shader tables were made from'
         if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
     work = nsp_dir / f'{g.id}_build'; logs = work / 'logs'; ex = work / 'extract'
+    want = None if prov else bi.glslc_wanted(g)   # the shaders it compiles while it runs that the registered tables name (run_time_missing)
+    if want and not derived and not (a.push_only or a.update_shaders) and run_time_missing(g, want, g.words('shader_versions') or [pkg_ver], ex, nsp_dir, env):
+        raise BuildError(run_time_stop(g, want, g.get('name', '') or g.id))   # before the NSZ decompression and the extraction (Three Houses: 47 s and more, then the split's table difference)
+    fam = unpack(fam)
     global _work; _work = work
     ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'), DM_TARGET='android', PYTHONUTF8='1')   # the tools' text files in UTF-8 on Windows too (its default is the ANSI code page)
@@ -1625,6 +1687,7 @@ def main(argv):
             if a.push_only or a.update_shaders: raise
     romfs_at = romfs_path(serial, a.romfs_dir, g.id) if a.romfs_dir and serial else None   # now, so that a phone with no card stops the build before its shaders
     capture_dir = ex / pkg_ver / 'glslc_capture'
+    runtime = False   # a provisional profile's game that compiles shaders while it runs (run_time_note): the end of an install says what to do next
     if a.push_only or a.update_shaders:   # what an earlier build left: the extraction, the rewrite, the shaders, the font and the host in the library
         game, spv, font = ex / pkg_ver, work / 'spv', work / 'font'
         need = [p for p in (game / 'control.nacp', patched / 'main.fixups.tsv', font) if not p.exists()]
@@ -1673,6 +1736,9 @@ def main(argv):
             os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
             g = gamemod.load(g.id)
             say(f'derived game profile for {pkg_ver} ({disp}): {g.dir}')
+        if note := run_time_note(src['glslc_capture'][0], name, g.id, prov, want, derived, len(bi.glslc_done(game / 'glslc_capture')), a.game_apk):   # before the rewrite and the shaders
+            say(note); runtime = bool(prov)
+            if runtime: bi.PROG.event('run_time_shaders', title_id=g.id, name=name, game_app=a.game_apk)   # the desktop app's notice and its Update shaders, highlighted
         g = bi.rewrite(sys.executable, REPO, game / 'ExeFS', patched, env, logs, g, bool(prov))
         if prov or derived: bi.provisional_prep(sys.executable, REPO, env, logs, g); g = bi.refine_after_rewrite(g, game, patched, reg if derived else None)
         # the DLC in the folder, as for iOS: <id>_build/aoc/<index>.img, which push_game copies to the game's aoc/ and the host mounts and reports as owned (DM_AOC_DIR).
@@ -1681,6 +1747,7 @@ def main(argv):
         if prov and serial: pull_captures(serial, g.id, capture_dir, logs)
         dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
         sdirs = {v: (game if v == pkg_ver else extract(v)) for v in sv}
+        if want and not derived and run_time_missing(g, want, sv, ex, nsp_dir, env, take=True): raise BuildError(run_time_stop(g, want, name))   # a version extracted again lost its own
         if sv and bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['ue_decode'][0]:   # Unreal's Oodle-compressed shaders (ue_decode)
             with phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Unreal shaders') if serial else contextlib.nullcontext():
                 ue_decode(sdirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game)
@@ -1734,6 +1801,7 @@ def main(argv):
     bi.PROG.end(f'{REMOTE}/games/{g.id}')
     if romfs_at: say(f'the RomFS: {romfs_at}' + (f' (copy {bi.rfs.source(game)} there before playing)' if a.no_romfs else ''))
     say(f'done: open DroidPlay on the phone and pick "{label}". Log: {REMOTE}/log.txt (adb logcat -s DroidPlay)')
+    if runtime: say('once it reaches its first scene, bring in the shaders it compiled while it ran with --update-shaders (DroidPlay for Windows: Manage › Update shaders from the phone)')
 
 
 if __name__ == '__main__':

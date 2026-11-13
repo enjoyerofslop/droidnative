@@ -407,6 +407,30 @@ class Explain(unittest.TestCase):   # the messages as the script, nx_extract and
         self.assertEqual(ex.explain('boom', stage='extract v393216').title, 'The build stopped at "Reading the game files"')
         self.assertEqual(ex.explain('boom', setup=True, stage='Android SDK packages').title, 'Installing the tools stopped at "Installing the Android SDK"')
 
+    # build_android_from_nsp.py run_time_stop's words, on Windows and on a Mac: a registered profile's tables name shaders the game compiles while it runs (droidplay-core#441)
+    STOP = ("[RED] Fire Emblem: Three Houses compiles 9 of its shaders while it runs, with its own shader compiler (GLSLC), and game profile 010055D009F78000's shader tables "
+            "need them. ")
+    PC = "Only a build on a Mac can capture them so far, so this game can't be built on Windows or Linux yet: droidplay-core#441 (https://github.com/enjoyerofslop/droidplay-core/issues/441)"
+    MAC = ('Only a build for the Mac captures them so far: build the game for the Mac first (DroidPlay for Mac, or scripts/build_ipa_from_nsp.py on this folder), then build it '
+           'for Android again, which takes them from that build. droidplay-core#441 (https://github.com/enjoyerofslop/droidplay-core/issues/441)')
+
+    def test_a_game_only_a_mac_build_can_capture_for_says_so(self):   # not "The build stopped", a bug to report: nothing the player did, and nothing to report
+        h = ex.explain(self.STOP + self.PC, game='Fire Emblem: Three Houses', stage='')
+        self.assertEqual((h.title, h.bug, h.action), ('This game builds on a Mac only for now', False, 'issue'))   # its button opens #441 (ISSUE_441)
+        self.assertIn('Fire Emblem: Three Houses compiles 9 of its shaders while it runs', h.body); self.assertIn('#441', h.body); self.assertIn('issue #441', h.body)
+        h = ex.explain(self.STOP + self.MAC, game='Fire Emblem: Three Houses')
+        self.assertEqual((h.title, h.action), ('Build it for the Mac first', '')); self.assertIn('DroidPlay for Mac', h.body)
+
+    def test_the_librarys_words_for_run_time_shaders(self):   # before a build (--info's run_time_shaders) and after one said so (its run_time_shaders event)
+        self.assertEqual(ex.mac_only(9), 'Builds on a Mac only for now: it compiles 9 shaders while it runs')
+        self.assertEqual(ex.mac_only(9, mac=True), 'Build it for the Mac first: it compiles 9 shaders while it runs')
+        title, body = ex.run_time_note('Crash <N. Sane>')
+        self.assertEqual(title, 'Some shaders come after the first play'); self.assertIn('Crash &lt;N. Sane&gt; compiles some', body)
+        self.assertIn('first install may draw some things black', body); self.assertIn('Manage › Update shaders from the phone', body)
+        title, body = ex.run_time_note('Crash', game_app=True)
+        self.assertIn('this game app may draw some things black', body); self.assertIn('build the game app again', body)
+        self.assertIn('Update shaders', ex.RUN_TIME_META)
+
 
 class Report(unittest.TestCase):   # Copy report: one Discord message, home folder as ~, never key material
     INFO = {'version': '0.5.0', 'title': 'Build Pokémon Brilliant Diamond', 'stage': 'rewrite', 'k': 3, 'n': 8, 'game': 'Pokémon Brilliant Diamond',

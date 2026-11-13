@@ -6,8 +6,10 @@ the shaders translated so far, and a full disk is said plainly there and at the 
 a translator that makes nothing stops it too, with spv_build.py run for real."""
 import contextlib
 import hashlib
+import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -323,6 +325,166 @@ class OodleDecode(unittest.TestCase):
         with mock.patch.dict(ba.os.environ, {'DM_UE_DECODE': 'phone'}): self.assertIsNone(found())
         self.assertEqual(found({'DM_OODLE_HOST': 'h', 'DM_OODLE_MODULES': 'm'}), {'DM_OODLE_HOST': 'h', 'DM_OODLE_MODULES': 'm'})   # set by hand: anywhere
         fx.write_text('# BUILD_ID\tffffffffffffffffffffffffffffffff\n'); self.assertIsNone(found())   # another build's modules
+
+
+class Reached(Exception): pass   # the step after the one a test is about: main got past it
+
+
+class RunTimeShaders(unittest.TestCase):
+    """Games that compile some of their shaders while they run, with their own GLSLC (droidplay-core#441). A registered profile whose shader map names them stops before the
+    NSZ decompression and the extraction unless a Mac build captured them: on Windows, Fire Emblem: Three Houses stopped at the split's table difference after extracting the
+    game. A Mac build's captures are taken instead; --update-shaders and --push-only go on as before. A provisional profile's game is told before the rewrite that its first
+    install may draw some things black and to use Update shaders, and the desktop app gets an event; a game without run-time shaders hears nothing. Three Houses' real profile
+    (9 captures); the game files, the extraction and the phone are stand-ins"""
+    TID = '010055D009F78000'   # Fire Emblem: Three Houses
+    PROV = '0100D940063A0000'   # a game without a profile, built from a provisional one
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.nsp = self.tmp / 'game/android'; self.nsp.mkdir(parents=True); self.keys = self.tmp / 'prod.keys'; self.keys.write_text('')
+        sys.path.insert(0, str(REPO / 'dm/games')); import game, profile_guess   # noqa: E401
+        self.game, self.pg = game, profile_guess
+        self.g = game.by_title(int(self.TID, 16)); self.want = ba.bi.glslc_wanted(self.g)
+        self.said = []
+        for p in (mock.patch.object(ba.bi, 'PROG', mock.MagicMock()), mock.patch.object(ba, 'say', self.said.append), mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'),
+                  mock.patch.dict(ba.os.environ, {'NXNATIVE_JOURNAL': '0'}), mock.patch.object(ba.bi, '_importable', return_value=True),
+                  mock.patch.object(ba, 'sdk_dir', return_value=self.tmp / 'sdk'), mock.patch.object(ba.bi, 'configure_dotnet')):
+            p.start(); self.addCleanup(p.stop)
+
+    def captures(self, d, names, size=0x48):   # whole GLSLC outputs (glslc_done): the magic, and their own length at +0x44
+        d.mkdir(parents=True, exist_ok=True)
+        b = bytearray(0x48); b[:4] = b'\x91\x68\x86\x19'; b[0x44:0x48] = size.to_bytes(4, 'little')
+        for n in names: (d / n).write_bytes(b)
+
+    def main(self, *args, plat='linux', tid=None, fam=None):   # → what main raised; the folder's game is Three Houses 1.5.0 (v327680), or tid's
+        fam = fam or {'base': self.nsp / 'base.nsp', 'updates': [(327680, self.nsp / 'update.nsp')], 'dlc': []}
+        with mock.patch.object(ba, 'scan', return_value=(self.nsp, int(tid or self.TID, 16), fam, None)), \
+             mock.patch.object(ba.bi, 'decompress_nsz', side_effect=lambda d, a, f, k, e: f) as self.nsz, \
+             mock.patch.object(ba, 'build_nx_extract', side_effect=Reached) as self.nx, mock.patch.object(ba.sys, 'platform', plat):
+            with self.assertRaises((ba.BuildError, Reached)) as cm: ba.main([str(self.nsp), '-k', str(self.keys), '--progress', 'off', *args])
+        return cm.exception
+
+    def test_the_profiles_tables_name_nine_captures(self):
+        self.assertEqual(len(self.want), 9)
+        self.assertTrue(all(re.fullmatch(r'[0-9a-f]{16}\.glslc', n) for n in self.want))
+
+    def test_a_registered_profile_with_captures_stops_before_the_extraction_off_a_mac(self):
+        e = self.main('--no-push')
+        self.assertIsInstance(e, ba.BuildError); msg = str(e)
+        self.assertIn(f"Fire Emblem: Three Houses compiles 9 of its shaders while it runs, with its own shader compiler (GLSLC), and game profile {self.TID}'s shader tables need them", msg)
+        self.assertIn("Only a build on a Mac can capture them so far, so this game can't be built on Windows or Linux yet: droidplay-core#441", msg)
+        self.assertNotIn('differ', msg)
+        self.nsz.assert_not_called(); self.nx.assert_not_called()   # no NSZ decompression, no extraction
+        self.assertFalse((self.nsp / f'{self.TID}_build').exists())   # nothing written
+
+    def test_on_a_mac_it_points_at_the_mac_build(self):   # whose captures this build takes
+        msg = str(self.main('--no-push', plat='darwin'))
+        self.assertIn('compiles 9 of its shaders while it runs', msg); self.assertIn('build the game for the Mac first (DroidPlay for Mac', msg); self.assertIn('#441', msg)
+        self.nx.assert_not_called()
+
+    def test_the_mac_builds_captures_let_the_build_go_on(self):   # DroidPlay for Mac's build beside the NSP folder, or the NSP script's in this one
+        for where in (self.tmp / 'game' / f'{self.TID}_build', self.nsp / f'{self.TID}_build'):
+            with self.subTest(where=where.parent.name):
+                self.captures(where / 'extract/v327680/glslc_capture', self.want)
+                self.assertIsInstance(self.main('--no-push'), Reached)   # on to the extraction
+                self.nsz.assert_called_once()
+                shutil.rmtree(where)
+
+    def test_the_desktop_app_explains_the_stop(self):   # in plain words on its Builds page (dm/android/desktop/explain.py), not as a bug to report
+        sys.path.insert(0, str(REPO / 'dm/android/desktop')); import explain   # pyright: ignore[reportMissingImports]
+        for plat, title in (('linux', 'This game builds on a Mac only for now'), ('darwin', 'Build it for the Mac first')):
+            with mock.patch.object(ba.sys, 'platform', plat): h = explain.explain(f'[RED] {ba.run_time_stop(self.g, self.want, "Fire Emblem: Three Houses")}')
+            self.assertEqual((h.title, h.bug), (title, False))
+
+    def test_info_tells_the_desktop_app_before_any_build(self):   # its Library shows the game as built on a Mac only until a Mac build's captures are there
+        fam = {'base': self.nsp / 'base.nsp', 'updates': [(327680, self.nsp / 'update.nsp')], 'dlc': []}
+        for p in (self.nsp / 'base.nsp', self.nsp / 'update.nsp'): p.write_bytes(b'')
+        with mock.patch.object(ba, 'scan', return_value=(self.nsp, int(self.TID, 16), fam, None)):
+            self.assertEqual(ba.info(self.nsp)['run_time_shaders'], {'count': 9, 'ready': False})
+            self.captures(self.tmp / 'game' / f'{self.TID}_build/extract/v327680/glslc_capture', self.want)
+            self.assertEqual(ba.info(self.nsp)['run_time_shaders'], {'count': 9, 'ready': True})
+        ver = int(self.game.by_title(int(GID, 16)).words('shader_versions')[0][1:])
+        with mock.patch.object(ba, 'scan', return_value=(self.nsp, int(GID, 16), dict(fam, updates=[(ver, self.nsp / 'update.nsp')]), None)):
+            self.assertNotIn('run_time_shaders', ba.info(self.nsp))
+
+    def test_update_shaders_and_push_only_are_not_stopped(self):   # they build nothing: --update-shaders still says a registered profile pulls nothing
+        for flag in ('--update-shaders', '--push-only'):
+            with self.subTest(flag=flag):
+                msg = str(self.main(flag, '--serial', 'S'))
+                self.assertIn('was not built on this computer yet', msg); self.assertNotIn('while it runs', msg)
+
+    def test_a_game_without_captures_in_its_tables_is_not_stopped(self):   # AI: THE SOMNIUM FILES, the version its profile registers
+        g = self.game.by_title(int(GID, 16)); self.assertIsNone(ba.bi.glslc_wanted(g))
+        ver = int(g.words('shader_versions')[0][1:])
+        e = self.main('--no-push', tid=GID, fam={'base': self.nsp / 'base.nsp', 'updates': [(ver, self.nsp / 'update.nsp')], 'dlc': []})
+        self.assertIsInstance(e, Reached)
+        self.assertFalse(any('while it runs' in s for s in self.said))
+
+    def test_a_mac_builds_captures_are_copied_into_this_build(self):   # where the split reads them
+        ex = self.nsp / f'{self.TID}_build/extract'; mac = self.tmp / 'game' / f'{self.TID}_build/extract/v327680/glslc_capture'
+        self.assertEqual(ba.run_time_missing(self.g, self.want, ['v327680'], ex, self.nsp, {}), ['v327680'])
+        self.captures(mac, sorted(self.want)[:8])   # one short: not taken
+        self.assertEqual(ba.run_time_missing(self.g, self.want, ['v327680'], ex, self.nsp, {}, take=True), ['v327680']); self.assertFalse((ex / 'v327680').exists())
+        self.captures(mac, sorted(self.want)[8:], size=0x80)   # the last one cut short (its length says 0x80)
+        self.assertEqual(ba.run_time_missing(self.g, self.want, ['v327680'], ex, self.nsp, {}), ['v327680'])
+        self.captures(mac, sorted(self.want)[8:])
+        self.assertEqual(ba.run_time_missing(self.g, self.want, ['v327680'], ex, self.nsp, {}, take=True), [])
+        self.assertEqual(ba.bi.glslc_done(ex / 'v327680/glslc_capture'), self.want)
+        self.assertTrue(any('9 shaders the game compiles while it runs, from the Mac build in' in s for s in self.said))
+        own = self.tmp / 'own'; self.captures(own, self.want)   # DM_GLSLC_CAPTURE: the split reads that folder, and only it counts
+        self.assertEqual(ba.run_time_missing(self.g, self.want, ['v327680'], ex, self.nsp, {'DM_GLSLC_CAPTURE': str(own)}, take=True), [])
+        self.assertEqual(ba.run_time_missing(self.g, self.want, ['v327680'], ex, self.nsp, {'DM_GLSLC_CAPTURE': str(self.tmp / 'none')}), ['v327680'])
+
+    def test_what_each_kind_of_profile_is_told(self):
+        prov = ba.run_time_note(True, 'Crash', self.PROV, True, None, '', 0)
+        self.assertIn('[RED] Crash compiles some of its shaders while it runs, so its first install may draw some things black. Play it to its first scene', prov)
+        self.assertIn('--update-shaders (DroidPlay for Windows: Manage › Update shaders from the phone)', prov)
+        app = ba.run_time_note(True, 'Crash', self.PROV, True, None, '', 0, game_app=True)
+        self.assertIn('a game app built now may draw some things black', app); self.assertIn('then build the game app again', app)
+        why = f'v393216 is not a version game profile {self.TID} registers'
+        derived = ba.run_time_note(True, 'Three Houses', self.TID, False, self.want, why, 0)
+        self.assertIn(f'compiles 9 of its shaders while it runs, and this build, from a profile derived from game profile {self.TID}, packs without them', derived)
+        self.assertIn('#441', derived); self.assertNotIn('--update-shaders', derived)   # it pulls nothing for a derived profile
+        self.assertIsNone(ba.run_time_note(True, 'Three Houses', self.TID, False, self.want, why, 9))   # this extraction has them: its split reads them
+        self.assertIsNone(ba.run_time_note(True, 'Three Houses', self.TID, False, self.want, '', 0))   # registered: taken from a Mac build, or the build stopped
+        listed = ba.run_time_note(True, 'Somnium', GID, False, None, '', 0)   # a registered profile whose tables name none (a Mac boot compiled none outside them)
+        self.assertNotIn('[RED]', listed); self.assertIn('none are pulled from the phone', listed)
+        for prov, want, derived in ((True, None, ''), (False, None, ''), (False, None, why)):   # no run-time shaders: nothing said
+            self.assertIsNone(ba.run_time_note(False, 'Odyssey', GID, prov, want, derived, 0))
+
+    def provisional(self, glslc, *args):   # main up to the rewrite for a game built from a provisional profile, its files saying glslc → what it said and the events it sent
+        pdir = self.nsp / f'{self.PROV}_build/profile/{self.PROV}'; pdir.mkdir(parents=True); (pdir / 'game.tsv').write_text('')
+        g = mock.Mock(id=self.PROV, dir=pdir); g.get.side_effect = lambda k, d=None: {'name': 'Crash'}.get(k, d)
+        g.builds.return_value = {'v0': {'display': '1.0.0'}}; g.words.side_effect = lambda k: {'shader_versions': ['v0'], 'modules': ['main']}.get(k, [])
+        ex = self.tmp / 'v0'; (ex / 'ExeFS').mkdir(parents=True)
+        src = {'graphics': ('nvn', ''), 'oodle_packs': (False, ''), 'ue_decode': (False, ''), 'glslc_capture': (glslc, 'main holds 3 GLSL sources and calls glslcCompile in subsdk0')}
+        with mock.patch.object(self.game, 'by_title', return_value=None), mock.patch.object(ba, 'provisional_profile', return_value=g), \
+             mock.patch.dict(ba.os.environ, {'DM_GAMES_DIR': str(pdir.parent)}), mock.patch.object(ba.bi, 'extract', return_value=ex), \
+             mock.patch.object(self.pg, 'build_sources', return_value=src), mock.patch.object(ba.bi.rfs, 'source', side_effect=lambda p: p), \
+             mock.patch.object(ba.bi, 'rewrite', side_effect=Reached):
+            fam = {'base': self.nsp / 'base.nsp', 'updates': [], 'dlc': []}
+            with mock.patch.object(ba, 'scan', return_value=(self.nsp, int(self.PROV, 16), fam, None)), mock.patch.object(ba.bi, 'decompress_nsz', side_effect=lambda d, a, f, k, e: f), \
+                 mock.patch.object(ba, 'build_nx_extract', return_value='nx'):
+                with self.assertRaises(Reached): ba.main([str(self.nsp), '-k', str(self.keys), '--progress', 'off', '--no-push', *args])
+        return [s for s in self.said if 'while it runs' in s], [c for c in ba.bi.PROG.event.call_args_list if c.args[0] == 'run_time_shaders']
+
+    def test_a_provisional_profiles_game_is_told_before_the_rewrite(self):
+        said, events = self.provisional(True)
+        self.assertEqual(len(said), 1); self.assertIn('first install may draw some things black', said[0]); self.assertIn('--update-shaders', said[0])
+        self.assertEqual([c.kwargs for c in events], [{'title_id': self.PROV, 'name': 'Crash', 'game_app': False}])   # the desktop app's notice
+
+    def test_a_game_app_is_told_to_install_and_update_first(self):
+        said, events = self.provisional(True, '--game-apk')
+        self.assertIn('a game app built now may draw some things black', said[0]); self.assertTrue(events[0].kwargs['game_app'])
+
+    def test_a_game_without_run_time_shaders_hears_nothing(self):
+        self.assertEqual(self.provisional(False), ([], []))
+
+    def test_the_journal_carries_the_event(self):   # the desktop app follows a console build through its journal
+        p = ba.Journaled('off', ['x']); p.event('run_time_shaders', title_id=self.PROV, name='Crash', game_app=False); p.exit(0)
+        (f,) = (self.tmp / 'data/builds').glob('*.jsonl')
+        evs = [json.loads(line) for line in f.read_text(encoding='utf-8').splitlines()]
+        self.assertIn({'ev': 'run_time_shaders', 'title_id': self.PROV, 'name': 'Crash', 'game_app': False}, [{k: v for k, v in e.items() if k != 't'} for e in evs])
 
 
 if __name__ == '__main__':

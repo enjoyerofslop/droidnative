@@ -14,13 +14,14 @@ import bug_report   # noqa: E402  # pyright: ignore[reportMissingImports]  (scri
 
 DISCORD = 'https://discord.gg/3r92f8wmh7'
 DISCORD_LIMIT = 2000   # characters in one message
+ISSUE_441 = 'https://github.com/enjoyerofslop/droidplay-core/issues/441'   # games only a Mac build can capture run-time shaders for
 
 
 @dataclass
 class Help:
     title: str
     body: str          # rich text: names in it are escaped
-    action: str = ''   # what its button does: phone, retry, keys, tools, folder, backup; '' for none
+    action: str = ''   # what its button does: phone, retry, keys, tools, folder, backup, issue (ISSUE_441); '' for none
     label: str = ''    # the button's text
     bug: bool = False  # nothing the player did or can fix: the report for #help is what to do
 
@@ -59,6 +60,12 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
     if 'INSTALL_FAILED_USER_RESTRICTED' in t:
         return Help('Your Xiaomi phone blocked the install', 'In Developer options, turn on <b>Install via USB</b> (it may ask you to sign in to your Xiaomi account), '
                     'then Install again.', 'retry', 'Install again')
+    m = re.search(r"compiles (\d+) of its shaders while it runs, with its own shader compiler \(GLSLC\), and game profile \w+'s shader tables need them", t)
+    if m:   # build_android_from_nsp.py run_time_stop: not a bug to report, and nothing the player can fix on this PC
+        mac = 'Only a build for the Mac captures them' in t
+        return Help('Build it for the Mac first' if mac else 'This game builds on a Mac only for now', f'{g} compiles {m[1]} of its shaders while it runs, and only a build on '
+                    'a Mac can capture them so far. ' + ('Build it for the Mac with DroidPlay for Mac, then build it for Android again: this build takes them from there.' if mac else
+                    'Its fix is followed in droidplay-core issue #441 on GitHub.'), '' if mac else 'issue', '' if mac else 'Follow the fix on GitHub')
     if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' in t or 'signed with another key' in t:
         return Help('DroidPlay on this phone came from another computer', 'To update it from this PC, copy the signing key (<b>.android\\nxnative-debug.jks</b> in '
                     'your user folder) from that computer to this one. Uninstalling DroidPlay from the phone instead deletes its saves.', 'backup', 'Back up saves')
@@ -114,6 +121,24 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
     what, at = 'Installing the tools' if setup else 'The build', stage_name(stage)
     return Help(f'{what} stopped at "{at}"' if at else f'{what} stopped', 'This is probably a bug in DroidPlay, not something you did. Copy the report and post it in '
                 '<b>#help</b> on the Discord.', bug=True)
+
+
+# Games that compile some of their shaders while they run, with their own GLSLC (build_android_from_nsp.py run_time_missing, run_time_note): the Library's words before a build,
+# and the Builds page's after one says so (its run_time_shaders event)
+RUN_TIME_META = 'compiles some shaders while it runs: after its first scene, Manage › Update shaders from the phone'
+
+
+def mac_only(count, mac=False):   # the status of a game whose profile's tables need shaders it compiles while it runs, with no Mac build's captures on this computer (#441)
+    return f'{"Build it for the Mac first" if mac else "Builds on a Mac only for now"}: it compiles {count} shaders while it runs'
+
+
+def run_time_note(game='', game_app=False):   # → (title, body) of the Builds page's notice for a provisional profile's game that compiles shaders while it runs
+    g = esc(game) if game else 'The game'
+    if game_app: return ('Some shaders come later', f'{g} compiles some of its shaders while it runs, so this game app may draw some things black, and it can\'t take them in '
+                         'later. To pack them, install the game with DroidPlay first, play it to its first scene, use Manage › Update shaders from the phone, then build the '
+                         'game app again.')
+    return ('Some shaders come after the first play', f'{g} compiles some of its shaders while it runs, so the first install may draw some things black. Play it to its '
+            'first scene, then use Manage › Update shaders from the phone to bring them in.')
 
 
 # ---- the report ----
