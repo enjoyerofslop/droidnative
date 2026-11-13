@@ -2,8 +2,8 @@
 
 Update 1.1.404 (v393216, the Anniversary Edition build) over the base game, SDK **14.3.0** (`nnSdk-14_3_0`, `NintendoSDK_NVN-14_3_0`). Bethesda's **Creation Engine** with Havok, drawing with **NVN**. Modules `main` and `sdk`. Every game file is in 89 BSA archives (version 105) and the plugin files (`.esm`, `.esl`) under `Data/`, 12.4 GB. Started from the provisional profile the NSP script wrote from its survey (`dm/games/profile_guess.py`); answers droidplay-core#414 (music, no picture).
 
-- **On the Mac:** draws from boot at the game's 30 fps: the title, the main menu, a new game's opening cart ride, the arrival in Helgen and character creation.
-- **On Android:** not run yet.
+- **On the Mac:** In-game at the game's 30 fps, by `DM_CTL` presses from a new game: the title, the main menu, the opening cart ride, the arrival in Helgen, character creation and the dragon attack, to the first steps under the player's control.
+- **On Android:** In-game on a Galaxy S25 Edge (Adreno 830), the same stretch over adb at 30 fps. See [Android](#android).
 
 ## What it needs
 
@@ -34,6 +34,16 @@ The NPDM declares 8 MB of system resource and `main` never sets a heap: the game
 - **Abort at "Start a new game?" → Yes (resolved):** the game makes a 1280x720 RGBA8 `LINEAR` texture with 3840-byte rows, which Metal's validation refused as a view and the host aborted on the replay thread ([A linear texture whose stride is shorter than its rows](../../../docs/reference/nvn-objects.md#a-linear-texture-whose-stride-is-shorter-than-its-rows)).
 - **Loading:** the title shows about 20 s after launch on the Mac; a new game reaches its opening cart ride about 30 s after Yes.
 
+## Mac
+
+On an M5 Max, a new game from the title through the cart ride, Helgen, character creation (named with `DM_KBD=Prisoner`) and the dragon attack to "Use L to move", where a held stick walks the player: 30 fps, 33.3 ms median frame time in every 300-frame window but one (41 ms), a resident footprint of 4.1 GB and 2.7 GB of GPU memory. One `[RED]` line in the whole run, `stage 1 cb11 has no uniform buffer bound` ([Open](#open)).
+
+## Android
+
+- **Galaxy S25 Edge (Adreno 830, Qualcomm's driver):** over adb from a new game, in a private save folder: the title, the main menu, the cart ride into Helgen, character creation (named in DroidPlay's text box), the dragon attack and the first steps with the left stick. 30 fps: the frame time's median is 33.0–33.5 ms in 64 of the 69 300-frame windows, the others 33.8–39.6 ms (the first at boot, and loads). 3.2 GB PSS. Both audio renderers produce output (renderer 0: 142,944 of 144,000 frames not silent); not listened to. The game wrote its character-creation save and an autosave; neither was loaded back.
+- **All 23,133 shaders translate** for Vulkan. One `[RED]` line, 8 times when the opening loads: `[vk] shader e8910903259b956c reads uniform slot 11, which has no buffer bound: it reads 0`, the Mac's cb11 line.
+- **Not tried:** the other devices; a stretch played by hand (real-time action: its Playable evidence needs a person); loading a save.
+
 ## Mac test controls
 
 `DM_CTL` presses of A held 0.5 s pass the title ("Press any button"), pick New and answer Yes. Character creation opens about six minutes later; Y finishes it and A confirms, then the game asks for a name: run with `DM_KBD=Prisoner`, or with no window the keyboard returns cancel.
@@ -45,7 +55,8 @@ The NPDM declares 8 MB of system resource and `main` never sets a heap: the game
 
 ## Open
 
-- **`[RED] stage 1 cb11 has no uniform buffer bound`**, once, when the opening loads (PR #444's 1.0.12 note has it too). Nothing missing was seen.
-- **The main menu's "Start a new game?" box** draws as two vertical lines the height of the screen beside its text; not compared with the Switch.
+- **`[RED] stage 1 cb11 has no uniform buffer bound`** on the Mac, once, when the opening loads, and Android's `shader e8910903259b956c reads uniform slot 11` (PR #444's 1.0.12 note has it too). Nothing missing was seen.
+- **The main menu's "Start a new game?" box** draws as two vertical lines the height of the screen beside its text, on the Mac and on the S25 alike; not compared with the Switch.
+- **The 1280x720 texture of 3840-byte rows** (made at "Start a new game?" → Yes) is uploaded as the GPU would read it; what it holds and where it shows is not known.
 - **Not checked from PR #444's 1.0.12 findings:** the lost wake of a plain-store mutex unlock before `SignalLightEvent` (stalls in loading on 1.0.12, 517 inlined unlocks cut there by build), and Helgen Keep's interior lighting (stencil written as a raw buffer by a compute pass). Neither was met in the opening; this build has no cuts for either.
 - **The iPhone:** the regions need more than its alias region holds (see [Memory](#memory)).
