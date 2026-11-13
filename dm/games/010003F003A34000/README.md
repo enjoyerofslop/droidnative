@@ -123,7 +123,7 @@ First run on Android, 2026-11-10: a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Eli
 **The menus' Pokémon and item sprites in the wrong colours (enjoyerofslop/droidplay-core#417), resolved** 2026-11-12:
 - **Before:** on every Android GPU, the party, bag and Catching Pocket sprites (68×56 RGB5A1 textures) had red and blue exchanged: a cyan Pikachu, a blue Pidgey, a brown Oddish, a blue Poké Ball and blue pocket frames. The menus' own art was right. Reported on an Adreno 825; reproduced with 0.8.4 on the OnePlus Pad 3 (Adreno 830) and the Pixel 9 Pro XL (Mali-G715).
 - **The fix:** [RGB565-family and RGBA4 textures in Vulkan's channel order](../../../docs/reference/rendering.md#rgb565-family-and-rgba4-textures-in-vulkans-channel-order-android).
-- **Checked** from `saves/viridian_forest_flip` on the Pixel and the Galaxy Z Flip 7 (Xclipse 950): the party (yellow Pikachu, brown Pidgey, purple Rattata, blue Oddish), the bag's pocket frames and the Catching Pocket (red and white Poké Ball, red Razz Berry) in their own colours. A control host from `main` without the fix, on the same Pixel and save, still swapped them. The title, the X menu and the field are otherwise the same with and without it.
+- **Checked** from `saves/viridian_forest_flip` on the Pad 3, the Pixel and the Galaxy Z Flip 7 (Xclipse 950): the party (yellow Pikachu, brown Pidgey, purple Rattata, blue Oddish), the bag's pocket frames and the Catching Pocket (red and white Poké Ball, red Razz Berry) in their own colours. A control host from `main` without the fix, on the same Pixel and save, still swapped them. The title, the X menu and the field are otherwise the same with and without it.
 
 ## Found on this game
 

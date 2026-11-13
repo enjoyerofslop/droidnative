@@ -2510,7 +2510,7 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - **Not covered:** buffer textures of these formats (texel buffer views read guest memory in place and take no swizzle) still read red and blue exchanged. RGB5's alpha (0x3A, no alpha) is not forced to 1, as no "X" format's is on Android.
 - **Check:**
   - `dm/tools/tests/test_rb16.py`: the formats that take the exchange, from the real table; known texels each way (Pikachu's yellow RGB5A1 texel reads as yellow); every 16-bit value comes back for each shift.
-  - Let's Go 1.0.0 from `saves/viridian_forest_flip` on the Pixel 9 Pro XL (Mali-G715) and the Galaxy Z Flip 7 (Xclipse 950): the party, bag and Catching Pocket in their own colours (yellow Pikachu, red and white Poké Ball).
+  - Let's Go 1.0.0 from `saves/viridian_forest_flip` on the OnePlus Pad 3 (Adreno 830), the Pixel 9 Pro XL (Mali-G715) and the Galaxy Z Flip 7 (Xclipse 950): the party, bag and Catching Pocket in their own colours (yellow Pikachu, red and white Poké Ball). Up to those menus the game makes only RGB5A1 textures of the four formats (the log's `first NVN` line).
   - A control host from `main` without the change on the same Pixel and save: the sprites swapped as before, and the title, the X menu and the field otherwise the same.
 - **Found on:** [Pokémon: Let's Go, Pikachu!](../../dm/games/010003F003A34000/README.md#found-on-this-game) (enjoyerofslop/droidplay-core#417, reported on an Adreno 825; reproduced on the Adreno 830 and the Mali-G715).
 
