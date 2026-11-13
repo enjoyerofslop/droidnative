@@ -129,5 +129,5 @@ General host changes first needed here; each applies to every game:
 - Check the island map (issue #73) with the host's alpha test.
 - `game.tsv` still describes the game as "In bring-up", while it plays on the iPhone.
 - A save on the Mac (the next morning, after the first night) has not been reached; on Android it has ([Saves](#saves)).
-- The GPU submissions cut short at the arrival on the Ayn Odin 2 (three in the [first run](#android), one in the [second](#android-through-the-first-night-on-the-odin-2)): whether the Mac or another phone shows them. This keeps the game at Playable – major issues; the stretch has no battle, race or level end, which the game doesn't have.
+- The GPU submissions cut short at the arrival on the Ayn Odin 2 (three in the [first run](#android), one in the [second](#android-through-the-first-night-on-the-odin-2)): whether the Mac or another phone shows them. This keeps the game at Playable – major issues. The stretch already takes in the end of the opening (the next morning, when island time starts to follow the real time), which the tier asks of a game with no battle, race or level end.
 - The keyboard's 8 geometry shaders do not translate.
