@@ -335,8 +335,18 @@ static void mem_init_once(void) {
     if (heap < pool) heap = pool;
 #endif
     g_reserve = 0x10000000 + heap + DM_GAME_MEM_STACK + alias;
+#ifdef DM_ANDROID
+    // 32 MB-aligned, as the Mac's mmap of a block this size happens to give it: Linux aligns it to a page, so the heap (256 MB in) started 32 KB-aligned, where Horizon's
+    // heap is at least 2 MB-aligned. Metroid Prime Remastered then crashed at its first nnMain steps, writing through 0x6aaac0 (docs/reference/memory.md)
+    { const size_t al = 0x2000000; uint8_t *raw = mmap(NULL, g_reserve + al, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+      if (raw == MAP_FAILED) die("reserve guest AS");
+      g_as = (uint8_t *)(((uintptr_t)raw + al - 1) & ~(uintptr_t)(al - 1));
+      if (g_as > raw) munmap(raw, (size_t)(g_as - raw));
+      if (raw + g_reserve + al > g_as + g_reserve) munmap(g_as + g_reserve, (size_t)(raw + g_reserve + al - (g_as + g_reserve))); }
+#else
     g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
+#endif
     guest_file_init();
     // Fixed partition (all inside the reserved block): 256 MB in front, the heap, the stacks, then the alias region. Mario: a heap region of 1.625 GB, stack 256 MB, alias 2.875 GB.
     // The alias region is last because a Switch's addresses stay below 2^39 and a 64 GB alias region cannot: macOS 27 reserves 0x1000000000-0x7000000000, which leaves exactly 64 GB below

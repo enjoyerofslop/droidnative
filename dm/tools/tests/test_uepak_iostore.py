@@ -435,6 +435,17 @@ class OodleTables(unittest.TestCase):
         inner = self.table([self.real()])
         self.assertEqual(len(self.scan(bytes(16) + self.table([(b'\x8c\x0b' + inner, 1 << 20, 0)]))), 1)
 
+    def test_with_no_decoder_a_supposed_table_is_no_table(self):
+        """An Android build gives the split no decoder for a game without Oodle archives: the export entry that only looks like a table (OCTOPATH TRAVELER II 1.0.0) cost the whole
+        package, its stored record too"""
+        self.stop()
+        env = patch.dict(os.environ); env.start(); self.addCleanup(env.stop)
+        for k in ('DM_OODLE_HOST', 'DM_OODLE_MODULES', 'DM_OODLE_CACHE'): os.environ.pop(k, None)
+        rec = b'\x8c\x0a' + self.record()
+        out = self.scan(bytes(16) + self.export() + self.table([(rec, len(rec), 1)]))
+        self.assertEqual([st for _, st, _, _ in out], ['vs'])
+        self.assertIsNone(ss._OODLE)
+
     def test_a_stored_stream_that_is_no_record_is_no_table(self):
         self.assertEqual(self.scan(bytes(16) + self.table([(b'\x8c\x0a' + bytes(10), 12, 0)])), [])
 

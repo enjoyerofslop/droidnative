@@ -2,7 +2,7 @@
 
 Update 1.1.0 (v65536) over the base game, SDK 18.3.5. Unity 6000.0.28f1 IL2CPP with FMOD on NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; the SDK and movie module are the builds used by [Monster Train 2](../010051701FB46000/README.md) and [Super Mario Galaxy](../010099C022B96000/README.md). The base game is not registered or tested.
 
-Plays on the Mac at 60 fps: the title, a new save, the opening movie, the island and Jungle maps, and the opening of 1-1 Jungle Hijinxs (running, jumping, damage, losing a life and restarting). An unsigned IPA is built; iOS is untested.
+Plays on the Mac at 60 fps: the title, a new save, the opening movie, the island and Jungle maps, and the opening of 1-1 Jungle Hijinxs (running, jumping, damage, losing a life and restarting). An unsigned IPA is built; iOS is untested. On Android, the cartridge's base game 1.0.0 (Unity 2022.3) runs 1-1 at 60 fps from a derived profile ([Android](#android)).
 
 ## What it needs
 
@@ -43,6 +43,23 @@ The work folder is `<NSP folder>/01009D901BC56000-work`. `run/boot.py <log name>
 - iOS has not been tested on a device.
 - Only the opening portion of the first level was played; finishing it, later levels, bosses and multiplayer remain untested.
 - The other thirteen MP4 movies and non-English languages are untested.
+
+## Android
+
+First run on Android, 2026-11-11, on a Galaxy S25 Edge (SM8750, Adreno 830 with Qualcomm's driver 0x80320001, Android 16), in handheld mode, driven over adb with `DM_CTL`. The cartridge's base game 1.0.0 (v0, Unity 2022.3.42f1), packed as a game app (`build_android_from_nsp.py --game-apk`, a 278 MB APK with the 15.3 GB RomFS as its OBB) from DroidPlay Core `main` at `1c06a5c4`.
+
+- **The build:** a profile derived from 1.1.0's, though 1.0.0 is another Unity major (2022.3, not 6000.0). All three modules differ from 1.1.0's, so this was the riskiest split of the new games. It found 16,718 shaders (1.1.0 has 19,314), all translated to SPIR-V, none failed.
+- **What was played:** the title and its attract demo, L+R, slot 1, Modern Mode, one player, the opening movie, the treehouse prompt (X pressed about 30 times, 0.23 s apart, as on the Mac), then 1-1 Jungle Hijinxs: running, jumping, the pig's hints, and a heart lost to an enemy.
+- **The opening movie froze four pictures before its end (fixed 2026-11-12):** `GI.mp4` (119 s) stopped on its 3,566th of 3,570 pictures, at 118.8 s, and the game went on presenting it at 60 fps; A skipped the movie, and everything after it worked. It froze on the same picture on the Odin 2 (below). The "about 87 s" first noted here came from the trace's sampled lines (every 2^k-th call), not from the picture. Cause and fix: [Android: an H.264 movie stops a few pictures before its end](../../../docs/reference/movies.md#android-an-h264-movie-stops-a-few-pictures-before-its-end). The Mac's build of 1.0.0 plays it through (3,570 of 3,570) and goes on to the treehouse.
+- **Save and Continue:** after a cold start, slot 1 shows "Game 1, 1-1 00%, Modern Mode", and loading it opens the island map at Jungle.
+- **Frame rate:** 60 fps (the game's own): every 30 s window 59.6–60.1, frame p50 16.7 ms, p95 about 19 ms; GPU about 6 ms in the menus and 10 ms in 1-1.
+- **Sound:** FMOD's stereo `AudioOut`, no underrun. The `DM_AUDIO_DUMP` has the movie and the level's music (RMS about 400–3,700). Not listened to by a person.
+- **Picture:** nothing wrong seen in the attract demo, the menus, the movie up to its freeze, the treehouse or 1-1. No `[RED]` line.
+- **Memory:** 2.51 GB PSS (0.67 GB graphics). Not killed.
+- **Not Playable yet:** it's a real-time platformer, so the stretch (1-1 to its end) needs a person with a controller.
+- **On an Ayn Odin 2 (SM8550, Adreno 740 with Qualcomm's driver 0x802a4000), with its built-in controller:** a new save through the menus, the movie (frozen as above, skipped with A), the treehouse and 1-1 at 60 fps (GPU about 2.6 ms), 1.89 GB PSS, no red line; 89 underruns in two reports during start-up, none in the level. The game app and its save stay installed there for a person to play.
+- **2026-11-12, the movie fix on the Odin 2** (a game app from DroidPlay Core `main` at `3b380b2f` with the fix, a new save in a private `DM_SAVE` folder): the movie plays to its end (3,570 of 3,570 pictures), the game ends it itself and goes on to the treehouse; the prompt (X 30 times) and 1-1 at 60 fps, no red line. Before the fix, the same build froze as above.
+- **Not tried:** the other devices (the movie fix included), and update 1.1.0 (the profile's build) on Android.
 
 ## Found on this game
 

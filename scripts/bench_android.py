@@ -7,13 +7,19 @@
 #   after a warm-up run with --warmup (run 0, reported apart: the first launch after an install builds the driver's pipelines). Install before a run, never during one.
 # A route is a line of the game's dm/games/<id>/bench_android.tsv (the first by default; without the file, `boot`: no input, no save, measured from 20 to 50 s):
 #   name <TAB> DM_KEYS or - <TAB> save or - <TAB> window start s <TAB> window length s <TAB> ready pattern or - <TAB> description [<TAB> KEY=VALUE;KEY=VALUE]
-#   save: a save folder beside the NSP folder or in its parent (the game's folder); each run gets a fresh copy in the app's external files (DM_SAVE points there), so
-#   the device's own saves are not touched. ready: a regular expression on the host's log whose first match marks the game ready (its title, say); its time is reported.
+#   save: a save folder beside the NSP folder or in its parent (the game's folder), or a downloaded save's archive there, with the folder inside it that holds the save's
+#   files after '//' (dm/android/tools/bench_sweep.py save_dir; unpacked into the output folder, never beside the archive); each run gets a fresh copy in the app's
+#   external files (DM_SAVE points there), so the device's own saves are not touched. ready: a regular expression on the host's log whose first match marks the game ready (its title, say); its time is reported.
 #   The last column, if there, is switches for env.txt this route needs (DM_FIXED_TIME for a game whose scene follows the clock, DM_KBD to answer a keyboard).
 # Each run: cool down (thermal status 0 and the battery at or under --cool-temp, up to --cool-max s), env.txt with DM_SAVE, DM_KEYS and per-frame timing (DM_NVN_TSV), the
 # game started from the launcher, screenshots at the window's start and end, and the game stopped. env.txt as it was is put back after the run.
+# A run that an adb call fails or stalls in (a timeout) is put back as well (the game stopped, its folder removed, env.txt as found) and recorded as a bench error; the rest go on.
 # Devices stay awake: every 45 s each one gets KEYCODE_WAKEUP (wakes a screen that went dark, does nothing to one that is on, and never turns it off, unlike POWER),
 # and the lock screen is dismissed before each start. A PIN or pattern lock cannot be dismissed over adb: set the test devices' screen lock to None or Swipe.
+# Save sweeps: --sweep runs every route named dl_* (a downloaded late-game save's scene) of each game given, --routes <patterns> the routes matching comma-separated shell
+#   patterns; one run each unless --runs says otherwise. They write sweep.md (one table per phone: load to the scene, fps, frame p50/p95, GPU, PSS, red lines and their
+#   kinds, how it ended, the end screenshot) and sweep.json; --compare <earlier sweep folder or sweep.json> flags a route whose fps fell 5 % or more, that has red-line kinds
+#   the earlier one hadn't, or that crashed or was killed where it hadn't. A downloaded save never moves a game up a tier (dm/android/README.md, Save sweeps).
 # Out: <out>/<device>/<title ID>_<route>_r<N>/ (logcat.txt, log.txt, frames.tsv, the screenshots, result.json), and results.json and results.md for all runs.
 # Default <out>: bench/<date-time> in build_android_from_nsp.py's data folder (~/.local/share/nxnative/android on a Mac or Linux), beside its builds journal.
 # Each device it uses is locked for the whole run (dm/android/tools/device_lock.py): a device another bench or install holds is refused with who holds it, or waited
@@ -24,7 +30,8 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / 'dm/android/tools'))
-import device_lock   # noqa: E402  # pyright: ignore[reportMissingImports]   (dm/android/tools, put on the path above)
+import device_lock, phone_id   # noqa: E401, E402  # pyright: ignore[reportMissingImports]   (dm/android/tools, put on the path above)
+import bench_sweep   # noqa: E402  # pyright: ignore[reportMissingImports]
 PKG = 'org.nxnative.android'
 EXT = f'/storage/emulated/0/Android/data/{PKG}/files'
 GAME_PROC = PKG + ':game'
@@ -32,6 +39,10 @@ RUNS = f'{EXT}/bench_runs'   # the runs' save folders (run_folder)
 TSV = f'{EXT}/bench_frames.tsv'   # the per-frame timing (DM_NVN_TSV)
 ADB = shutil.which('adb') or str(Path(os.environ.get('ANDROID_HOME', Path.home() / 'Library/Android/sdk')) / 'platform-tools/adb')
 TIMING = ('@t_s', '@frame_ms', '@gpu_ms', '@work_ms', '@draws')
+
+
+def device_folder(d):   # a device's runs under <out>: <model>_<serial>, safe on Windows too (a Wi-Fi device's serial has a ':', phone_id.py)
+    return phone_id.safe(f"{d['model'].replace(' ', '_')}_{d['serial']}")
 
 
 def data_dir():   # build_android_from_nsp.py's: the library of game hosts, its builds journal, and these results
@@ -103,6 +114,11 @@ def screenshot(serial) -> bytes:
 def ready_devices():
     out = subprocess.run([ADB, 'devices'], capture_output=True, text=True).stdout.splitlines()[1:]
     return [line.split()[0] for line in out if len(line.split()) > 1 and line.split()[1] == 'device']
+
+
+def phone_key(serial):   # the phone's stable ID (dm/android/tools/phone_id.py), or its serial: its lock is named after it, as build_android_from_nsp.py names it
+    try: return phone_id.from_props(sh(serial, phone_id.ID_CMD, timeout=15)) or serial
+    except (OSError, subprocess.SubprocessError): return serial
 
 
 def device_info(serial):
@@ -299,15 +315,15 @@ def run_one(serial, folder, gid, route, n, out, args):
     # A folder of its own per run: what the game writes there is its own (drwxr-x---), which the shell can read but never delete, so a reused folder would hold the
     # last run's save. bench_runs is made by mkdir under files/, so it is setgid ext_data_rw like files/, and only symbolic modes are given it below (a numeric one
     # clears setgid, and a chmod cannot set it again on this storage)
-    run = run_folder(gid)
+    run = run_folder(gid); PENDING[serial] = {'run': run, 'env': env_before, 'dir': d}
     env = ['# written by scripts/bench_android.py for a benchmark run; put back as it was when the run ends', f'DM_SAVE={run}/save/{gid}',
            f'DM_NVN_TSV={TSV}', 'DM_NVN_TSV_CALLS=0', 'DM_FS=1'] + ([f'DM_KEYS={route["keys"]}'] if route['keys'] else []) + route['env'] + args.env   # DM_FS: file opens in the log, for ready patterns
     # bench_runs itself opened too (symbolically, keeping setgid), as build_android_from_nsp.py opens games/'s parent: the app is not in ext_data_rw on Android 16
     # (the Pad 3), so a drwxrws--- bench_runs kept it out of the save folder inside (errno 13), where the Odin 2's let it in
     sh(serial, f'mkdir -p {run}/save; chmod a+rwx {RUNS}')
     if route['save']:
-        src = next((p for p in (Path(folder) / route['save'], Path(folder).parent / route['save']) if p.is_dir()), None)
-        if not src: sys.exit(f'route {route["name"]}: no save folder {route["save"]} beside {folder}')
+        try: src = bench_sweep.save_dir(route['save'], folder, out.parent / 'saves')
+        except (OSError, ValueError, subprocess.CalledProcessError) as e: sys.exit(f'route {route["name"]}: {e}')
         # Folders made by the shell, files pushed one by one: a folder adb push makes lists empty on the Odin 2's storage (its files are there by path, but a directory
         # read misses them, and the host copies the save by reading it)
         dirs = sorted({os.path.relpath(r, src) for r, _, _ in os.walk(src)} - {'.'})
@@ -324,6 +340,7 @@ def run_one(serial, folder, gid, route, n, out, args):
     adb(serial, 'logcat', '-c')
     with open(d / 'logcat.txt', 'wb') as lf:
         lc = subprocess.Popen([ADB, '-s', serial, 'logcat', '-v', 'epoch', 'DroidPlay:V', 'nxnative:V', 'ActivityManager:I', 'Zygote:I', 'DEBUG:V', 'libc:F', 'lmkd:I', 'lowmemorykiller:I', '*:S'], stdout=lf)
+        PENDING[serial]['logcat'] = lc
         sh(serial, 'input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard')
         t0 = time.time()
         sh(serial, f'am start -n {PKG}/.Launcher --es game {gid} --ez play true')
@@ -348,8 +365,7 @@ def run_one(serial, folder, gid, route, n, out, args):
         else: print(f'  no save to keep: the game made none on {serial}', flush=True)
     remove_run(serial, run)
     (d / 'log.txt').write_bytes(adb_bytes(serial, 'exec-out', f'cat {EXT}/log.txt'))
-    if env_before.strip(): adb(serial, 'push', str(write_tmp(d / 'env_before.txt', env_before)), f'{EXT}/env.txt')
-    else: sh(serial, f'rm -f {EXT}/env.txt')
+    put_env_back(serial, env_before, d); PENDING.pop(serial, None)
     facts = log_facts((d / 'logcat.txt').read_text(errors='replace'), route['ready'])
     if route['ready'] and facts['ready_s'] is None: facts['ready_s'] = ready_in_log((d / 'log.txt').read_text(errors='replace'), route['ready'], facts['shift'])
     rows = frames((d / 'frames.tsv').read_text(errors='replace'))
@@ -358,7 +374,8 @@ def run_one(serial, folder, gid, route, n, out, args):
     first = min((r['@t_s'] for r in rows.values() if '@t_s' in r), default=None)
     res = {'serial': serial, 'game': gid, 'route': route['name'], 'run': n, 'first_frame_s': round(first, 2) if first is not None else None, **facts,
            **window_stats(rows, route['start'], route['length']), 'pss_mb': pss, 'died_at_s': died, 'cooled_s': waited,
-           'thermal': [st0, st1], 'battery_c': [bt0, bt1], 'pidof_misses': watch.misses}
+           'thermal': [st0, st1], 'battery_c': [bt0, bt1], 'pidof_misses': watch.misses, 'red_kinds': bench_sweep.red_kinds((d / 'log.txt').read_text(errors='replace')),
+           'shot': str(d / 'shot_end.png') if (d / 'shot_end.png').is_file() else None, 'dir': str(d)}
     if died and not res['exit']: res['exit'] = f'stopped at {died} s'
     if watch.pid is None and not died and not res['exit']: res['exit'] = 'never seen running'   # an empty pidof all through, which no longer counts as a death on its own
     (d / 'result.json').write_text(json.dumps(res, indent=1), encoding='utf-8')
@@ -370,6 +387,28 @@ def run_one(serial, folder, gid, route, n, out, args):
 # with the app
 def run_folder(gid):
     return f'{RUNS}/{gid}_{int(time.time())}'
+
+
+PENDING: dict[str, dict[str, Any]] = {}   # serial → the run's folder, env.txt as found, its output folder and logcat: what a run that stopped part-way has to put back
+
+
+def put_env_back(serial, env_before, d):
+    if env_before.strip(): adb(serial, 'push', str(write_tmp(d / 'env_before.txt', env_before)), f'{EXT}/env.txt')
+    else: sh(serial, f'rm -f {EXT}/env.txt')
+
+
+def tidy(serial):   # after a run raised part-way (an adb call that stalled): the game stopped, the run's folder removed, env.txt put back; best effort, as adb may still be down
+    p = PENDING.pop(serial, None)
+    if p is None: return
+    if p.get('logcat'): p['logcat'].terminate()
+    try: sh(serial, f'am force-stop {PKG}'); remove_run(serial, p['run']); put_env_back(serial, p['env'], p['dir'])
+    except (subprocess.SubprocessError, OSError) as e: print(f"  could not tidy up {serial} ({type(e).__name__}): its run folder {p['run']} and env.txt may be left", flush=True)
+
+
+def failed_run(serial, gid, route, n, e):   # the result of a run that raised: every field report() and the sweep table read, the error as how it ended
+    why = f'adb timed out after {e.timeout:g} s' if isinstance(e, subprocess.TimeoutExpired) else type(e).__name__
+    return {'serial': serial, 'game': gid, 'route': route['name'], 'run': n, 'battery_c': [None, None], 'red_kinds': {}, 'shot': None, 'dir': None, 'exit': f'bench error: {why}',
+            **dict.fromkeys(('first_frame_s', 'ready_s', 'fps', 'frame_p50', 'frame_p95', 'frame_p99', 'over_17ms_pct', 'over_34ms_pct', 'gpu_p50', 'pss_mb', 'died_at_s'))}
 
 
 def remove_run(serial, run):
@@ -409,7 +448,7 @@ def main():
     ap.add_argument('folders', nargs='+', help='NSP folders packed by build_android_from_nsp.py')
     ap.add_argument('-s', '--serial', action='append', help='an adb device (repeatable; default: every ready one)')
     ap.add_argument('--route', help="a route name of the game's bench_android.tsv (default: its first)")
-    ap.add_argument('--runs', type=int, default=2); ap.add_argument('--install', action='store_true', help='build_android_from_nsp.py --push-only to each device first')
+    ap.add_argument('--runs', type=int, help='runs of each route (default 2; 1 for --sweep and --routes)'); ap.add_argument('--install', action='store_true', help='build_android_from_nsp.py --push-only to each device first')
     ap.add_argument('-k', '--keys', default=str(Path.home() / '.switch/prod.keys'), help='prod.keys for --install (default ~/.switch/prod.keys)')
     ap.add_argument('--warmup', action='store_true', help='a warm-up run (run 0) before the measured ones, reported apart: the first launch after an install builds pipelines')
     ap.add_argument('--shot-every', type=int, default=0, help='also a screenshot every this many seconds (for working out a route)')
@@ -418,12 +457,23 @@ def main():
     ap.add_argument('--cool-temp', type=float, default=38.0, help='start a run once the battery is at or under this many °C (default 38)')
     ap.add_argument('--cool-max', type=int, default=300, help='wait at most this many seconds to cool down (default 300)')
     ap.add_argument('--wait-device', type=float, default=0, help='wait up to this many seconds for a device another bench or install holds (default: refuse at once)')
+    ap.add_argument('--sweep', action='store_true', help="every dl_* route of each game: the downloaded saves' scenes, one summary table per phone (sweep.md)")
+    ap.add_argument('--routes', help='the routes matching these comma-separated shell patterns (dl_*,boot), summarised like --sweep')
+    ap.add_argument('--compare', help='an earlier sweep (its folder or sweep.json): flag fps 5 %% lower, new red-line kinds, a crash or kill')
     args = ap.parse_args()
+    sweep = args.sweep or bool(args.routes)
+    if args.compare and not sweep: ap.error('--compare goes with --sweep or --routes')
+    if args.route and sweep: ap.error('--route is one route; --sweep and --routes pick several')
+    runs = args.runs if args.runs is not None else (1 if sweep else 2)
+    try: earlier = bench_sweep.load(args.compare) if args.compare else None   # read before any run, so a wrong path costs nothing
+    except (OSError, ValueError, KeyError) as e: ap.error(f'--compare {args.compare}: {e}')
     serials = args.serial or ready_devices()
     if not serials: sys.exit('no adb device ready')
     what = 'bench_android.py: ' + ', '.join(Path(f).expanduser().resolve().parent.name for f in args.folders) + (f' ({args.route})' if args.route else '')
+    keys = {s: phone_key(s) for s in serials}   # a phone on a cable and on Wi-Fi at once is one device: run once, over the cable, under one lock
+    serials = [d['serial'] for d in phone_id.one_per_phone([{'serial': s, 'id': keys[s]} for s in serials])]
     for s in list(serials):   # each device for the whole run: another bench's or an install's force-stop and env.txt would void this one's runs, and the reverse
-        try: device_lock.acquire(s, what, args.wait_device, say=lambda m: print(m, flush=True))
+        try: device_lock.acquire(keys[s], what, args.wait_device, say=lambda m: print(m, flush=True))
         except device_lock.DeviceBusy as e:
             if args.serial: sys.exit(str(e))
             print(f'left out: {e}', flush=True); serials.remove(s)
@@ -435,21 +485,36 @@ def main():
     try:
         for folder in args.folders:
             gid, g = game_of(folder)
-            rs = routes(gid); route = next((r for r in rs if r['name'] == args.route), None) if args.route else rs[0]
-            if not route: sys.exit(f'{gid}: no route {args.route} in dm/games/{gid}/bench_android.tsv')
+            rs = routes(gid)
+            if sweep:
+                picked = bench_sweep.pick_routes(rs, args.routes or 'dl_*')
+                if not picked: print(f"{g.get('name', gid)}: no route matches {args.routes or 'dl_*'} in dm/games/{gid}/bench_android.tsv", flush=True); continue
+            else:
+                route = next((r for r in rs if r['name'] == args.route), None) if args.route else rs[0]
+                if not route: sys.exit(f'{gid}: no route {args.route} in dm/games/{gid}/bench_android.tsv')
+                picked = [route]
             for d in devices:
                 if args.install:
                     print(f"{gid} → {d['model']}: installing", flush=True)
                     subprocess.run([sys.executable, str(REPO / 'scripts/build_android_from_nsp.py'), folder, '-k', args.keys, '--push-only', '--serial', d['serial'], '--progress', 'lines'], check=True)
-                for n in range(0 if args.warmup else 1, args.runs + 1):   # run 0: the warm-up, the first launch after an install (pipelines built, files cached)
-                    print(f"{g.get('name', gid)} ({route['name']}) on {d['model']}, {'warm-up' if n == 0 else f'run {n}'}", flush=True)
-                    r = run_one(d['serial'], folder, gid, route, n, out / f"{d['model'].replace(' ', '_')}_{d['serial']}", args); results.append(r)
-                    print(f"  first frame {r['first_frame_s']} s, ready {r['ready_s']} s, {r['fps']} fps, frame p50 {r['frame_p50']} / p95 {r['frame_p95']} ms, "
-                          f"GPU p50 {r['gpu_p50']} ms, {r['exit'] or 'ran'}", flush=True)
-                    report(out, devices, results)
+                for route in picked:
+                    for n in range(0 if args.warmup else 1, runs + 1):   # run 0: the warm-up, the first launch after an install (pipelines built, files cached)
+                        print(f"{g.get('name', gid)} ({route['name']}) on {d['model']}, {'warm-up' if n == 0 else f'run {n}'}", flush=True)
+                        try: r = run_one(d['serial'], folder, gid, route, n, out / device_folder(d), args)
+                        except (subprocess.SubprocessError, OSError) as e:   # one stalled adb call costs this run, not the rest of the sweep
+                            tidy(d['serial']); r = failed_run(d['serial'], gid, route, n, e)
+                        except SystemExit: tidy(d['serial']); raise
+                        results.append(r)
+                        print(f"  first frame {r['first_frame_s']} s, ready {r['ready_s']} s, {r['fps']} fps, frame p50 {r['frame_p50']} / p95 {r['frame_p95']} ms, "
+                              f"GPU p50 {r['gpu_p50']} ms, {sum(r['red_kinds'].values())} red lines, {r['exit'] or 'ran'}", flush=True)
+                        report(out, devices, results)
     finally:
         awake.stop.set()
     print(f'results: {out / "results.md"}')
+    if sweep and results:
+        names = {d['serial']: f"{d['maker']} {d['model']}" for d in devices}
+        reg = bench_sweep.write(out, bench_sweep.summarize(results), names, earlier)
+        print(f'sweep: {out / "sweep.md"}' + (f', {len(reg)} route(s) flagged against {args.compare}' if args.compare else ''))
 
 
 if __name__ == '__main__':

@@ -1,0 +1,15 @@
+# Switches this game gets on Android (build_android_from_nsp.py puts them in the game's defaults.txt; env.txt and the settings screen still win)
+# DM_VK_RAW_GMEM: raw global memory (gfx_vk_gmem.inc), off unless a game turns it on. None of this game's shaders read through the raw pool table (no table is ever built
+# for it). It is on for what comes with it: a storage buffer in a placed pool is bound in place, where it was copied into the arena and compared or written back
+# (gfx_vk_gmem_inplace.inc). In a Mushroom Cup race on a Galaxy S25 Edge (Adreno 830, 12 GB, the AHardwareBuffer route) that took the replay's CPU from 53.7 to 38.7 ms a
+# frame and the race from 14.5 to 19.5 fps, with 155 MiB placed of the pools' 1,282 MiB (in 2 MiB chunks, as bindings reach them: gfx_vk_gmem_lazy.inc), 1.3 GB of memory
+# still available and no low-memory kill (2026-11-11, README.md, Android). Placing whole pools, before the chunks, placed 1.3 GB and the game was killed on a OnePlus Pad 3.
+# With the chunks that tablet ran the race in five launches of five with this default, 127 MiB placed and no kill: a median 22.8 fps against 18.4 with =0
+DM_VK_RAW_GMEM=1
+# DM_VK_IND_FWD=1: an indirect dispatch whose arguments a dispatch before it wrote runs as vkCmdDispatchIndirect on the GPU's copy of them (gfx_vk_draw.inc vk_dispatch),
+# instead of the replay submitting the chunk and waiting for the whole ring to complete so it can read the group counts. In 90 s of a Mushroom Cup race this game met about
+# 9,000 such waits; with the switch none are left (about 11,000 of those dispatches run on the GPU). On 0.8.4's host in Mario Bros. Circuit's race: a OnePlus Pad 3
+# (Adreno 830) went from 24.8 to 27.3 fps (two launches each, GPU 22 -> 20 ms) and a Galaxy Z Flip 7 (Xclipse 950) from 19.5 to 24.1 fps, the picture and the red lines
+# the same. A Pixel 9 Pro XL (Mali-G715) gains nothing (28.8 / 29.2 fps), and this game isn't steady there either way: with the switch it froze once in two launches
+# (no frame after the title, the GPU at its top clock), without it Mali's driver crashed once in three (2026-11-12, q278)
+DM_VK_IND_FWD=1

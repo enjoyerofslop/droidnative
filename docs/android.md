@@ -47,7 +47,8 @@ DroidPlay opens on **Get started**: four steps, each saying what it needs and wh
   [license](https://developer.android.com/studio/terms), which the app asks first; its usage metrics stay off. What the computer already has is kept.
   From a console: `build_android_from_nsp.py --setup --accept-android-licenses`.
 - **Your phone:** plug it in with USB debugging on; the step says when the phone is waiting for you to tap **Allow**.
-- **Your first game:** add the folder with its NSP or XCI files, then **Build and install**.
+- **Your first game:** add the folder with its NSP or XCI files, or the folder that holds a Switch 2 game's `.nup` or dump (no keys needed), then **Build and install**. The build works beside the game's files, so their drive needs room:
+  a lot of it for a game with many shaders ([Free space](#free-space)).
 
 Until all four are done, a launch opens on the checklist and the top bar's **Setup 2 of 4** opens it; **Settings › Show the setup checklist** does any time.
 
@@ -60,23 +61,58 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 
 ### The pages
 
-- **Library:** the games you added (**+ Build game** picks a folder with a game's NSP files), each with its box art, version and status on the phone picked at the top.
+- **Library:** the games you added (**+ Build game** picks a folder with a game's NSP or XCI files, or a Switch 2 game's `.nup` or dump; Windows' folder picker shows no files, so pick the folder that holds them), each with its box art, version and status on the phone picked at the top.
   The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
-  build only, update the app on the phone, remove the game. A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
+  build only, update the app on the phone, remove the game, import a save to the phone, restore its save from a backup ([Saves](#saves)). A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
   provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.
 - **Builds:** the running build's stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console shows here too.
   When a build fails, a banner says what went wrong in plain words, with the button that fixes it where there is one (**Install again** once the phone has room,
   **Choose prod.keys** for keys older than the game). Otherwise it is likely a bug: **Copy report** copies a short report to paste in #help on the Discord, and
   **Save full report** saves the whole log; both leave out your user folder, the phone's serial and anything that looks like a key.
 - **Phones:** adb devices over USB and Wi-Fi (pair, connect, discover), each one's battery and free space, the app version and the games on each phone, saves
-  backed up to the computer. **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
+  backed up to the computer and put back (**Restore a backup…**). **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
   (Samsung's Auto Blocker, Xiaomi's Install via USB, a Pixel's driver) and what to try when the phone doesn't show up; a phone below 20% battery gets a warning,
-  since a PC's USB port charges slowly and an install takes minutes.
+  since a PC's USB port charges slowly and an install takes minutes. A phone on a cable and on Wi-Fi at once is one phone: the list at the top shows it once, over
+  the cable. What DroidPlay keeps for a phone (the one you picked, its backups) follows the phone itself, not its Wi-Fi address, which changes each time wireless
+  debugging restarts.
 - **Performance:** the game's log from `adb logcat`, with the frame time, GPU and CPU figures the host prints, and a frame's GPU time per pass.
 - **Settings:** your `prod.keys`, and the [requirements](#what-the-command-line-needs) with how to install what is missing (on Windows, **Install what's missing** does it).
 
 A rebuild only does what changed: the extraction, the rewritten code and the translated shaders are reused when their inputs are the same, and the RomFS image is not
 copied to the phone again when the phone already holds the same one.
+
+If the phone drops off during an install (it slept, Wi-Fi roamed, wireless debugging restarted on a new port, or the cable came out), the install waits up to
+three minutes for it to come back, finds it again by its serial number (over Wi-Fi it connects to it again by itself) and goes on: the game data, the shaders
+and large DLC carry on from what the phone already holds, and the other steps run again. Wake the phone, or plug it back in, while the Builds page says it is waiting.
+
+### Over Wi-Fi
+
+DroidPlay can install and play over Wi-Fi instead of a cable, through Android's wireless debugging (Android 11 and later):
+
+1. On the phone, turn on **Settings › Developer options › Wireless debugging**, allow it on your network, and tap **Pair device with pairing code**. Keep that
+   screen open.
+2. On the **Phones** page, click **Pair over Wi-Fi…**. It finds the phone on the network by itself and fills in its address: type the six-digit code the phone shows,
+   then **Pair**. DroidPlay then connects to the phone (adb usually does it by itself within a few seconds), and the phone appears in the list at the top.
+   If the phone isn't listed (some networks don't pass the multicast that finds it), type the address shown with the code; if the connection isn't found after
+   pairing, it asks for the address on the Wireless debugging screen itself.
+3. Install and play as over a cable. A phone already allowed over USB can skip pairing: **Connect…** with the address on its Wireless debugging screen.
+
+The phone and this computer must be on the same network: a guest network keeps devices apart. A failed pairing says why (a wrong code, the pairing screen closed,
+another network) in place of adb's own words.
+
+**Discover** lists every phone offering wireless debugging on the network (a phone already connected, over Wi-Fi or its cable, is shown as such) and connects to
+the ones you tick. **Disconnect** drops the phone picked in the list (or at the top): a phone connected by address is disconnected at once. A phone adb connected
+by itself over the network would be connected again while Wireless debugging is on, so for that one DroidPlay offers to turn Wireless debugging off on the phone.
+A phone on its cable is unplugged to disconnect it.
+
+When the phone picked at the top drops off Wi-Fi (it slept, roamed, or Wireless debugging restarted on a new port), the list at the top says **Reconnecting to
+<phone> over Wi-Fi…** and DroidPlay looks for it every 20 seconds for ten minutes, by its serial number on the network and at its last address, and connects to
+it again. If the phone's Wi-Fi itself went off, Android turns Wireless debugging off with it: turn it on again on the phone. The Performance page's log carries
+on once the phone is back.
+
+**Use over Wi-Fi…** (Phones page) takes a phone connected by its cable onto Wi-Fi with no pairing, on Android 10 as well: DroidPlay restarts adb on the phone in
+network mode (`adb tcpip 5555`) and connects to it at its Wi-Fi address, and then the cable can come out. That connection is **not encrypted** (the phone still
+accepts only computers it has allowed) and lasts until the phone restarts; on Android 11 and later, Pair over Wi-Fi gives an encrypted one.
 
 ### From source
 
@@ -104,13 +140,55 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   Galaxy S25 Edge, 39 on a OnePlus Pad 3. Desktop DroidPlay says so the first time **Play** is pressed after an install, and the app says so when the game has no
   pipelines saved yet. Later starts take a few seconds.
 - **In the game.** Touch controls are drawn over the picture in three layouts (2D, 3D and Tap, switched with the round button at the top); touches no control takes go
-  to the game's touch screen. Their size and how far in from the sides they sit are the settings screen's choices; a game app, which has none, takes `DM_PAD_SCALE` and
-  `DM_PAD_INSET` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
-  shakes the controller. The **≡** button at the top (left of −) goes back to the launcher while the game keeps running behind it: **Play** on the same game resumes
-  it, and picking another game asks before closing the running one.
-- **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; the desktop app backs them up to the computer. The log is
+  to the game's touch screen. Their size, how far in from the sides they sit and how high from the bottom are the settings screen's choices; a game app, which has none, takes `DM_PAD_SCALE`,
+  `DM_PAD_INSET` and `DM_PAD_RAISE` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
+  shakes the controller. The **≡** button at the top (left of −; with a controller connected it hides, and a tap on the screen shows it for a few seconds), or a controller's Mode or Menu key where Android passes it on, opens the pause menu: the game is held
+  under it (its clock, sound and vibration stop, and no input reaches it) until **Resume**, ≡ again, B or the phone's Back. Its rows change the touch layout and turn the frame-rate
+  counter on or off for this run (the settings screen's choice is the one that is kept), **Export or import the save…** opens the game's screen in the launcher,
+  where the Save rows are (they ask before closing the game: a save is not swapped under a running game), and **Back to the launcher** goes there while the game
+  keeps running behind it: **Play** on the same game resumes it, and picking another game asks before closing the running one. A game app has no launcher: it has
+  no save row, and its last row is **Home screen**.
+- **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; each game's screen exports, imports and puts back its save
+  ([Saves](#saves)), and the desktop app backs them all up to the computer. The log is
   `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`). The start before's is kept as `log.prev.txt`, so a game the system closed
   for memory and that opened again still leaves its last log.
+
+## Saves
+
+At the bottom of a game's screen in the app, under **Save**:
+
+- **Export save** writes the game's save as a zip wherever you pick: Downloads, a cloud drive, an SD card. Inside, `saves/<title ID>/` is the save as the game
+  sees it (with `saves/<title ID>_device/` beside it for a game that also keeps a device save). For an emulator, copy the files inside that folder into its save folder for the game.
+- **Import save** takes a save from a zip or a folder you pick and puts it in place of the game's save. It recognises:
+  - an export or backup from DroidPlay;
+  - a yuzu-family emulator's save folder (yuzu, Citron, Eden, Sudachi…: `nand/user/save/0000000000000000/<user>/<title ID>/`) and Ryujinx's (`bis/user/save/<number>/`);
+    pick the game's folder, or one higher up: when it holds several users' saves, you pick one;
+  - JKSV, EdiZon and Checkpoint backups;
+  - any folder that is the save itself, such as UltraTears' `userdata/save/<user ID>/`, or a save site's zip.
+
+  It shows what it found and asks first. It warns when the files say they're another game's, or share no file names with the save the game has on the phone.
+  RAR and 7z archives, and zips that Windows packed with Deflate64 (it does for big ones), can't be opened on a phone: unpack them with a file manager app or on a
+  computer, then import the folder.
+- **Earlier saves** puts back a save kept before an import, or one from **Back up saves** on the games list.
+
+From a computer, **DroidPlay for Windows** does the same over adb, for a phone that's connected:
+- **Library › Manage › Import a save to the phone…** sends a save folder or archive for that game. Unlike the phone, the computer unpacks RAR and 7z archives too
+  (with Windows' own `tar`); a Deflate64 zip still needs unpacking first (Explorer's **Extract all** reads it).
+- **Manage › Restore its save from a backup…**, and **Phones › Restore a backup…** for every game in one, send saves back from what **Back up saves to this computer**
+  copied (pick its folder, or one of the dated folders inside it; the newest backup of each game is taken).
+- The command line's `--import-save` and `--restore-backup` do the same ([Packing from the command line](#packing-from-the-command-line)).
+
+The save goes to `files/import/<title ID>/` on the phone, which adb can write; the app's own save folder it can't. DroidPlay on the phone then shows what it found and
+asks, as for an import from the phone: at once when the app is open or opens, or after the game, when it's being played.
+
+Before an import or a restore, the game's save is kept in `Android/data/org.nxnative.android/files/backups/<time>-<title ID>/`, which DroidPlay for Windows' **Back up
+saves to this computer** copies too. The game must not be running; the app offers to close it, and progress it hasn't saved is lost. Uninstalling the app deletes
+those backups along with the saves, so export the saves you care about first.
+
+- **Play the game once before importing**, until it saves. The import then checks the new files against that save, and finds the save's folder by its file names
+  when a zip holds it deeper down or inside a folder of its own. Without a save to compare with, it goes down through folders that hold nothing but one folder, and takes the first that holds more.
+- **A save from a later update of the game** than the one on the phone may not load (the game may say it's damaged, or start afresh). Your previous save is kept.
+- **A game with several save slots** keeps them all in its one save, so an import replaces every slot at once.
 
 ## Game apps
 
@@ -144,7 +222,9 @@ the system's driver. On a phone without an Adreno GPU (Mali, Xclipse) the line i
 code, loses the GPU, or ends in its first 30 seconds (a hang you closed, say), the next start runs on the system's driver once, and the start screen and the log say why;
 the start after that tries your driver again. A crash outside the driver's code is noted but doesn't count against it, and a hang after the first 30 seconds isn't
 caught. The app keeps each driver's last start in `files/vk_driver_state/<driver file>.json` and each game's in
-`files/games/<title ID>/vk_driver_result.txt`, which DroidPlay for Windows can read. Remove the line from `env.txt`
+`files/games/<title ID>/vk_driver_result.txt`, which DroidPlay for Windows can read. Every start, on any driver, also writes
+`files/games/<title ID>/vk_start.txt`: the driver and GPU it ran on, how many pipelines the driver refused (their draws are missing from the picture) with the first
+shaders' keys, and a lost GPU. Remove the line from `env.txt`
 (or start it with `#`) to go back. Each driver keeps its own pipeline cache, so the first start on a new driver compiles the game's pipelines again (it can take a
 minute to the first frame, and it stutters until they are built), and the system driver's cache is still there afterwards.
 
@@ -160,7 +240,8 @@ Python 3.12 or newer with `lz4`, `capstone`, `fonttools` and `backports.zstd` (n
 `pip install lz4 capstone fonttools backports.zstd PySide6`. The .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (set `ANDROID_HOME` or pass
 `--sdk`), `adb`, and a JDK (for `keytool` and `javac`). The desktop app's **Settings** page checks all of this and says how to get what is missing; DroidPlay for Windows installs it for you.
 On Windows, use Python 3.14 and set `PYTHONUTF8=1` for the command line (the desktop app sets it for what it runs): the scripts read and write text as UTF-8,
-which Python on Windows does by default only from 3.15, and lz4 has no Windows build for 3.15 yet.
+which Python on Windows does by default only from 3.15, and lz4 has no Windows build for 3.15 yet. On Linux, an Unreal game whose pak index is encrypted also
+needs OpenSSL's libcrypto (`libcrypto.so.3`, which distributions install with OpenSSL); the Mac and Windows have their own AES.
 
 ```
 python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k "<your prod.keys>"    build, install, copy the game
@@ -169,14 +250,47 @@ python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k
     --romfs-beside       with --game-apk: <name>.romfs beside the APK whatever the game's size, so the APK stays small
     -p v0                pack the base game instead of the newest version in the folder (a version the profile does not register is packed from a derived profile)
     -l es-419            the default game language (a code or a name)
-    --serial <device>    the adb device, when more than one is connected
+    --serial <device>    the adb device, when more than one is connected (over Wi-Fi: its ip:port, or the adb-…._adb-tls-connect._tcp name adb found it by)
     --no-push            build the APK only (a game without a profile is first built this way)
     --push-only          install the app and copy a game built before, without building
 python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
+python scripts/build_android_from_nsp.py --import-save "<save folder or archive>" --title <title ID>    send a save to the phone (Saves)
+python scripts/build_android_from_nsp.py --restore-backup "<backup folder>" [--title <title ID>]       send a game's save, or every game's, from a backup
 python scripts/build_android_from_nsp.py --check       what the build needs on this computer, as JSON
 ```
 
 The first build of a game takes a while (the shader translation and, on a hard disk, the RomFS image); later builds reuse what did not change.
+
+## Free space
+
+A build keeps its files in a `<title ID>_build` folder beside the game's files: the extracted game (its RomFS image is as large as the game), the game's shaders as
+one package (`shader/pkg`), and the shaders translated for Vulkan (`spv`). While the shaders translate, the translator's own copy of them sits in `<title ID>_build/tmp`
+too, and goes when the translation ends, however it ends. So everything is on the drive with the game's folder: moving that folder to a bigger drive moves all of it.
+
+The translated shaders take about 12 to 14 times the package's size, and the translation needs about 20 times it for a while:
+
+| Game | Shaders | Package | Translated | Needed while translating |
+|---|---|---|---|---|
+| Super Mario Odyssey | 27,984 | 0.16 GB | 1.9 GB | about 3 GB |
+| The Legend of Zelda: Ocarina of Time | 42,848 | 0.54 GB | 6.5 GB | about 12 GB |
+| Final Fantasy Resonance | 73,496 | 0.68 GB | 9.4 GB | about 17 GB |
+| [Pokémon Pokopia](../dm/games/0400A3A01EE4C000/README.md) | 131,426 | 4.4 GB | about 50 to 60 GB (estimated) | 90 GB or more |
+| [Hyrule Warriors: Age of Imprisonment](../dm/games/04003F40232DE000/README.md) | 101,860 | not measured | likely 40 GB or more | likely 70 GB or more, besides its 46 GB RomFS |
+
+Those are on top of the extracted game and the package. Yoshi and the Mysterious Book has over 100,000 shaders too (133,155), not measured.
+
+While they translate, the Builds page counts the shaders done out of those left to translate (`progress: <done>/<total>` in `spv_build.log`, every 10 seconds). A game with over 100,000 shaders can take hours on a home PC. A translation stopped part-way keeps nothing of that run (its outputs are in `tmp` until it ends), so letting it finish is quickest.
+
+- **The build checks first.** Before it translates, it works out what the shaders left to translate need, and stops when the drive can't hold it:
+  `[RED] spv_build: not enough free space to translate … shaders`, with what the drive has and what it needs. Nothing has been translated then, and what the build
+  did before (the extraction, the shader split) is kept.
+- **If the disk fills anyway,** the build stops with `This computer ran out of disk space`, naming the drive. Free some space and build again: the shaders translated
+  so far are kept, and only the rest is translated. A game's `<title ID>_build` folder can be deleted once you don't build that game any more.
+- **Builds before DroidPlay Core 0.8.3** kept the translator's copy in the system's temp folder instead (`%TEMP%` on Windows, on C: whatever drive the game was on), and a
+  translation that failed left it there: folders named `spv_` and some letters, tens of GB each for a big game. Nothing uses them, so delete them: type `%TEMP%` into File
+  Explorer's address bar to get there.
+- **The phone needs room too:** the translated shaders and the RomFS image. The install checks the phone before each copy, and a copy that doesn't fit stops before it
+  starts.
 
 ## Games that compile their shaders while they run
 
@@ -192,7 +306,7 @@ translate, so the first build has none (`[RED] the game is packed without shader
 A scene reached later (or a DLC) can compile more shaders: repeat until the log shows no `no translated shader`. This is done for games packed from a provisional
 profile; a registered profile's shader tables name the captures they were made from. DLC in the NSP folder is extracted and copied to the phone with the game.
 
-A game packed from a registered profile has its shaders in its tables, so a shader split that fails there stops the build rather than pack the game without them ([why](reference/packing.md#an-android-build-packs-a-registered-game-without-shaders-after-a-split-error-and-succeeds)).
+A game packed from a registered profile has its shaders in its tables, so a shader split that fails there stops the build rather than pack the game without them ([why](reference/packing.md#an-android-build-packs-a-registered-game-without-shaders-after-a-split-error-and-succeeds)). A shader translation that stops ends the build for every game, rather than pack it with part of its shaders ([why](reference/packing.md#an-android-build-packs-the-shaders-translated-so-far-after-the-translation-stops)): the shaders translated by then are kept, and the next build translates the rest. So does one that translates none of the shaders it has to (`[RED] spv_build: no shader was translated`), as happens when a file is missing from the translator's folder, `dm/gfx/tools/dmsh_xlate_bin` ([why](reference/packing.md#an-android-build-packs-a-game-without-shaders-when-the-translator-makes-nothing)).
 
 ## Seeing what a game draws
 

@@ -3,10 +3,13 @@
 shows across all its parts, from --setup's events. Qt-free, so dm/tools/tests/test_android_desktop.py tests it without PySide6."""
 import functools
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import phone_guide   # this folder's: the phone's battery and free space
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+from phone_id import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above: a serial that is a Wi-Fi connection)
 
 TODO, WORKING, WAITING, DONE, PROBLEM = 'todo', 'working', 'waiting', 'done', 'problem'
 WARN = '#f5b82e'   # the app's amber, for a warning inside a done step's text
@@ -15,10 +18,11 @@ SETUP_TITLE = 'Set up this computer'   # the Builds page's title for --setup, fr
 INTRO = ('<b>Setting up takes about half an hour the first time:</b> the tools download once (1.5 GB), and the first build of a game takes about 10–20 minutes. '
          'After that, a new game takes about 10 minutes, and playing again takes seconds.')
 KEYS_INTRO = ('DroidPlay reads your games with the keys from your own Switch, a file called <b>prod.keys</b> (Lockpick_RCM makes it). '
-              'They stay on this PC.')
+              "They stay on this PC. A Switch 2 game's .nup or dump folder doesn't need them.")
 TOOLS_INTRO = ("DroidPlay builds games with Microsoft's Java and .NET and Google's Android SDK. They download once: about 1.5 GB, 5 GB on disk.")
 PHONE_INTRO = 'Plug in your Android phone or handheld with a USB cable.'
-GAME_INTRO = ("Pick the folder with a game's NSP or XCI files: the base game, and its update if you have it. "
+GAME_INTRO = ("Pick the folder with a game's NSP or XCI files (the base game, and its update if you have it), or the folder that holds a Switch 2 game's "
+              '.nup file or its dump. '
               'DroidPlay writes its build files (a few GB) into a folder beside them.')
 
 
@@ -110,7 +114,9 @@ def phone_step(devs, adb, picked=None, seen=False):
         name = esc(phone_name(d) or 'Your phone')
         if d['state'] in ('unauthorized', 'authorizing'):
             return Step('phone', title, WAITING, f'<b>{name}</b> is waiting: unlock it and tap <b>Allow</b> on "Allow USB debugging?"', 'Set up my phone…')
-        if d['state'] == 'offline': return Step('phone', title, PROBLEM, f"<b>{name}</b> isn't answering: unplug it and plug it back in.", 'Set up my phone…')
+        if d['state'] == 'offline':
+            return Step('phone', title, PROBLEM, f"<b>{name}</b> isn't answering over Wi-Fi: wake it, and check that Wireless debugging is still on." if wifi(d['serial'])
+                        else f"<b>{name}</b> isn't answering: unplug it and plug it back in.", 'Set up my phone…')
     if devs:   # Linux's "no permissions", a phone in recovery: adb's own word, as the Phones page shows it
         d = devs[0]; return Step('phone', title, PROBLEM, f'<b>{esc(phone_name(d) or "Your phone")}</b> is connected but not ready (adb says "{esc(d["state"])}").', 'Set up my phone…')
     if seen: return Step('phone', title, DONE, "Your phone was set up before. It isn't plugged in now.")

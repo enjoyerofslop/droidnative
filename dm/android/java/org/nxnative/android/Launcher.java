@@ -10,7 +10,8 @@
 //   Saves: internal storage, saves/<title ID> (front_android.c). The one-game installs kept theirs in internal files/save: the packing script's --migrate moves the game
 //   folder into games/<title ID> and leaves a legacy_save marker there, and this launcher then backs every save up to <external files>/backups/<time>/ and copies
 //   files/save into saves/<title ID> (files/save itself is left as it was). Back up saves does the same backup on demand; a folder pushed to backups/restore/ is copied
-//   back into internal storage at the next start (after a backup of what is there).
+//   back into internal storage at the next start (after a backup of what is there), a game at a time. A game's settings screen also exports, imports and puts back
+//   that game's save (its Save rows: LauncherSaves.java).
 package org.nxnative.android;
 
 import android.app.Activity;
@@ -72,7 +73,7 @@ public class Launcher extends Activity {
 
     // A setting: an environment variable the host reads (dm/games/settings.tsv's columns; only those the Android host honours)
     static final class Setting {
-        final String key, kind, section, label, note; String[] values, labels; float lo, hi, step; String def;
+        final String key, kind, section, label, note; String[] values, labels; float lo, hi, step; String def; String on = "1";   // on: the value a toggle writes when on
         Setting(String key, String kind, String section, String label, String note) { this.key = key; this.kind = kind; this.section = section; this.label = label; this.note = note; }
     }
     // A game folder on the phone
@@ -83,6 +84,7 @@ public class Launcher extends Activity {
     File ext, games, internal; SharedPreferences app, prefs; Map<String, String> envFile, defaults;
     Game game;   // the one whose settings are shown
     final List<Setting> settings = new ArrayList<>();
+    LauncherSaves saves;
     final Map<String, String> chosen = new HashMap<>();
     LinearLayout list; float dp;
     final Handler ui = new Handler(Looper.getMainLooper());
@@ -90,7 +92,7 @@ public class Launcher extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         ext = getExternalFilesDir(null); if (ext == null) ext = getFilesDir();
-        games = new File(ext, "games"); internal = getFilesDir();
+        games = new File(ext, "games"); internal = getFilesDir(); saves = new LauncherSaves(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         dp = getResources().getDisplayMetrics().density;
         app = getSharedPreferences("app", MODE_PRIVATE);
@@ -103,14 +105,16 @@ public class Launcher extends Activity {
     }
 
     // The desktop app's Play (scripts/nxnative_android.py: am start ... --es game <title ID> [--ez play true]): that game's settings, or the game itself
-    @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); setIntent(i); opened(i); }
+    @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); setIntent(i); opened(i); saves.incoming(); }   // the computer's am start when the launcher is in front already
     void opened(Intent i) {
         String id = i != null ? i.getStringExtra("game") : null; if (id == null) return;
         for (Game g : scan()) if (g.id.equalsIgnoreCase(id) && g.hosted) { showSettings(g); if (i.getBooleanExtra("play", false)) play(true); return; }
         toast("The game " + id + " is not on this phone, or this app has no host for it");
     }
 
+    @Override protected void onResume() { super.onResume(); saves.incoming(); }   // a save the computer sent (LauncherSaves.incoming)
     @Override public void onBackPressed() { if (game != null) showGames(); else super.onBackPressed(); }
+    @Override protected void onActivityResult(int req, int res, Intent data) { if (!saves.result(req, res, data)) super.onActivityResult(req, res, data); }
 
     // ---------------- The games ----------------
     List<Game> scan() {
@@ -224,17 +228,36 @@ public class Launcher extends Activity {
             "Game time keeps levels timed to the music in step with the picture when the phone runs the game below its frame rate; the music can stutter.");
         s.values = new String[] {"real", "game"}; s.labels = new String[] {"Real time", "Game time"}; s.def = "real"; settings.add(s);
         s = new Setting("DM_SHOW_FPS", "toggle", "Game", "Frame-rate counter", null); s.def = "0"; settings.add(s);
+        if (defaults.containsKey("DM_VK_MESH_LEAVE_OUT")) {   // a game whose profile names plants the host can leave out (its android_defaults.txt carries the key; gfx_vk_mesh.inc): Ocarina of Time's forest
+            s = new Setting("DM_VK_MESH_LEAVE_OUT", "toggle", "Game", "Fewer plants (faster)",
+                "Leaves out the ferns, flowers and the trees' canopies: about 3 ms of GPU time a frame (a OnePlus Pad 3 went from 29.1 to 30.0 fps in Kokiri Forest). The trees stand bare.");
+            s.def = "0"; settings.add(s);
+        }
+        if (kgsl()) {   // any game, on a phone whose GPU clock the host can hold up (gfx_vk_floor.inc); on, the highest clock, as Ocarina of Time's Galaxy Z Fold 8 runs used
+            s = new Setting("DM_VK_GPU_FLOOR", "toggle", "Game", "Keep the GPU clock up",
+                "Holds the GPU at its highest clock: faster in some games on some phones, no faster on others, and slower on a warm phone, which then limits its GPU harder. The phone runs warmer and uses more battery.");
+            s.on = "100"; s.def = "0"; settings.add(s);
+        }
         s = new Setting("DM_PAD_ABXY", "choice", "Controls", "Controller face buttons",
             "By label for a controller that already gives its buttons Nintendo's letters (a Retroid in its Retro layout); by position for an Xbox-style controller.");
         s.values = new String[] {"position", "label"}; s.labels = new String[] {"By position", "By label"}; s.def = "position"; settings.add(s);   // front_android.c face_button
         s = new Setting("DM_RUMBLE", "toggle", "Controls", "Game rumble", null); s.def = "1"; settings.add(s);
         s = new Setting("DM_RUMBLE_GAIN", "range", "Controls", "Rumble strength", null); s.lo = 0; s.hi = 3; s.step = 0.1f; s.def = "1.0"; settings.add(s);
-        // the touch controls' size and how far in from the sides they sit (Gamepad.java padScale, insetPx)
+        // the touch controls' size and how far in from the sides they sit (Gamepad.java padScale, insetPx, raisePx)
         s = new Setting("DM_PAD_SCALE", "range", "Controls", "Touch control size", "Stops growing where the controls would meet."); s.lo = 0.6f; s.hi = 1.4f; s.step = 0.05f; s.def = "1.0"; settings.add(s);
         s = new Setting("DM_PAD_INSET", "range", "Controls", "Touch control inset",
             "Moves the stick, the D-pad and the buttons in from the sides. 0% is the standard layout, 100% brings them together in the middle.");
         s.lo = 0; s.hi = 1; s.step = 0.05f; s.def = "0"; settings.add(s);
+        s = new Setting("DM_PAD_RAISE", "range", "Controls", "Touch control height",
+            "Moves the stick, the D-pad and the buttons up from the bottom. 0% is the standard layout; 100% stops just below the shoulder buttons.");
+        s.lo = 0; s.hi = 1; s.step = 0.05f; s.def = "0"; settings.add(s);
         for (Setting t : settings) if (defaults.containsKey(t.key)) t.def = defaults.get(t.key);
+    }
+
+    // Qualcomm's kernel GPU driver (KGSL), the one whose clock floor the host can ask for: its device node, as vk_driver.c adreno() tests it (there, or there but not
+    // readable). A Mali, Xclipse or PowerVR GPU has none, and the setting would do nothing there
+    static boolean kgsl() {
+        try { Os.stat("/dev/kgsl-3d0"); return true; } catch (android.system.ErrnoException e) { return e.errno != android.system.OsConstants.ENOENT; }
     }
 
     View build(Game g) {
@@ -283,6 +306,7 @@ public class Launcher extends Activity {
         reset.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { prefs.edit().clear().apply(); for (Setting s : settings) chosen.put(s.key, s.def); fill(); } });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, px(44)); lp.topMargin = px(12);
         list.addView(reset, lp);
+        list.addView(saves.rows(game));
     }
 
     View row(final Setting s) {
@@ -318,7 +342,7 @@ public class Launcher extends Activity {
             int[][] st = {{android.R.attr.state_checked}, {}};
             sw.setThumbTintList(new android.content.res.ColorStateList(st, new int[] {INK, TEXT2}));
             sw.setTrackTintList(new android.content.res.ColorStateList(st, new int[] {CREAM, SEG})); sw.setTrackTintMode(android.graphics.PorterDuff.Mode.SRC);
-            sw.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() { public void onCheckedChanged(android.widget.CompoundButton v, boolean on) { set(s, on ? "1" : "0"); } });
+            sw.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() { public void onCheckedChanged(android.widget.CompoundButton v, boolean on) { set(s, on ? s.on : "0"); } });
             ctl = sw;
         } else {
             LinearLayout box = new LinearLayout(this); box.setGravity(Gravity.CENTER_VERTICAL);
@@ -348,6 +372,7 @@ public class Launcher extends Activity {
     // desktop: the desktop app's Play started it (it said the first start takes a while before it did), so a first start gets a toast here, not a dialog to tap
     void play(final boolean desktop) {
         final Game g = game;
+        if (saves.busy) { toast("Wait for the save to finish copying, then press Play"); return; }
         StringBuilder sb = new StringBuilder("# written by the settings screen (Launcher.java); env.txt wins over these\n");
         for (Setting s : settings) if (!envFile.containsKey(s.key)) sb.append(s.key).append('=').append(chosen.get(s.key)).append('\n');
         try (FileOutputStream o = new FileOutputStream(new File(g.dir, "launcher.txt"))) { o.write(sb.toString().getBytes(StandardCharsets.UTF_8)); } catch (IOException e) { Log.w(TAG, "launcher.txt: " + e); }
@@ -434,7 +459,8 @@ public class Launcher extends Activity {
         Log.i(TAG, "saves backed up to " + to);
         return to.getPath();
     }
-    // A folder pushed to <external files>/backups/restore/ (a backup) goes back into internal storage, over the folders of the same names, after a backup of those
+    // A folder pushed to <external files>/backups/restore/ (a backup) goes back into internal storage, over the folders of the same names, after a backup of those.
+    // saves/ goes back a game at a time, so a game the backup has no save of keeps its own (a one-game backup from an import or an export holds saves/<title ID> alone)
     String restore() {
         File r = new File(ext, "backups/restore"); if (!r.isDirectory()) return null;
         if (gameProcess() != null) return "A game is running: the backup in backups/restore is restored at the next start";
@@ -444,13 +470,18 @@ public class Launcher extends Activity {
         try {
             for (File f : fs) {
                 if (!f.isDirectory() || !f.getName().startsWith("save")) continue;
-                File dst = new File(internal, f.getName()); File tmp = new File(internal, f.getName() + ".restoring");
-                deleteTree(tmp); copyTree(f, tmp, null, null); applyXattrs(tmp, f.getName(), xa);
-                deleteTree(dst); if (!tmp.renameTo(dst)) throw new IOException("rename " + tmp + " failed");
+                if (!f.getName().equals("saves")) { restoreTree(f, new File(internal, f.getName()), f.getName(), xa); continue; }
+                File[] gs = f.listFiles(); if (gs != null) for (File g : gs)
+                    if (g.isDirectory() && Saves.TITLE.matcher(g.getName()).matches()) restoreTree(g, new File(internal, "saves/" + g.getName()), "saves/" + g.getName(), xa);
             }
         } catch (IOException e) { Log.w(TAG, "restore: " + e); return "Restore failed: " + e.getMessage(); }
         r.renameTo(new File(ext, "backups/restored-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date())));
         return "Saves restored" + (before != null ? " (the ones before are in " + before + ")" : "");
+    }
+    static void restoreTree(File src, File dst, String top, Map<String, String[]> xa) throws IOException {
+        File tmp = new File(dst.getPath() + ".restoring");
+        deleteTree(tmp); dst.getParentFile().mkdirs(); copyTree(src, tmp, null, null); applyXattrs(tmp, top, xa);
+        deleteTree(dst); if (!tmp.renameTo(dst)) throw new IOException("rename " + tmp + " failed");
     }
     // The one-game installs kept their save in internal files/save (and save_device beside it); --migrate leaves games/<id>/legacy_save on the game they belonged to.
     // That save is copied to saves/<id> (through a temporary folder, so a copy cut short is made again next time), after a backup of everything; files/save stays as it was
@@ -515,9 +546,9 @@ public class Launcher extends Activity {
         for (String line : new String(b, StandardCharsets.UTF_8).split("\n")) { String[] c = line.split("\t"); if (c.length == 3) m.put(c[0] + "\u0000" + (i++), c); }
         return m;
     }
-    static void applyXattrs(File root, String top, Map<String, String[]> xa) {
+    static void applyXattrs(File root, String top, Map<String, String[]> xa) {   // the user namespace alone: a backup's security.selinux rows are its phone's labels
         for (String[] c : xa.values()) {
-            if (!c[0].equals(top) && !c[0].startsWith(top + "/")) continue;
+            if (!c[1].startsWith("user.") || !c[0].equals(top) && !c[0].startsWith(top + "/")) continue;
             File f = new File(root, c[0].substring(top.length()));
             try { Os.setxattr(f.getPath(), c[1], unhex(c[2]), 0); } catch (Exception e) { Log.w(TAG, "xattr " + f + ": " + e); }
         }

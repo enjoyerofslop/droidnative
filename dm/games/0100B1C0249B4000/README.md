@@ -81,6 +81,20 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
   - **What runs:** the title, the menu, the intro movie, the story screen and the city, with sound. Raw global memory is on (the AHardwareBuffer route, 618 pieces, 349 MiB placed), and the terrain, snow, lights and UI draw. City: 29.0 fps, frame p50 34.1 / p95 37.7 ms, GPU p50 17.8 ms (without the meshes). The sound dump runs at −17 to −32 dBFS; 1 underrun in 68,000 callbacks.
   - **What doesn't:** the Generator, the buildings and the props, which leave only their shadows and lights. Every pipeline with one of the 1,108 shaders that read raw global memory fails (`pipeline creation failed: VkResult -13`: 32 pipelines, about 242,000 draws left out in four minutes). Logcat says why: `AdrenoVK-0: Shader compilation failed for shaderType: 0 ... INTERNAL ERROR: Instruction OpConvertUToPtr not supported`. The translator turns raw global memory into `PhysicalStorageBuffer` pointers made with `OpConvertUToPtr` from 64-bit addresses (539 vertex and 569 fragment modules).
   - **Two rewrites tried on the device** (the modules swapped in `games/<id>/spv`, then put back): an `OpBitcast` from the 64-bit address fails `src expected to have two components`, and an `OpBitcast` through a `uvec2` (GL_EXT_buffer_reference_uvec2's form, valid by spirv-val) gets past that but crashes the compiler (`SIGSEGV in libllvm-qgl.so+0x2cc258`, building `7069f9743717cd32`). So this driver takes no physical pointer form tried; Turnip does (below), and a translation of raw global memory without pointers would.
+- **On the Moto Razr Plus 2023 on its own driver, 2026-11-11: the meshes draw, through a descriptor array.** The replay now finds at start that the driver refuses `OpConvertUToPtr` (a probe pipeline) and reaches the placed pools through a storage-buffer array, rewriting the shaders' pointers ([Raw global memory on a driver that refuses OpConvertUToPtr](../../../docs/reference/rendering.md#raw-global-memory-on-a-driver-that-refuses-opconvertutoptr-android), enjoyerofslop/droidplay-core#286). The phone's app with only Frostpunk's host replaced by that branch's, the game files as above, the same `DM_KEYS` route into the city, each row one launch measured from 160 to 220 s:
+
+  | | Through the array (the default there) | The array off (`DM_VK_RAW_GMEM_NOPTR=0`: as before) |
+  |---|---|---|
+  | Pipelines that fail | none | 31, with 108 `OpConvertUToPtr not supported` lines from the driver |
+  | Generator, wreckage | drawn | invisible (the crater and its shadow) |
+  | Frame time | p50 33.9 / p95 34.9 ms (29.4-29.5 fps, the game's 30) in four launches | p50 33.9 / p95 34.4 ms (29.5 fps) |
+  | GPU | p50 27.1-28.3 ms | p50 17.1 ms, without the meshes |
+  | The game's PSS | 1.77-1.78 GB | 1.75 GB |
+  | Draws a frame | 632-641 | 559 |
+
+  - **Raw memory:** 96 modules rewritten, none left as they were; 2 pieces placed (6 MiB: pools are placed in chunks as they are used now, where the earlier run placed 349 MiB whole), 2 of the array's 8,191 slots in use. `DM_VK_RAW_GMEM_TEST=1`: 64 of 64 reads through the array match the CPU's bytes.
+  - **What the meshes cost:** the mesh G-buffer pass is 18.4 of the frame's 28.2 ms, and in it the fetches through the array are what costs. A vertex's shader makes 61 of them (a word and 15 vectors, a vector being four). With the meshes' triangles culled the pass takes 4.4 times the same frame's terrain pass; 0.5 with the lookups kept and no fetch; 2.3 with each vector in one fetch (test builds, `prof_now`). A 16-slot array, a sized array, no `NonUniform` decorations and plain-memory copies in the slots changed nothing. The 27 and 17 ms above don't compare as they stand: the GPU clocks down when the frame is light (the terrain pass takes 1.44 ms with the meshes drawn and 3.93 ms without). So Turnip's 13.7 ms (below) can't be set beside them without its own per-pass profile.
+  - **Red lines:** only the sky's uniform slot line. Not played past the tutorial's first pop-up; sound not checked in these runs. The phone's own app was put back after (md5 checked).
 - **On the Moto Razr Plus 2023 with a Turnip driver, 2026-11-11: the meshes draw.** Mr. Purple's Turnip T30 (`turnip_mrpurple_T30-toasted.adpkg.zip`, a third-party Mesa build; not part of DroidPlay) put on the phone and named with `DM_VK_DRIVER=vulkan.purple.so` ([Another Vulkan driver](../../../docs/android.md#another-vulkan-driver-turnip)). The installed app from `main` at `ec8f451f`, the game files as above (`DM_VK_RAW_GMEM=1`), and `DM_KEYS=45:A,52:A,60:A,100:B,105:B,112:A,122:A,132:A` into the city; the two drivers run back to back with the same build and route:
 
   | | Qualcomm's driver V@0615.98 | Turnip T30 |
@@ -127,7 +141,7 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made from the
 
 ## Open
 
-- **Android: the Adreno 730's driver (V@0615.98) compiles no raw global memory shader** (the Moto Razr Plus 2023, above): the meshes are invisible there on the phone's own driver. With a Turnip driver they draw (above); a translation of raw global memory without pointers would fix it on Qualcomm's driver too.
+- **Android: on the Adreno 730's own driver (V@0615.98) the mesh pass is two thirds of the GPU frame** (the Moto Razr Plus 2023, above), at the game's 30 fps in the first city view. Each fetch through the pools' array costs there, and a vector is loaded in four. A test build that loaded each vector in one fetch halved the vertex cost; a fuller city wasn't tried there.
 - **Android: the opening view's darker picture** and the sky shader's unbound uniform slot, above.
 - **Android: hull and domain shaders** (terrain, terrain shadow map, water and 8 `meshsolid` variants). None were seen in the first city view; a tessellated scene was not looked for.
 - **Mac: the two domain shaders' attribute clash and the 40 shaders without a texture slot**, above.

@@ -1,0 +1,2 @@
+# build_commit: the commit, filled in by git archive (a release's source archives, stage.ps1); build_stamp.py reads it where there is no .git
+build_commit export-subst

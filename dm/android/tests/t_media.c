@@ -1,7 +1,10 @@
-// The movie decoders on MediaCodec (media_android.c): t_media <h264 file> <aac file>, made by ffmpeg (the README's Checks):
+// The movie decoders on MediaCodec (media_android.c): t_media <h264 file> <aac file> [<h264 file without B-frames>], made by ffmpeg (the README's Checks):
 //   an Annex B H.264 stream of 30 frames of solid 0x2060c0 at 320×240 (High profile with B-frames, access unit delimiters), decoded as hle_movie.c does it (one access
 //   unit per packet, pictures taken as they come and the rest at the end), as NV12 (Y 91, U 180, V 93: ffmpeg's BT.601 video range) and as RGBA (about 32 96 192);
-//   an ADTS AAC stream of one second of a 1 kHz sine at 48 kHz, stereo, decoded through AudioConverter as md_aac does (the configuration in an esds cookie).
+//   an ADTS AAC stream of one second of a 1 kHz sine at 48 kHz, stereo, decoded through AudioConverter as md_aac does (the configuration in an esds cookie);
+//   the same picture in Main profile without B-frames (pic_order_cnt_type 2), whose every picture must leave before the end of stream, as a player that sends none
+//   needs: as x264 writes it (its VUI says max_num_reorder_frames 0), and with its SPS's bitstream_restriction taken out, as Donkey Kong Country Returns HD's movie has it
+//   (avc_sps.h then goes by pic_order_cnt_type 2).
 #include <AudioToolbox/AudioToolbox.h>
 #include <math.h>
 #include <stdio.h>
@@ -9,6 +12,7 @@
 #include <string.h>
 #include "dm.h"
 #include "hle_movie_avc.h"
+#include "../avc_sps.h"
 static int fails, checks;
 #define EXPECT(what, ok) do { checks++; int ok_ = (ok); printf("%-70s %s\n", what, ok_ ? "✓" : "✗"); if (!ok_) fails++; } while (0)
 static uint8_t *slurp(const char *p, size_t *n) {
@@ -16,6 +20,7 @@ static uint8_t *slurp(const char *p, size_t *n) {
     fseek(f, 0, SEEK_END); *n = (size_t)ftell(f); fseek(f, 0, SEEK_SET); uint8_t *b = malloc(*n); fread(b, 1, *n, f); fclose(f); return b;
 }
 static size_t next_sc(const uint8_t *p, size_t n, size_t i) { for (; i + 3 <= n; i++) if (!p[i] && !p[i + 1] && p[i + 2] == 1) return i; return n; }
+static int g_early;   // the pictures the last video() took before the end of stream
 static int video(const uint8_t *s, size_t n, int rgba, int *pics, uint8_t px[4]) {
     mavc *a = mavc_new(); if (rgba) mavc_set_rgba(a);
     int w = 320, h = 240; uint8_t *out = malloc((size_t)w * h * 4); int64_t pts; int frame = 0;
@@ -32,9 +37,27 @@ static int video(const uint8_t *s, size_t n, int rgba, int *pics, uint8_t px[4])
         if (last) break;
         i = j;
     }
+    g_early = *pics;
     while (mavc_take(a, 1, out, w, h, &pts)) { (*pics)++; memcpy(px, rgba ? out + ((size_t)120 * w + 160) * 4 : out + (size_t)120 * w + 160, rgba ? 4 : 1); if (!rgba) { px[1] = out[(size_t)w * h + 60 * w + 160]; px[2] = out[(size_t)w * h + 60 * w + 161]; } }
     mavc_free(a); free(out);
     return frame;
+}
+// s with every SPS's bitstream_restriction_flag cleared (and what followed it dropped) → o (n + 16 bytes are enough); its length
+static size_t strip_restriction(const uint8_t *s, size_t n, uint8_t *o) {
+    size_t i = next_sc(s, n, 0), on = 0;
+    while (i < n) {
+        size_t b = i + 3, e = next_sc(s, n, b), end = e; while (end > b && !s[end - 1]) end--;
+        avc_rbsp r; avc_sps sp; memcpy(o + on, "\0\0\0\1", 4); on += 4;
+        if ((s[b] & 31) == 7 && avc_sps_parse(s + b, end - b, &r, &sp) && sp.br) {
+            uint8_t rb[sizeof r.b] = {0}; size_t bits = sp.br_at + 2;   // the bits before the flag, the flag (0) and the stop bit
+            for (size_t k = 0; k < sp.br_at; k++) if (r.b[k / 8] >> (7 - k % 8) & 1) rb[k / 8] |= (uint8_t)(0x80 >> (k % 8));
+            rb[(sp.br_at + 1) / 8] |= (uint8_t)(0x80 >> ((sp.br_at + 1) % 8));
+            o[on++] = s[b];
+            for (size_t k = 0, z = 0; k < (bits + 7) / 8; k++) { if (z >= 2 && rb[k] <= 3) { o[on++] = 3; z = 0; } o[on++] = rb[k]; z = rb[k] ? 0 : z + 1; }   // emulation prevention
+        } else { memcpy(o + on, s + b, end - b); on += end - b; }
+        i = e;
+    }
+    return on;
 }
 static const uint8_t *g_pkt; static UInt32 g_pkt_n;
 static OSStatus feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, AudioStreamPacketDescription **pd, void *ctx) {
@@ -43,7 +66,7 @@ static OSStatus feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, Audio
     bl->mNumberBuffers = 1; bl->mBuffers[0].mData = (void *)g_pkt; bl->mBuffers[0].mDataByteSize = g_pkt_n; *np = 1; g_pkt = NULL; return 0;
 }
 int main(int argc, char **argv) {
-    if (argc < 3) { printf("usage: t_media <h264> <aac>\n"); return 2; }
+    if (argc < 3) { printf("usage: t_media <h264> <aac> [<h264 without B-frames>]\n"); return 2; }
     size_t n; uint8_t *s = slurp(argv[1], &n);
     int pics = 0; uint8_t px[4] = {0};
     int frames = video(s, n, 0, &pics, px);
@@ -83,6 +106,20 @@ int main(int argc, char **argv) {
     EXPECT("AAC: about the stream's length (all but the decoder's last packets)", total > 40000 && total <= 49152);
     EXPECT("AAC: a 1 kHz tone (within 5 %, not silent)", rms > 1000 && total && fabs(cross / 2.0 / (total / 48000.0) - 1000) < 50);
     AudioConverterDispose(c); free(s);
+    if (argc > 3) {   // pictures in decode order: each leaves once decoded, so a player that never ends the stream still gets the last
+        s = slurp(argv[3], &n);
+        pics = 0; frames = video(s, n, 0, &pics, px);
+        printf("H.264 without B-frames: %d access units, %d pictures, %d of them before the end of stream\n", frames, pics, g_early);
+        EXPECT("decode order, as the SPS says: every picture before the end of stream", frames == 30 && pics == 30 && g_early == 30);
+        uint8_t *t = malloc(n + 64); size_t tn = strip_restriction(s, n, t);
+        avc_rbsp r; avc_sps sp; size_t sb = next_sc(t, tn, 0) + 3; while (sb < tn && (t[sb] & 31) != 7) sb = next_sc(t, tn, sb) + 3;   // the first SPS, after the delimiter
+        size_t se = next_sc(t, tn, sb); while (se > sb && !t[se - 1]) se--;
+        EXPECT("the SPS without bitstream_restriction (pic_order_cnt_type 2)", sb < tn && avc_sps_parse(t + sb, se - sb, &r, &sp) && !sp.br && sp.poc_type == 2);
+        pics = 0; frames = video(t, tn, 0, &pics, px);
+        printf("H.264 without B-frames, no bitstream_restriction: %d pictures, %d of them before the end of stream\n", pics, g_early);
+        EXPECT("decode order, the SPS silent: every picture before the end of stream", frames == 30 && pics == 30 && g_early == 30);
+        free(t); free(s);
+    }
     printf("== %d checks, %d failed ==\n", checks, fails);
     return fails != 0;
 }
