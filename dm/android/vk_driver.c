@@ -6,15 +6,18 @@
 //   a hook loads the player's driver in place of the vendor's. The loader in that copy still makes the window surface and the swapchain, which Turnip on Android lacks.
 //   A driver that cannot be copied or opened, or that offers no GPU, logs one [RED] line, and the system's driver runs. So does one that opens and then fails to make the
 //   instance, find the GPU's graphics queue or the window extensions, or make the device (gfx_vk.c vk_create, through vk_driver_fallback), or the first window's surface
-//   or swapchain (front_android.c vk_window_first): a player's choice of driver must never leave a game without a picture. On a phone without an Adreno GPU, DM_VK_DRIVER is not opened at all.
+//   or swapchain (front_android.c vk_window_first): a player's choice of driver must never leave a game without a picture. On a phone whose GPU is neither an Adreno nor a
+//   Samsung Xclipse, DM_VK_DRIVER is not opened at all.
 #include <dirent.h>
 #include <dlfcn.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <drm/drm.h>
 #include "dm.h"
 #include "gfx_vk.h"
 #include "../third_party/libadrenotools/include/adrenotools/driver.h"   // the type of adrenotools_open_libvulkan, opened with dlsym: the host does not link it
@@ -133,9 +136,24 @@ static int open_system(void) {
     if (!vkCreateInstance || !vkEnumerateInstanceExtensionProperties) { LOG("[RED] [vk] no Vulkan: the driver has no vkCreateInstance"); return 0; }
     return 1;
 }
-// Turnip, like every driver libadrenotools loads, drives Qualcomm's kernel GPU driver, KGSL. Without its device node (a Mali or Xclipse phone) such a driver has nothing to
-// run on, and libadrenotools.so's constructor (liblinkernsbypass) would patch the linker for nothing. Only a missing node counts: one SELinux keeps from a stat is still there
+// The GPUs a player's driver can run on. libadrenotools' custom-driver load is the same for any vendor (it swaps the file the system's loader opens as vulkan.<x>.so), so
+// what decides is the kernel GPU driver the player's driver drives. Elsewhere (a Mali phone) no such driver has anything to run on, and libadrenotools.so's constructor
+// (liblinkernsbypass) would patch the linker for nothing.
+//   Adreno: Turnip drives Qualcomm's KGSL. Only a missing node counts: one SELinux keeps from a stat is still there
 static int adreno(void) { struct stat st; return !stat("/dev/kgsl-3d0", &st) || errno != ENOENT; }
+//   Xclipse: RADV built for it (radv-xclipse, as Eden loads it) drives Samsung's kernel GPU driver, sgpu, AMD's amdgpu adapted, through a DRM render node, which apps
+//   may open (their Vulkan driver does). Told as RADV tells its GPU (radv_physical_device_try_create): the node's DRM driver name is "amdgpu", which sgpu keeps (sysfs
+//   names its platform driver sgpu). Other render nodes have other names (the Flip 7 also has an exynos-drm one, for the display)
+static int xclipse(void) {
+    for (int i = 128; i < 136; i++) {
+        char p[32], name[16] = ""; snprintf(p, sizeof p, "/dev/dri/renderD%d", i);
+        int fd = open(p, O_RDWR | O_CLOEXEC); if (fd < 0) continue;
+        struct drm_version v = {.name_len = sizeof name - 1, .name = name};
+        int ok = !ioctl(fd, DRM_IOCTL_VERSION, &v) && !strcmp(name, "amdgpu");
+        close(fd); if (ok) return 1;
+    }
+    return 0;
+}
 
 // ---------------- Start records and the crash guard ----------------
 // A driver that crashes the game, hangs it or loses the GPU would do so again at every start. So each start with a DM_VK_DRIVER driver is recorded, and one that went wrong
@@ -145,7 +163,7 @@ static int adreno(void) { struct stat st; return !stat("/dev/kgsl-3d0", &st) || 
 //   games/<title ID>/vk_driver_result.txt   this game's last start: driver=, result= (a state), reason=, time= lines; removed at a start without DM_VK_DRIVER
 // The states: trying (written before the driver opens), ok (120 frames presented, 30 s of the game, or the self test's picture check drawn: a first start compiles for longer
 // than 30 s), fell back (it failed and the system's driver ran), crashed (in the driver's code), crashed elsewhere (in the host's or the game's code, the driver running),
-// device lost, skipped and not used (no Adreno GPU: the result file only). A start that finds crashed, device lost or trying (a start that ended before ok: a crash the
+// device lost, skipped and not used (neither an Adreno nor an Xclipse GPU: the result file only). A start that finds crashed, device lost or trying (a start that ended before ok: a crash the
 // handler did not see, a hang the player ended, or a game closed in its first 30 s) skips the driver and writes skipped; crashed elsewhere is only said, since the driver
 // may have no part in it (a game that crashed at boot would otherwise change drivers at every start). A hang in the driver after ok isn't caught: the records can't tell it
 // from a long compile, and a game hung after its first 30 s is ended by the player, which leaves ok
@@ -262,13 +280,16 @@ void vk_driver_lost(VkResult r) { if (g_name[0]) { mark_bad(1); record("device l
 
 int vk_driver_load(void) {
     const char *drv = getenv("DM_VK_DRIVER");
-    int on = drv && *drv, kgsl = on && adreno();
-    record_paths(on ? drv : NULL, kgsl);
-    if (on && !kgsl) {
-        LOG("[vk] DM_VK_DRIVER %s: not used, this GPU is not an Adreno (no /dev/kgsl-3d0) and Turnip drivers are for Adreno GPUs only: the system's driver runs", drv);
-        record("not used", "not an Adreno GPU (no /dev/kgsl-3d0)");
-        snprintf(g_note, sizeof g_note, "Vulkan driver: the system's (%s is for Adreno GPUs only)", g_drv); g_note_warn = 1;
-    } else if (kgsl && !skip_once()) {
+    int on = drv && *drv;
+    const char *gpu = !on ? NULL : adreno() ? "Adreno" : xclipse() ? "Xclipse" : NULL;   // the GPU a player's driver can run on, or NULL
+    record_paths(on ? drv : NULL, gpu != NULL);
+    if (on && !gpu) {
+        LOG("[vk] DM_VK_DRIVER %s: not used, this GPU is neither an Adreno (no /dev/kgsl-3d0) nor a Samsung Xclipse (no amdgpu render node), the GPUs another driver (Turnip, "
+            "RADV for Xclipse) runs on: the system's driver runs", drv);
+        record("not used", "not an Adreno or Xclipse GPU (no /dev/kgsl-3d0, no amdgpu render node)");
+        snprintf(g_note, sizeof g_note, "Vulkan driver: the system's (%s is for Adreno and Xclipse GPUs only)", g_drv); g_note_warn = 1;
+    } else if (gpu && !skip_once()) {
+        LOG("[vk] DM_VK_DRIVER %s: trying it on this %s GPU", drv, gpu);
         record("trying", "");
         if ((g_gipa = open_custom(drv))) {
             void crash_set_pc_hook(void (*)(int, uint64_t, uint64_t, uint64_t)); crash_set_pc_hook(crash_hook);

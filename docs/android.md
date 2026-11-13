@@ -206,8 +206,9 @@ carries the game, so never share it. How it is packed: [A game app](../dm/androi
 ## Another Vulkan driver (Turnip)
 
 On a phone with an Adreno GPU, a game can run on a Vulkan driver you put on the phone instead of the system's, as in Switch emulators: usually a build of Mesa's
-open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666/purple-turnip/releases). The app carries what loads it
-([libadrenotools](../dm/third_party/libadrenotools/README.md)), so trying one needs no new build:
+open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666/purple-turnip/releases). On a Samsung phone with an Xclipse GPU, the same goes for
+a build of Mesa's RADV for Xclipse, such as [radv-xclipse](https://github.com/JimVulkan/radv-xclipse/releases) (its Android package, `vulkan.radeon.so`). The app
+carries what loads it ([libadrenotools](../dm/third_party/libadrenotools/README.md)), so trying one needs no new build:
 
 1. Unzip the driver package (`turnip_mrpurple_T30-toasted.adpkg.zip`, say). It holds a `.so` (`vulkan.purple.so`) and a `meta.json` that names it.
 2. Copy the `.so` into `Android/data/org.nxnative.android/files/`, beside `env.txt`: `adb push vulkan.purple.so /sdcard/Android/data/org.nxnative.android/files/`.
@@ -217,7 +218,7 @@ open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666
 The app copies the driver into its internal storage at start, since Android loads no code from shared storage, and copies it again when the file changes. The log
 names the driver that runs: `[vk] driver: … (DM_VK_DRIVER, through libadrenotools), not the system's: PurpleVK-public Adreno (TM) 740 …`. A driver that can't run
 (a wrong path, a build for another GPU, one that loads but can't make the Vulkan device or the window's swapchain) gets one `[RED] [vk] DM_VK_DRIVER …` line saying why, and the game runs on
-the system's driver. On a phone without an Adreno GPU (Mali, Xclipse) the line is ignored, and the log says so. When a start with the driver crashes in the driver's
+the system's driver. On a phone with neither an Adreno nor an Xclipse GPU (a Mali) the line is ignored, and the log says so. When a start with the driver crashes in the driver's
 code, loses the GPU, or ends in its first 30 seconds (a hang you closed, say), the next start runs on the system's driver once, and the start screen and the log say why;
 the start after that tries your driver again. A crash outside the driver's code is noted but doesn't count against it, and a hang after the first 30 seconds isn't
 caught. The app keeps each driver's last start in `files/vk_driver_state/<driver file>.json` and each game's in
