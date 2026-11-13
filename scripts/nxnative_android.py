@@ -266,6 +266,7 @@ class Game:
         self.captures = e.get('captures') or 0
         self.icon = e.get('icon'); self.display = e.get('display'); self.languages = e.get('languages') or [c for c, _ in LANGUAGES]
         self.profile = info.get('profile'); self.provisional = info.get('provisional'); self.host = info.get('host'); self.tested = info.get('android_tested')
+        self.run_time = info.get('run_time_shaders') or {}   # {count, ready}: shaders it compiles while it runs that its tables name, which only a Mac build captures (droidplay-core#441)
         self.pm = QPixmap(self.icon) if self.icon else QPixmap()
 
     def new_shaders(self, on_phone):   # run-time shaders the phone saved beyond the ones on this computer (a provisional profile's only: build_android_from_nsp.py pull_captures)
@@ -277,6 +278,7 @@ class Game:
         if self.error:   # in plain words (explain.py): keys older than the game get Pick your prod.keys, not a disabled "Can't read it"
             h = ex.explain(self.error); return h.title, ERR, {'keys': 'keys', 'tools': 'tools'}.get(h.action, 'none')
         if not self.profile: return 'Not supported yet: experimental build only', ERR, 'survey'
+        if self.run_time and not self.run_time.get('ready') and not self.host: return ex.mac_only(self.run_time.get('count', 0), sys.platform == 'darwin'), ERR, 'mac'   # its build would stop at once
         x = 'Experimental (provisional profile, may not boot) · ' if self.provisional else ''   # an experimental build's profile, guessed from the survey
         n = self.new_shaders(on_phone)
         if n and self.host: return f'{x}{n} new shader(s) captured on the phone · Manage → Update shaders', BUILD, 'install' if self.id not in on_phone else 'play'
@@ -301,13 +303,13 @@ class Hero(QWidget):   # the picked game, large: its art's wash behind, the art 
         self.manage.setPopupMode(QToolButton.InstantPopup); self.manage.setCursor(Qt.PointingHandCursor)
         row.addWidget(self.play); row.addWidget(self.opts); row.addWidget(self.manage); row.addStretch(); lay.addLayout(row)
 
-    def show_game(self, g, status, color):
+    def show_game(self, g, status, color, hint=''):   # hint: what to do next, after the game's details
         self.pm = g.pm if g else QPixmap(); self.cache = None
         self.status.setText(f'<span style="color:{color}">●&nbsp;&nbsp;{esc(status.upper())}</span>' if g else '')
         self.title.setText(esc(g.name) if g else 'Add your first game')
         if g and g.error and not g.info.get('needs_keys') and not g.info.get('needs_tools'): self.meta.setText(ex.explain(g.error).body)   # what to do about it
         elif g:
-            bits = [g.id, f'v{g.display}' if g.display else None, (g.info.get('table') or {}).get('engine'), 'played on Android' if g.tested else 'not played on Android yet']
+            bits = [g.id, f'v{g.display}' if g.display else None, (g.info.get('table') or {}).get('engine'), 'played on Android' if g.tested else 'not played on Android yet', hint]
             self.meta.setText('   ·   '.join(b for b in bits if b))
         else: self.meta.setText('Pick the folder with your game\'s NSP or XCI files and your prod.keys, or with a Switch 2 game\'s .nup or dump (no keys): + Build game, at the top right')
         self.update()
@@ -466,10 +468,12 @@ class LibraryPage(QWidget):
     def show_hero(self, g):
         if not g: self.hero.show_game(None, '', TEXT3); self.hero.play.setEnabled(False); self.hero.opts.setEnabled(False); return
         text, color, state = g.status(self.win.phone_games, self.win.phone_name())
-        self.hero.show_game(g, text, color); self.hero.opts.setEnabled(bool(g.profile))
+        self.hero.show_game(g, text, color, ex.RUN_TIME_META if self.run_time_later(g) else ''); self.hero.opts.setEnabled(bool(g.profile))
         self.hero.play.setText({'play': '  Play', 'install': '  Install on phone', 'build': '  Build and install', 'survey': '  Experimental build', 'keys': '  Pick your prod.keys',
-                                'tools': '  Install the tools', 'none': "  Can't read it"}[state])
-        self.hero.play.setEnabled(state != 'none')
+                                'tools': '  Install the tools', 'none': "  Can't read it", 'mac': '  Build it for the Mac first' if sys.platform == 'darwin' else '  Builds on a Mac only'}[state])
+        self.hero.play.setEnabled(state not in ('none', 'mac'))
+    def run_time_later(self, g):   # a build said the game compiles shaders while it runs (run_time_shaders), which Update shaders brings in: a provisional profile's only
+        return bool(g.provisional and self.win.st.value(f'runtime/{g.id}', False, type=bool))
     def current(self): return self.games.get(self.picked)
     def slide(self, d): sb = self.scroll.horizontalScrollBar(); sb.setValue(sb.value() + d * (Card.W + 20) * 2)
     def arrows(self):
@@ -608,8 +612,10 @@ class LibraryPage(QWidget):
         act('Build only', lambda: self.run(g, ['--no-push'], 'Build'), bool(g.profile))
         act('Build a game app…', lambda: self.game_app(g), bool(g.profile))
         act('Install on phone (no build)', lambda: self.run(g, ['--push-only'], 'Install'), bool(g.profile and g.host and s))
-        n = g.new_shaders(self.win.phone_games)
-        act(f'Update shaders from the phone ({n} new)' if n else 'Update shaders from the phone', lambda: self.run(g, ['--update-shaders'], 'Update shaders'), bool(g.provisional and g.host and s))
+        n, later = g.new_shaders(self.win.phone_games), self.run_time_later(g)
+        up = act(f'Update shaders from the phone ({n} new)' if n else 'Update shaders from the phone' + (' (after its first scene)' if later else ''),
+                 lambda: self.run(g, ['--update-shaders'], 'Update shaders'), bool(g.provisional and g.host and s))
+        if n or later: f = up.font(); f.setBold(True); up.setFont(f)   # the next thing to do for this game
         self.menu.addSeparator()
         act('Update the app on the phone', lambda: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.after_task), bool(s and ba.library()))
         act('Remove from the phone…', lambda: self.win.phones.remove_game(g.id, g.name), bool(s and g.id in self.win.phone_games))
@@ -650,6 +656,16 @@ class FailBanner(QFrame):   # a build that failed, at the top of the Builds page
         self.show()
 
 
+class NoteBanner(QFrame):   # what the running build says to do next, at the top of the Builds page: amber, as nothing went wrong
+    def __init__(self):
+        super().__init__(); self.setObjectName('notebanner'); self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet('QFrame#notebanner { background: rgba(245,184,46,0.08); border: 1px solid rgba(245,184,46,0.35); border-radius: 12px; }')
+        lay = QVBoxLayout(self); lay.setContentsMargins(22, 14, 22, 14); lay.setSpacing(4)
+        self.title = label(''); self.title.setStyleSheet(f'font-size: 15px; font-weight: 700; color: {BUILD}'); lay.addWidget(self.title)
+        self.body = label('', 'meta', wrap=True); lay.addWidget(self.body); self.hide()
+    def show_note(self, title, body): self.title.setText(title); self.body.setText(body); self.show()
+
+
 class BuildsPage(QWidget):
     progress = Signal(str, str, float, bool)   # title, detail, fraction (-1: unknown), running
     event = Signal(str, object)   # title, a stage event as the script sent it: the checklist draws Install tools' one bar from --setup's
@@ -662,6 +678,7 @@ class BuildsPage(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(48, 32, 48, 24); lay.setSpacing(16)
         self.head = label('Builds', 'h1'); lay.addWidget(self.head); self.sub = label('Nothing running. Builds start from the Library.', 'muted'); lay.addWidget(self.sub)
         self.banner = FailBanner(self); lay.addWidget(self.banner)
+        self.note = NoteBanner(); lay.addWidget(self.note)
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(['Stage', 'Progress', 'Time', 'Result']); self.tree.setRootIsDecorated(False)
         hh = self.tree.header(); hh.setStretchLastSection(False); hh.setSectionResizeMode(0, QHeaderView.Stretch); hh.setSectionResizeMode(1, QHeaderView.Fixed)
         hh.setSectionResizeMode(2, QHeaderView.ResizeToContents); hh.setSectionResizeMode(3, QHeaderView.Stretch); self.tree.setColumnWidth(1, 220)
@@ -720,7 +737,7 @@ class BuildsPage(QWidget):
         self.progress.emit(title, 'starting…', -1, True)
     def fresh(self, args, bid):   # a build starts: what the last one said and where it stopped are forgotten
         self.last_red = self.last_line = ''; self.reds, self.stage, self.failed_stage, self.args, self.bid, self.journal, self.stopping = [], None, None, list(args), bid, None, False
-        self.banner.hide()
+        self.banner.hide(); self.note.hide()
     def say(self, text, color=None):
         if color is None:
             color = ERR if '[RED]' in text else None
@@ -740,6 +757,7 @@ class BuildsPage(QWidget):
             return
         k = ev.get('ev')
         if k == 'say': self.say(ev.get('msg', '')); return
+        if k == 'run_time_shaders': self.run_time(ev); return
         if k not in ('stage', 'step', 'progress', 'stage_end'): return
         self.event.emit(self.title, ev)
         if k == 'stage': self.stage = (ev.get('k'), ev.get('n'), ev.get('name', ''))
@@ -765,6 +783,9 @@ class BuildsPage(QWidget):
         self.sub.setText(f'stage {key} of {it.n} · {detail}')
         self.live = None if k == 'stage_end' else (it, detail, frac if frac >= 0 else (self.live[2] if self.live and self.live[0] is it and k != 'step' else -1))
         self.progress.emit(self.title, detail, self.live[2] if self.live else frac, True)
+    def run_time(self, ev):   # build_android_from_nsp.py run_time_note: a provisional profile's game compiles shaders while it runs; the Library then points at Update shaders for it
+        if ev.get('title_id'): self.win.st.setValue(f'runtime/{ev["title_id"]}', True)
+        self.note.show_note(*ex.run_time_note(ev.get('name') or '', bool(ev.get('game_app'))))
     def tick(self):   # the running stage's clock, every second: a long step (adb copying the RomFS) sends no events
         if not self.live or not (self.busy() or self.ext): return
         it, detail, frac = self.live; t = clock_text(time.time() - it.t0)
@@ -1633,6 +1654,7 @@ class Window(QMainWindow):
         elif action == 'tools': self.settings.install(show_builds=False); self.go('setup')
         elif action == 'folder' and folder: reveal(folder)
         elif action == 'backup': self.phones.backup()
+        elif action == 'issue': QDesktopServices.openUrl(QUrl(ex.ISSUE_441))
     def phone_guide(self): PhoneGuide(self).exec()
     def phone_brand(self):   # the guide's brand: of the phone adb sees (its maker once it has allowed this PC, its model code before), else the one picked last time
         d = next((d for d in self.devs or [] if d['state'] == 'device'), None) or next(iter(self.devs or []), None)

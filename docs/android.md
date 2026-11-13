@@ -319,8 +319,14 @@ While they translate, the Builds page counts the shaders done out of those left 
 
 ## Games that compile their shaders while they run
 
-Some games carry their shaders as GLSL source and compile them with Nintendo's GLSL compiler while they run (The Binding of Isaac does). Their files hold no shader to
-translate, so the first build has none (`[RED] the game is packed without shaders`): the game runs but draws nothing. The app captures them on the phone by itself:
+Some games carry their shaders as GLSL source and compile them with Nintendo's GLSL compiler while they run. The Binding of Isaac compiles all of them that way; Crash
+Bandicoot N. Sane Trilogy compiles some. No game file holds those shaders, so the first build doesn't have them: whatever they draw is black, and a game that compiles all
+of them has no shaders at all (`[RED] the game is packed without shaders`). It runs but draws nothing.
+
+The build says so before its long steps, once it has read the game's files (its `main` holds GLSL sources and calls `glslcCompile`):
+`[RED] <game> compiles some of its shaders while it runs, so its first install may draw some things black. Play it to its first scene, then bring them in with --update-shaders`.
+DroidPlay for Windows shows the same notice on the Builds page. On the game's page it then points at **Manage › Update shaders from the phone**, which is in bold in the
+Manage menu. A game app can't take them in later, so build it after the steps below. The app captures them on the phone by itself:
 
 1. Play the game for a while: each shader is saved the first time the game compiles it (in the game's folder on the phone, `glslc_capture/`).
 2. On the computer, the game's card in the desktop app says how many new shaders the phone has; **Manage › Update shaders from the phone** copies them, translates
@@ -330,6 +336,14 @@ translate, so the first build has none (`[RED] the game is packed without shader
 
 A scene reached later (or a DLC) can compile more shaders: repeat until the log shows no `no translated shader`. This is done for games packed from a provisional
 profile; a registered profile's shader tables name the captures they were made from. DLC in the NSP folder is extracted and copied to the phone with the game.
+
+**Games only a Mac can build so far.** Six registered profiles' tables name shaders their games compile at boot: DRAGON QUEST BUILDERS 2, Fire Emblem: Three Houses,
+Portal, Portal 2, Hyrule Warriors: Definitive Edition and Catherine: Full Body. Only a build on a Mac captures them (it boots the game in the Mac host), so on Windows and
+Linux these games can't be built yet ([droidplay-core#441](https://github.com/enjoyerofslop/droidplay-core/issues/441)). The build stops at once, before it extracts
+the game: `<game> compiles <N> of its shaders while it runs, with its own shader compiler (GLSLC), and game profile <id>'s shader tables need them. Only a build on a
+Mac can capture them so far`. DroidPlay for Windows shows such a game as **Builds on a Mac only for now** and leaves its Play button off. On a Mac, build the game for
+the Mac first: DroidPlay for Mac, or `build_ipa_from_nsp.py` on the same folder. The Android build then takes the captures from that build's
+`<title ID>_build/extract/<version>/glslc_capture` ([why](reference/packing.md#an-android-build-of-a-game-that-compiles-shaders-while-it-runs-stops-at-the-split-off-a-mac)).
 
 A game packed from a registered profile has its shaders in its tables, so a shader split that fails there stops the build rather than pack the game without them ([why](reference/packing.md#an-android-build-packs-a-registered-game-without-shaders-after-a-split-error-and-succeeds)). A shader translation that stops ends the build for every game, rather than pack it with part of its shaders ([why](reference/packing.md#an-android-build-packs-the-shaders-translated-so-far-after-the-translation-stops)): the shaders translated by then are kept, and the next build translates the rest. So does one that translates none of the shaders it has to (`[RED] spv_build: no shader was translated`), as happens when a file is missing from the translator's folder, `dm/gfx/tools/dmsh_xlate_bin` ([why](reference/packing.md#an-android-build-packs-a-game-without-shaders-when-the-translator-makes-nothing)).
 
