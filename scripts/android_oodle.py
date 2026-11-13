@@ -54,6 +54,19 @@ def free_bytes(df_k):   # bytes available, from the last line of `df -k <folder>
 def mb(n): return f'{n / 1048576:,.0f} MB'
 
 
+def host_free(folder):   # bytes free on this computer's drive that holds folder
+    return shutil.disk_usage(folder).free
+
+
+def no_room(what, folder, need):
+    """The ValueError for a drive on this computer short of space, before the build writes there: on Windows a full drive made adb pull fail with "cannot write …
+    Input/output error" after 35 of Pokémon Legends: Z-A's jobs (issues #415, #436), and nothing said it was the computer's drive, not the phone's"""
+    free = host_free(folder)
+    return None if free >= need else ValueError(
+        f'{what} needs about {mb(need)} free on this computer\'s drive with {folder}, and it has {mb(free)}: free up space there, or build from a drive with more, then build '
+        'again (what the phone decoded so far is kept)')
+
+
 class Rounds:
     """decode(compressed, raw length) for uepak.py: what the phone decoded so far, else zeros, the stream kept for the next job. Only a stream that starts as Oodle's do is kept:
     bytes made from an earlier round's zeros never do, so no record is a guess (uepak's checks on such bytes raise ValueError, which run() counts as a round to finish)"""
@@ -137,8 +150,14 @@ class Phone:
             (self.logs / f'oodle_phone_{self.jobs}.log').write_text(text, encoding='utf-8', errors='replace')
             if not done: raise ValueError(f'the Oodle job on the phone did not finish ({(fail or f"no answer in {JOB_SECS} s").strip()[-400:]}); its log: {self.logs / f"oodle_phone_{self.jobs}.log"}')
             res = self.work / 'tmp' / 'oodle_phone.job.out'; size = self.sh(f'stat -c %s {rjob}.out', check=False).strip()
+            if (e := no_room('Copying the Oodle job\'s output from the phone', res.parent, (int(size) if size.isdigit() else out_size(records)) + SPARE)): raise e
             for _ in range(2):   # a copy that came over shorter than the phone's file is made again, once
-                self.adb(self.serial, 'pull', f'{rjob}.out', res)
+                try: self.adb(self.serial, 'pull', f'{rjob}.out', res)
+                except Exception as e:   # build_android_from_nsp.py's BuildError; PhoneLost (the phone went away) goes on as it is
+                    if 'cannot write' not in str(e) and 'cannot create' not in str(e): raise
+                    raise ValueError(f'this computer could not write the Oodle job\'s output to {res} ({str(e).strip()[-200:]}). This is usually its drive filling up, or a '
+                                     f'drive that went away; it has {mb(host_free(res.parent))} free now: free up space there, then build again (what the phone decoded so far '
+                                     'is kept)') from None
                 if not size.isdigit() or res.stat().st_size == int(size): break
             else: raise ValueError(f'the Oodle job\'s output came over from the phone as {res.stat().st_size:,} of its {int(size):,} bytes, twice: check the USB cable, then build again')
             try: got = read_out(res, len(records))
@@ -231,6 +250,8 @@ def fill(cache, record, phone, want_dir, rounds=8):
             record(want_dir)
             todo = [(k, v) for k, v in wants(want_dir).items() if k not in cache and v[3]]
             if not todo: return r, total
+            # the cache keeps every decoded byte, so a drive too small for them is told now, not after an hour of jobs (issue #436); a job's own copy is checked as it comes
+            if (e := no_room(f'Decoding the shader split\'s {len(todo):,} remaining Oodle streams with the phone', cache.d, sum(k[1] for k, _ in todo) + SPARE)): raise e
             dec = dec or phone()
             batches, cur, size = [], [], 0
             for k, v in todo:

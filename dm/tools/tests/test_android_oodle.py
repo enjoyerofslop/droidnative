@@ -100,8 +100,9 @@ class FormatTest(unittest.TestCase):
 
 class PhoneTest(unittest.TestCase):
     """Phone.job against a stand-in for adb: what it runs on the phone, and what it does with the answers"""
-    def run_job(self, df_free_k, pulled, size_word=None, log='DM_OODLE_JOB: 1 records decoded', logged=None):
-        """log: what the grep of the game's log.txt finds; pulled[0] None: the game left no output. logged, a list: gets the job's log file as the build wrote it"""
+    def run_job(self, df_free_k, pulled, size_word=None, log='DM_OODLE_JOB: 1 records decoded', logged=None, host=1 << 40, pull_error=None):
+        """log: what the grep of the game's log.txt finds; pulled[0] None: the game left no output. logged, a list: gets the job's log file as the build wrote it.
+        host: bytes free on this computer's drive; pull_error: what adb pull fails with"""
         calls = []
         def adb(serial, *args, check=True):
             calls.append(args)
@@ -111,13 +112,14 @@ class PhoneTest(unittest.TestCase):
             if cmd.startswith('stat -c'): return '' if pulled[0] is None else str(size_word if size_word is not None else len(pulled[0]))
             if cmd.startswith('ls -l'): return '-rw-rw---- 1 u0_a160 ext_data_rw 0 log.txt'
             if args[0] == 'logcat': return 'I/Zygote  ( 1279): Process 10751 exited cleanly (0)'
+            if args[0] == 'pull' and pull_error: raise RuntimeError(pull_error)
             if args[0] == 'pull': Path(args[2]).write_bytes(pulled.pop(0) if len(pulled) > 1 else pulled[0])
             return ''
         class Clock:   # time for android_oodle: each sleep moves it on, so the 20 s before a gone game counts take no real time
             t = 1000.0
             def time(self): return self.t
             def sleep(self, s): self.t += s
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(ao, 'time', Clock()):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ao, 'time', Clock()), mock.patch.object(ao, 'host_free', lambda f: host):
             ph = ao.Phone(adb, 'SERIAL', '0100606026F12000', '/sdcard/x', 'org.nxnative.android', d, d, lambda s: None)
             try: r = ph.job([(stream(b'abc'), 3)])
             except ValueError as e: r = e
@@ -128,6 +130,19 @@ class PhoneTest(unittest.TestCase):
         r, calls = self.run_job(1024, [b''])
         self.assertIsInstance(r, ValueError); self.assertIn('free up space', str(r))
         self.assertFalse([c for c in calls if c[0] in ('push', 'pull')])
+
+    def test_a_full_drive_here_stops_before_the_copy(self):   # issue #436: the computer's drive, not the phone's, was full
+        good = b'DMOR' + struct.pack('<I', 1) + struct.pack('<I', 3) + b'abc'
+        r, calls = self.run_job(10 << 20, [good], host=1 << 20)
+        self.assertIsInstance(r, ValueError); self.assertIn("this computer's drive", str(r)); self.assertIn('decoded so far is kept', str(r))
+        self.assertFalse([c for c in calls if c[0] == 'pull'])
+
+    def test_a_copy_that_cannot_be_written_here_is_named(self):   # issue #436: adb pull's "cannot write … Input/output error" on Windows
+        good = b'DMOR' + struct.pack('<I', 1) + struct.pack('<I', 3) + b'abc'
+        r, _ = self.run_job(10 << 20, [good], pull_error="adb pull failed (exit status 1): adb: error: cannot write 'C:\\b\\oodle_phone.job.out': Input/output error")
+        self.assertIsInstance(r, ValueError); self.assertIn('this computer could not write', str(r)); self.assertIn('Input/output error', str(r))
+        with self.assertRaises(RuntimeError) as e: self.run_job(10 << 20, [good], pull_error='adb lost the phone: device offline')
+        self.assertNotIsInstance(e.exception, ValueError)   # a lost phone goes on as it is, for the reconnect
 
     def test_a_short_copy_is_made_again(self):
         good = b'DMOR' + struct.pack('<I', 1) + struct.pack('<I', 3) + b'abc'
@@ -219,6 +234,14 @@ class SplitCacheTest(unittest.TestCase):
         again = ao.Cache(self.cache.d, 'main-1')
         self.assertEqual(len(again), 5)
         again.add([(ao.stream_key(b'\x8cz', 1), b'z')]); self.assertTrue((self.cache.d / '4.idx').is_file())
+
+    def test_a_drive_too_small_for_the_decode_stops_before_the_phone(self):   # issue #436: told before the jobs, not after an hour of them
+        streams = [(stream(bytes([65 + i]) * 100), 100) for i in range(5)]
+        def read(): return [self.ss.oodle(c, n) for c, n in streams]
+        def no_phone(): raise AssertionError('the phone was asked for')
+        with mock.patch.object(ao, 'host_free', lambda f: 1000), self.assertRaises(ValueError) as e:
+            ao.fill(self.cache, lambda w: self.run_split(read, w), no_phone, self.tmp / 'want')
+        self.assertIn('5 remaining Oodle streams', str(e.exception)); self.assertIn(str(self.cache.d), str(e.exception))
 
     def test_another_decoder_empties_the_cache(self):
         self.cache.add([(ao.stream_key(stream(b'x'), 1), b'x')]); self.cache.finish('inputs-1')
