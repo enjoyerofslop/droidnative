@@ -263,12 +263,14 @@ class Game:
         ex = info.get('extracted') or {}; self.newest = info.get('newest')
         e = ex.get(self.newest) or (next(iter(ex.values())) if ex else {})
         self.id = info.get('title_id'); self.name = e.get('name') or info.get('name') or self.id or Path(folder).name; self.error = info.get('error')
+        self.detail = info.get('detail') or self.error   # what the read said in full: the files it passed over, and why, before the error
         self.captures = e.get('captures') or 0
         self.icon = e.get('icon'); self.display = e.get('display'); self.languages = e.get('languages') or [c for c, _ in LANGUAGES]
         self.profile = info.get('profile'); self.provisional = info.get('provisional'); self.host = info.get('host'); self.tested = info.get('android_tested')
         self.run_time = info.get('run_time_shaders') or {}   # {count, ready}: shaders it compiles while it runs that its tables name, which only a Mac build captures (droidplay-core#441)
         self.pm = QPixmap(self.icon) if self.icon else QPixmap()
 
+    def help(self): return ex.explain(self.detail or '', folder=self.folder, read=True)   # the folder's read failed: what to do about it (explain.py)
     def new_shaders(self, on_phone):   # run-time shaders the phone saved beyond the ones on this computer (a provisional profile's only: build_android_from_nsp.py pull_captures)
         return max(0, (on_phone.get(self.id) or {}).get('captures', 0) - self.captures) if self.provisional else 0
     def status(self, on_phone, phone):   # (text, colour, state): state picks what Play does
@@ -276,7 +278,7 @@ class Game:
         # not the game's fault: the tools that read it aren't installed yet. It showed as unreadable, with a disabled "Not supported", to every new player
         if self.info.get('needs_tools'): return "Install DroidPlay's tools to read it: Get started, step 2", BUILD, 'tools'
         if self.error:   # in plain words (explain.py): keys older than the game get Pick your prod.keys, not a disabled "Can't read it"
-            h = ex.explain(self.error); return h.title, ERR, {'keys': 'keys', 'tools': 'tools'}.get(h.action, 'none')
+            h = self.help(); return h.title, ERR, {'keys': 'keys', 'tools': 'tools', 'folder': 'folder'}.get(h.action, 'none')
         if not self.profile: return 'Not supported yet: experimental build only', ERR, 'survey'
         if self.run_time and not self.run_time.get('ready') and not self.host: return ex.mac_only(self.run_time.get('count', 0), sys.platform == 'darwin'), ERR, 'mac'   # its build would stop at once
         x = 'Experimental (provisional profile, may not boot) · ' if self.provisional else ''   # an experimental build's profile, guessed from the survey
@@ -307,7 +309,8 @@ class Hero(QWidget):   # the picked game, large: its art's wash behind, the art 
         self.pm = g.pm if g else QPixmap(); self.cache = None
         self.status.setText(f'<span style="color:{color}">●&nbsp;&nbsp;{esc(status.upper())}</span>' if g else '')
         self.title.setText(esc(g.name) if g else 'Add your first game')
-        if g and g.error and not g.info.get('needs_keys') and not g.info.get('needs_tools'): self.meta.setText(ex.explain(g.error).body)   # what to do about it
+        if g and g.error and not g.info.get('needs_keys') and not g.info.get('needs_tools'):   # what to do about it, and what the read said, to search or quote
+            self.meta.setText(f'{g.help().body}<br><span style="color:{TEXT3}">What it said: {esc(g.error)}</span>')
         elif g:
             bits = [g.id, f'v{g.display}' if g.display else None, (g.info.get('table') or {}).get('engine'), 'played on Android' if g.tested else 'not played on Android yet', hint]
             self.meta.setText('   ·   '.join(b for b in bits if b))
@@ -425,7 +428,7 @@ class LibraryPage(QWidget):
                     msg = str(e).strip().splitlines()[-1].removeprefix('[RED] ') if str(e).strip() else 'could not be read'
                     # no keys yet, or no tools yet: before Install what's missing has brought the .NET SDK, nothing can read the packages (build_ipa_from_nsp.py's
                     # "needs dotnet"), and every game read as a folder that could not be read
-                    out[f] = {'error': msg, 'needs_keys': not keys and 'prod.keys' in msg, 'needs_tools': 'dotnet' in msg,
+                    out[f] = {'error': msg, 'detail': str(e).strip(), 'needs_keys': not keys and 'prod.keys' in msg, 'needs_tools': 'dotnet' in msg,
                               'name': names.get(str(Path(f).resolve())) or Path(f).name}
             return out
         def got(r):
@@ -470,7 +473,7 @@ class LibraryPage(QWidget):
         text, color, state = g.status(self.win.phone_games, self.win.phone_name())
         self.hero.show_game(g, text, color, ex.RUN_TIME_META if self.run_time_later(g) else ''); self.hero.opts.setEnabled(bool(g.profile))
         self.hero.play.setText({'play': '  Play', 'install': '  Install on phone', 'build': '  Build and install', 'survey': '  Experimental build', 'keys': '  Pick your prod.keys',
-                                'tools': '  Install the tools', 'none': "  Can't read it", 'mac': '  Build it for the Mac first' if sys.platform == 'darwin' else '  Builds on a Mac only'}[state])
+                                'tools': '  Install the tools', 'folder': '  Open the folder', 'none': "  Can't read it", 'mac': '  Build it for the Mac first' if sys.platform == 'darwin' else '  Builds on a Mac only'}[state])
         self.hero.play.setEnabled(state not in ('none', 'mac'))
     def run_time_later(self, g):   # a build said the game compiles shaders while it runs (run_time_shaders), which Update shaders brings in: a provisional profile's only
         return bool(g.provisional and self.win.st.value(f'runtime/{g.id}', False, type=bool))
@@ -492,6 +495,7 @@ class LibraryPage(QWidget):
         s = self.win.serial()
         if state == 'keys': self.win.settings.pick_keys(); return   # none yet, or keys older than the game
         if state == 'tools': self.win.go('setup'); return   # the checklist's Install tools
+        if state == 'folder': reveal(g.folder); return   # what's in the folder is what to change (explain.py's rules for the scan)
         if state in ('play', 'install') and not s: self.win.toast(self.win.no_phone()); return
         if state == 'play':
             if not self.first_start_ok(g, s): return
@@ -1694,7 +1698,7 @@ class Window(QMainWindow):
     def keys(self): k = self.st.value('keys', '') or ''; return k if k and Path(k).is_file() else None
     def script_json(self, *args):
         r = subprocess.run([PYTHON, str(SCRIPT), *args], capture_output=True, text=True, encoding='utf-8', errors='replace', creationflags=NOWINDOW, env=dict(os.environ, PYTHONUTF8='1'))
-        if r.returncode: raise RuntimeError((r.stderr or r.stdout).strip()[-500:])
+        if r.returncode: raise RuntimeError(ex.script_error(r.stdout, r.stderr))   # its error is on stdout after --info's notes on stderr: the error last
         return json.loads(r.stdout)
     def serial(self): return self.phone.currentData() or None
     def phone_name(self): return self.models.get(self.serial()) or self.serial()
