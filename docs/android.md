@@ -47,7 +47,8 @@ DroidPlay opens on **Get started**: four steps, each saying what it needs and wh
   [license](https://developer.android.com/studio/terms), which the app asks first; its usage metrics stay off. What the computer already has is kept.
   From a console: `build_android_from_nsp.py --setup --accept-android-licenses`.
 - **Your phone:** plug it in with USB debugging on; the step says when the phone is waiting for you to tap **Allow**.
-- **Your first game:** add the folder with its NSP or XCI files, then **Build and install**.
+- **Your first game:** add the folder with its NSP or XCI files, or the folder that holds a Switch 2 game's `.nup` or dump (no keys needed), then **Build and install**. The build works beside the game's files, so their drive needs room:
+  a lot of it for a game with many shaders ([Free space](#free-space)).
 
 Until all four are done, a launch opens on the checklist and the top bar's **Setup 2 of 4** opens it; **Settings › Show the setup checklist** does any time.
 
@@ -60,8 +61,9 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 
 ### The pages
 
-- **Library:** the games you added (**+ Build game** picks a folder with a game's NSP files), each with its box art, version and status on the phone picked at the top.
+- **Library:** the games you added (**+ Build game** picks a folder with a game's NSP or XCI files, or a Switch 2 game's `.nup` or dump; Windows' folder picker shows no files, so pick the folder that holds them), each with its box art, version and status on the phone picked at the top.
   The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
+  **Options** has the game's version, language and **Game data** (Phone storage, or the SD card when the picked phone has one: [the game data on an SD card](#the-game-data-on-an-sd-card)),
   build only, update the app on the phone, remove the game, import a save to the phone, restore its save from a backup ([Saves](#saves)). A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
   provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.
 - **Builds:** the running build's stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console shows here too.
@@ -139,10 +141,14 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   Galaxy S25 Edge, 39 on a OnePlus Pad 3. Desktop DroidPlay says so the first time **Play** is pressed after an install, and the app says so when the game has no
   pipelines saved yet. Later starts take a few seconds.
 - **In the game.** Touch controls are drawn over the picture in three layouts (2D, 3D and Tap, switched with the round button at the top); touches no control takes go
-  to the game's touch screen. Their size and how far in from the sides they sit are the settings screen's choices; a game app, which has none, takes `DM_PAD_SCALE` and
-  `DM_PAD_INSET` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
-  shakes the controller. The **≡** button at the top (left of −) goes back to the launcher while the game keeps running behind it: **Play** on the same game resumes
-  it, and picking another game asks before closing the running one.
+  to the game's touch screen. Their size, how far in from the sides they sit and how high from the bottom are the settings screen's choices; a game app, which has none, takes `DM_PAD_SCALE`,
+  `DM_PAD_INSET` and `DM_PAD_RAISE` from its `env.txt`. A physical controller works as player 1 and hides the touch controls (its A/B/X/Y by position, or by label for a controller with Nintendo's layout: [settings](settings.md#controller-face-buttons)); rumble goes to the controller or the phone, and shaking the phone
+  shakes the controller. The **≡** button at the top (left of −; with a controller connected it hides, and a tap on the screen shows it for a few seconds), or a controller's Mode or Menu key where Android passes it on, opens the pause menu: the game is held
+  under it (its clock, sound and vibration stop, and no input reaches it) until **Resume**, ≡ again, B or the phone's Back. Its rows change the touch layout and turn the frame-rate
+  counter on or off for this run (the settings screen's choice is the one that is kept), **Export or import the save…** opens the game's screen in the launcher,
+  where the Save rows are (they ask before closing the game: a save is not swapped under a running game), and **Back to the launcher** goes there while the game
+  keeps running behind it: **Play** on the same game resumes it, and picking another game asks before closing the running one. A game app has no launcher: it has
+  no save row, and its last row is **Home screen**.
 - **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; each game's screen exports, imports and puts back its save
   ([Saves](#saves)), and the desktop app backs them all up to the computer. The log is
   `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`). The start before's is kept as `log.prev.txt`, so a game the system closed
@@ -190,19 +196,21 @@ those backups along with the saves, so export the saves you care about first.
 A game can also be built as an app of its own, with its name, icon and saves, opening straight into the game. It installs on any arm64 device with Vulkan
 without the DroidPlay app or a connection to your computer: copy the file over and open it. Several install side by side, apart from the DroidPlay app.
 
-- **DroidPlay for Windows:** **Manage › Build a game app…**, then APK or XAPK. No phone needs to be connected; the file goes in the game's folder.
+- **DroidPlay for Windows:** **Manage › Build a game app…**, then APK or XAPK. No phone needs to be connected; the file goes in the game's folder. For an APK, **Keep the game data for an SD card** is `--romfs-beside`.
 - **DroidPlay on a Mac:** **Build Game App**.
 - **The command line:** `--game-apk`, or `--game-apk --xapk` ([Packing from the command line](#packing-from-the-command-line)).
 
 A game whose data is more than an APK holds (2 GB) gets it beside the APK, as `<name>.romfs`: copy that file anywhere on the device or its SD card, and pick it
-once when the game first starts. An XAPK carries the data as the app's OBB file instead, for an XAPK installer app. A game app is for your own devices only: it
+once when the game first starts. On the command line, `--romfs-beside` does this for a smaller game too, so the APK stays small and the data can live on the SD card
+(DLC that fits stays in the APK). An XAPK carries the data as the app's OBB file instead, for an XAPK installer app. A game app is for your own devices only: it
 carries the game, so never share it. How it is packed: [A game app](../dm/android/README.md#a-game-app).
 
 ## Another Vulkan driver (Turnip)
 
 On a phone with an Adreno GPU, a game can run on a Vulkan driver you put on the phone instead of the system's, as in Switch emulators: usually a build of Mesa's
-open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666/purple-turnip/releases). The app carries what loads it
-([libadrenotools](../dm/third_party/libadrenotools/README.md)), so trying one needs no new build:
+open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666/purple-turnip/releases). On a Samsung phone with an Xclipse GPU, the same goes for
+a build of Mesa's RADV for Xclipse, such as [radv-xclipse](https://github.com/JimVulkan/radv-xclipse/releases) (its Android package, `vulkan.radeon.so`). The app
+carries what loads it ([libadrenotools](../dm/third_party/libadrenotools/README.md)), so trying one needs no new build:
 
 1. Unzip the driver package (`turnip_mrpurple_T30-toasted.adpkg.zip`, say). It holds a `.so` (`vulkan.purple.so`) and a `meta.json` that names it.
 2. Copy the `.so` into `Android/data/org.nxnative.android/files/`, beside `env.txt`: `adb push vulkan.purple.so /sdcard/Android/data/org.nxnative.android/files/`.
@@ -212,11 +220,13 @@ open-source Turnip driver, such as [Mr. Purple's](https://github.com/MrPurple666
 The app copies the driver into its internal storage at start, since Android loads no code from shared storage, and copies it again when the file changes. The log
 names the driver that runs: `[vk] driver: … (DM_VK_DRIVER, through libadrenotools), not the system's: PurpleVK-public Adreno (TM) 740 …`. A driver that can't run
 (a wrong path, a build for another GPU, one that loads but can't make the Vulkan device or the window's swapchain) gets one `[RED] [vk] DM_VK_DRIVER …` line saying why, and the game runs on
-the system's driver. On a phone without an Adreno GPU (Mali, Xclipse) the line is ignored, and the log says so. When a start with the driver crashes in the driver's
+the system's driver. On a phone with neither an Adreno nor an Xclipse GPU (a Mali) the line is ignored, and the log says so. When a start with the driver crashes in the driver's
 code, loses the GPU, or ends in its first 30 seconds (a hang you closed, say), the next start runs on the system's driver once, and the start screen and the log say why;
 the start after that tries your driver again. A crash outside the driver's code is noted but doesn't count against it, and a hang after the first 30 seconds isn't
 caught. The app keeps each driver's last start in `files/vk_driver_state/<driver file>.json` and each game's in
-`files/games/<title ID>/vk_driver_result.txt`, which DroidPlay for Windows can read. Remove the line from `env.txt`
+`files/games/<title ID>/vk_driver_result.txt`, which DroidPlay for Windows can read. Every start, on any driver, also writes
+`files/games/<title ID>/vk_start.txt`: the driver and GPU it ran on, how many pipelines the driver refused (their draws are missing from the picture) with the first
+shaders' keys, and a lost GPU. Remove the line from `env.txt`
 (or start it with `#`) to go back. Each driver keeps its own pipeline cache, so the first start on a new driver compiles the game's pipelines again (it can take a
 minute to the first frame, and it stutters until they are built), and the system driver's cache is still there afterwards.
 
@@ -232,17 +242,21 @@ Python 3.12 or newer with `lz4`, `capstone`, `fonttools` and `backports.zstd` (n
 `pip install lz4 capstone fonttools backports.zstd PySide6`. The .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (set `ANDROID_HOME` or pass
 `--sdk`), `adb`, and a JDK (for `keytool` and `javac`). The desktop app's **Settings** page checks all of this and says how to get what is missing; DroidPlay for Windows installs it for you.
 On Windows, use Python 3.14 and set `PYTHONUTF8=1` for the command line (the desktop app sets it for what it runs): the scripts read and write text as UTF-8,
-which Python on Windows does by default only from 3.15, and lz4 has no Windows build for 3.15 yet.
+which Python on Windows does by default only from 3.15, and lz4 has no Windows build for 3.15 yet. On Linux, an Unreal game whose pak index is encrypted also
+needs OpenSSL's libcrypto (`libcrypto.so.3`, which distributions install with OpenSSL); the Mac and Windows have their own AES.
 
 ```
 python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k "<your prod.keys>"    build, install, copy the game
                          (a Switch 2 game: the folder with its .nup or dump, or the .nup itself; no keys needed)
     --game-apk [--xapk]  the game as an app of its own (<name>.apk, plus <name>.romfs, with its DLC after the RomFS, for a game over 2 GB, or one .xapk); no device needed
+    --romfs-beside       with --game-apk: <name>.romfs beside the APK whatever the game's size, so the APK stays small
     -p v0                pack the base game instead of the newest version in the folder (a version the profile does not register is packed from a derived profile)
     -l es-419            the default game language (a code or a name)
     --serial <device>    the adb device, when more than one is connected (over Wi-Fi: its ip:port, or the adb-…._adb-tls-connect._tcp name adb found it by)
     --no-push            build the APK only (a game without a profile is first built this way)
     --push-only          install the app and copy a game built before, without building
+    --romfs-dir sd       put the game's data (its RomFS image) on the phone's SD card, not its own storage; or give a folder on the phone
+    --no-romfs           with --romfs-dir: copy no data; you copy RomFS.img there yourself
 python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
 python scripts/build_android_from_nsp.py --import-save "<save folder or archive>" --title <title ID>    send a save to the phone (Saves)
 python scripts/build_android_from_nsp.py --restore-backup "<backup folder>" [--title <title ID>]       send a game's save, or every game's, from a backup
@@ -250,6 +264,58 @@ python scripts/build_android_from_nsp.py --check       what the build needs on t
 ```
 
 The first build of a game takes a while (the shader translation and, on a hard disk, the RomFS image); later builds reuse what did not change.
+
+### The game data on an SD card
+
+A game's data, its RomFS image (gigabytes), goes in the app's folder on the phone's own storage, `files/games/<title ID>/RomFS.img`. With `--romfs-dir sd`, it goes
+in the app's own folder on the SD card instead: `/storage/<card ID>/Android/data/org.nxnative.android/files/romfs/<title ID>/RomFS.img`. The app reads that folder
+with no storage permission. The rest of the game (code, shaders) stays on the phone's storage.
+
+- **How the game finds it:** the game's `defaults.txt` gets `DM_ROMFS=<that path>`, and a copy left in the game's folder by an earlier install is deleted. An
+  install with `--romfs-dir` again copies only a changed image, and goes on from where a copy cut short stopped, as before.
+- **Another folder:** `--romfs-dir <folder>` takes any folder on the phone. On Android 11 and later the app reads only its own folders (`Android/data/org.nxnative.android`
+  on the phone or the card), so the script warns about a folder outside them.
+- **Copying it yourself:** `--romfs-dir sd --no-romfs` copies no data, sets the path, and prints it. Copy the extraction's image there, for example with
+  `adb push "<NSP folder>/<title ID>_build/extract/<version>/RomFS.img" /storage/<card ID>/Android/data/org.nxnative.android/files/romfs/<title ID>/RomFS.img`, or with
+  a card reader.
+- **In DroidPlay for Windows:** a game's **Options** has **Game data**, Phone storage (the default) or SD card, saved per game. SD card is offered only when the picked
+  phone has exactly one card (the script's own reading of `sm list-volumes`, else `/storage`); an install with it chosen passes `--romfs-dir sd`, and **Build a game app**
+  passes `--romfs-beside` for an APK. If the card is out when you install, DroidPlay says so and doesn't start. Going back to Phone storage copies the data back, as above.
+- **When the image isn't there** (the card taken out, or the image not copied yet), the game doesn't start, and the log says so: `[RED] the game's RomFS … is missing`.
+- **Going back:** an install without `--romfs-dir` copies the image to the phone's storage again and leaves the card's copy, which you delete yourself. So does an
+  install from DroidPlay on a Mac, which doesn't pass the option yet. Removing the game leaves the card's copy too; uninstalling the app deletes
+  it, with the app's other folders.
+
+## Free space
+
+A build keeps its files in a `<title ID>_build` folder beside the game's files: the extracted game (its RomFS image is as large as the game), the game's shaders as
+one package (`shader/pkg`), and the shaders translated for Vulkan (`spv`). While the shaders translate, the translator's own copy of them sits in `<title ID>_build/tmp`
+too, and goes when the translation ends, however it ends. So everything is on the drive with the game's folder: moving that folder to a bigger drive moves all of it.
+
+The translated shaders take about 12 to 14 times the package's size, and the translation needs about 20 times it for a while:
+
+| Game | Shaders | Package | Translated | Needed while translating |
+|---|---|---|---|---|
+| Super Mario Odyssey | 27,984 | 0.16 GB | 1.9 GB | about 3 GB |
+| The Legend of Zelda: Ocarina of Time | 42,848 | 0.54 GB | 6.5 GB | about 12 GB |
+| Final Fantasy Resonance | 73,496 | 0.68 GB | 9.4 GB | about 17 GB |
+| [Pokémon Pokopia](../dm/games/0400A3A01EE4C000/README.md) | 131,426 | 4.4 GB | about 50 to 60 GB (estimated) | 90 GB or more |
+| [Hyrule Warriors: Age of Imprisonment](../dm/games/04003F40232DE000/README.md) | 101,860 | not measured | likely 40 GB or more | likely 70 GB or more, besides its 46 GB RomFS |
+
+Those are on top of the extracted game and the package. Yoshi and the Mysterious Book has over 100,000 shaders too (133,155), not measured.
+
+While they translate, the Builds page counts the shaders done out of those left to translate (`progress: <done>/<total>` in `spv_build.log`, every 10 seconds). A game with over 100,000 shaders can take hours on a home PC. A translation stopped part-way keeps nothing of that run (its outputs are in `tmp` until it ends), so letting it finish is quickest.
+
+- **The build checks first.** Before it translates, it works out what the shaders left to translate need, and stops when the drive can't hold it:
+  `[RED] spv_build: not enough free space to translate … shaders`, with what the drive has and what it needs. Nothing has been translated then, and what the build
+  did before (the extraction, the shader split) is kept.
+- **If the disk fills anyway,** the build stops with `This computer ran out of disk space`, naming the drive. Free some space and build again: the shaders translated
+  so far are kept, and only the rest is translated. A game's `<title ID>_build` folder can be deleted once you don't build that game any more.
+- **Builds before DroidPlay Core 0.8.3** kept the translator's copy in the system's temp folder instead (`%TEMP%` on Windows, on C: whatever drive the game was on), and a
+  translation that failed left it there: folders named `spv_` and some letters, tens of GB each for a big game. Nothing uses them, so delete them: type `%TEMP%` into File
+  Explorer's address bar to get there.
+- **The phone needs room too:** the translated shaders and the RomFS image. The install checks the phone before each copy, and a copy that doesn't fit stops before it
+  starts.
 
 ## Games that compile their shaders while they run
 
@@ -265,7 +331,7 @@ translate, so the first build has none (`[RED] the game is packed without shader
 A scene reached later (or a DLC) can compile more shaders: repeat until the log shows no `no translated shader`. This is done for games packed from a provisional
 profile; a registered profile's shader tables name the captures they were made from. DLC in the NSP folder is extracted and copied to the phone with the game.
 
-A game packed from a registered profile has its shaders in its tables, so a shader split that fails there stops the build rather than pack the game without them ([why](reference/packing.md#an-android-build-packs-a-registered-game-without-shaders-after-a-split-error-and-succeeds)).
+A game packed from a registered profile has its shaders in its tables, so a shader split that fails there stops the build rather than pack the game without them ([why](reference/packing.md#an-android-build-packs-a-registered-game-without-shaders-after-a-split-error-and-succeeds)). A shader translation that stops ends the build for every game, rather than pack it with part of its shaders ([why](reference/packing.md#an-android-build-packs-the-shaders-translated-so-far-after-the-translation-stops)): the shaders translated by then are kept, and the next build translates the rest. So does one that translates none of the shaders it has to (`[RED] spv_build: no shader was translated`), as happens when a file is missing from the translator's folder, `dm/gfx/tools/dmsh_xlate_bin` ([why](reference/packing.md#an-android-build-packs-a-game-without-shaders-when-the-translator-makes-nothing)).
 
 ## Seeing what a game draws
 

@@ -192,10 +192,31 @@ static void unaligned_upload_case(void) {   // a pool made through NVN, so that 
     for (int i = 0; i < N; i++) h_nvnTextureFinalize(&tex[i]);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); defer_drain(); munmap(mem, len);
 }
+// A stride shorter than a row of pixels (Skyrim 1.1.404: a 1280x720 RGBA8 LINEAR texture of 3840-byte rows when a new game starts). Metal refuses a view with such rows and its
+// validation aborts the process; the texture is uploaded from its storage with each row running on into the next one's bytes, as the GPU reads it, and 0 past the storage's end.
+// 6x6 RGBA8 of 16-byte rows: row 5 starts 80 bytes in, and its last 8 bytes lie past the 96 bytes of storage
+static void short_stride_case(void) {
+    const size_t len = 65536; uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
+    for (size_t i = 0; i < len; i++) mem[i] = (uint8_t)(i * 7 + 3);   // no two neighbouring bytes alike, so a wrong stride or a wrong tail shows
+    pool_t pool = {0}; pool_builder_t pb = {.mem = mem, .size = len, .flags = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    EXPECT("short stride: pool init", 1, h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb));
+    NVNtextureBuilder tb; NVNtexture tex; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 6); h_nvnTextureBuilderSetHeight(&tb, 6);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_LINEAR); h_nvnTextureBuilderSetStride(&tb, 16);
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 4096);
+    EXPECT("short stride: storage of 6 rows of 16 bytes", 96, h_nvnTextureBuilderGetStorageSize(&tb));
+    EXPECT("short stride: texture init", 1, h_nvnTextureInitialize(&tex, &tb));
+    mtl_sub_begin(); id<MTLTexture> t = tex_mtl((const tex_t *)&tex); mtl_wait(mtl_sub_commit(), 5000000000ull);
+    EXPECT("short stride: a texture, not a view on the pool's buffer", 1, t && !t.buffer);
+    uint8_t want[24 * 6]; const uint8_t *s = mem + 4096;
+    for (int y = 0; y < 6; y++) for (int x = 0; x < 24; x++) want[y * 24 + x] = y * 16 + x < 96 ? s[y * 16 + x] : 0;
+    EXPECT("short stride: 6 rows read from row x 16, overlapping, 0 past the storage", 0, t ? blit_bad(t, want, 24) : 6);
+    h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); defer_drain(); munmap(mem, len);
+}
 int main(void) { @autoreleasepool { setenv("DM_TBUF_ALIGN", "64", 1);   // before the first lookup (tbuf_align reads it once); the other cases' rows and offsets are 64-byte aligned
     mtl_init(); run_case(NVN_FORMAT_RGBA8); run_case(NVN_FORMAT_RGBA8_SRGB);
     render_target_stride_case();
     scaled_copy_case();
     unaligned_upload_case();
+    short_stride_case();
     printf("LINEAR_READBACK cases=%d failed=%d\n",cases,failed); return failed != 0;
 } }

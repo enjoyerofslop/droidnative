@@ -1,5 +1,5 @@
 # The desktop app of the Android port: pack your games for the nxnative app, install them on your phones and watch them run.
-#   uv run scripts/nxnative_android.py        (uv brings Python and the modules the block below names; or a Python that has them: pip install PySide6 lz4 capstone fonttools)
+#   uv run scripts/nxnative_android.py        (uv brings Python and the modules the block below names; or a Python that has them: pip install PySide6 lz4 capstone fonttools zbic)
 # It drives scripts/build_android_from_nsp.py (its --progress json events, --info, --check, --push-only, --apk-only, --migrate) and adb:
 #   Get started  a new player's four steps (keys, tools, phone, first game), each with its state: where a first launch and the empty Library land; the top bar's
 #                "Setup 2 of 4" opens it while a step is left (dm/android/desktop/first_run.py works the steps out)
@@ -13,7 +13,8 @@
 # # Below 3.15: lz4 has no wheels for it yet, and a player's computer has no compiler to build one. The packing script runs in this same Python.
 # # PySide6-Essentials has every Qt module the app uses (Core, Gui, Widgets, Svg) without PySide6's add-ons and web engine, a few hundred MB less to download.
 # requires-python = ">=3.12,<3.15"
-# dependencies = ["PySide6-Essentials", "lz4", "capstone>=5,<6", "fonttools", "backports.zstd; python_version < '3.14'"]
+# # zbic decodes the ZBIC (Nintendo zstd) segments of code modules built for system 22.0.0 on, which Switch 2 games such as Ocarina of Time ship (dm/tools/nso.py); it has Windows wheels.
+# dependencies = ["PySide6-Essentials", "lz4", "capstone>=5,<6", "fonttools", "zbic", "backports.zstd; python_version < '3.14'"]
 # ///
 import json, os, re, shutil, subprocess, sys, time, uuid
 from pathlib import Path
@@ -39,6 +40,7 @@ import build_android_from_nsp as ba   # noqa: E402  (data_dir, library: the host
 import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, which the script put on the path: a phone's ID, which outlives a Wi-Fi port)
 sys.path.insert(0, str(REPO / 'dm' / 'android' / 'desktop'))
 import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop, put on the path here: the Get started checklist's steps, Qt-free so its tests run without PySide6)
+import game_data as gd   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop: Phone storage or SD card, per game)
 import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (what adb pair, connect and mdns say over Wi-Fi, in plain words)
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]  (plain words for what went wrong, and the report for #help)
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]  (how to connect a phone, by brand; its battery and free space)
@@ -307,7 +309,7 @@ class Hero(QWidget):   # the picked game, large: its art's wash behind, the art 
         elif g:
             bits = [g.id, f'v{g.display}' if g.display else None, (g.info.get('table') or {}).get('engine'), 'played on Android' if g.tested else 'not played on Android yet']
             self.meta.setText('   ·   '.join(b for b in bits if b))
-        else: self.meta.setText('Pick the folder with your game\'s NSP files and your prod.keys: + Build game, at the top right')
+        else: self.meta.setText('Pick the folder with your game\'s NSP or XCI files and your prod.keys, or with a Switch 2 game\'s .nup or dump (no keys): + Build game, at the top right')
         self.update()
 
     def resizeEvent(self, e):
@@ -396,7 +398,7 @@ class LibraryPage(QWidget):
         self.prev = QPushButton(); self.prev.setObjectName('arrow'); self.prev.setIcon(icon('left', TEXT, 20)); self.prev.clicked.connect(lambda: self.slide(-1))
         sl.addWidget(self.next, 0, 0, Qt.AlignRight | Qt.AlignTop); sl.addWidget(self.prev, 0, 0, Qt.AlignLeft | Qt.AlignTop)
         self.next.setStyleSheet(f'margin-top: {Card.H // 2 - 22}px'); self.prev.setStyleSheet(f'margin-top: {Card.H // 2 - 22}px')
-        bl.addWidget(strip); self.empty = label('No games yet. + Build game adds the folder with a game\'s NSP files.', 'muted'); bl.addWidget(self.empty)
+        bl.addWidget(strip); self.empty = label('No games yet. + Build game adds the folder with a game\'s NSP or XCI files, or with a Switch 2 game\'s .nup or dump.', 'muted'); bl.addWidget(self.empty)
         outer.addWidget(body, 0)
         self.scroll.horizontalScrollBar().valueChanged.connect(self.arrows); self.scroll.horizontalScrollBar().rangeChanged.connect(lambda *_: self.arrows())
         self.reload()
@@ -506,6 +508,10 @@ class LibraryPage(QWidget):
         v = self.win.st.value(f'ver/{g.id}', '')
         if v: args += ['-p', v]
         s = self.win.serial()
+        data = gd.valid(self.win.st.value(f'data/{g.id}', gd.PHONE))
+        if data == gd.SD and gd.flags(data, extra) == ['--romfs-dir', 'sd'] and s:   # the card is looked at now: it can have gone since Options
+            if (why := gd.problem(data, extra, self.sd_cards(s))): self.win.toast(why); return
+        extra = [*extra, *gd.flags(data, extra)]
         if '--no-push' not in extra and '--game-apk' not in extra:   # a game app needs no phone
             if not s: self.win.toast(self.win.no_phone()); return
             if self.win.phone_legacy and not self.legacy_ok(s): return
@@ -547,6 +553,9 @@ class LibraryPage(QWidget):
         lay.addWidget(label(f'One file, with {data} as the app\'s OBB file, for an XAPK installer app on the device. It holds a full copy of the data, so it takes '
                             'that much more space on this computer.', 'muted', wrap=True))
         (xapk if self.win.st.value('game_app_kind', 'apk') == 'xapk' else apk).setChecked(True)
+        sd = QCheckBox('Keep the game data for an SD card'); sd.setChecked(gd.valid(self.win.st.value(f'data/{g.id}', gd.PHONE)) == gd.SD); lay.addWidget(sd)   # the same per-game choice as Options' Game data
+        lay.addWidget(label(gd.MEANING_APP + ' With XAPK, the data is in the file.', 'muted', wrap=True))
+        xapk.toggled.connect(lambda on: sd.setEnabled(not on)); sd.setEnabled(not xapk.isChecked())
         lay.addSpacing(6); lay.addWidget(label(f'It goes in the game\'s folder, {g.folder}, beside the other kind if that was built too.', 'muted', wrap=True))
         bb = QDialogButtonBox(QDialogButtonBox.Cancel); bb.addButton('Build', QDialogButtonBox.AcceptRole); bb.accepted.connect(d.accept); bb.rejected.connect(d.reject)
         foot = QWidget(); fl = QVBoxLayout(foot); fl.setContentsMargins(24, 8, 24, 24); fl.addWidget(bb); outer.addWidget(foot)
@@ -556,10 +565,14 @@ class LibraryPage(QWidget):
         d.resize(560, min(need, int(self.screen().availableGeometry().height() * 0.85)))
         if not d.exec(): return
         x = xapk.isChecked(); self.win.st.setValue('game_app_kind', 'xapk' if x else 'apk')
+        if not x: self.win.st.setValue(f'data/{g.id}', gd.SD if sd.isChecked() else gd.PHONE)
         made = f'{ba.safe_name(g.name) or g.id}.{"xapk" if x else "apk"}'
         def done(): self.after_task(); reveal(g.folder); self.win.toast(f'{made} is in the game\'s folder')
         self.run(g, ['--game-apk'] + (['--xapk'] if x else []), 'Build the game app of', after=done)
     def after_task(self): self.win.refresh_phone(); self.reload()
+    def sd_cards(self, s):   # the phone's SD cards (volume IDs), by the script's own reading of the same two adb calls
+        v = adb_run(s, 'shell', 'sm list-volumes public 2>/dev/null', timeout=8)[1]
+        return ba.sd_card_ids(v, '' if ba.sd_card_ids(v, '') else adb_run(s, 'shell', 'ls /storage 2>/dev/null', timeout=8)[1])
     def legacy_ok(self, s):   # the phone holds the one-game install (files/game) and its save: installing moves it to the launcher, and the app copies the save on its next start
         b = QMessageBox(QMessageBox.Warning, 'This phone has a save', f'{self.win.phone_name()} has the app from before the launcher, with its game and save. Installing updates the app '
                         '(its data stays), moves the game folder into the launcher and the app copies the save to the game the next time it opens; the old save is left as it was.\n\n'
@@ -579,8 +592,14 @@ class LibraryPage(QWidget):
         i = lang.findData(self.win.st.value(f'lang/{g.id}', 'en-US')); lang.setCurrentIndex(max(i, 0))
         f.addRow(label('Version to pack', 'meta'), ver); f.addRow(label('Game language', 'meta'), lang)
         f.addRow(label('The language is the default on the phone; the app\'s settings screen changes it too.', 'muted', wrap=True))
+        s = self.win.serial(); cards = self.sd_cards(s) if s else []; saved = gd.valid(self.win.st.value(f'data/{g.id}', gd.PHONE))
+        where = QComboBox(); where.addItem(gd.LABELS[gd.PHONE], gd.PHONE)
+        if gd.offered(cards) or saved == gd.SD: where.addItem(gd.LABELS[gd.SD] + ('' if gd.offered(cards) else ' (not in the picked phone)'), gd.SD)   # a saved choice stays shown, and changeable, when the card is out
+        where.setCurrentIndex(max(where.findData(saved), 0))
+        f.addRow(label('Game data', 'meta'), where)
+        f.addRow(label(gd.MEANING if gd.offered(cards) or saved == gd.SD else gd.no_card_note(cards), 'muted', wrap=True))
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel); bb.accepted.connect(d.accept); bb.rejected.connect(d.reject); f.addRow(bb)
-        if d.exec(): self.win.st.setValue(f'ver/{g.id}', ver.currentData()); self.win.st.setValue(f'lang/{g.id}', lang.currentData())
+        if d.exec(): self.win.st.setValue(f'ver/{g.id}', ver.currentData()); self.win.st.setValue(f'lang/{g.id}', lang.currentData()); self.win.st.setValue(f'data/{g.id}', where.currentData())
     def fill_menu(self):
         self.menu.clear(); g = self.current(); s = self.win.serial()
         if not g: self.menu.addAction('Add a game…', self.win.add_game); return
@@ -1643,7 +1662,7 @@ class Window(QMainWindow):
         else: self.search.clear()
     def filter_games(self, t): self.library.filter = t; self.library.render()
     def add_game(self):
-        d = QFileDialog.getExistingDirectory(self, 'The folder with your game\'s NSP / XCI files')
+        d = QFileDialog.getExistingDirectory(self, 'The folder with your game: its NSP / XCI files, or a Switch 2 game\'s .nup or dump')
         if not d: return
         fs = [f for f in (self.st.value('folders', []) or []) if f]
         if d not in fs: self.st.setValue('folders', fs + [d])

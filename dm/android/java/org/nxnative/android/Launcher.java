@@ -73,7 +73,7 @@ public class Launcher extends Activity {
 
     // A setting: an environment variable the host reads (dm/games/settings.tsv's columns; only those the Android host honours)
     static final class Setting {
-        final String key, kind, section, label, note; String[] values, labels; float lo, hi, step; String def;
+        final String key, kind, section, label, note; String[] values, labels; float lo, hi, step; String def; String on = "1";   // on: the value a toggle writes when on
         Setting(String key, String kind, String section, String label, String note) { this.key = key; this.kind = kind; this.section = section; this.label = label; this.note = note; }
     }
     // A game folder on the phone
@@ -127,7 +127,7 @@ public class Launcher extends Activity {
             if (!new File(d, "code/main.fixups.tsv").exists()) continue;
             Game g = new Game(); g.id = d.getName().toUpperCase(Locale.ROOT); g.dir = d; g.nacp = readAll(new File(d, "control.nacp"));
             g.name = title(g.nacp, g.id); g.version = displayVersion(g.nacp); g.hosted = new File(libs, "libdmhost_" + g.id + ".so").exists();
-            File img = new File(d, "RomFS.img"); g.bytes = img.length();
+            File img = new File(d, "RomFS.img"); g.bytes = img.exists() ? img.length() : romfsBytes(d);
             out.add(g);
         }
         return out;
@@ -228,17 +228,36 @@ public class Launcher extends Activity {
             "Game time keeps levels timed to the music in step with the picture when the phone runs the game below its frame rate; the music can stutter.");
         s.values = new String[] {"real", "game"}; s.labels = new String[] {"Real time", "Game time"}; s.def = "real"; settings.add(s);
         s = new Setting("DM_SHOW_FPS", "toggle", "Game", "Frame-rate counter", null); s.def = "0"; settings.add(s);
+        if (defaults.containsKey("DM_VK_MESH_LEAVE_OUT")) {   // a game whose profile names plants the host can leave out (its android_defaults.txt carries the key; gfx_vk_mesh.inc): Ocarina of Time's forest
+            s = new Setting("DM_VK_MESH_LEAVE_OUT", "toggle", "Game", "Fewer plants (faster)",
+                "Leaves out the ferns, flowers and the trees' canopies: about 3 ms of GPU time a frame (a OnePlus Pad 3 went from 29.1 to 30.0 fps in Kokiri Forest). The trees stand bare.");
+            s.def = "0"; settings.add(s);
+        }
+        if (kgsl()) {   // any game, on a phone whose GPU clock the host can hold up (gfx_vk_floor.inc); on, the highest clock, as Ocarina of Time's Galaxy Z Fold 8 runs used
+            s = new Setting("DM_VK_GPU_FLOOR", "toggle", "Game", "Keep the GPU clock up",
+                "Holds the GPU at its highest clock: faster in some games on some phones, no faster on others, and slower on a warm phone, which then limits its GPU harder. The phone runs warmer and uses more battery.");
+            s.on = "100"; s.def = "0"; settings.add(s);
+        }
         s = new Setting("DM_PAD_ABXY", "choice", "Controls", "Controller face buttons",
             "By label for a controller that already gives its buttons Nintendo's letters (a Retroid in its Retro layout); by position for an Xbox-style controller.");
         s.values = new String[] {"position", "label"}; s.labels = new String[] {"By position", "By label"}; s.def = "position"; settings.add(s);   // front_android.c face_button
         s = new Setting("DM_RUMBLE", "toggle", "Controls", "Game rumble", null); s.def = "1"; settings.add(s);
         s = new Setting("DM_RUMBLE_GAIN", "range", "Controls", "Rumble strength", null); s.lo = 0; s.hi = 3; s.step = 0.1f; s.def = "1.0"; settings.add(s);
-        // the touch controls' size and how far in from the sides they sit (Gamepad.java padScale, insetPx)
+        // the touch controls' size and how far in from the sides they sit (Gamepad.java padScale, insetPx, raisePx)
         s = new Setting("DM_PAD_SCALE", "range", "Controls", "Touch control size", "Stops growing where the controls would meet."); s.lo = 0.6f; s.hi = 1.4f; s.step = 0.05f; s.def = "1.0"; settings.add(s);
         s = new Setting("DM_PAD_INSET", "range", "Controls", "Touch control inset",
             "Moves the stick, the D-pad and the buttons in from the sides. 0% is the standard layout, 100% brings them together in the middle.");
         s.lo = 0; s.hi = 1; s.step = 0.05f; s.def = "0"; settings.add(s);
+        s = new Setting("DM_PAD_RAISE", "range", "Controls", "Touch control height",
+            "Moves the stick, the D-pad and the buttons up from the bottom. 0% is the standard layout; 100% stops just below the shoulder buttons.");
+        s.lo = 0; s.hi = 1; s.step = 0.05f; s.def = "0"; settings.add(s);
         for (Setting t : settings) if (defaults.containsKey(t.key)) t.def = defaults.get(t.key);
+    }
+
+    // Qualcomm's kernel GPU driver (KGSL), the one whose clock floor the host can ask for: its device node, as vk_driver.c adreno() tests it (there, or there but not
+    // readable). A Mali, Xclipse or PowerVR GPU has none, and the setting would do nothing there
+    static boolean kgsl() {
+        try { Os.stat("/dev/kgsl-3d0"); return true; } catch (android.system.ErrnoException e) { return e.errno != android.system.OsConstants.ENOENT; }
     }
 
     View build(Game g) {
@@ -323,7 +342,7 @@ public class Launcher extends Activity {
             int[][] st = {{android.R.attr.state_checked}, {}};
             sw.setThumbTintList(new android.content.res.ColorStateList(st, new int[] {INK, TEXT2}));
             sw.setTrackTintList(new android.content.res.ColorStateList(st, new int[] {CREAM, SEG})); sw.setTrackTintMode(android.graphics.PorterDuff.Mode.SRC);
-            sw.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() { public void onCheckedChanged(android.widget.CompoundButton v, boolean on) { set(s, on ? "1" : "0"); } });
+            sw.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() { public void onCheckedChanged(android.widget.CompoundButton v, boolean on) { set(s, on ? s.on : "0"); } });
             ctl = sw;
         } else {
             LinearLayout box = new LinearLayout(this); box.setGravity(Gravity.CENTER_VERTICAL);
@@ -623,6 +642,10 @@ public class Launcher extends Activity {
         if (nacp == null || nacp.length < 0x3070) return null;
         int e = 0x3060; while (e < 0x3070 && nacp[e] != 0) e++;
         return e > 0x3060 ? new String(nacp, 0x3060, e - 0x3060, StandardCharsets.UTF_8) : null;
+    }
+    // game.json's size of the RomFS, whose image is in another folder (build_android_from_nsp.py --romfs-dir): 0 when it can't be read
+    static long romfsBytes(File d) {
+        try { return new org.json.JSONObject(new String(readAll(new File(d, "game.json")), StandardCharsets.UTF_8)).optLong("romfs_bytes", 0); } catch (Exception e) { return 0; }
     }
     static byte[] readAll(File f) {
         try (FileInputStream in = new FileInputStream(f)) { byte[] b = new byte[(int) f.length()]; int n = 0; while (n < b.length) { int k = in.read(b, n, b.length - n); if (k < 0) break; n += k; } return b; }

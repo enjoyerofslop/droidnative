@@ -39,6 +39,26 @@ The work folder is `<NSP folder>/010012101468C000-work`: `host.sh` copies the wo
 
 - From a fresh save: `DM_KEYS=f1600:A,f2200:A,f2800:A,f3600:A,f4200:A`: the title (press A), the start of the menu, save slot 1 (New Game), difficulty (Normal), the save message; the briefing and the gunship's approach follow, and the game takes control on the Frigate Orpheon at about frame 12,000 (Samus's visor up, energy 99). Skipping the opening was not tried, and there is no save yet past the new file.
 
+## Android
+
+First test on Android, 2026-11-12, from `main` c6920f36 with the guest block 32 MB-aligned. The cartridge's 1.0.0 was packed with this profile: 40,483 shaders translated, none failed.
+
+- **Too big for a game app:** the APK would have to carry 2.66 GiB of shaders, and one holds 1.94 GiB. It was installed through a DroidPlay carrying only this game's host, then the phone's own DroidPlay was put back.
+- **The boot crash:** before the change, the Pixel crashed on the main thread at the first `nnMain` steps (`addr=0x6aaac0 pc=sdk+0x53c48c`): [The guest block 32 MB-aligned (Android)](../../../docs/reference/memory.md#the-guest-block-32-mb-aligned-android).
+- **Moto Razr Plus 2023** (Adreno 730, Qualcomm's driver 0x80267062, Vulkan 1.1.128): from a new game with the [Mac route](#mac-routes)'s frame-keyed presses, through the briefing and the gunship's approach, into control on the Frigate Orpheon's landing deck. Walked forward over adb to the lock-on tutorial.
+  - **Frame rate:** 60.0 fps in every 30 s window, GPU about 10 ms a frame.
+  - **Memory:** 2.0 GB PSS in the game process, 0.26 GB of it swapped out.
+  - **Red lines:** only `virtual pool remap … failed: 5`, 6 times.
+  - **Picture, against the Mac at the same points:**
+    - The force fields draw as a jumble of blue triangles and blocks instead of a translucent cyan panel: the landing deck's door, and the panel beside the lock-on tutorial.
+    - The arm cannon is dark: a black silhouette on the deck, dim inside.
+    - The deck's yellow floor strip shows, which an M4 Pro Mac doesn't draw either ([Open](#open)).
+- **Pixel 9 Pro XL** (Mali-G715, Arm's driver 0xd803000):
+  - The title is nearly black: only some of its particles are drawn.
+  - Two shaders write storage from the vertex stage, which the Mali can't, and two pipelines fail (-3). A 368 MB image is over the image limit.
+  - About 3 minutes in (frame 10,500), the driver crashed building a pipeline in the background (`libGLES_mali.so+0x1de07f4`, vertex `9f31f616f65b098b` .z, fragment `2ab0d59de3ce1cc8`).
+- **Not tried:** sound, saves, past the Frigate's first room, the other devices.
+
 ## Found on this game
 
 General host and tool changes first needed here; each applies to every game:
@@ -48,6 +68,7 @@ General host and tool changes first needed here; each applies to every game:
 - **Image stores of vertex shaders drawn with rasterizer discard** (`vs_writes`): [rendering.md](../../../docs/reference/rendering.md#rasterizer-discard-preserves-vertex-storage-writes).
 - **Sparse 3D textures take the standard 3D tile** (`sparse_tile_h3`, `sparse_tile_d3`): [rendering.md](../../../docs/reference/rendering.md#sparse-3d-textures-take-the-standard-3d-tile).
 - **Integer textures read through float slots** (`tex_float_fit`): [rendering.md](../../../docs/reference/rendering.md#integer-textures-read-through-float-slots).
+- **Android:** the guest block 32 MB-aligned: [The guest block 32 MB-aligned (Android)](../../../docs/reference/memory.md#the-guest-block-32-mb-aligned-android).
 
 ## Open
 

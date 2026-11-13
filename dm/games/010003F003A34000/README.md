@@ -112,9 +112,19 @@ First run on Android, 2026-11-10: a Galaxy Z Fold 8 (SM-F971U1: Snapdragon 8 Eli
 - **`[RED]`:** the same two kinds; no crash, no hang, and nothing wrong seen in the picture (Route 1, Viridian City, Route 2, the gatehouse, the forest's light).
 - **Open, the Z Flip 7 (Xclipse): a dark band over the lower third of the picture in Viridian Forest.** Seen on 2026-11-11 (Let's Go's host from `main` 526e4b77 with enjoyerofslop/droidplay-core#252, the `viridian_forest_flip` save): from the first frame after Continue, a flat near-black band with a faint straight top edge covers the bottom ~28% of the game's picture, where the path and grass south of the player should be. It's there before and after a wild battle, the menus and a save; the battle scene itself fills the whole frame.
   - Not compared yet with another phone or the Mac in the same place, and the q120 run's screenshots weren't kept. Whether the band is the game's own darkness, a missing draw (the forest's lower canopy or a fog or shadow layer), or Xclipse-only isn't known.
+  - 2026-11-12: the same band on the Pixel 9 Pro XL (Mali-G715) and the OnePlus Pad 3 (Adreno 830), from the same save (with 0.8.4 on both, and with `main` on the Pixel): so it isn't Xclipse-only. The field's frame holds no 16-bit packed texture.
 - **Not played:** Viridian Forest's trainers and its exit, Pewter City, aiming with motion.
 
 **Options → Open Pokémon GO Settings**, 2026-11-11 on the Z Flip 7 (enjoyerofslop/droidplay-core#220):
 - **Before the fix:** from the title's "Change your options" or the X menu's Options, the entry ended the game at once with `Break#1 reason=0` at `sdk+0xd989c`. The cause was `nn::bluetooth::RegisterGattOperationNotification`, which reached btm:u with no session ([Bluetooth LE at boot](../../../docs/reference/services.md#bluetooth-le-at-boot)).
 - **With the fix:** both routes show the Pokémon GO notice and then "Would you like to pair your game with a Pokémon GO account". Yes leads to "Searching for a Pokémon GO account…", which keeps searching, as a Switch with no phone nearby does, until B Quit returns to the options.
 - **After the menu:** Continue loaded `viridian_forest_flip`. The player walked, met a wild Pidgey and ran from it, opened the menu again, and made a save (`save commit #1`). There was no new `[RED]` line.
+
+**The menus' Pokémon and item sprites in the wrong colours (enjoyerofslop/droidplay-core#417), resolved** 2026-11-12:
+- **Before:** on every Android GPU, the party, bag and Catching Pocket sprites (68×56 RGB5A1 textures) had red and blue exchanged: a cyan Pikachu, a blue Pidgey, a brown Oddish, a blue Poké Ball and blue pocket frames. The menus' own art was right. Reported on an Adreno 825; reproduced with 0.8.4 on the OnePlus Pad 3 (Adreno 830) and the Pixel 9 Pro XL (Mali-G715).
+- **The fix:** [RGB565-family and RGBA4 textures in Vulkan's channel order](../../../docs/reference/rendering.md#rgb565-family-and-rgba4-textures-in-vulkans-channel-order-android).
+- **Checked** from `saves/viridian_forest_flip` on the Pad 3, the Pixel and the Galaxy Z Flip 7 (Xclipse 950): the party (yellow Pikachu, brown Pidgey, purple Rattata, blue Oddish), the bag's pocket frames and the Catching Pocket (red and white Poké Ball, red Razz Berry) in their own colours. A control host from `main` without the fix, on the same Pixel and save, still swapped them. The title, the X menu and the field are otherwise the same with and without it.
+
+## Found on this game
+
+- The party, bag and Catching Pocket sprites (RGB5A1) sampled with red and blue exchanged on Android: [RGB565-family and RGBA4 textures in Vulkan's channel order](../../../docs/reference/rendering.md#rgb565-family-and-rgba4-textures-in-vulkans-channel-order-android).

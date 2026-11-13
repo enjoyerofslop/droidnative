@@ -12,7 +12,7 @@
     X(vkAcquireNextImageKHR) X(vkAllocateCommandBuffers) X(vkAllocateDescriptorSets) X(vkAllocateMemory) X(vkBeginCommandBuffer) X(vkBindBufferMemory) \
     X(vkBindImageMemory) X(vkCmdBeginQuery) X(vkCmdBeginRenderPass) X(vkCmdBindDescriptorSets) X(vkCmdBindIndexBuffer) X(vkCmdBindPipeline) \
     X(vkCmdBindVertexBuffers) X(vkCmdBlitImage) X(vkCmdClearAttachments) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdCopyBuffer) X(vkCmdCopyBufferToImage) X(vkCmdFillBuffer) \
-    X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdDispatch) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdEndQuery) X(vkCmdEndRenderPass) \
+    X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndexedIndirect) X(vkCmdEndQuery) X(vkCmdEndRenderPass) \
     X(vkCmdPipelineBarrier) X(vkCmdPushConstants) X(vkCmdResetQueryPool) X(vkCmdResolveImage) X(vkCmdSetBlendConstants) X(vkCmdSetDepthBias) \
     X(vkCmdSetScissor) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilReference) X(vkCmdSetStencilWriteMask) X(vkCmdSetViewport) X(vkCmdWriteTimestamp) \
     X(vkCreateAndroidSurfaceKHR) X(vkCreateBuffer) X(vkCreateBufferView) X(vkCreateCommandPool) X(vkCreateComputePipelines) X(vkCreateDescriptorPool) \
@@ -51,6 +51,14 @@ void vk_driver_game(const char *dir, const char *id);
 void vk_driver_ok(void);
 void vk_driver_lost(VkResult r);
 const char *vk_driver_note(int *warn);
+// The start record every start writes, whatever driver runs (vk_start.c): games/<title ID>/vk_start.txt. vk_start_game: the game's folder (the front end, before vkb);
+// vk_start_device: the device is made; vk_start_pipe_failed: a pipeline the game needed was refused (its shaders' keys; b NULL for compute); vk_start_lost: the GPU
+// was lost; vk_start_tick: the front end's loop, which writes what changed
+void vk_start_game(const char *dir);
+void vk_start_device(const char *gpu, int driver_id);
+void vk_start_pipe_failed(const char *a, const char *b);
+void vk_start_lost(VkResult r);
+void vk_start_tick(void);
 int vk_fp_host(void);   // vk_driver.c: the driver's compiles run with FPCR 0 (DM_VK_FP_HOST); the pipeline cache's file is named for it
 
 typedef struct {

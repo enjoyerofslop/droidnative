@@ -11,6 +11,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/android/desktop'))
 import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop, put on the path above)
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]
+import game_data as gd   # noqa: E402  # pyright: ignore[reportMissingImports]
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]
 sys.path.insert(0, str(REPO / 'dm/android/tools'))
 import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above)
@@ -459,6 +460,35 @@ class Guide(unittest.TestCase):   # PhoneGuide: the brand picked from what adb s
         self.assertEqual(pg.battery_warning({'battery': 20}), '')
         self.assertIn('wall charger', pg.battery_warning({'battery': 12, 'charging': False}))
         self.assertIn("it's charging", pg.battery_warning({'battery': 15, 'charging': True}))
+
+
+class GameDataTests(unittest.TestCase):
+    def test_phone_storage_is_the_default_and_adds_nothing(self):
+        for saved in (None, '', 'phone', 'junk'):
+            for extra in ([], ['--push-only'], ['--game-apk'], ['--no-push']): self.assertEqual(gd.flags(saved, extra), [])
+
+    def test_sd_card_for_a_library_install_is_romfs_dir_sd(self):
+        self.assertEqual(gd.flags('sd', []), ['--romfs-dir', 'sd']); self.assertEqual(gd.flags('sd', ['--push-only']), ['--romfs-dir', 'sd'])
+
+    def test_sd_card_for_a_game_app_keeps_the_data_beside_the_apk(self):
+        self.assertEqual(gd.flags('sd', ['--game-apk']), ['--romfs-beside'])
+        self.assertEqual(gd.flags('sd', ['--game-apk', '--xapk']), [])   # the script refuses --romfs-beside with --xapk: its data is the OBB file
+
+    def test_runs_that_copy_no_game_take_no_flag(self):   # the script refuses --romfs-dir with each of these
+        for x in ('--no-push', '--update-shaders', '--apk-only', '--migrate'): self.assertEqual(gd.flags('sd', [x]), [])
+
+    def test_sd_card_is_offered_for_exactly_one_card(self):
+        self.assertFalse(gd.offered([])); self.assertTrue(gd.offered(['6FB7-F185'])); self.assertFalse(gd.offered(['6FB7-F185', '1234-ABCD']))
+        self.assertIn('no SD card', gd.no_card_note([])); self.assertIn('2 SD cards', gd.no_card_note(['a', 'b'])); self.assertEqual(gd.no_card_note(['a']), '')
+
+    def test_an_install_with_the_card_out_is_stopped_in_words(self):
+        self.assertIn('no SD card', gd.problem('sd', ['--push-only'], [])); self.assertIn('2 SD cards', gd.problem('sd', [], ['a', 'b']))
+        self.assertEqual(gd.problem('sd', [], ['a']), ''); self.assertEqual(gd.problem('phone', [], []), '')
+        self.assertEqual(gd.problem('sd', ['--game-apk'], []), ''); self.assertEqual(gd.problem('sd', ['--no-push'], []), '')   # no phone is asked
+
+    def test_the_words_say_what_it_means(self):
+        for w in ('on the SD card', 'rest of the game stays on the phone', "won't start without the card", 'copies the data back', 'delete'): self.assertIn(w, gd.MEANING)
+        self.assertIn("won't start without the card", gd.MEANING_APP)
 
 
 if __name__ == '__main__':

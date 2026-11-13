@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 from typing import Any
 import unittest
 from unittest import mock
@@ -101,6 +102,27 @@ class Json(unittest.TestCase):
             want = sorted(name(r[0]) for r in rows if r[2].lstrip('*').startswith(tier))
             self.assertEqual(sorted(name(r[0]) for r in rows if name(r[0]) in line.group(1)), want, f'README.md: the "{tier}" line under Playable now')
 
+    def test_game_status_captures_show_their_rows_tier(self):   # each capture's chip names its row's tier, so a row that moves tier moves its chip too
+        readme = (REPO / 'README.md').read_text(encoding='utf-8')
+        table = readme.split('| Game | Device | State |\n|---|---|---|\n', 1)[1].split('\n\n', 1)[0]
+        rows = [[c.strip() for c in line[1:-1].split('|')] for line in table.splitlines()]
+        name = lambda game: re.sub(r' \(Switch 2\)$', '', game.strip('*')).rsplit(' ', 1)[0]
+        chips = {'Playable – minor issues': 'playable-minor', 'Playable – major issues': 'playable-major', 'In-game, blocked': 'in-game-blocked',
+                 'In-game': 'in-game', 'Menus': 'menus', 'Boots': 'boots', "Doesn't run": 'doesnt-run'}   # "In-game, blocked" before the "In-game" it starts with
+        tier = {name(r[0]): next(t for t in chips if r[2].lstrip('*').startswith(t)) for r in rows}
+        self.assertIn('<a id="tiers"></a>', readme)
+        cells = re.findall(r'<td [^>]*><img src="docs/images/android/[^"]+"[^>]*>(.*?)</td>', readme)
+        self.assertGreater(len(cells), 10)
+        for cell in cells:
+            game = re.search(r'<b><a href="dm/games/[0-9A-F]{16}/README\.md">([^<]+)</a></b>', cell)
+            assert game, f'README.md: a capture without its game: {cell[:80]}'
+            chip = re.search(r'<br><a href="#tiers"><img src="docs/badges/([a-z-]+)\.svg" height="20" alt="([^"]+)"></a><br>', cell)
+            assert chip, f'README.md: the capture of {game.group(1)} has no tier chip under its name'
+            self.assertIn(game.group(1), tier, f'README.md: the capture of {game.group(1)} has no row in the status table')
+            want = tier[game.group(1)]
+            self.assertEqual((chip.group(1), chip.group(2)), (chips[want], want), f'README.md: the chip of {game.group(1)}')
+            self.assertIn(f'>{want}</text>'.replace("'", '&#39;'), (REPO / f'docs/badges/{chips[want]}.svg').read_text(encoding='utf-8'))
+
 
 class Windows(unittest.TestCase):
     def test_loads_where_python_has_no_fcntl(self):   # Windows: build_ipa_from_nsp.py loads tree_tar.py, which imports fcntl; dm/android/tools/compat's stand-in is found
@@ -178,6 +200,16 @@ class GameApp(Base):   # droidplay-core issue #169: a game app whose DLC doesn't
         mk8 = {'code': 90 * MB, 'shaders': 700 * MB, 'font': 22 * MB, 'the rest': 2 * MB}
         self.assertEqual(ba.game_app_plan(mk8, 1600 * MB, 11 << 30, False, L), (False, False))
         self.assertEqual(ba.game_app_plan(mk8, 1600 * MB, 11 << 30, True, L), (False, False))
+
+    def test_romfs_beside_keeps_any_romfs_out_and_dlc_that_fits_in(self):   # --romfs-beside: a small APK, the RomFS stored anywhere
+        parts = {'code': 100, 'shaders': 100, 'font': 10, 'the rest': 10}
+        self.assertEqual(ba.game_app_plan(parts, 50, 1000, False, limit=10_000), (True, True))
+        self.assertEqual(ba.game_app_plan(parts, 50, 1000, False, limit=10_000, beside=True), (False, True))
+        self.assertEqual(ba.game_app_plan(parts, 9_900, 1000, False, limit=10_000, beside=True), (False, False))   # DLC the APK can't hold follows the RomFS, as before
+
+    def test_romfs_beside_needs_a_game_apk_and_no_xapk(self):
+        for argv in (['g', '--romfs-beside'], ['g', '--game-apk', '--xapk', '--romfs-beside'], ['g', '--xapk', '--romfs-beside']):
+            with self.subTest(argv=argv), self.assertRaisesRegex(ba.BuildError, '--romfs-beside goes with --game-apk'): ba.main(argv)
 
     def test_what_cant_go_beside_is_named(self):
         with self.assertRaises(ba.BuildError) as e:
@@ -315,6 +347,29 @@ public class UnzipCheck { public static void main(String[] a) throws Exception {
         self.assertEqual(sorted(p.name for p in dst.iterdir()), sorted(p.name for p in spv.iterdir()))
         self.assertTrue(all((dst / p.name).read_bytes() == p.read_bytes() for p in spv.iterdir()))
         self.assertFalse((self.tmp / 'outside.spv').exists())
+
+
+class Cartridges(unittest.TestCase):   # a cartridge with several games (Batman: Arkham Trilogy): --title-id / TITLE_ID names the one to pack, as build_ipa_from_nsp.py's does
+    def test_title_id_is_parsed(self):
+        self.assertIsNone(ba.title_id(''))
+        self.assertEqual(ba.title_id(' 0100E870163CA000 '), 0x0100E870163CA000)
+        for bad in ('Asylum', '0100E870163CA00', '1100E870163CA000'):
+            with self.assertRaises(ba.BuildError): ba.title_id(bad)
+
+    def test_scan_passes_the_choice_to_the_folder_scan(self):
+        seen = []
+        class Reader:
+            contents = None
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def check_keys(self, fam): pass
+        def scan_nsps(folder, contents_of, want=None): seen.append(want); return want, {'base': None, 'updates': [], 'dlc': []}
+        with mock.patch.object(ba.bi, 'nup_file', return_value=None), mock.patch.object(ba.bi, 'dump_folder', return_value=False), \
+             mock.patch.object(ba.bi, 'package_reader', lambda *a, **k: Reader()), mock.patch.object(ba.bi, 'scan_nsps', scan_nsps):
+            _, app, _, kind = ba.scan(Path(tempfile.gettempdir()), Path('prod.keys'), {}, nsz=False, want=0x0100E870163CA000)
+            ba.scan(Path(tempfile.gettempdir()), Path('prod.keys'), {}, nsz=False)
+        self.assertEqual((app, kind), (0x0100E870163CA000, None))
+        self.assertEqual(seen, [0x0100E870163CA000, None])
 
 
 class Setup(unittest.TestCase):   # --setup (dm/android/tools/host_setup.py): what --check finds missing, installed where the script looks; nothing is downloaded here
@@ -647,7 +702,7 @@ class PickDevice(Base):   # the console's default phone: the only one ready, a p
         self.assertEqual(self.pick([('R5CY51ZLGKH', 'device'), ('192.168.1.30:5555', 'offline')], props), 'R5CY51ZLGKH')
 
 
-class Phone(Base):
+class PhoneSetup(Base):   # adb as a recording stand-in, and a game to copy
     def setUp(self):
         super().setUp()
         self.cmds = []; self.remote: dict[str, Any] = {}   # remote path → exists ('free': the phone's free KiB for df, 'mkdirs': what the folder script prints)
@@ -685,6 +740,8 @@ class Phone(Base):
                 for part in p.parts: self.assertFalse(set(part) & set('<>:"/\\|?*') or part.endswith(('.', ' ')), (serial, p))
             self.assertTrue(any(c[0] == 'push' for c in self.cmds), serial)
 
+
+class Phone(PhoneSetup):
     def test_copies_to_games_folder_and_opens_it(self):
         flat = self.push(); dst = f'{ba.REMOTE}/games/{GID}'
         self.assertTrue(any(c.startswith('push') and c.endswith(f'{dst}/') for c in flat))
@@ -829,6 +886,47 @@ class Phone(Base):
         self.assertFalse(any(k.endswith('.tar') for k in files))   # no archive left on the phone
         self.assertTrue(any('archives' in m for m in self.said), self.said)
 
+    def test_a_large_copys_piece_goes_whatever_stops_it(self):   # droidplay-core#307: Pokopia's full disk stopped the copy at piece.write_bytes, and the piece was left
+        big = self.tmp / 'RomFS.img'; big.write_bytes(bytes(range(256)) * 9000); piece = self.tmp / 'logs' / 'p.piece'
+        files: dict[str, bytes] = {}; pushed: list = []
+        real = Path.write_bytes
+        def full(p, data):   # the second piece finds the disk full partway through its write
+            if p == piece and pushed: real(p, data[:1000]); raise OSError(28, 'No space left on device')
+            return real(p, data)
+        with mock.patch.object(ba, 'adb', self.phone_fs(files, pushed)), mock.patch.object(ba, 'CHUNK', 1 << 20), mock.patch.object(Path, 'write_bytes', full):
+            with self.assertRaises(OSError): ba.push_resumable('S', big, '/r/RomFS.img', self.tmp / 'logs' / 'p.log')
+        self.assertFalse(piece.exists())
+        self.assertEqual(len(files['/r/RomFS.img.partial']), 1 << 20)   # the next install goes on from the piece the phone has
+        def lost(c):   # an adb error that isn't a drop: the copy stops there
+            if c[0] == 'push': raise ba.BuildError('adb push failed (exit status 1): no output')
+            return False
+        with mock.patch.object(ba, 'adb', self.phone_fs(files, pushed, lost)), mock.patch.object(ba, 'CHUNK', 1 << 20):
+            with self.assertRaises(ba.BuildError): ba.push_resumable('S', big, '/r/RomFS.img', self.tmp / 'logs' / 'p.log')
+        self.assertFalse(piece.exists())
+
+    def test_a_copy_without_room_for_its_piece_on_this_computer_stops_first(self):
+        big = self.tmp / 'RomFS.img'; big.write_bytes(bytes(range(256)) * 9000)
+        files: dict[str, bytes] = {}; pushed: list = []
+        usage = SimpleNamespace(total=1 << 40, used=1 << 40, free=(1 << 20) + ba.LOCAL_SPARE - 1)   # a byte short of a 1 MiB piece and the spare
+        with mock.patch.object(ba, 'adb', self.phone_fs(files, pushed)), mock.patch.object(ba, 'CHUNK', 1 << 20), mock.patch.object(ba.shutil, 'disk_usage', return_value=usage):
+            with self.assertRaisesRegex(ba.BuildError, r"this computer has 68 MB free on .+: RomFS\.img's piece needs 1 MB there for the copy to the phone \(.+p\.piece\), plus 67 MB "
+                                        r'left free\. Free up 0 MB on that drive, then install again'):
+                ba.push_resumable('S', big, '/r/RomFS.img', self.tmp / 'logs' / 'p.log')
+        self.assertEqual(pushed, []); self.assertFalse((self.tmp / 'logs' / 'p.piece').exists())
+
+    def test_a_folders_archive_goes_whatever_stops_its_packing(self):   # the archive cut short by a full disk while it was packed, then no room for the next
+        spv = self.tmp / 'spv'; spv.mkdir()
+        for i in range(ba.TAR_FILES + 1): (spv / f'{i:04}.spv').write_bytes(b'x' * 100)
+        tar = self.tmp / 'logs' / 'p.tar'
+        def full(self, tarinfo, fileobj=None): raise OSError(28, 'No space left on device')
+        with mock.patch.object(ba.tarfile.TarFile, 'addfile', full), self.assertRaises(OSError):
+            ba.push_dir('S', spv, f'{ba.REMOTE}/games/{GID}', 'spv', self.tmp / 'logs' / 'p.log', sync=True)
+        self.assertFalse(tar.exists())
+        usage = SimpleNamespace(total=1 << 40, used=1 << 40, free=ba.LOCAL_SPARE)
+        with mock.patch.object(ba.shutil, 'disk_usage', return_value=usage), self.assertRaisesRegex(ba.BuildError, r"spv's archive needs 0 MB there for the copy to the phone"):
+            ba.push_dir('S', spv, f'{ba.REMOTE}/games/{GID}', 'spv', self.tmp / 'logs' / 'p.log', sync=True)
+        self.assertFalse(tar.exists()); self.assertFalse(any(c[0] == 'push' and c[-1].endswith('.tar') for c in self.cmds), self.cmds)
+
     def test_a_large_dlc_image_goes_on_from_what_the_phone_holds(self):   # issue #169's Booster Course Pass is gigabytes
         aoc = self.tmp / 'aoc'; aoc.mkdir(); (aoc / '1.img').write_bytes(bytes(range(256)) * 9000); (aoc / '2.img').write_bytes(b'small')
         files: dict[str, bytes] = {}; pushed: list = []; n = [0]
@@ -890,6 +988,80 @@ class Phone(Base):
         self.assertEqual(self.cmds[-1][:2], ['install', '-r'])
         self.assertFalse(any('uninstall' in ' '.join(c) for c in self.cmds))
 
+
+
+class RomfsDir(PhoneSetup):   # --romfs-dir / --no-romfs: the RomFS image in another folder on the phone (an SD card's), which defaults.txt's DM_ROMFS names
+    AT = f'/storage/6FB7-F185/{ba.ROMFS_SD}/{GID}/RomFS.img'
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.game / 'RomFS'); (self.game / 'RomFS.img').write_bytes(b'DMROMFS1' + bytes(64))
+        self.sent = []
+        cm = mock.patch.object(ba, 'push_resumable', lambda serial, local, remote, log: self.sent.append(remote)); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def push(self, at=None, copy=True):
+        ba.push_game('S', GID, self.game, self.patched, None, self.font, self.tmp / 'aoc', 'DM_LANG=en-US\n', self.tmp, self.tmp / 'logs', {'title_id': GID}, romfs_at=at, romfs_push=copy)
+        return [' '.join(c) for c in self.cmds]
+
+    def phone(self, answers):   # adb shell command → what the phone prints
+        def adb(serial, *a, log=None, check=True): return answers.get(a[1], '') if a[0] == 'shell' else ''
+        cm = mock.patch.object(ba, 'adb', adb); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def test_the_image_goes_to_the_folder_and_the_games_copy_goes(self):
+        flat = self.push(self.AT); folder, dst = self.AT.rsplit('/', 1)[0], f'{ba.REMOTE}/games/{GID}'
+        self.assertEqual(self.sent, [self.AT])
+        self.assertTrue(any(f"mkdir -p '{folder}'" in c for c in flat), flat)
+        self.assertTrue(any(f"chmod -R a+rwX '{folder}'" in c for c in flat), flat)   # a folder adb made on the phone's own storage is opened to the app (Android 15)
+        self.assertTrue(any(c.startswith('shell rm -rf') and f"'{dst}/RomFS.img'" in c and f"'{dst}/RomFS.img.partial'" in c for c in flat), flat)
+
+    def test_without_a_folder_the_image_goes_to_the_game(self):
+        flat = self.push(); dst = f'{ba.REMOTE}/games/{GID}'
+        self.assertEqual(self.sent, [f'{dst}/RomFS.img'])
+        self.assertFalse(any(f"'{dst}/RomFS.img.partial'" in c for c in flat), flat)   # the game's copy stays, and a part of one goes on
+
+    def test_no_romfs_copies_nothing_and_says_where(self):
+        flat = self.push(self.AT, copy=False)
+        self.assertEqual(self.sent, []); self.assertFalse(any('mkdir -p' in c and '6FB7-F185' in c for c in flat), flat)
+        self.assertTrue(any(self.AT in m and 'yourself' in m for m in self.said), self.said)
+
+    def test_a_romfs_folder_extraction_is_refused(self):   # an older extraction's RomFS folder: the host reads one image from elsewhere
+        (self.game / 'RomFS.img').unlink(); (self.game / 'RomFS').mkdir()
+        with self.assertRaisesRegex(ba.BuildError, 'one image'): self.push(self.AT)
+
+    def test_defaults_name_the_image(self):
+        g = mock.Mock(dir=self.tmp)
+        self.assertEqual(ba.defaults_text(g, 'en-US'), 'DM_LANG=en-US\n')
+        self.assertEqual(ba.defaults_text(g, 'en-US', self.AT), f'DM_LANG=en-US\nDM_ROMFS={self.AT}\n')
+
+    def test_sd_is_the_mounted_cards_app_folder(self):
+        self.phone({'sm list-volumes public 2>/dev/null': 'public:179,1 mounted 6FB7-F185\n'})
+        self.assertEqual(ba.romfs_path('S', 'sd', GID), self.AT); self.assertFalse(any('[RED]' in m for m in self.said), self.said)
+
+    def test_sd_from_storage_when_sm_says_nothing(self):   # sm refused to the shell, or another output: the card's folder in /storage
+        self.phone({'sm list-volumes public 2>/dev/null': '', 'ls /storage 2>/dev/null': 'emulated\nself\n6FB7-F185\n'})
+        self.assertEqual(ba.romfs_path('S', 'SD', GID), self.AT)
+
+    def test_the_card_ids_alone_for_the_desktop_app(self):   # the same reading, from the two outputs the app gets with its own adb calls
+        self.assertEqual(ba.sd_card_ids('public:179,1 mounted 6FB7-F185\n', ''), ['6FB7-F185'])
+        self.assertEqual(ba.sd_card_ids('', 'emulated\nself\n6FB7-F185\n'), ['6FB7-F185'])
+        self.assertEqual(ba.sd_card_ids('public:179,1 unmounted null\n', 'emulated\nself\n'), [])
+
+    def test_sd_with_no_card_or_two_says_so(self):
+        self.phone({'sm list-volumes public 2>/dev/null': 'public:179,1 unmounted null\n', 'ls /storage 2>/dev/null': 'emulated\nself\npersist\n'})
+        with self.assertRaisesRegex(ba.BuildError, 'no SD card'): ba.romfs_path('S', 'sd', GID)
+        self.phone({'sm list-volumes public 2>/dev/null': 'public:179,1 mounted 6FB7-F185\npublic:8,1 mounted 1234-ABCD\n'})
+        with self.assertRaisesRegex(ba.BuildError, '2 cards .*6FB7-F185, 1234-ABCD'): ba.romfs_path('S', 'sd', GID)
+
+    def test_a_folder_given_is_used_and_one_outside_the_apps_is_warned(self):
+        self.assertEqual(ba.romfs_path('S', f'{ba.REMOTE}/romfs/', GID), f'{ba.REMOTE}/romfs/{GID}/RomFS.img'); self.assertFalse(self.said)
+        self.assertEqual(ba.romfs_path('S', '/sdcard/Games', GID), f'/sdcard/Games/{GID}/RomFS.img')
+        self.assertTrue(any(m.startswith('[RED]') and 'outside the app' in m for m in self.said), self.said)
+        with self.assertRaisesRegex(ba.BuildError, 'from /'): ba.romfs_path('S', 'Games', GID)
+
+    def test_options_that_dont_go_together(self):
+        for argv, msg in ((['g', '--no-romfs'], 'goes with --romfs-dir'), (['g', '--game-apk', '--romfs-dir', 'sd'], 'for a game copied to a phone'),
+                          (['g', '--no-push', '--romfs-dir', 'sd'], 'for a game copied to a phone'), (['--apk-only', '--romfs-dir', 'sd'], 'for a game copied to a phone')):
+            with self.subTest(argv=argv), self.assertRaisesRegex(ba.BuildError, msg): ba.main(argv)
 
 
 class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop app's updates: the newest release read, its Setup downloaded and checked; a local server is GitHub

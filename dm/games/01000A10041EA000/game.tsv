@@ -1,0 +1,45 @@
+# Game profile of The Elder Scrolls V: Skyrim (Switch, update 1.1.404 = v393216, the Anniversary Edition build)
+# Format: see dm/games/README.md
+# Bethesda's Creation Engine on SDK 14.3.0 (NVN, Havok); started from the provisional profile scripts/build_ipa_from_nsp.py wrote from its survey (dm/games/profile_guess.py)
+
+# ---- Identity ----
+title_id	01000A10041EA000
+program_id	01000A10041EA000
+
+# ---- App ----
+name	The Elder Scrolls V: Skyrim
+ipa	TheElderScrollsVSkyrim.ipa
+app_category	public.app-category.games
+# the game calls nvnDeviceSetDepthMode with near = 0 in its first seconds: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+# after its first frame the render thread waits for a timestamp report's counter field to read 0, as on the GPU; the host writes the time there unless render_cond is on,
+# and the game presented one black frame and no more (seedds/nxnative PR #444 found the same wait on 1.0.12, main+0xb5e808)
+render_cond	on
+
+# ---- Versions ----
+build	v393216	1.1.404.0	main=0c0cac3fcf0f0beb9dcf79cb68e30739	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	Data/Skyrim - Voices_en0.bsa
+zip_store	.bik:.bsa:.esm:.metallib
+
+# ---- Memory ----
+# The NPDM declares 8 MB of system resource and main never sets a heap: the game's heaps are address regions it maps itself, four from main+0xacf43c (2 GB, 2 GB, 0.59 GB, 1 GB)
+# and more after them, reaching alias +6.92 GB in its first 15 s, past the 4.375 GB an iPhone's 5 GB block holds. The Mac and Android give every game a Switch's 64 GB alias region
+# whatever this says (hle_svc.c mem_init_once), so the profile names that much, as Unreal's bring-up profiles do; an iPhone would need the heap ceilings cut, as seedds/nxnative
+# PR #444 does for 1.0.12 (Default and GPU heaps 2 → 1.5 GB, the small-block pool 1 GB → 256 MB)
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 8 MB of system resource
+sys_resource	0x800000
+
+# ---- Shader split ----
+# 23,080 shaders in Data/Skyrim - Shaders.bsa (shadersfx/shaders011.fxp) and 53 in main, NVN records each (shader_split.py fxp_shaders, bsa.py)
+shader_groups	/Data/=data /BatchFiles/=batchfiles
+shader_note	The Elder Scrolls V: Skyrim shaders (BSA and main FXP records)

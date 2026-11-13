@@ -1,6 +1,6 @@
 # Paper Mario: The Thousand-Year Door (`0100ECD018EBE000`)
 
-Update 1.0.1 (v65536), SDK 15.3.2. Intelligent Systems' engine on NintendoWare (G3d, Vfx, Atk) on NVN. Modules `main`, `subsdk0` (the SDK's movie library) and `sdk`; `sdk` is the build Celeste ships ([01002B30028F6000](../01002B30028F6000/README.md)). Playable on the iPhone since the spin waits ([CPU](#cpu)); 60 fps (30 on the Switch) through the host's frame step. On the Mac: the title, a new file, the storybook prologue, Peach in Rogueport, Mario's house, the letter and the boat into Rogueport, with Mario under control on the docks, with music and sound, at 60 fps and the game's normal speed; no crash in eight minutes.
+Update 1.0.1 (v65536), SDK 15.3.2. Intelligent Systems' engine on NintendoWare (G3d, Vfx, Atk) on NVN. Modules `main`, `subsdk0` (the SDK's movie library) and `sdk`; `sdk` is the build Celeste ships ([01002B30028F6000](../01002B30028F6000/README.md)). Playable on the iPhone since the spin waits ([CPU](#cpu)); 60 fps (30 on the Switch) through the host's frame step. On the Mac: the title, a new file, the storybook prologue, Peach in Rogueport, Mario's house, the letter and the boat into Rogueport, with Mario under control on the docks, with music and sound, at 60 fps and the game's normal speed; no crash in eight minutes. On Android: the 1.0.0 cartridge base, Playable – minor issues through the first battle on a Galaxy S25 Edge ([Android](#android)).
 
 ## What it needs
 
@@ -79,6 +79,43 @@ Update 1.0.1 (v65536), SDK 15.3.2. Intelligent Systems' engine on NintendoWare (
 ## Mac routes
 
 - A fresh save reaches Rogueport's docks with `DM_KEYS="35:A,45:A,55:A,65:A*195/2"` (the title, File 1, Start, then A every 2 s through the dialogue; Mario is under control at about 415 s, at 60 fps as at 30).
+
+## Android
+
+### The 1.0.0 base from a derived profile
+
+- The profile registers 1.0.1 (v65536). The cartridge's 1.0.0 (v0) is packed from a profile derived from it (`build_android_from_nsp.py`: "derived game profile for v0 (1.0.0)"). Its `main` is another build (`78f37bb5…`); `subsdk0` and `sdk` are 1.0.1's (`368f01d5…`, `86188952…`), so the SDK-wide cuts apply.
+- `patches.py`'s cuts on 1.0.1's `main` don't: the frame-step floor and the `FRAME_STEP` stub ([Frame rate](#frame-rate)). The derived `game.tsv` has `fps_target 0`, so the game runs at its own 30 fps, the target its Android runs are measured against. Update 1.0.1 would bring the registered profile and its 60 fps.
+- The derived profile's split found the same 11,858 shaders as 1.0.1's (3,154 vertex, 7,826 pixel, 874 compute, 4 domain). 11,854 translated to SPIR-V, none failed (1.1 GB); the 4 domain shaders have no Vulkan stage.
+- A Mac build of the same 1.0.0 (`--platform mac`) reaches Rogueport's docks at about frame 12,600 with [Mac routes](#mac-routes)' presses, at 30 fps. Its screenshots at fixed frames are what the Android prologue was compared with.
+
+### Through the first battle on the Galaxy S25 Edge (2026-11-11)
+
+- **Played** by hand over adb (`DM_CTL`) on the S25 Edge (Adreno 830, Samsung's driver, 12 GB):
+  - a new file through the storybook prologue (a movie: VP9 with its Vorbis sound on a second audio output), Peach in Rogueport, Mario's house and the boat into Rogueport's docks;
+  - a Save Block save on the docks;
+  - Lord Crump's battle with Goombella's tutorial, won with Jump;
+  - the X-Naut crowd, Goombella's thanks and Tattle tutorial in the plaza, and a second Save Block save there.
+  - After a cold start, the file select showed that save (Level 1, 0:36, Mario and Goombella), and Continue loaded it in the plaza.
+- **Measured** (main a0950809 with [#337](https://github.com/enjoyerofslop/droidplay-core/pull/337), the game's frame table):
+  - frame rate: a median 29.9 fps over 75 windows of 30 s, 27.8–30.0, frame p50 33.4 ms. The 27.8 window is the X-Naut crowd's.
+  - GPU: 9–24 ms a frame.
+  - sound throughout: the game's output at a median −33.5 dBFS, the prologue movie's −30, 7 underruns in 37 minutes.
+  - memory: 2.7 GB resident at most, 35 MB swapped, the kernel's GPU pages at most 1.6 GB, 44 descriptor pools (550 MB), and the phone's available memory never under 2.8 GB. No kill.
+- **Issues:** nothing looked wrong, and the prologue's scenes match the Mac's at the same frames.
+  - The first start left out 1,441 draws while their pipelines compiled (`draws not made: pipeline`).
+  - Eight shaders read uniform slot 5 with nothing bound (they read 0), with no visible effect.
+  - The battle and the plaza weren't compared with the Mac (the Mac run stopped at the docks).
+- **Resolved by #337: the low-memory killer at the prologue's sea scene.** On main 9811908b the game was ended there in four runs of four, as the boat left: `lmkd: Reclaim 'org.nxnative.android:game' … device is low on swap … thrashing`.
+  - The game's resident memory stayed near 2.4 GB while the kernel's GPU pages went from 2.6 to 7.6 GB in about 15 s.
+  - The reflection shaders' 8,192-element handle arrays (c14) had each set reserve 8,192 descriptors, so the descriptor pools reached 539 (6.7 GB). #337 shortens those arrays to the 1,024 elements the replay writes; its reference entry is listed under [Found on this game](#found-on-this-game).
+- **Driving it over adb:**
+  - A jumps.
+  - At boot the title waits about 10 s, then plays the opening story as its attract mode. A press then only skips the story's lines, and the story runs into Peach's scene. So press A once a second from boot: that reaches the file select, then File 1 and Start.
+  - Save Blocks: one on the docks by the barrels, one in the plaza by the shop. Standing under a block takes a few tries: in a screenshot mid-jump, Mario hidden behind the block means stepping toward the camera, and Mario drawn over it means stepping back.
+  - After the battle the X-Nauts' brawl blocks the way back to the docks; the stairs lead up into town.
+  - Lord Crump fell to five Jumps without action commands.
+- **Save:** File 1 after the battle, in the S25's `files/q221/save` (`DM_SAVE`).
 
 ## Found on this game
 
