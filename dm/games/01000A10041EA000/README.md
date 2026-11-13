@@ -15,6 +15,7 @@ Update 1.1.404 (v393216, the Anniversary Edition build) over the base game, SDK 
 | `depth_mode zero` | [`game.tsv`](game.tsv) | the game calls `nvnDeviceSetDepthMode` with near = 0 in its first seconds |
 | `shader_groups /Data/=data /BatchFiles/=batchfiles` | [`game.tsv`](game.tsv) | the shaders are in `Data/Skyrim - Shaders.bsa` and in `main`; see [Shaders](#shaders) |
 | `zip_store .bik:.bsa:.esm:.metallib` | [`game.tsv`](game.tsv) | the archives are stored uncompressed already |
+| the scene initializer's stencil clear (`main+0xbf7d5c`) | [`patches.py`](patches.py) | see [Helgen Keep's lighting](#helgen-keeps-lighting) |
 
 `pso_manifest.tsv` is still the empty provisional list.
 
@@ -34,6 +35,20 @@ The NPDM declares 8 MB of system resource and `main` never sets a heap: the game
 - **Abort at "Start a new game?" → Yes (resolved):** the game makes a 1280x720 RGBA8 `LINEAR` texture with 3840-byte rows, which Metal's validation refused as a view and the host aborted on the replay thread ([A linear texture whose stride is shorter than its rows](../../../docs/reference/nvn-objects.md#a-linear-texture-whose-stride-is-shorter-than-its-rows)).
 - **Loading:** the title shows about 20 s after launch on the Mac; a new game reaches its opening cart ride about 30 s after Yes.
 
+## Helgen Keep's lighting
+
+- **The report (droidplay-core#444):** inside Helgen Keep the lights flicker, the room switching between bright and dark, on an AYN Thor Pro (Adreno 740) with Qualcomm's driver and with PurpleVK; occlusion queries off (`DM_VK_OCCLUSION=0`) change nothing. seedds/nxnative PR #444 found the cause on 1.0.12: [Raw depth/stencil storage written as a buffer](../../../docs/reference/rendering.md#raw-depthstencil-storage-written-as-a-buffer).
+- **The same code in 1.1.404:** the scene initializer (`main+0xbf7690`) switches on its mode at `+0xbf7cd8` with 1.0.12's table (1.0.12: `+0xb551c0`): modes 0 and 6 clear depth and stencil, 2 the stencil, 1 the depth, and 7 the depth and then dispatches `a76fe13a8630d619` (main's FXP record at `main@0x20d0a60`) with storage buffer 0 laid over the 1600x900 D24S8 target (6,553,600 bytes). The interior's shadow mask (`f83614ab6954bec4`) takes its shadow class from the stencil's upper three bits, which the dispatch writes as 0 into the buffer only; the image's stencil keeps what the interface left there (255 on 1.0.12, class 7: secondary-shadow data the scene does not have).
+- **Cut (current):** `main+0xbf7d5c` `mov w3, wzr` → `neg w3, w21`: w21 is 1 in mode 7 and 0 in mode 1, so mode 7's depth clear also clears the stencil to 0 (mask 0xffffffff) and mode 1 stays depth-only. On the Mac the pass dump shows it: mode 7's clear was `stencil_mask=0` with the stencil plane left unwritten before the dispatch, and is `stencil_mask=0xffffffff` with the plane cleared and stored with the cut. Mode 7 runs every frame outdoors too (the execution yard, the tower); the shadow mask is not drawn there, and screenshots of the same outdoor stretch show the same lighting and shadows with and without the cut.
+- **Not confirmed:** the keep's flicker itself. Reaching it means following Hadvar through Helgen under the dragon, which was not driven here, so the flicker was not seen before or after the cut on any device. PR #444's user confirmed the same cut on 1.0.12 on an iPhone.
+
+## Unlocks before SignalLightEvent (open)
+
+- **What:** 552 inlined unlocks in 1.1.404's main are a plain `str wzr`, then `bl nn::os::SignalLightEvent`, then `dmb ish` (1.0.12 has 517; PR #444 cut them to release stores there).
+- **No lost wake here:** 1.0.12 loses wakes after them because SDK 3.4's `SignalLightEvent` reads the event with `ldarb` and skips its write when the event is signalled already. SDK 14.3's reads it after a `dmb ish` (`sdk+0x123868`), so this build cannot lose a wake that way.
+- **Ordering gap:** nothing orders the critical section's stores before the plain unlock. A native litmus test sees another core read the old data with the plain store (on an Odin 2's Snapdragon 8 Gen 2 cores and on an M5 Max), never with `stlr`; no failure of the game is tied to it. Release-store cuts for all 552 (Armv8.0 forms) are held on branch `android/skyrim-1-1-404-cuts` (c234dce8), not in this build.
+- **The report's BSTaskManager crashes:** both are unchecked pops of the audio pools' `std::deque<void *>` (`main+0xabd428`, whose garbage pointer `nn::audio::ParseAdpcmHeader` faults on at `pc=sdk+0x1ca880 lr=main+0xac0d24`, and `main+0xabd548`, `pc=main+0xabd5c8 lr=main+0xac11bc`). The second reproduced on the Mac without any cuts (M5 Max, thread `LibAudioUpdate`, 620 s after launch, just after walking into the tower), so it is neither Android's nor PurpleVK's. The cause is not known.
+
 ## Mac
 
 On an M5 Max, a new game from the title through the cart ride, Helgen, character creation (named with `DM_KBD=Prisoner`) and the dragon attack to "Use L to move", where a held stick walks the player: 30 fps, 33.3 ms median frame time in every 300-frame window but one (41 ms), a resident footprint of 4.1 GB and 2.7 GB of GPU memory. One `[RED]` line in the whole run, `stage 1 cb11 has no uniform buffer bound` ([Open](#open)).
@@ -52,11 +67,13 @@ On an M5 Max, a new game from the title through the cart ride, Helgen, character
 
 - [FXP shader records in Bethesda BSA archives and in main](../../../docs/reference/shaders.md#fxp-shader-records-in-bethesda-bsa-archives-and-in-main).
 - [A linear texture whose stride is shorter than its rows](../../../docs/reference/nvn-objects.md#a-linear-texture-whose-stride-is-shorter-than-its-rows).
+- [Raw depth/stencil storage written as a buffer](../../../docs/reference/rendering.md#raw-depthstencil-storage-written-as-a-buffer).
 
 ## Open
 
 - **`[RED] stage 1 cb11 has no uniform buffer bound`** on the Mac, once, when the opening loads, and Android's `shader e8910903259b956c reads uniform slot 11` (PR #444's 1.0.12 note has it too). Nothing missing was seen.
 - **The main menu's "Start a new game?" box** draws as two vertical lines the height of the screen beside its text, on the Mac and on the S25 alike; not compared with the Switch.
 - **The 1280x720 texture of 3840-byte rows** (made at "Start a new game?" → Yes) is uploaded as the GPU would read it; what it holds and where it shows is not known.
-- **Not checked from PR #444's 1.0.12 findings:** the lost wake of a plain-store mutex unlock before `SignalLightEvent` (stalls in loading on 1.0.12, 517 inlined unlocks cut there by build), and Helgen Keep's interior lighting (stencil written as a raw buffer by a compute pass). Neither was met in the opening; this build has no cuts for either.
+- **Helgen Keep's flicker after the cut:** not seen in the keep on any device yet ([Helgen Keep's lighting](#helgen-keeps-lighting)).
+- **The unlocks before `SignalLightEvent` and the audio pool crashes** (droidplay-core#444, and once on the Mac): see [Unlocks before SignalLightEvent](#unlocks-before-signallightevent-open).
 - **The iPhone:** the regions need more than its alias region holds (see [Memory](#memory)).
