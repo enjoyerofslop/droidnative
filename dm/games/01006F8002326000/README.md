@@ -92,7 +92,7 @@ Played by hand on an Ayn Odin 2 (Snapdragon 8 Gen 2, Adreno 740 with Qualcomm's 
   - **When:** 596, 608 and 618 s into the run, as the island's first frames were drawn.
   - **What each was:** a list of 65 draws, and it made one long frame (1031, 450 and 451 ms).
   - **After:** the game went on normally, with none in the next 54 minutes.
-  - **Not compared yet** with the Mac or another phone at the same moment.
+  - **Since then:** the same GPU hang, found and reset by the kernel's GPU driver, not at a load ([the GPU hang on the Odin 2](#android-the-gpu-hang-on-the-odin-2)).
 
 ## Android: through the first night on the Odin 2
 
@@ -108,8 +108,37 @@ Played by hand on the same Ayn Odin 2 (Adreno 740, Qualcomm's driver V@0676.32, 
 - **Save and Continue:** the game's first save came as that morning's messages closed, then the `−` menu's Save and end ([Saves](#saves)). After a cold start the title showed the island's plaza, and A loaded the player at the tent, at the real time.
 - **Frame rate** (target 30, as on the Switch), from the log's frame counter: 30.00 fps over the 2 h 12 min session (237,163 frames in 7,907 s); between the long-frame stamps 30 s or more apart, none under 29.89. Frame p50 33.3 ms in all 792 of the log's 300-frame windows, p95 at most 40.8 ms. 79 long frames, none over 368 ms; GPU p50 10.1 ms on the island.
 - **Sound:** no underrun in the session's 1,415 callback reports. `DM_AUDIO_DUMP` of the cold start (97 s): silent through the boot, then the title music and the island's sound at −16 to −31 dBFS RMS.
-- **Red lines:** one GPU submission cut short by the driver's hang recovery, 613 s in as the island's first frames drew (336 ms on the GPU, a 368 ms frame), the first run's fault again (three there). No crash or hang.
+- **Red lines:** one GPU submission cut short by the driver's hang recovery, 613 s in as the island's first frames drew (336 ms on the GPU, a 368 ms frame), the first run's fault again (three there): a GPU hang the kernel resets ([below](#android-the-gpu-hang-on-the-odin-2)). The game went on; no crash or hang of its own.
 - **For a person playing on:** the tent takes the night only with the camping cot placed (pockets, Place Item), lain on, and Rest chosen. After the dream the player stays lying on the cot until a button gets them up. A tree's shaken item is picked up with the player standing on it (the item's name shows) and Y pressed.
+
+## Android: the GPU hang on the Odin 2
+
+Checked on 2026-11-13 (job q319) with the host from `main` at `50a256fe` (0.8.7-1) and its own build of the game files (shader chain 6; `main` rewritten to the same bytes as before). Every run started a new game in an empty private save folder, with its own pipeline cache file (`DM_PIPELINE_CACHE`: empty for the first run on each phone, kept for the later ones), and the [Mac route](#mac-routes)'s `DM_KEYS` with A pressed every 2 s until 698 s. Each run reached the dock, and the island's first frames, at frames 12,339–12,402 (about 414 s), as the Mac did at frame 12,354.
+
+- **What the red line measures** (`gpu_slow` in `dm/android/gfx_vk.c`). The completion thread waits for each submission's fence once the one before it has completed. A wait of 200 ms or more is logged with the submission's last passes, draws and dispatches. "Its end timestamp never written" means the fence signalled but the timestamp the submission writes at its end can't be read (`VK_NOT_READY`): the GPU stopped working on it before its end.
+- **It is a GPU hang, and the kernel's GPU driver finds it.** The Odin's `dmesg` and `/sys/class/kgsl/kgsl-3d0/snapshot/` can be read over adb; the OnePlus Pad 3's can't. At run o2's red line the kernel logged:
+  - `adreno-gen7-gmu 3d68000.qcom,gmu: MISC: GPU hang detected`;
+  - `kgsl kgsl-3d0: ve.android:game[27602]: ctx 17 ctx_type VK ts 251795 status 00E794E7 dispatch_queue=-1 rb 1af0/1d74 ib1 000000404935C8B4/0000 ib2 0000004049356070/0000`;
+  - `GPU snapshot created at pa f1f00000++0x3e69ec`, then `Suspended GMU`: the GPU was reset.
+
+  The snapshot's fault count went from 6 to 7. With the driver's fault-tolerance policy (`ft_policy` 0xC2: replay, skip the command, throttle), the rest of the hung submission is dropped and the game's context goes on, so the device isn't lost. The kernel keeps its first snapshot until something reads it. The one still there on 2026-11-13 was from 2026-11-10 23:13:57, about ten minutes into [the first run by hand](#android). It names the game's process, the same context (17) and the same size of command buffer (780 words), so that run's red lines were the same fault.
+- **Runs** (the first island frame is the first one with over 6,000 draws):
+
+  | Run | Device | Pipeline cache | First island frames | GPU hang |
+  |---|---|---|---|---|
+  | o1 | Ayn Odin 2 | empty | frame 12,339, 1,226 ms (60 pipelines made) | none in 730 s |
+  | o2 | Ayn Odin 2 | o1's | frame 12,363, 88 ms | one, 572 s in: 995 ms on the GPU and a 1,029 ms frame (frame 17,091), 159 s after the first island frames |
+  | o3 | Ayn Odin 2 | o1's and o2's | frame 12,361, 85 ms | none in 873 s |
+  | o4 | Ayn Odin 2 | o1's to o3's | frame 12,368, 94 ms | none in 781 s |
+  | p1 | OnePlus Pad 3 | empty | frame 12,347, 807 ms | none in 720 s |
+  | p2 | OnePlus Pad 3 | p1's | frame 12,402, 69 ms | none in 880 s |
+
+  Every run held 30 fps (median of 30 s windows 30.00; lowest window 27.5 in o1, from the first island frames' pipeline builds, and 29.0 in o2, from the hang).
+- **Where it comes: not at a load.** o2's came in a steady scene: the player standing at the dock, 2,705 draws a frame, 9 ms of GPU a frame. The hung submission was a 1280 x 720 pass and 64 of the island's draws (vertex shaders `5930533f8cf31c82`, `438b0d58b8eeb2c0`, `8214035a40a89d07`, `f7114c72220a0fc0`, `83e5385e0e0d4e7a` and others; the last one `83e5385e0e0d4e7a` with fragment `0073e35f6fe87884`, 25,266 vertices). No pipeline or shader was new in that frame. All five hangs so far came 572–618 s after the launch: 596, 608 and 618 s in the first run, 613 s in the second and 572 s in o2. In the runs by hand that was when the island's first frames were drawn; in o2 it was 2.6 minutes after them.
+- **The Mac at the same moment.** Run m1 used the same route from a new game and ran alongside o2. Frame 17,091 (572.8 s) took 33.3 ms, with 1.9 ms on the GPU. After the island's loads (431 s) and up to 784 s, no frame took over 117 ms, and the log has no GPU error. The Mac draws the docked 1920 x 1080 picture, the phones the handheld 1280 x 720 one. At frame 17,090, run m2's picture is the Odin's scene at the same second: the dock, the airport and the player, in the same light. Each new game makes its own island and look, so only the scene can be compared, not the pixels.
+- **On screen:** the picture stops for about a second, then play goes on, and o2's picture 148 s later is right. The frame shown after the stall lacks whatever draws of that submission the reset dropped. No video caught it: o3 recorded 500–860 s and o4 540–720 s, and neither run hung.
+
+A GPU hang that the kernel resets, in three of six sessions on the Adreno 740, isn't one of the cosmetic faults Playable – minor issues allows, and the Mac has nothing like it. It keeps the game at Playable – major issues.
 
 ## Found on this game
 
@@ -129,5 +158,5 @@ General host changes first needed here; each applies to every game:
 - Check the island map (issue #73) with the host's alpha test.
 - `game.tsv` still describes the game as "In bring-up", while it plays on the iPhone.
 - A save on the Mac (the next morning, after the first night) has not been reached; on Android it has ([Saves](#saves)).
-- The GPU submissions cut short at the arrival on the Ayn Odin 2 (three in the [first run](#android), one in the [second](#android-through-the-first-night-on-the-odin-2)): whether the Mac or another phone shows them. This keeps the game at Playable – major issues. The stretch already takes in the end of the opening (the next morning, when island time starts to follow the real time), which the tier asks of a game with no battle, race or level end.
+- The GPU hang on the Ayn Odin 2 ([the GPU hang on the Odin 2](#android-the-gpu-hang-on-the-odin-2)): a GPU hang the kernel resets, in three of six sessions, always 572–618 s after the launch; not on the OnePlus Pad 3 or the Mac. This keeps the game at Playable – major issues. Next: find the draw. `DM_VK_MID_DRAWS=1` sends each draw in a submission of its own, so the red line names the hung one. Then find what happens about ten minutes in. The stretch already takes in the end of the opening (the next morning, when island time starts to follow the real time), which the tier asks of a game with no battle, race or level end.
 - The keyboard's 8 geometry shaders do not translate.
