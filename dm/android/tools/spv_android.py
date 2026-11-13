@@ -16,8 +16,13 @@
 #   for a vertex shader, the constant buffer reads its position is made of can read their row through a value known only at run time (pos_rows), after cb_extents,
 #     which these reads would otherwise make the whole buffer: Qualcomm's Adreno 740 driver lost those rows in the position-only copy of a shader it bins with.
 #     A specialization constant the host sets only where it is needed turns them on; off, the rows are the constant ones.
-# Usage: spv_android.py <dmsh_xlate output dir> <out dir> [key ...]   (all keys of the input dir by default); prints one line per shader and a summary
-import itertools, json, struct, sys
+#   a task or mesh shader (res.json "mesh", spv_build.py), translated as compute, made a Vulkan task or mesh module (spv_mesh.py), a mesh shader's .z.spv with the depth
+#   -1..1 mapping as a vertex shader's; res.json stage 'ts' / 'ms' and prim_locs, the locations it writes per primitive.
+# Usage: spv_android.py [-j N] <dmsh_xlate output dir> <out dir> [key ...]   (all keys of the input dir by default); prints a line for each shader with a problem, and a summary
+#   The shaders are done in N processes (default: one per CPU), each writing its own shaders' files: a shader's files depend only on its own inputs, so they are the same as one
+#   process makes, and the lines come out in key order. This is pure Python, about 20 shaders a second on one core (most of it cb_extents), so in one process it was most of a
+#   big game's translation time: Ocarina of Time's 42,328 shaders took about 33 minutes after 3 of translating.
+import concurrent.futures as cf, functools, itertools, json, multiprocessing, os, struct, sys
 from pathlib import Path
 
 ANDROID_CHAIN = 6   # res.json 'android': bumped when this post-pass or spv_build.py's translation changes what they make (spv_build.py translates older outputs again).
@@ -26,7 +31,7 @@ ANDROID_CHAIN = 6   # res.json 'android': bumped when this post-pass or spv_buil
                     #    (StructuredProgram.GetSourceVarType), so a layer no longer goes through float locals (#135 and #147 shipped together)
 EXT_FROM = 3   # 4 added res.json cbufs[].ext (cb_extents) and nothing else: spv_build.py brings an output of chain 3 up to date from its .spv (add_ext), without the translator,
                # only while ANDROID_CHAIN is EXT_FROM + 1 (upgrade stamps that chain, so a later bump for a change to the .spv translates chain 3's outputs again)
-SET_OF = {'vs': 0, 'ps': 1, 'gs': 2, 'tc': 3, 'te': 3, 'cs': 0}
+SET_OF = {'vs': 0, 'ps': 1, 'gs': 2, 'tc': 3, 'te': 3, 'cs': 0, 'ms': 0, 'ts': 2}   # a mesh pipeline: mesh in the vertex shader's set, task in the geometry shader's
 OP_CAP, OP_EXT, OP_EXECMODE, OP_ENTRY, OP_DECORATE, OP_MEMBERDECORATE = 17, 10, 16, 15, 71, 72
 OP_FUNCTION, OP_FUNCTIONEND, OP_RETURN, OP_VARIABLE, OP_TYPEPOINTER, OP_TYPEINT, OP_TYPEFLOAT, OP_TYPEVECTOR, OP_CONSTANT = 54, 56, 253, 59, 32, 21, 22, 23, 43
 OP_ACCESSCHAIN, OP_LOAD, OP_STORE, OP_COMPOSITEEXTRACT, OP_COMPOSITEINSERT, OP_FADD, OP_FMUL, OP_LABEL = 65, 61, 62, 81, 82, 129, 133, 248
@@ -46,6 +51,22 @@ def parse(data):
         ins.append([op] + w[i + 1:i + n]); i += n
     return hdr, ins
 
+def unreadable(data):
+    """Why data isn't a whole SPIR-V module, or None. The translator writes each output with File.WriteAllBytes, which creates the file before it writes: a write that fails,
+    as on a full disk, leaves it empty or cut short, and parse stopped the post-pass at the first one (IndexError at w[0], droidplay-core#307). A module cut at an
+    instruction's end still parses, but no longer ends in OpFunctionEnd, as every module with a function does"""
+    if not data: return 'empty (0 bytes)'
+    if len(data) % 4 or len(data) < 24: return f'cut short ({len(data):,} bytes)'
+    w = struct.unpack('<%dI' % (len(data) // 4), data)
+    if w[0] != 0x07230203: return f'not SPIR-V ({len(data):,} bytes)'
+    i, last = 5, None
+    while i < len(w):
+        n = w[i] >> 16
+        if not n or i + n > len(w): return f'cut short ({len(data):,} bytes: an instruction runs past the end)'
+        last, i = w[i] & 0xffff, i + n
+    if last != OP_FUNCTIONEND: return f'cut short ({len(data):,} bytes: it does not end in OpFunctionEnd)'
+    return None
+
 def emit(hdr, ins):
     out = list(hdr)
     for x in ins: out.append((len(x) << 16) | x[0]); out.extend(x[1:])
@@ -54,8 +75,9 @@ def emit(hdr, ins):
 def ext_name(x):   # OpExtension's literal string
     return b''.join(struct.pack('<I', v) for v in x[1:]).split(b'\0')[0].decode()
 
-def process(data, stage, cbsize=None):
-    """→ (header, instructions, interlock removed, size table taken out: None when the shader has none, else True, or False when its use was not the translator's)"""
+def process(data, stage, cbsize=None, keep=()):
+    """→ (header, instructions, interlock removed, size table taken out: None when the shader has none, else True, or False when its use was not the translator's).
+    keep: variables whose descriptor set stays as it is (spv_meshemu.compute's buffers)"""
     hdr, ins = parse(data)
     stripped = None
     if cbsize is not None: hdr, ins, stripped = cbsize_strip(hdr, ins, cbsize)
@@ -63,7 +85,7 @@ def process(data, stage, cbsize=None):
     out = []
     for x in ins:
         op = x[0]
-        if op == OP_DECORATE and x[2] == DEC_DESCRIPTORSET: x = x[:3] + [s]
+        if op == OP_DECORATE and x[2] == DEC_DESCRIPTORSET and x[1] not in keep: x = x[:3] + [s]
         if op == OP_CAP and x[1] in INTERLOCK_CAPS: interlock = True; continue
         if op == OP_EXT and ext_name(x) == 'SPV_EXT_fragment_shader_interlock': continue
         if op == OP_EXECMODE and x[2] in INTERLOCK_MODES: continue
@@ -864,34 +886,98 @@ def upgrade(out, key):
     add_ext(res, parse((out / f'{key}.spv').read_bytes())[1]); res['android'] = EXT_FROM + 1   # the chain this makes, not ANDROID_CHAIN: after a later bump, retranslated
     rp.write_text(json.dumps(res), encoding='utf-8')
 
+def post(src, dst, k):
+    """Shader k of folder src made ready, its files written into dst → (its counts for main's summary: depth variant, without one, extents known, read whole, size table
+    taken out, run-time row reads, a compute form made; the lines it prints). A pool job's result is these few numbers and lines, never the shader's bytes"""
+    try: return post_one(src, dst, k)
+    except Exception as e: e.add_note(f'shader {k} in {src}'); raise   # the pool runs shaders out of order: the traceback names the one that stopped it
+
+def put(p, data):   # a file written whole or not at all: to a temporary name, then renamed (a full disk midway leaves no cut-short file under the real name)
+    t = p.with_name(p.name + '.tmp'); t.write_bytes(data); os.replace(t, p)
+
+def lost(dst, k, why):   # a shader whose translator output can't be read: its line, and no res.json of an older run left, so it counts as not translated and is translated again
+    (dst / f'{k}.res.json').unlink(missing_ok=True)
+    return (0, 0, 0, 0, 0, 0, 0), [f"[RED] {k}: the translator's output can't be read: {why} (a write that failed, as on a full disk): not translated"]
+
+def post_one(src, dst, k):
+    try: res = json.loads((src / f'{k}.res.json').read_text(encoding='utf-8'))
+    except FileNotFoundError: return lost(dst, k, 'no .res.json')
+    except ValueError: return lost(dst, k, '.res.json empty or cut short')
+    data = (src / f'{k}.spv').read_bytes()
+    if why := unreadable(data): return lost(dst, k, f'.spv {why}')
+    stage = res.get('stage', 'vs'); lines = []; nz = bad = ncs = nrows = nemu = 0; files = {}   # its files besides res.json, written before it (put): res.json makes it translated
+    cs = next((c['binding'] for c in res.get('cbufs') or [] if c.get('slot') == CBSIZE_BANK), None)
+    if res.get('mesh'):   # a task or mesh shader translated as compute (spv_build.py): the stage module, and a mesh shader's depth -1..1 variant
+        import spv_mesh
+        mesh = res.pop('mesh'); stage = res['stage'] = mesh['info']['kind']
+        kernel = data
+        try:
+            plain, res['prim_locs'] = spv_mesh.wrap(data, mesh['info'], mesh['lay'])
+            zdata = spv_mesh.wrap(data, mesh['info'], mesh['lay'], gl=True)[0] if stage == 'ms' else None
+        except ValueError as e:
+            return (0, 1, 0, 0, 0, 0, 0), [f'[RED] {k}: {e}: no {"task" if stage == "ts" else "mesh"} module']
+        data = plain
+        if zdata:
+            zh, zi, _, _ = process(zdata, stage, cs); files['.z.spv'] = emit(zh, zi); nz = 1
+        try:   # the emulation's forms (spv_meshemu.py): what a GPU without VK_EXT_mesh_shader runs instead (gfx_vk_meshemu.inc)
+            import spv_meshemu
+            cdata, keep, pk, direct = spv_meshemu.compute(kernel, mesh['info'], mesh['lay'])
+            ch, ci, _, _ = process(cdata, 'cs', cs, keep); files['.cs.spv'] = emit(ch, ci)
+            if stage == 'ms':
+                files['.pvs.spv'] = spv_meshemu.vertex(mesh['info'])
+                files['.pvs.z.spv'] = spv_meshemu.vertex(mesh['info'], gl=True)
+            res['mesh_emu'] = spv_meshemu.facts(mesh['info'], pk, direct); nemu = 1
+        except ValueError as e:
+            lines.append(f'[RED] {k}: {e}: no compute form (a GPU without VK_EXT_mesh_shader skips its draws)'); res['mesh_emu'] = None
+    hdr, ins, interlock, stripped = process(data, stage, cs)
+    if interlock: res.setdefault('notes', []).append('android: fragment shader interlock removed (no ordering of overlapping fragments)')
+    if stripped: res['cbufs'] = [c for c in res['cbufs'] if c.get('slot') != CBSIZE_BANK]; ncs = 1
+    elif stripped is False: lines.append(f'[RED] {k}: the uniform slots\' size table (c{CBSIZE_BANK}) is used other than the translator\'s bound tests use it: left in (it loses the device on Adreno 830)')
+    res['set'] = SET_OF.get(stage, 0); res['android'] = ANDROID_CHAIN
+    eb, ew = add_ext(res, ins)
+    if stage == 'vs':   # after add_ext: a run-time row would keep the whole buffer, and it reads the rows the constant one did
+        hdr, ins, nrows = pos_rows(hdr, ins)
+        res['vin'] = vin_types(ins)
+    files['.spv'] = emit(hdr, ins)
+    if stage == 'vs' and res.get('tf'):
+        files['.tf.spv'] = tf_variant(hdr, ins, res['tf'])
+    if stage == 'vs':
+        z = z_variant(hdr, ins)
+        if z: files['.z.spv'] = z; nz = 1
+        else: bad = 1; lines.append(f'[RED] {k}: no position output found, no depth -1..1 variant')
+    for suffix, b in files.items(): put(dst / f'{k}{suffix}', b)
+    put(dst / f'{k}.res.json', json.dumps(res).encode())   # last: a shader whose res.json is there has all its files (spv_build.py skips it on the next run)
+    return (nz, bad, eb, ew, ncs, nrows, nemu), lines
+
+CHUNK = 16   # shaders per pool job: ~0.8 s of work on average, so the pipe's round trips cost nothing and the last jobs still spread over the processes
+
+def jobs_default():
+    return (getattr(os, 'process_cpu_count', None) or os.cpu_count)() or 4   # the CPUs this process may use (3.13+), else the machine's
+
+def pool_size(j, n):   # processes for n shaders with -j j: 1 means none started
+    if sys.platform == 'win32': j = min(j, 61)   # ProcessPoolExecutor's limit on Windows (WaitForMultipleObjects); spv_build.py passes os.cpu_count()
+    return max(1, min(j, -(-n // CHUNK)))   # no more processes than jobs: a few shaders (an update's) are done here, with no pool to start
+
 def main():
-    src, dst = Path(sys.argv[1]), Path(sys.argv[2]); dst.mkdir(parents=True, exist_ok=True)
-    keys = sys.argv[3:] or sorted(p.stem for p in src.glob('*.spv') if not p.name.endswith('.reader.spv'))
-    n = nz = bad = eb = ew = ncs = npr = nrows = 0
-    for k in keys:
-        res = json.loads((src / f'{k}.res.json').read_text(encoding='utf-8'))
-        stage = res.get('stage', 'vs')
-        cs = next((c['binding'] for c in res.get('cbufs') or [] if c.get('slot') == CBSIZE_BANK), None)
-        hdr, ins, interlock, stripped = process((src / f'{k}.spv').read_bytes(), stage, cs)
-        n += 1
-        if interlock: res.setdefault('notes', []).append('android: fragment shader interlock removed (no ordering of overlapping fragments)')
-        if stripped: res['cbufs'] = [c for c in res['cbufs'] if c.get('slot') != CBSIZE_BANK]; ncs += 1
-        elif stripped is False: print(f'[RED] {k}: the uniform slots\' size table (c{CBSIZE_BANK}) is used other than the translator\'s bound tests use it: left in (it loses the device on Adreno 830)')
-        res['set'] = SET_OF.get(stage, 0); res['android'] = ANDROID_CHAIN
-        b, w = add_ext(res, ins); eb += b; ew += w
-        if stage == 'vs':   # after add_ext: a run-time row would keep the whole buffer, and it reads the rows the constant one did
-            hdr, ins, pr = pos_rows(hdr, ins)
-            if pr: npr += 1; nrows += pr
-            res['vin'] = vin_types(ins)
-        (dst / f'{k}.spv').write_bytes(emit(hdr, ins))
-        (dst / f'{k}.res.json').write_text(json.dumps(res), encoding='utf-8')
-        if stage == 'vs' and res.get('tf'):
-            (dst / f'{k}.tf.spv').write_bytes(tf_variant(hdr, ins, res['tf']))
-        if stage == 'vs':
-            z = z_variant(hdr, ins)
-            if z: (dst / f'{k}.z.spv').write_bytes(z); nz += 1
-            else: bad += 1; print(f'[RED] {k}: no position output found, no depth -1..1 variant')
-    print(f'spv_android: {n} shaders, {nz} depth variants, {bad} without one; constant buffers: {eb} with a known extent, {ew} read whole; the size table taken out of {ncs}; position rows read at run time in {npr} vertex shaders ({nrows} reads)')
+    a = sys.argv[1:]; j = jobs_default()
+    if a[:1] == ['-j']: j = int(a[1]); a = a[2:]
+    src, dst = Path(a[0]), Path(a[1]); dst.mkdir(parents=True, exist_ok=True)
+    keys = a[2:] or sorted(p.stem for p in src.glob('*.spv') if not p.name.endswith('.reader.spv'))
+    one = functools.partial(post, src, dst)
+    nz = bad = eb = ew = ncs = npr = nrows = nemu = 0
+    ex = None
+    if (n := pool_size(j, len(keys))) > 1:   # spawn on every host, as Windows has only spawn: the Mac's runs and tests cover what Windows runs
+        ex = cf.ProcessPoolExecutor(n, mp_context=multiprocessing.get_context('spawn'))
+    try:
+        for (z, b, e, w, c, r, m), lines in (ex.map(one, keys, chunksize=CHUNK) if ex else map(one, keys)):   # in key order, as one process prints them
+            for ln in lines: print(ln)
+            nz += z; bad += b; eb += e; ew += w; ncs += c; nrows += r; npr += r > 0; nemu += m
+    except BaseException:
+        if ex: ex.shutdown(cancel_futures=True)   # a shader that stops the post-pass stops it at once, not after every other job
+        raise
+    if ex: ex.shutdown()
+    print(f'spv_android: {len(keys)} shaders, {nz} depth variants, {bad} without one; constant buffers: {eb} with a known extent, {ew} read whole; the size table taken out of {ncs}; position rows read at run time in {npr} vertex shaders ({nrows} reads)'
+          + (f'; {nemu} task / mesh shaders in compute form too' if nemu else ''))
 
 if __name__ == '__main__':
     main()

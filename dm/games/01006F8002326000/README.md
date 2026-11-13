@@ -34,7 +34,8 @@ On the Mac: a new game through Tom Nook's counter (name entry on the game's own 
 ## Saves
 
 - A save is not reached on the Mac: the game first saves when the player sleeps at the end of the first day (the `−` menu says "You can't save right now." before that). Until then it only probes for `main.dat`, `mainHeader.dat` and `Moved/personal.dat` in its device save data.
-- Nor on Android: the run by hand on the Ayn Odin 2 (below) stopped on the first evening, before the first night, with the same "You can't save right now."
+- On Android it is reached: in the second run by hand on the Ayn Odin 2 ([below](#android-through-the-first-night-on-the-odin-2)) the first save came the next morning, as island time began to follow the real clock, not when the player lay down. It wrote `main.dat` (10,161,808 bytes), `mainHeader.dat`, `landname.dat` and `Villager0/`'s files through the work directory, swapped in on `Commit`. The `−` menu's Save and end saved again ("Save complete."), and Continue loaded that save after a cold start.
+- The first run by hand there stopped on the first evening, before the first night, with the same "You can't save right now."
 
 ## Movies
 
@@ -93,6 +94,23 @@ Played by hand on an Ayn Odin 2 (Snapdragon 8 Gen 2, Adreno 740 with Qualcomm's 
   - **After:** the game went on normally, with none in the next 54 minutes.
   - **Not compared yet** with the Mac or another phone at the same moment.
 
+## Android: through the first night on the Odin 2
+
+Played by hand on the same Ayn Odin 2 (Adreno 740, Qualcomm's driver V@0676.32, Android 13) on 2026-11-11, 14:14 to 16:26, from a new game in an empty private save folder (`DM_SAVE`). The host was from `main` at `c03656cf` (`ANDROID_CHAIN` 6), swapped into the device's own APK, with chain 6's shaders; input was adb gamepad keys and stick events.
+
+- **The stretch:**
+  - the first run's way to the evening gathering at the plaza;
+  - Tom Nook's 10 branches, and the 6 apples he asks for next (shaken from trees);
+  - the welcome party at the campfire, with the island's name entered on the game's keyboard and the toast;
+  - the night: Tom Nook's word before bed, the camping cot placed from the pockets in the tent, and Rest;
+  - K.K.'s dream, then the next morning: Tom Nook at the tent, the NookPhone, the Nook Mileage Program and the 49,800 Bells for the getaway package;
+  - "From now on, island time will match the flow of time in the real world", then free play.
+- **Save and Continue:** the game's first save came as that morning's messages closed, then the `−` menu's Save and end ([Saves](#saves)). After a cold start the title showed the island's plaza, and A loaded the player at the tent, at the real time.
+- **Frame rate** (target 30, as on the Switch), from the log's frame counter: 30.00 fps over the 2 h 12 min session (237,163 frames in 7,907 s); between the long-frame stamps 30 s or more apart, none under 29.89. Frame p50 33.3 ms in all 792 of the log's 300-frame windows, p95 at most 40.8 ms. 79 long frames, none over 368 ms; GPU p50 10.1 ms on the island.
+- **Sound:** no underrun in the session's 1,415 callback reports. `DM_AUDIO_DUMP` of the cold start (97 s): silent through the boot, then the title music and the island's sound at −16 to −31 dBFS RMS.
+- **Red lines:** one GPU submission cut short by the driver's hang recovery, 613 s in as the island's first frames drew (336 ms on the GPU, a 368 ms frame), the first run's fault again (three there). No crash or hang.
+- **For a person playing on:** the tent takes the night only with the camping cot placed (pockets, Place Item), lain on, and Rest chosen. After the dream the player stays lying on the cot until a button gets them up. A tree's shaken item is picked up with the player standing on it (the item's name shows) and Y pressed.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:
@@ -110,6 +128,6 @@ General host changes first needed here; each applies to every game:
 
 - Check the island map (issue #73) with the host's alpha test.
 - `game.tsv` still describes the game as "In bring-up", while it plays on the iPhone.
-- A save on the Mac or on Android (the end of the first day) has not been reached.
-- The three GPU submissions cut short at the arrival on the Ayn Odin 2 ([Android](#android)): whether the Mac or another phone shows them.
+- A save on the Mac (the next morning, after the first night) has not been reached; on Android it has ([Saves](#saves)).
+- The GPU submissions cut short at the arrival on the Ayn Odin 2 (three in the [first run](#android), one in the [second](#android-through-the-first-night-on-the-odin-2)): whether the Mac or another phone shows them. This keeps the game at Playable – major issues; the stretch has no battle, race or level end, which the game doesn't have.
 - The keyboard's 8 geometry shaders do not translate.

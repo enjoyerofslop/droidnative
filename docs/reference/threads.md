@@ -135,6 +135,19 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** spawn `/usr/bin/sample` directly with the PID, one-second duration, `-f` and the unchanged path as separate arguments. Spawn file actions redirect stdout and stderr to `/dev/null`. Setup, spawn, wait, nonzero exit and signal failures retain the failure log; an interrupted wait resumes. The watchdog still exits with `128 + SIGALRM` after sampling.
 - **Found on:** the [static-analysis audit in issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6543080671), reproduced with synthetic paths; no game-specific failure is claimed.
 
+### A crash dump prints the text a register points at
+
+- **Symptom:** a crash dump's `[dm] *xN:` line shows a string only as far as its first 48 bytes, as hex words: before three Unreal Engine 4 games crashed at start-up, `x1` held the PhysX error message Unreal had just built, and the dump kept only `PHYSX: (D:/Build/++Fortn` of it, not the file, line, error code and text that say what failed.
+- **Cause:** the dump prints the first six words each register points at. That names an object's class by its vtable, but it cuts any string longer than 48 bytes (24 UTF-16 characters).
+- **Fix:** when a register points at text, `crash.c` prints it on a line of its own after the register's `*xN:` line, or in that line's place for an unaligned register (`crash_text.h`): `[dm] *x1 text (utf-16, 184 characters): "PHYSX: (…/NpScene.cpp 3191) eINVALID_OPERATION : …"`.
+  - **What counts as text:** up to 512 bytes of UTF-16LE or UTF-8, ended by a NUL or by the first character that is not printable. 512 bytes hold Unreal's whole PhysX message, about 200 UTF-16 characters; 256 would cut its text.
+  - **UTF-16 or UTF-8:** UTF-16 is taken at a 2-byte aligned address when more than half its characters are ASCII. ASCII text read as UTF-16 makes CJK characters, with no ASCII among them.
+  - **Too short to be text:** fewer than six UTF-8 characters, since a pointer's own bytes can read as five (`0x7161626364` reads `dcbaq`), or fewer than four UTF-16 ones.
+  - **The line:** the text is escaped as a C string literal, with ` ...` after it when it runs to the end of what was read.
+  - **The read:** through `vm_read_overwrite`, which fails instead of faulting, as the rest of the dump reads, in pieces that each stay within a 4 KiB page. A string near the end of its mapping keeps its start: one read of the whole range would fail on the Mac and come back short on Android (`process_vm_readv`, `dm_android.h`).
+- **Check:** `dm/tools/tests/test_crash_text.py`: both encodings, the escapes, pointers and numbers that are not text, and reads across a page boundary and up to an unreadable page. A forced crash through `crash.c`'s handler on the Mac, with `x1` at a 184-character message of that form in UTF-16, printed it whole on its `*x1 text` line.
+- **Found on:** Biomutant (01004BA017CD6000), DreadOut 2 (010032B01C6F2000) and Troublemaker (01001040220E8000) on a Galaxy S23 ([droidplay-core#389](https://github.com/enjoyerofslop/droidplay-core/issues/389)). None of them has a profile yet.
+
 ## Synchronization and address arbitration
 
 ### `SignalToAddress` type 2 with count ≤ 0

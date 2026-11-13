@@ -673,8 +673,21 @@ kern_return_t vm_remap(mach_port_t t, vm_address_t *to, vm_size_t size, vm_addre
                        vm_prot_t *cur, vm_prot_t *max, vm_inherit_t inh) {
     (void)t; (void)mask; (void)st; (void)inh;
     if (copy) return KERN_FAILURE;
-    void *r = mremap((void *)from, 0, size, MREMAP_MAYMOVE | ((flags & VM_FLAGS_ANYWHERE) ? 0 : MREMAP_FIXED), (void *)*to);
-    if (r == MAP_FAILED) return KERN_FAILURE;
+    // The duplicate is made where the kernel puts it, and only then moved to a fixed destination. mremap with MREMAP_FIXED unmaps the destination before it looks at the
+    // source, so a duplication it then refuses (old size 0 of a private mapping: EINVAL) left a hole where the destination had been mapped. A virtual memory pool's
+    // requests (hle_nvn.c vpool_map) all fail that way on Android, whose pools are private memory: Mario Kart World made about 9,000, each a hole in the pool's
+    // reservation, the driver's next mappings landed in the holes (an arena block, its own structures), and the next request over the same range unmapped them: a fault in
+    // the replay's copy into the arena on a Galaxy S25 Edge, and in Qualcomm's driver at a submission on a OnePlus Pad 3
+    void *r = mremap((void *)from, 0, size, MREMAP_MAYMOVE);
+    if (r == MAP_FAILED) return KERN_FAILURE;   // nothing was touched
+    if (!(flags & VM_FLAGS_ANYWHERE)) {
+        void *at = mremap(r, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)*to);
+        if (at == MAP_FAILED) {   // the destination may be unmapped now: it stays reserved, as inaccessible pages, rather than open to any later mapping
+            munmap(r, size); mmap((void *)*to, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
+            return KERN_FAILURE;
+        }
+        r = at;
+    }
     *to = (vm_address_t)r; if (cur) *cur = VM_PROT_READ | VM_PROT_WRITE; if (max) *max = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
     return KERN_SUCCESS;
 }
