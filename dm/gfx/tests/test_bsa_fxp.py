@@ -70,6 +70,23 @@ class FxpTests(unittest.TestCase):
         found = split.fxp_shaders(image, 'main')
         self.assertEqual(found, [('main#FXP@0x90', 'vs', bytes(ctl), code)])
 
+    def test_wrapped_records_of_1_1_404(self):
+        # 1.1.404 (SDK 14.3) puts a 0x30-byte header (magic 0x11223344 at +8, length from +0x30 at +12) before each record, and its controls are 0x880 bytes
+        def wrapped(stage, n):
+            ctl, code = bytearray(0x880), bytearray(n)
+            ctl[:4] = split.CTL_MAGIC
+            struct.pack_into('<I', ctl, 0x20, len(ctl))
+            struct.pack_into('<I', ctl, 0x704, len(code))
+            code[:4] = split.GFX_MAGIC
+            struct.pack_into('<I', code, 0x30, (split.STAGES.index(stage) + 1) << 10 | 1)
+            record = struct.pack('<4I', 16, len(ctl), 16 + len(ctl), len(code)) + ctl + code
+            head = struct.pack('<4I', 1, 1, 0x11223344, len(record)) + b'\0\x10\x14\xff' + b'\xff' * 24 + b'\0\0\6\xcd'
+            return head + record, bytes(ctl), bytes(code)
+        (a, ca, ka), (b, cb, kb) = wrapped('vs', 0x300), wrapped('ps', 0x180)
+        found = split.fxp_shaders(a + b, '/shadersfx/shaders011.fxp')
+        self.assertEqual(found, [('/shadersfx/shaders011.fxp#FXP@0x40', 'vs', ca, ka),
+                                 (f'/shadersfx/shaders011.fxp#FXP@{len(a) + 0x40:#x}', 'ps', cb, kb)])
+
     def test_unrelated_control_magic_is_ignored(self):
         self.assertEqual(split.fxp_shaders(bytes(32) + split.CTL_MAGIC + bytes(0x900), '/other'), [])
 

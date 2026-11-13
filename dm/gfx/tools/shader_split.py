@@ -48,6 +48,7 @@
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · Liquid Engine archives (11 bit studios, Frostpunk): one shader per entry of the .dat archive its .idx / .str index and name (zstd entries), see liquid_index and liquid_shaders
 #   · AnvilNext forge (Ubisoft, Assassin's Creed: The Rebel Collection): BNSH in the LZO1X blocks of the .forge entries (version 27, anvil_forge.py), see anvil_jobs and anvil_shaders
+#   · Bethesda BSA (Creation Engine, The Elder Scrolls V: Skyrim): NVN records {control offset, length, code offset, length} in the .fxp member of Skyrim - Shaders.bsa (bsa.py) and in main, see fxp_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -345,6 +346,8 @@ def fxp_shaders(d, label):
     their control magic and validate both independent lengths and offsets,
     rather than interpreting the engine's variable-length permutation metadata.
     Programs combine at draw time, so separable_pairs supplies their cover.
+    1.1.404 (SDK 14.3) wraps each record in a 0x30-byte header (magic 0x11223344 at +8) and has 0x880-byte controls; main's 53 records have 0x7d1-, 0x838- and 0x848-byte ones.
+    From seedds/nxnative PR #444 (Skyrim 1.0.12).
     """
     out = []
     for match in re.finditer(re.escape(CTL_MAGIC), d):
@@ -2970,7 +2973,7 @@ SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
 # each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders); and the Liquid Engine's shader files (Frostpunk: 833 vertex and 1,577 pixel shaders, liquid_shader)
-SINGLE_STAGE += ('#FXP@',)   # Skyrim's separately bound NVN programs
+SINGLE_STAGE += ('#FXP@',)   # Skyrim's separately bound NVN programs (fxp_shaders)
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
     from the pipeline state) have their real pairs only at draw time. vs_pad uses only the union of the locations the paired pixel shaders read, so every single-stage vertex shader is paired with
@@ -3156,7 +3159,7 @@ def scan_file_in(args):
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
-    if head[:4] == b'BSA\0':
+    if head[:4] == b'BSA\0':   # a Bethesda archive (Skyrim): only its .fxp members are read, not its gigabytes of textures and sounds (bsa.py, fxp_shaders)
         import bsa
         for name, data in bsa.shader_files(path, opener=open):
             found.extend(fxp_shaders(data, '/' + rel + '/' + name))
@@ -3376,8 +3379,7 @@ def main():
             try: common = unityfs.common_strings(img)
             except ValueError: common = None   # not a Unity game
         found = []; scan_blob(img, 'main' + ('@' + tag if tag else ''), found)
-        # Creation Engine embeds the same offset/length records as its FXP
-        # archive in main (including older, unaligned 0x7d1-byte controls).
+        # Creation Engine embeds the same offset/length records as its FXP archive in main (including unaligned 0x7d1-byte controls); before raw_shaders, which leaves them out as known
         found += fxp_shaders(img, 'main' + ('@' + tag if tag else ''))
         found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
