@@ -3384,8 +3384,13 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         for (unsigned y = 0; y < layers; y++) {
             if (linear) {   // one 2D level (linear_fit): rows of the storage's stride, the same pitch GetStorageSize counts
                 size_t srow = t->L.layer_size / (t->d.height ? t->d.height : 1);
-                if (l || y || z != 1 || srow < pitch || srow * rows > t->L.size) { RED_ONCE(153, "linear texture upload: %ux%u format %#x target %d levels %u is not one 2D level of rows (stride %zu)", t->d.width, t->d.height, t->d.format, t->d.target, t->d.levels, srow); break; }
-                for (size_t r = 0; r < rows; r++) memcpy((uint8_t *)stg.contents + off + r * pitch, src + r * srow, pitch);
+                if (l || y || z != 1 || srow * rows > t->L.size) { RED_ONCE(153, "linear texture upload: %ux%u format %#x target %d levels %u is not one 2D level of rows (stride %zu)", t->d.width, t->d.height, t->d.format, t->d.target, t->d.levels, srow); break; }
+                // A stride shorter than the row (Skyrim's 3840-byte rows of 1280 RGBA8 pixels): each row runs on into the next one's bytes, as the GPU reads it; what lies past the
+                // storage's end (the last rows' tails) reads as 0 rather than the pool's next bytes
+                for (size_t r = 0; r < rows; r++) {
+                    size_t n = MIN(pitch, t->L.size - r * srow); uint8_t *dst = (uint8_t *)stg.contents + off + r * pitch;
+                    memcpy(dst, src + r * srow, n); if (n < pitch) memset(dst + n, 0, pitch - n);
+                }
             } else if (nvn_deswizzle(&t->d, l, y, src, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
             if (rb_shift) rb_swap_rows((uint8_t *)stg.contents + off, pitch, rows, z, pitch, pitch * rows, rb_shift);
             if (zb && l < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
@@ -3839,6 +3844,13 @@ static int linear_fit(const tex_t *t, uint32_t *pf, void **mb, uint64_t *mo, siz
     uint8_t swz[4]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!nvn_fmt_to_mtl(t->d.format, pf, swz) || !*pf || !bpb || bw != 1 || bh != 1) return 0;
     *row = t->L.layer_size / (t->d.height ? t->d.height : 1);   // same explicit or aligned stride as GetStorageSize
+    // A stride shorter than a row of pixels: the GPU reads each row from row × stride, into the next row's bytes, and Metal refuses such a view (its validation aborts the process).
+    // Skyrim 1.1.404 makes a 1280x720 RGBA8 LINEAR texture of 3840-byte rows when a new game starts: uploaded from its storage instead (pkg_upload_ copies the overlapping rows)
+    if (*row < (size_t)t->d.width * bpb) {
+        static int n; if (n++ < 4) MLOG("linear texture ser=%llu %ux%u format %#x flags %#x: its stride %zu is shorter than a row of %zu bytes, uploaded from its storage (%d so far)",
+                                        (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.flags, *row, (size_t)t->d.width * bpb, n);
+        return -1;
+    }
     if (!mtl_addr((uint64_t)t->mem, (uint64_t)*row * (t->d.height ? t->d.height : 1), mb, mo)) { RED_ONCE(64, "linear texture storage is not in a memory pool (%ux%u format %#x)", t->d.width, t->d.height, t->d.format); return 0; }
     NSUInteger al = tbuf_align([g_dev minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)*pf]);
     if (*mo % al || *row % al) {

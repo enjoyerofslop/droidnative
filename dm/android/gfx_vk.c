@@ -1565,8 +1565,8 @@ static void up_view(const vtex *v, const tex_t *t) {
     rp_end();
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); size_t n = t->L.size;
     if (bpb && !v->conv && is_linear(t)) {   // the rows vt_upload_ reads, at the stride clamped up to the pitch: possibly past the storage size
-        size_t pitch = (size_t)((v->w + bw - 1) / bw) * bpb, rows = (v->h + bh - 1) / bh, srow = t->L.layer_size / (rows ? rows : 1); if (srow < pitch) srow = pitch;
-        size_t e = (size_t)(v->layers - 1) * t->L.layer_size + srow * (rows ? rows - 1 : 0) + pitch; if (e > n) n = e; }
+        size_t pitch = (size_t)((v->w + bw - 1) / bw) * bpb, rows = (v->h + bh - 1) / bh, srow = t->L.layer_size / (rows ? rows : 1);
+        size_t e = (size_t)(v->layers - 1) * t->L.layer_size + srow * (rows ? rows - 1 : 0) + pitch; if (srow >= pitch && e > n) n = e; }   // a shorter stride reads within the storage (vt_upload_)
     uintptr_t lo = (uintptr_t)t->mem, hi = lo + n; uint64_t seq = 0;
     if (C && chunk_hits(C, lo, hi, 0)) { g_vsite[2][0]++; submit_wait(); return; }
     if (atomic_load(&g_inflight_wb) || atomic_load(&g_inflight_cop)) {
@@ -1600,8 +1600,12 @@ static int vt_upload_(vtex *v, const tex_t *t, int track) {
             } else if (is_linear(t)) {   // linear: block rows at the texture's stride (its layer's bytes over its block rows, as GetStorageSize gives them)
                 if (l || z > 1) { RED_ONCE(22, "linear texture with levels or depth: only level 0 of a 2D one is read"); off += out; continue; }
                 size_t srow = t->L.layer_size / (rows ? rows : 1); const uint8_t *src = t->mem + (size_t)y * t->L.layer_size;
-                if (srow < pitch) srow = pitch;
-                for (size_t r = 0; r < rows; r++) memcpy(s.p + off + r * pitch, src + r * srow, pitch);
+                if (srow < pitch) {   // a stride shorter than the row (Skyrim 1.1.404's 1280x720 RGBA8 of 3840-byte rows): each row runs on into the next one's bytes, as the GPU reads it,
+                                      // and what would lie past the storage's end reads as 0 (it was read at the row's length instead, sheared, and 0.9 MB past the storage)
+                    size_t left = t->L.size > (size_t)y * t->L.layer_size ? t->L.size - (size_t)y * t->L.layer_size : 0;
+                    for (size_t r = 0; r < rows; r++) { size_t at = r * srow, k = at < left ? (left - at < pitch ? left - at : pitch) : 0;
+                        memcpy(s.p + off + r * pitch, src + at, k); memset(s.p + off + r * pitch + k, 0, pitch - k); }
+                } else for (size_t r = 0; r < rows; r++) memcpy(s.p + off + r * pitch, src + r * srow, pitch);
             } else if (nvn_deswizzle(&t->d, l, y, t->mem, s.p + off, pitch)) { RED_ONCE(21, "deswizzle failed format %#x target %d", t->d.format, t->d.target); free(tmp); return 0; }
             if (v->rbx) rb16_rows(s.p + off, out, 1, out, v->rbx);   // the guest's order into the image's (rb16.h)
             VkBufferImageCopy r = {.bufferOffset = s.off + off, .imageSubresource = {v->aspect, l, y, 1}, .imageExtent = {w, h, z}};
