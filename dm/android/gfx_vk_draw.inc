@@ -143,6 +143,8 @@ typedef struct {
     struct { uint32_t miss, prim; struct lmod *m; } pvar[2]; int npvar;   // fragment shaders: variants reading a mesh shader's per-primitive outputs (gfx_vk_mesh.inc ps_variant_prim)
     int b0;   // a module of its set (.spv, .z.spv, .tf.spv; ps_variant only makes inputs private) reads binding 0, the support buffer (spv_b0_used): stage_set writes it only then
     int wlayer;   // a vertex, tessellation or geometry shader that writes the layer (spv_layer_out): its draws get every layer of their targets (rp_prepare)
+    int lbpc, lbase;   // the layer less the push constant base in a vertex shader, plus it in a fragment shader (spv_fit_lbase): lbpc, a module of it reads the base (its
+                       // pipelines' layouts take it, and their draws set it); lbase, a vertex shader's every module does, so its draws may be made once per g_vs_layers layers (vs_layer_groups)
     struct { uint32_t miss; struct lmod *m; } avar[4]; int navar;   // alpha-test variants (ps_alpha_mod, spv_alpha.h) by the inputs variant; a NULL module: the transform does not apply
     ds_list *dsf;   // its descriptor sets kept by each chunk, [2 chunk + tf] (dsl, dsl_tf): made at its first set (ds_get), never freed (as the shader)
     uint32_t ndesc;   // descriptors in dsl, an array's counted up to TEX_ARR_MAX (what stage_set writes of it): DM_VK_SET_STATS=1 checks each stage_set writes them all
@@ -530,6 +532,24 @@ static size_t spv_fit_layer(const uint32_t *code, size_t nw, const char *what, u
     if (vk_debug()) LOG("[vk] %s: layer or viewport output rewritten as an ordinary output", what);
     *out = o; return k;
 }
+static __thread int t_lbase_info;   // what spv_fit_lbase did to the modules lm_code made since sh_get cleared it: 1, a module rewritten; 2, one with layer output left as it was
+// The module with its layer output less the push constant base, or its layer input plus it (spv_layer.h spv_layer_base), in *out (to free); 0 when it needs nothing:
+// a GPU whose vertex shaders reach every layer (g_vs_layers 0), or no layer in the module. DM_SPV_LBASE=0 (env.txt): as translated, and each draw made once (the layers
+// past the limit undrawn)
+static size_t spv_fit_lbase(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LBASE"); on = !(e && *e == '0'); }
+    *out = NULL;
+    if (!on || !g_vs_layers || !g_layer_out || !spv_layer_out(code, nw)) return 0;
+    size_t need = 0; spv_layer_base(code, nw, NULL, 0, &need);
+    uint32_t *o = need ? malloc(need * 4) : NULL; size_t k = o ? spv_layer_base(code, nw, o, need, NULL) : 0;
+    if (!k) { free(o); t_lbase_info |= 2; return 0; }   // a geometry shader's (no limit there), or a form spv_layer_base leaves
+    t_lbase_info |= 1;
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1))
+        LOG("[vk] the GPU's vertex shaders reach only layers 0-%d of a layered pass: those that write the layer write it less a base (fragment shaders that read it add the "
+            "base back), and their draws into more layers are made once per %d layers (DM_VK_VS_LAYERS, DM_SPV_LBASE=0: as translated). First: %s", g_vs_layers - 1, g_vs_layers, what);
+    *out = o; return k;
+}
 // The module with its butterfly shuffles as ShuffleXor (spv_xor.h), in *out (to free); 0 when it needs nothing: a GPU spv_xor is not for, subgroups under 32 lanes
 // (spv_narrow rewrites those), a stage that runs no subgroup operations (spv_limits'), or no shuffle by the lane ID ^ a mask. For Qualcomm's own driver below
 // Vulkan 1.3 (its GPU name "Adreno (TM) ..."; Turnip's differs): the Adreno 730's (V@0615.98) returns garbage from the translator's Shuffle by the lane ^ the
@@ -747,12 +767,13 @@ static vshader *sh_get(const char *key) {
     int has_tf = (s->tf_stride[0] | s->tf_stride[1] | s->tf_stride[2] | s->tf_stride[3]) != 0; uint32_t tf_outs = 0, tf_ver = 0;
     js_free(&r);
     sh_bind_map(s);   // before its modules: they and the layout below take the same numbers
-    t_pool_info = 0; t_harr_info = 0;
+    t_pool_info = 0; t_harr_info = 0; t_lbase_info = 0;
     snprintf(p, sizeof p, s->memu ? "%s/%s.cs.spv" : "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(s, p, &s->b0);   // (a task / mesh shader in compute form: its kernel, through the same rewrites and binding map)
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
       if (w) { if (s->stage == SH_CS || s->memu) s->tgs = tgs_bytes(w, nw, s->key); if (has_tf && nw > 1) { tf_outs = spv_tff_outs(w, nw); tf_ver = w[1]; } spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
     sh_bind_apply(s);   // the layout and stage_set's writes from here on: the numbers the modules have (the matching above read the file's)
     if (s->stage == SH_VS || (s->stage == SH_MS && !s->memu)) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(s, p, &s->b0); }
+    if (t_lbase_info & 1) { s->lbpc = 1; s->lbase = s->stage == SH_VS && s->wlayer && !(t_lbase_info & 2); }   // its modules read the layer base (spv_fit_lbase)
     if (has_tf && s->stage == SH_VS && tf_frag()) {   // the fragment-stage capture; if it cannot be made, the .tf.spv below (which tf_capture refuses on such a GPU, RED 115)
         snprintf(p, sizeof p, "%s/%s.spv", g_spv_dir, s->key); s->modtf = lm_new_t(p, s->bmap, &s->b0);
         if (s->modtf) s->modtff = tff_fs_mod(s, &tfl, tf_outs, tf_ver);
@@ -1553,6 +1574,7 @@ static void dup_check(void) {
         g_dup_lost++; RED_ONCE(170, "a draw writes colour slot %d and not slot %d, where the pass keeps their image: the write is lost (dup_slots; DM_VK_DUP_SLOTS=0 attaches both)", d, g_dup_of[d]); return;
     }
 }
+static uint32_t g_lbase;   // a layered pass's first layer past its targets' views (vs_layer_groups: 0, then a multiple of g_vs_layers while a draw is made again per group)
 static int rp_prepare_(int layered) {
     layered = layered && layered_on();
     if (P.active && (P.layered || !layered)) return 1;
@@ -1581,6 +1603,7 @@ static int rp_prepare_(int layered) {
         // in the format of the target's view: Super Mario Bros. Wonder's last pass writes its RGBA8 window texture through an RGBA8_SRGB view, and in the image's
         // format the linear values were stored unencoded (the whole picture darker and more saturated; nvn_mtl.m found the same)
         g_view_fmt = cv ? view_format(v, cv) : VK_FORMAT_UNDEFINED; VkFormat af = g_view_fmt ? g_view_fmt : v->fmt;
+        if (layered) ly += g_lbase;
         uint32_t nl = layered ? rt_layers(v, cv, lv, ly) : 1;
         g_view_slice = 1; VkImageView iv = view_get(v, nl > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, lv, 1, ly, nl, VK_IMAGE_ASPECT_COLOR_BIT, NULL); g_view_slice = 0; g_view_fmt = VK_FORMAT_UNDEFINED; if (!iv) continue;
         if (nl < layers) layers = nl;
@@ -1593,6 +1616,7 @@ static int rp_prepare_(int layered) {
         if (v && v->aspect != VK_IMAGE_ASPECT_COLOR_BIT) {
             const view_t *dv = R.rt.has_dview ? &R.rt.dview : NULL;
             uint32_t lv = dv && dv->set_levels ? dv->base_level : 0, ly = dv && dv->set_layers ? dv->min_layer : 0;
+            if (layered) ly += g_lbase;
             uint32_t nl = layered ? rt_layers(v, dv, lv, ly) : 1;
             g_view_slice = 1; VkImageView iv = view_get(v, nl > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, lv, 1, ly, nl, v->aspect, NULL); g_view_slice = 0;
             if (iv && nl < layers) layers = nl;
@@ -1771,7 +1795,8 @@ static const struct { const char *n; size_t o, s; } PK_F[] = {{"z", offsetof(pip
     {"topo", offsetof(pipe_key, topo), 1}, {"restart", offsetof(pipe_key, restart), 1}, {"depth_clamp", offsetof(pipe_key, depth_clamp), 1}, {"ll", offsetof(pipe_key, ll), 1},
     {"color", offsetof(pipe_key, color), sizeof(color_st)}, {"chmask", offsetof(pipe_key, chmask), sizeof(chmask_st)}, {"blend", offsetof(pipe_key, blend), sizeof(((pipe_key *)0)->blend)},
     {"ms", offsetof(pipe_key, ms), sizeof(ms_st)}, {"poly", offsetof(pipe_key, poly), sizeof(poly_st)}, {"ds", offsetof(pipe_key, ds), sizeof(ds_st)}};
-typedef struct { VkPipeline p; VkPipelineLayout pl; int alpha; } pipe_t;   // alpha: the fragment module is spv_alpha.h's, and the draw sets its reference (a push constant)
+typedef struct { VkPipeline p; VkPipelineLayout pl; int alpha; VkShaderStageFlags lbpc; } pipe_t;   // alpha: the fragment module is spv_alpha.h's, and the draw sets its reference (a push
+                                                                                              // constant); lbpc: the stages whose modules read the layer base (spv_fit_lbase), which the draw sets
 static nvn_hmap g_pipes = {.klen = sizeof(pipe_key)};
 static int is_int_fmt(VkFormat f);   // below: an integer colour format, which takes no alpha test (as in OpenGL)
 // Whether this draw runs NVN's alpha test: a fragment shader, a function other than ALWAYS, and no integer colour 0. A depth-only pass runs it too (shadow maps of
@@ -2025,9 +2050,11 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     int mesh = k->sh[0] && k->sh[0]->stage == SH_MS;
     VkPushConstantRange pcr = mesh ? (VkPushConstantRange){VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 0, MESH_PC_BYTES}
                                    : (VkPushConstantRange){VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};   // the alpha test's reference (spv_alpha.h); unused by shaders that do not declare it
-    VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nset, .pSetLayouts = sets, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
+    VkShaderStageFlags lbpc = mesh ? 0 : (k->sh[0] && k->sh[0]->lbpc ? VK_SHADER_STAGE_VERTEX_BIT : 0) | (k->sh[1] && k->sh[1]->lbpc ? VK_SHADER_STAGE_FRAGMENT_BIT : 0);
+    VkPushConstantRange pcrs[2] = {pcr, {lbpc, SPV_LBASE_PC, 4}};   // [1]: the layer base the modules of those stages read (spv_fit_lbase); only then
+    VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nset, .pSetLayouts = sets, .pushConstantRangeCount = lbpc ? 2u : 1u, .pPushConstantRanges = pcrs};
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &pp->pl) != VK_SUCCESS) return VK_ERROR_INITIALIZATION_FAILED;
-    pp->alpha = pspec != NULL;
+    pp->alpha = pspec != NULL; pp->lbpc = lbpc;
     VkVertexInputBindingDescription vb[32]; VkVertexInputAttributeDescription va[16]; VkVertexInputBindingDivisorDescriptionEXT vd[32]; uint32_t nvd = 0; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
     for (int i = 0; i < 16; i++) {
         va_st a; memcpy(&a, &k->attr[i], 4);
@@ -3169,6 +3196,26 @@ static void bf_vbuf(VkCommandBuffer c, uint32_t i, VkBuffer b, VkDeviceSize o) {
     vkCmdBindVertexBuffers(c, i, 1, &b, &o); g_bf.vb[i] = b; g_bf.vo[i] = o; g_bf.vbok |= 1u << i; g_bf_made[2]++;
 }
 // ---------------- The draw ----------------
+// A draw whose vertex shader writes the layer, into a layered pass of more layers than a vertex shader reaches (g_vs_layers: Arm's Mali-G715 driver drops a primitive
+// whose layer from a vertex shader is 8 or more, whatever the framebuffer's layer count; a geometry shader's reaches every layer). Pokemon Legends: Z-A builds its
+// 32x32x32 colour-grading LUT with one such draw (b29f08619f379a83, an instance per slice) and tone-maps the frame through it: on a Pixel 9 Pro XL only slices 1-7
+// were drawn, and the world came out nearly black. The draw is made first as it is (layers 0-7 drawn), then again for each later group of layers in a pass of its
+// own whose views start at the group's first layer, the shader's layer less that base (spv_layer_base), so a primitive lands in its group alone (the GPU drops the
+// layers below 0 as well as from 8 on). The pass's bindings stay bound across its passes (one command buffer); the next draw begins its own pass from layer 0
+static uint64_t g_lg_draws;   // draws made again for a later group of layers
+static void vs_layer_groups(VkCommandBuffer c, const pipe_t *pp, uint32_t count, uint32_t inst, int32_t first, uint32_t first_inst, int indexed) {
+    uint32_t L = P.layers, n = (uint32_t)g_vs_layers;
+    if (!g_lg_draws) LOG("[vk] a draw whose vertex shader writes the layer into %u layers: made again for each later %u (vs_layer_groups)", L, n);
+    for (uint32_t b = n; b < L; b += n) {
+        rp_end(); g_lbase = b;
+        int ok = rp_prepare_(1) && P.layers > 0 && rp_start() && C->cb == c;
+        if (!ok) { RED_ONCE(196, "a draw made again for layers from %u: its pass could not begin in the same command buffer, the layers from there are not drawn", b); break; }
+        int32_t base = (int32_t)b; vkCmdPushConstants(c, pp->pl, pp->lbpc, SPV_LBASE_PC, 4, &base);   // the vertex shader's layer less it, a fragment shader's plus it
+        if (indexed) vkCmdDrawIndexed(c, count, inst, 0, first, first_inst); else vkCmdDraw(c, count, inst, (uint32_t)first, first_inst);
+        g_lg_draws++;
+    }
+    rp_end(); g_lbase = 0;   // the next draw's pass from layer 0, as before
+}
 // vertex data: each stream's bytes from vertex lo to the last vertex (or instance) the draw reads; the bindings start at vertex lo, so the draw numbers its vertices
 // from lo (firstVertex / vertexOffset less lo). Copying from vertex 0 instead made a draw late in a large vertex buffer copy (and convert) all of it before its
 // vertices: Hades II draws its sprites from one growing buffer, and its render thread spent 61% of its time here (bind_vbufs and memcpy) at about 3 fps
@@ -3293,6 +3340,7 @@ static int tf_capture(vshader *vs, const prog_t *pr, int pst, const p_draw *dw, 
     VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = g_null_rp, .framebuffer = *fbp, .renderArea = area};
     vkCmdBeginRenderPass(c, &rb, VK_SUBPASS_CONTENTS_INLINE); bf_reset();   // its pipeline, viewport and scissor are set behind the bind filter (bf_*): unknown to it
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->p);
+    if (pp->lbpc) { int32_t b0 = 0; vkCmdPushConstants(c, pp->pl, pp->lbpc, SPV_LBASE_PC, 4, &b0); }   // the layer base: none (spv_fit_lbase)
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, 0, 1, &set, vs->ndyn, dyn);
     if (vs->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { vkCmdEndRenderPass(c); cb_barrier(); bf_reset(); g_drawing = 0; return 0; }
     if (vs->gm && g_gm_np) gm_np_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl);
@@ -3601,6 +3649,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     else if (!g_rd_made++) LOG("[vk] rasterizer discard: a draw whose vertex stage writes memory runs as a dispatch, in a pass of its own (vertex %s, %u %s; DM_VK_RAST_DISCARD=0 leaves it out)", k.sh[0]->key, dw ? (unsigned)dw->count : (unsigned)di->count, dw ? "vertices" : "indices");
     bf_pipeline(c, pp->p);   // binds the command buffer already holds are left out (bf_*)
     if (pp->alpha) vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof D.alpha_ref, &D.alpha_ref);   // the alpha test's reference, data rather than a key (spv_alpha.h)
+    if (pp->lbpc) { int32_t b0 = 0; vkCmdPushConstants(c, pp->pl, pp->lbpc, SPV_LBASE_PC, 4, &b0); }   // the layer base: none (spv_fit_lbase)
     for (int i = 0; i < 4; i++) if (k.sh[i]) vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, (uint32_t)(k.sh[i]->set & 3), 1, &sets[i], k.sh[i]->ndyn, dyn[i]);
     if (pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl)) { g_drop[3]++; return 0; }
     if (g_gm_np) { int gm = 0; for (int i = 0; i < 4; i++) gm |= k.sh[i] && k.sh[i]->gm; if (gm) gm_np_bind(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl); }   // (gfx_vk_gmem_noptr.inc)
@@ -3667,6 +3716,8 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!bind_vbufs(c, k.sh[0], lo, vhi, base_inst, inst)) { g_drop[6]++; return 0; }
     if (ib) { bf_ibuf(c, ib, ioff, i32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16); vkCmdDrawIndexed(c, icount, inst, 0, (int32_t)((di ? di->base_vertex : 0) - lo), base_inst - inst_shift(base_inst)); }
     else vkCmdDraw(c, count, inst, (uint32_t)(dw->first - lo), base_inst - inst_shift(base_inst));   // inst_shift: the base instance in the streams' offsets instead
+    if (!rd && (pp->lbpc & VK_SHADER_STAGE_VERTEX_BIT) && k.sh[0]->lbase && !k.sh[2] && !k.sh[3] && P.layered && P.layers > (uint32_t)g_vs_layers)   // the layers past the vertex shader's reach
+        vs_layer_groups(c, pp, ib ? icount : count, inst, ib ? (int32_t)((di ? di->base_vertex : 0) - lo) : (int32_t)(dw->first - lo), base_inst - inst_shift(base_inst), ib != VK_NULL_HANDLE);
     g_draws++; C->ndraw++; crumb((dw ? dw->ind : di->ind) ? 'D' : 'd', k.sh[0]->key, k.sh[1] ? k.sh[1]->key : NULL, ib ? icount : count, inst);
     if (g_prof_cur >= 0) { prof_rec *pr = &g_prof[g_prof_cur]; uint64_t nv = (uint64_t)(ib ? icount : count) * inst; pr->draws++; pr->verts += nv;
         if (nv > pr->big) { pr->big = nv; pr->bigvs = k.sh[0]->key; pr->bigfs = k.sh[1] ? k.sh[1]->key : NULL; } }
