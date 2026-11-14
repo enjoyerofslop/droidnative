@@ -30,12 +30,14 @@ if [[ ${1:-} != --player ]]; then
             pacman -Syu --noconfirm --needed libglvnd mesa libx11 libxcb fontconfig freetype2 glib2 dbus wayland ca-certificates ttf-dejavu xorg-server-xvfb \
                 weston procps-ng > /dev/null ;;
         opensuse-tumbleweed)
-            zypper -n -q in Mesa-libGL1 Mesa-libEGL1 libX11-6 libX11-xcb1 libxcb1 fontconfig libfreetype6 libglib-2_0-0 libdbus-1-3 libwayland-client0 \
-                libwayland-cursor0 libwayland-egl1 ca-certificates dejavu-fonts xorg-x11-server-Xvfb weston procps > /dev/null ;;
+            # openSUSE packs GLib's libgthread on its own (other distributions keep it in GLib's package); its desktops have it
+            zypper -n -q in Mesa-libGL1 Mesa-libEGL1 libX11-6 libX11-xcb1 libxcb1 fontconfig libfreetype6 libglib-2_0-0 libgthread-2_0-0 libdbus-1-3 \
+                libwayland-client0 libwayland-cursor0 libwayland-egl1 ca-certificates dejavu-fonts xorg-x11-server-Xvfb weston procps > /dev/null ;;
         *) fail "no package list for $ID" ;;
     esac
     # what the AppImage brings itself and a fresh install may lack: shown as the distribution has it, absent or not
     say "the system's own xcb-util and xkbcommon-x11: $( (ldconfig -p 2> /dev/null || true) | grep -oE 'lib(xcb-cursor|xcb-icccm|xkbcommon-x11)\.so\.[0-9]+' | sort -u | tr '\n' ' ')"
+    mkdir -p /tmp/.X11-unix; chmod 1777 /tmp/.X11-unix   # Xvfb, not run as root, can't make it (a desktop's display manager has)
     useradd -m player
     cp "$img" /home/player/DroidPlay.AppImage; chmod 755 /home/player/DroidPlay.AppImage; chown player: /home/player/DroidPlay.AppImage
     exec runuser -u player -- env -i HOME=/home/player USER=player PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 bash "$0" --player "$out" "$ID"
@@ -71,7 +73,8 @@ say 'first start, under X11: the version unpacks, then the window'
 t0=$(date +%s)
 start first DISPLAY=:99 "$app"
 for _ in $(seq 600); do compgen -G "$HOME/.local/share/DroidPlay/*/.complete" > /dev/null && break; sleep 0.5; done
-mapfile -t vers < <(find "$HOME/.local/share/DroidPlay" -mindepth 1 -maxdepth 1 -type d ! -name '*.partial')
+vers=()   # a container may have no find (openSUSE's has none)
+for d in "$HOME"/.local/share/DroidPlay/*/; do [[ $d == *.partial/ ]] || vers+=("${d%/}"); done
 ((${#vers[@]} == 1)) && [[ -f ${vers[0]}/.complete ]] || { cat "$out/first.log"; fail "no unpacked version after the first start (${vers[*]:-none})"; }
 dir=${vers[0]}; say "  unpacked ${dir#"$HOME"/} ($(du -sm "$dir" | cut -f1) MB) in $(($(date +%s) - t0)) s"
 alive_for "$last" 10 first; stop "$last"
