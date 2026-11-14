@@ -3,7 +3,7 @@
 Update 1.3 (v196608) over the base game, SDK **11.4.3** (`NintendoSDK_NVN-11_4_3`). **Assassin's Creed II** is the base game; **Brotherhood** (`0100670014483001`) and **Revelations** are DLC. It runs on Ubisoft's **AnvilNext** (Scimitar) with Havok and Wwise, and renders with **NVN**. Modules `main` and `sdk`. The RomFS is 114 files, 6.7 GB: 27 `.forge` archives under `AC2/` and `AC2_PATCH/`, two Wwise `.pck` banks and Bink movies. Brotherhood's DLC is 88 files, 10.4 GB: 29 `.forge` archives under `ACB/`, eight `.pck` banks and movies.
 
 - **On the Mac:** In-game. Assassin's Creed II boots through the collection's launcher parameter to its title, menus and a new game, and into Desmond's escape from Abstergo under control at 30 fps. Everything the run asked for is in the shader map; see [Shaders](#shaders).
-- **On Android:** In-game, blocked on a Galaxy S25 Edge: the same route at 30 fps, but the 3D picture is black, only text, menu shapes and the HUD are drawn. See [Android](#android).
+- **On Android:** In-game on a Galaxy S25 Edge: the same route at 30 fps, lit as on the Mac since buffer textures read through 2D slots got an image of their rows on Vulkan (#489). See [Android](#android).
 - **Brotherhood** is program 1 and wasn't tried; Revelations isn't in this dump. See [Two programs](#two-programs).
 
 ## What it needs
@@ -54,8 +54,9 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made (the sur
 - **Tested 2026-11-13** (Adreno 830, Qualcomm's driver), from a private build of this branch with the provisional profile and its launch parameter in `env.txt` (`DM_LAUNCH_PARAM`). The build's own APK went on for the run, and the phone's own DroidPlay was put back afterwards. Scripted over adb with `DM_CTL` presses and `DM_KBD=Ezio`, from a new game in a private save folder. No hand play.
 - **The build:** the split found the same 46,700 shaders with the Mac host as the game's Oodle decoder (1 min 16 s), and all 46,700 translated for Vulkan with none failed (3 min 2 s).
 - **Route:** as on the Mac, through the movie, the load and the wall, into Abstergo's opening. The game wrote its first save there.
-- **The picture is black.** The titles, menus and loading screen draw their text and shapes on black, where the Mac draws them on a white backdrop. In the opening nothing of the 3D scene shows, though the game draws about 870 times a frame there and the GPU is busy 15 ms a frame.
-  - **The likely cause:** `[RED] [vk] buffer textures are not on Vulkan yet` (`gfx_vk.c`): NVN buffer textures aren't on Android yet. The game writes and reads one (the Mac's log names it at pool offset `0x154190f8`), likely a value the frame's lighting or tone mapping uses. Not confirmed.
+- **Resolved: the picture was black.** The titles, menus and loading screen drew their text and shapes on black, where the Mac draws them on a white backdrop, and nothing of the opening's 3D scene showed. The game reads a 48-element R32F buffer texture (texture ID 4610, slot 132 of compute shader `2405a4193559eaec` and others) through a slot the translator declares 2D, at `(x & 0x3FFF, x >> 14)` (res.json `fetch1d`). The Mac binds it as 2D rows (`tbuf_as_2d`); the Vulkan replay refused every buffer texture (`[RED] [vk] buffer textures are not on Vulkan yet`), so the slot read 0 and the lit passes multiplied by it. A Mac host with `tbuf_as_2d` switched off drew the S25's black picture. Fixed by #489 (`dm/android/tbuf_rows.h`; `DM_VK_TBUF_ROWS=0` turns it off): on 2026-11-14, with hosts from main a72a85c5 plus this profile and #489, the same route drew the title and menus on white, the Animus load's text, and the lab and corridor matching the Mac's frames after the same walk, at the same frame time (p50 33.4 ms, p95 41.4 ms) and GPU time (p50 14.9 ms), 2.89 GB PSS at most.
+- **Current: at the spawn after the Animus load** the wall around the doorway in front of Desmond isn't drawn for the first moments, and the lab shows through; the Mac draws it. The white patch on the doorway's floor after about 30 s shows on the Mac too. `DM_VK_OCCLUSION=0` gives the same frame. Not traced yet.
+- **Current: the compute pass that writes the buffer texture** is sometimes still pending when its reader comes, and that read waits for the submission (409 such waits over the route, 0 before #489); the frame rate is the same.
   - **Other red lines:** shaders `a8dcee323ede7253` and `97a3014bf67b9022` read uniform slot 0 with no buffer bound (8 lines), and `SetRenderEnableConditional`, as on the Mac.
 - **Frame rate:** 30.0 fps in every 20 s window but one of the load (28.0): frame p50 33.4 ms, p95 about 41 ms in the opening.
 - **Memory:** 2.9 GB PSS in the opening, 0.69 GB of it graphics.
@@ -63,7 +64,7 @@ The profile is the provisional one `scripts/build_ipa_from_nsp.py` made (the sur
 
 ## Open
 
-- **Android's black picture:** buffer textures on Vulkan, the likely cause, then the route again.
+- **Android, at the spawn:** the doorway's wall that isn't drawn for the first moments: a frame dump against the Mac's.
 - **Brotherhood** (program 1): a profile, then a boot. Its 26,123 shaders are in this profile's tables now, as the split reads the DLC with the game; whether program 1's own build should be the one to carry them is open. Revelations wasn't dumped.
 - **On Android the decode is the phone's on Windows and Linux:** the split decodes every forge entry, about 13 GB for II and 12 GB for Brotherhood, so a build with no Mac to decode on sends some 700,000 Oodle streams to the phone ([Oodle-compressed archives decoded on the phone](../../../docs/reference/shaders.md#oodle-compressed-archives-decoded-on-the-phone-for-an-android-build)). Every shader is in resources of one class (`0xbcfb3c7a`): decoding only the chunks that hold resources' first bytes, then that class's resources, would be 5.22 GB of II's 12.97 GB.
 - **`render_cond`:** the game sets render conditions; whether it needs the key wasn't looked at.
