@@ -28,8 +28,8 @@ try:
                                    QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
                                    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSplitter, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton,
                                    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
-except ImportError:
-    sys.exit(f'DroidPlay (nxnative_android.py) needs PySide6: uv run {__file__}, or {sys.executable} -m pip install PySide6')
+except ImportError as e:   # on Linux also a system library Qt needs and the system lacks (libEGL.so.1...): the error names it
+    sys.exit(f'DroidPlay (nxnative_android.py) needs PySide6 ({e}): uv run {__file__}, or {sys.executable} -m pip install PySide6')
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'scripts' / 'build_android_from_nsp.py'

@@ -157,6 +157,7 @@ install -m 755 "$here/AppRun" "$app/AppRun"
 icons=usr/share/icons/hicolor/256x256/apps
 mkdir -p "$app/usr/share/applications" "$app/$icons" "$app/usr/share/metainfo" "$app/usr/share/doc/droidplay"
 cp "$here/$ID.desktop" "$app/usr/share/applications/"; ln -s "usr/share/applications/$ID.desktop" "$app/$ID.desktop"
+"$py" -c 'import PySide6.QtGui, PySide6.QtSvg, PySide6.QtWidgets' || die "the runtime's PySide6 doesn't load (above: what this system lacks)"
 QT_QPA_PLATFORM=offscreen "$py" "$pay/core/scripts/nxnative_android.py" --write-icon "$app/$icons/$ID.png"
 [[ -s $app/$icons/$ID.png ]] || die 'the app wrote no icon'
 ln -s "$icons/$ID.png" "$app/$ID.png"; ln -s "$icons/$ID.png" "$app/.DirIcon"
