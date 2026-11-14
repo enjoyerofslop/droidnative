@@ -83,6 +83,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [A flush that waited for the Android replay's lock while holding the flush list's](../../../docs/reference/nvn-objects.md#a-flush-that-waited-for-the-android-replays-lock-while-holding-the-flush-lists) (2026-11-13, droidplay-core#457): on Android, one player's save (an autosave at Thyphlo Ruins) hung every time, on the loading screen or just after the world drew, when the texture defragmentation's flush (`ModuleSystemWorker1`, `main+0x5bd288`) met a submission in flight. Checked on a Galaxy S25 Edge: hung in 3 loads of 3 before the fix, played in 4 of 4 after it.
 - [AltServer cannot install a file of 2 GiB or more](../../../docs/reference/packing.md#altserver-cannot-install-a-file-of-2-gib-or-more) (2026-11-08, #1688): 1.4.3's shader library is 2.10 GiB; `--shader-files` packs it as separate files.
 - [The Mac's alias region is the Switch's 64 GB](../../../docs/reference/memory.md#the-macs-alias-region-is-the-switchs-64-gb) (2026-11-05, #639): the long-session Blood Moon reached +2.25 of the iPhone-sized 2.38 GB. Whether this ends it is open until a long session runs on the larger region.
 - [A work folder holds millions of small files](../../../docs/reference/packing.md#a-work-folder-holds-millions-of-small-files): 8,893,028 files and 509 GB here.

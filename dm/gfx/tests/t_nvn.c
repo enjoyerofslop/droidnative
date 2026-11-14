@@ -1183,6 +1183,21 @@ int main(void) {
         P(nvnTextureBuilderSetStorage)(&b, &fp, 0x20000); P(nvnTextureInitialize)(&d, &b); uint64_t sd = ((const tex_t *)&d)->serial;
         P(nvnMemoryPoolFinalize)(&fp);
         EXPECT("first-touch: the pool finalized under its textures takes their entries", 0, nvn_ft_tracked(sc2) || nvn_ft_tracked(sd));
+        // A flush takes the textures it covers off the list, marking them with g_ft_mu released (ft_flush: on Android the mark takes the replay's lock, which takes
+        // g_ft_mu under it). Two in one flush leave, the one beside them stays, and a later flush over all three takes the third once
+        P(nvnMemoryPoolInitialize)(&fp, &fb);
+        NVNtexture f1, f2, f3; NVNtexture *ft3[3] = {&f1, &f2, &f3}; uint64_t fs[3];
+        for (int i = 0; i < 3; i++) { P(nvnTextureBuilderSetStorage)(&b, &fp, 0x10000 * i); P(nvnTextureInitialize)(ft3[i], &b); fs[i] = ((const tex_t *)ft3[i])->serial; }
+        EXPECT("first-touch flush: three textures registered", 1, nvn_ft_tracked(fs[0]) && nvn_ft_tracked(fs[1]) && nvn_ft_tracked(fs[2]));
+        P(nvnMemoryPoolFlushMappedRange)(&fp, 0x2000, 0x10000);   // the end of the first texture and the start of the second
+        EXPECT("first-touch flush: the two it covers leave the list", 0, nvn_ft_tracked(fs[0]) || nvn_ft_tracked(fs[1]));
+        EXPECT("first-touch flush: the one beside them stays", 1, nvn_ft_tracked(fs[2]));
+        P(nvnMemoryPoolFlushMappedRange)(&fp, 0, 0x30000);
+        EXPECT("first-touch flush: a flush over all three takes the third", 0, nvn_ft_tracked(fs[2]));
+        pthread_mutex_lock(&g_ft_mu); size_t ft_left = g_nft; pthread_mutex_unlock(&g_ft_mu);
+        EXPECT("first-touch flush: the list is empty", 0, ft_left);
+        for (int i = 0; i < 3; i++) P(nvnTextureFinalize)(ft3[i]);
+        P(nvnMemoryPoolFinalize)(&fp);
     } else printf("(9. the first-touch list: skipped, this profile has no tex_flush_upload)\n");
 
     printf("== %d checks, %d failed ==\n", g_n, g_fail);

@@ -555,12 +555,33 @@ void nvn_ft_poll(void) {
     }
     pthread_mutex_unlock(&g_ft_mu);
 }
+// DroidPlay Core: the textures a flush covers are marked CPU-written outside g_ft_mu, as nvn_ft_written and nvn_ft_poll mark theirs. On Android the mark takes the Vulkan replay's
+// lock (gfx_vk.c g_bk), which the replay holds through a whole submission and takes g_ft_mu under (ft_del_drain and nvn_ft_poll at the submission's start): a game thread that
+// flushed while a submission was in flight held g_ft_mu and waited for g_bk while the replay held g_bk and waited for g_ft_mu, and the game hung for good (droidplay-core#457:
+// Tears of the Kingdom's texture defragmentation, main+0x5bd288, every time with one player's save, on the loading screen or just after the world drew). The entries stay listed
+// while they are marked, so a first use meanwhile still finds them (nvn_ft_written, nvn_ft_tracked), and then leave the list where the scan saw them unless an entry was removed
+// meanwhile (then found by serial; one a finalize or another flush removed is gone). The last seen goes first: a removal moves the list's last entry, never an earlier one of these
 static void ft_flush(const uint8_t *a, uint64_t n) {
     if (!DM_GAME_TEX_FLUSH_UPLOAD || !a || !n) return;
+    struct { tex_t t; size_t at; } *hit = NULL; size_t nhit = 0, chit = 0;
     pthread_mutex_lock(&g_ft_mu);
-    for (size_t i = 0; i < g_nft;)
-        if (g_ft[i].mem < a + n && a < g_ft[i].mem + g_ft[i].size) { mtl_tex_cpu_written(&g_ft[i].t); g_ft[i] = g_ft[--g_nft]; } else i++;
+    for (size_t i = 0; i < g_nft; i++)
+        if (g_ft[i].mem < a + n && a < g_ft[i].mem + g_ft[i].size) {
+            if (nhit == chit && !(hit = realloc(hit, (chit = chit ? 2 * chit : 8) * sizeof *hit))) die("ft_flush allocation failed");
+            hit[nhit].t = g_ft[i].t; hit[nhit++].at = i;
+        }
     pthread_mutex_unlock(&g_ft_mu);
+    if (!nhit) return;
+    for (size_t k = 0; k < nhit; k++) mtl_tex_cpu_written(&hit[k].t);
+    pthread_mutex_lock(&g_ft_mu);
+    for (size_t k = nhit; k--;) {
+        size_t j = hit[k].at;
+        if (j >= g_nft || g_ft[j].t.serial != hit[k].t.serial)
+            for (j = 0; j < g_nft && g_ft[j].t.serial != hit[k].t.serial; j++) {}
+        if (j < g_nft) g_ft[j] = g_ft[--g_nft];
+    }
+    pthread_mutex_unlock(&g_ft_mu);
+    free(hit);
 }
 // Flushed ranges (every game): what the CPU published with nvnMemoryPoolFlushMappedRange, as disjoint [lo, hi) spans sorted by start (touching spans merge), dropped with their pool.
 // Until the GPU first uses a texture it has not written it, so storage the game flushed before that first use is the texture's content: tex_init_fill (nvn_mtl.m) fills the new GPU
