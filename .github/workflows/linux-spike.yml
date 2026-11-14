@@ -64,10 +64,11 @@ jobs:
           "$img" --write-icon "$RUNNER_TEMP/icon1.png"   # a start: unpacks the version, writes the icon and ends
           dir=$(ls -d "$HOME"/.local/share/DroidPlay/*/); dir=${dir%/}
           host "$dir" first
+          echo "first build: $(grep -c 'Building C' "$WORK/logs/android_host.log") files compiled"
           "$img" --write-icon "$RUNNER_TEMP/icon2.png"   # started again: a new mount, the same unpacked version
           host "$dir" 'after a relaunch'
-          tail -3 "$WORK/logs/android_host.log"
-          grep -q 'no work to do' "$WORK/logs/android_host.log" || { echo 'the relaunch rebuilt the host'; exit 1; }
+          cat "$WORK/logs/android_host.log"   # the build stamp and the profile step run every time; nothing should compile
+          ! grep -q 'Building C' "$WORK/logs/android_host.log" || { echo 'the relaunch rebuilt the host'; exit 1; }
           # what running from the mount would have met: a new path at every start
           for i in 1 2; do "$img" --appimage-mount > "$RUNNER_TEMP/mnt$i" & sleep 3; head -1 "$RUNNER_TEMP/mnt$i"; kill $! || true; sleep 1; done
       - name: nx_extract built from the AppImage's read-only mount
