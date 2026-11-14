@@ -1,0 +1,89 @@
+# Phase 0 of plans/linux-appimage.md, on the work branch only (removed before the pull request): what the AppImage's layout has to make possible, shown on
+# a runner. A host build from the unpacked version, built again after the AppImage is started again (a new mount): the CMake build folder must survive
+# (build_android_from_nsp.py build_host throws away one made from another source path), so the second build has nothing to do. And nx_extract built by
+# `dotnet build` from the AppImage's read-only mount, which needs obj/ outside the project.
+name: linux-spike
+
+on:
+  push:
+    branches: [linux/appimage]
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: 28.2.13676358
+  CMAKE_VERSION: 3.22.1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  spike:
+    name: Host build across a relaunch, nx_extract from the read-only mount
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.7'
+          enable-cache: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: The AppImage
+        run: dm/android/linux/stage.sh --out "$RUNNER_TEMP/linux" --no-launch
+      - name: NDK and CMake
+        run: |
+          sdk="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          (yes || true) | "$sdk" --licenses > /dev/null
+          "$sdk" --install "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" > /dev/null
+          sudo apt-get install -y -qq fuse3 > /dev/null
+      - name: A host build from the unpacked version, then again after a relaunch
+        run: |
+          img=$(ls "$RUNNER_TEMP"/linux/DroidPlay-*-x86_64.AppImage)
+          export HOME=$RUNNER_TEMP/home QT_QPA_PLATFORM=offscreen WORK=$RUNNER_TEMP/game_build; mkdir -p "$HOME"
+          host() {   # the game's host from the unpacked tree, as a build the app starts makes it (BD's profile: any profile does)
+            "$1/runtime/bin/python3" - "$1/core" "$2" <<'PY'
+          import os, sys, time
+          from pathlib import Path
+          sys.path.insert(0, sys.argv[1] + '/scripts')
+          import build_android_from_nsp as ba
+          work = Path(os.environ['WORK']); t = time.time()
+          ba.build_host(ba.sdk_dir(None), '0100000011D90000', work, work / 'logs', dict(os.environ))
+          print(f'{sys.argv[2]}: REPO {ba.REPO}, host built in {time.time() - t:.0f} s')
+          PY
+          }
+          "$img" --write-icon "$RUNNER_TEMP/icon1.png"   # a start: unpacks the version, writes the icon and ends
+          dir=$(ls -d "$HOME"/.local/share/DroidPlay/*/); dir=${dir%/}
+          host "$dir" first
+          "$img" --write-icon "$RUNNER_TEMP/icon2.png"   # started again: a new mount, the same unpacked version
+          host "$dir" 'after a relaunch'
+          tail -3 "$WORK/logs/android_host.log"
+          grep -q 'no work to do' "$WORK/logs/android_host.log" || { echo 'the relaunch rebuilt the host'; exit 1; }
+          # what running from the mount would have met: a new path at every start
+          for i in 1 2; do "$img" --appimage-mount > "$RUNNER_TEMP/mnt$i" & sleep 3; head -1 "$RUNNER_TEMP/mnt$i"; kill $! || true; sleep 1; done
+      - name: nx_extract built from the AppImage's read-only mount
+        run: |
+          img=$(ls "$RUNNER_TEMP"/linux/DroidPlay-*-x86_64.AppImage)
+          "$img" --appimage-mount > "$RUNNER_TEMP/mnt" & mpid=$!; sleep 3; mnt=$(head -1 "$RUNNER_TEMP/mnt")
+          echo "mounted at $mnt"
+          echo '--- as before this change (obj/ in the project): expected to fail'
+          dotnet build "$mnt/payload/core/dm/tools/nx_extract" -c Release -o "$RUNNER_TEMP/nx_old" -v quiet -nologo 2>&1 | tail -3 || true
+          echo '--- build_android_from_nsp.py build_nx_extract (obj/ in the temporary folder)'
+          XDG_DATA_HOME=$RUNNER_TEMP/xdg "$mnt/payload/runtime/bin/python3" - "$mnt/payload/core" <<'PY'
+          import os, sys, tempfile, time
+          from pathlib import Path
+          sys.path.insert(0, sys.argv[1] + '/scripts')
+          import build_android_from_nsp as ba
+          logs = Path(tempfile.mkdtemp()); t = time.time()
+          exe = ba.build_nx_extract(None, logs, dict(os.environ))
+          print(f'built {exe} in {time.time() - t:.0f} s from {ba.REPO}')
+          print((logs / 'nx_extract_build.log').read_text()[-600:])
+          PY
+          kill $mpid
