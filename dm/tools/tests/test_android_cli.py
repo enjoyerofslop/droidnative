@@ -64,6 +64,16 @@ class Json(unittest.TestCase):
         t = ba.games_table()   # no game played on Android is one the table lists as drawing without NVN
         self.assertEqual([g for g in ba.ANDROID_TESTED if g in t and 'NVN' not in t[g]['graphics']], [])
 
+    def test_main_alone_stops_a_game_before_the_survey(self):   # droidplay-core#476: FM24 Touch stopped for its OpenGL only after a 9-minute survey and extraction
+        egl = {'eglCreateWindowSurface', 'eglGetProcAddress'}
+        self.assertEqual(ba.main_graphics(egl, 3)[0], 'gl')   # EGL and glShaderSource named: OpenGL
+        self.assertIsNone(ba.main_graphics(egl, 0))   # EGL alone, no GL function named: SDL3's (Absolum), NVN
+        self.assertIsNone(ba.main_graphics(egl | {'nvnBootstrapLoader'}, 3))   # NVN beside an EGL it never calls (Rayman 30th Anniversary Edition)
+        self.assertIsNone(ba.main_graphics(egl | {'_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi'}, 3))   # NROs at run time may draw with NVN (Portal): the survey decides
+        self.assertEqual(ba.main_graphics({'vkCreateInstance', 'vkCreateDevice', 'vkQueueSubmit'}, 0)[0], 'vulkan')
+        self.assertIsNone(ba.main_graphics({'vkGetInstanceProcAddr'}, 0))   # SDL's Vulkan loader alone (Balatro)
+        self.assertIsNone(ba.main_graphics({'nvnBootstrapLoader'}, 0))
+
     def test_oodle_packs_stop_early_without_a_decoder(self):   # issue #310: Pokémon Legends: Arceus's split failed on its 678 GFPAKs after about 220 s, with no decoder for the game's Oodle
         sys.path.insert(0, str(REPO / 'dm/games')); import profile_guess as pg   # noqa: E401
         src = pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_gfpak=678)

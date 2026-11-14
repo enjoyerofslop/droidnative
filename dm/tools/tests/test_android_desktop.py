@@ -443,6 +443,13 @@ class Explain(unittest.TestCase):   # the messages as the script, nx_extract and
         h = ex.explain(t, read=True)
         self.assertEqual(h.title, "DroidPlay couldn't download its game reader"); self.assertIn('dotnet nuget enable source nuget.org', h.body); self.assertFalse(h.bug)
 
+    def test_a_game_that_draws_with_opengl_or_vulkan_is_not_a_bug(self):   # build_android_from_nsp.py unsupported_graphics' words, as droidplay-core#476's log had them
+        h = ex.explain('[RED] FM24 Touch draws with OpenGL, not NVN (main imports EGL and names glShaderSource: it renders with OpenGL). DroidPlay Core on Android runs NVN '
+                       'games only so far, so this game cannot be built for Android yet', stage='extract v458752')
+        self.assertEqual((h.title, h.bug, h.action), ("This game isn't supported on Android yet", False, '')); self.assertIn('FM24 Touch draws with OpenGL', h.body)
+        h = ex.explain('[RED] Hades draws with Vulkan, not NVN (main imports 99 Vulkan functions and not nvnBootstrapLoader). …', game='Hades')
+        self.assertIn('Hades draws with Vulkan', h.body)
+
     def test_an_unknown_read_failure_says_read_not_build(self):
         h = ex.explain('[RED] something new', folder=self.D, read=True)
         self.assertTrue(h.bug); self.assertEqual(h.title, "DroidPlay couldn't read this game"); self.assertNotIn('stopped', h.title)

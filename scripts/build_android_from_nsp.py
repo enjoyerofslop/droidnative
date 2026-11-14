@@ -1451,6 +1451,24 @@ def unsupported_graphics(gfx, name):   # why a game cannot be built for Android,
             f'so this game cannot be built for Android yet')
 
 
+def main_graphics(imports, gl_names):
+    """(api, why) for a game whose main alone shows it draws with Vulkan or OpenGL, by profile_guess.shader_sources' rules, else None. None as well when main imports nn::ro (it
+    loads NROs at run time, which can draw with NVN: Portal's Source engine) or nvnBootstrapLoader (NVN, or NVN beside an EGL it never calls: Rayman 30th Anniversary Edition):
+    the survey reads the rest and the check after the extraction decides (unsupported_graphics)"""
+    if 'nvnBootstrapLoader' in imports or any(s.startswith('_ZN2nn2ro') for s in imports): return None
+    vk = sum(1 for s in imports if re.match(r'vk[A-Z]', s) and s != 'vkGetInstanceProcAddr')   # vkGetInstanceProcAddr alone: SDL's Vulkan loader, never used (Balatro)
+    if vk: return 'vulkan', f'main imports {vk} Vulkan functions and not nvnBootstrapLoader'
+    if 'eglCreateWindowSurface' in imports and gl_names: return 'gl', 'main imports EGL and names glShaderSource: it renders with OpenGL'   # EGL alone: SDL3's (Absolum)
+    return None
+
+
+def code_graphics(code):   # main_graphics of bi.code_probe's folder; None without a main
+    main = Path(code) / 'ExeFS' / 'main'
+    if not main.exists(): return None
+    img = bi.pg.nso(main)[0]
+    return main_graphics({s for s, defined, _ in bi.pg.nso_syms.dynsyms(img) if not defined}, img.count(b'glShaderSource'))
+
+
 def undecodable_packs(packs, name, decoder):   # why a game's shaders cannot be split here, from profile_guess.build_sources' oodle_packs; None when the split can read them
     # Only the game's own Oodle reads these archives: the phone (oodle_decode), a Mac host (mac_decoder), or what an earlier build with the phone decoded. Without one, Pokémon
     # Legends: Arceus's split failed on all 678 GFPAKs after about 220 s, then the build stopped (issue #310). ue_legacy is left out, as Python reads its Zlib and LZ4 paks
@@ -1651,6 +1669,10 @@ def main(argv):
         else:   # the first experimental build only packs; once its provisional profile exists, it is built and installed like a profiled game's (to try it on a phone)
             if not a.no_push: raise BuildError(f'no game profile for {app:016X}: a game without one is first packed with --no-push (a survey, a provisional profile and an APK that may not boot)')
             fam = unpack(fam)   # the survey reads the packages
+            # the code modules first: a game Android can't build stops now, not after the survey's RomFS manifest and the extraction (FM24 Touch: 9 minutes, droidplay-core#476)
+            code = bi.code_probe(nsp_dir, app, fam, keys, REPO, env)
+            gfx = code_graphics(code)
+            if gfx: raise BuildError(unsupported_graphics(gfx, nacp.name(code / 'control.nacp') or f'{app:016X}'))
             facts = bi.survey(nsp_dir, app, fam, keys, REPO, sys.executable, env)
             facts['survey'] = str(nsp_dir / f'{app:016X}_survey' / 'survey.md')
             bi.write_profile(pdir / f'{app:016X}', app, facts)

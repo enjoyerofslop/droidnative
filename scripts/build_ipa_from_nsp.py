@@ -719,6 +719,21 @@ def same_build(nsp_dir, app, fam, keys, repo, env):
     PROG.end('no profile registers its main build'); return None
 
 
+def code_probe(nsp_dir, app, fam, keys, repo, env):
+    """The newest version's control data and code modules alone, nothing of the RomFS: nx_extract --code-only, or a NUP's or a dump's ExeFS as it is. For a check before the
+    survey, whose RomFS manifest reads every RomFS file (Football Manager 2024 Touch: 7 minutes on a Windows PC before the Android build stopped for its OpenGL).
+    → the folder holding ExeFS/ (and control.nacp from an NSP), in <title ID>_survey/code.partial"""
+    work = nsp_dir / f'{app:016X}_survey'; logs = work / 'logs'; tmp = work / 'code.partial'; rmtree(tmp)
+    files = fam.get('nup') or fam.get('dump')
+    ups = sorted(fam['updates'], key=lambda u: u[0] or 0); upd = ups[-1][1] if ups else None
+    PROG.plan(1); PROG.stage('survey: graphics check', step='reading the code modules' if files else 'build nx_extract')
+    if files: code_modules(fam, upd or fam['base'], tmp / 'ExeFS')
+    else:
+        nx = build_nx_extract(repo, work, logs, env); PROG.set(step='reading the code modules')
+        run([nx, keys, fam['base'], upd or '-', tmp, '--code-only'] + extract_flags(app), logs / 'code_only.log', ok=(4,))   # 4: a sparse base game alone
+    PROG.end(); return tmp
+
+
 def code_modules(fam, k, dst):   # the ExeFS of a NUP package or a dump's version folder into dst; nothing for a version folder with no code of its own
     if fam.get('dump'):
         if pack_dump.has_code(k): pack_dump.exefs(k / 'exefs', dst)

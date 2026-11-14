@@ -3,6 +3,8 @@
 // With a base RomFS dir in legacy mode, files whose content matches it become APFS clones (no new space).
 // --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB),
 //   and its NRO modules under <output dir>/romfs_nro/ (small: their imports decide the graphics API and the modules, Portal 2's 21 NROs are 60 MB).
+// --code-only: the control data and the ExeFS alone, nothing of the RomFS: what the Android build reads to stop a game it can't build before the survey's manifest, which lists
+//   every RomFS file (Football Manager 2024 Touch: 7 minutes on a Windows PC, then the stop for its OpenGL)
 // A damaged NSP (a file whose data fails the NCA's hash check, e.g. a copy cut short or a broken download) stops the extraction with exit code 3 after listing every damaged file;
 //   --allow-damaged writes those files as read instead and only lists them (Super Mario Galaxy's base NSP with 147 MB zeroed: its two prologue WebM movies). A RomFS image marks them in its index, and the host names them in its log.
 // A sparse base program (Minecraft Dungeons II: its Program NCA leaves out data that its update carries) can be read only with its update: without one, exit code 4.
@@ -54,6 +56,7 @@ static class P {
 
     static int Run(string[] a) {
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
+        bool codeOnly = Array.IndexOf(a, "--code-only") >= 0; a = Array.FindAll(a, s => s != "--code-only");
         bool image = Array.IndexOf(a, "--romfs-image") >= 0; a = Array.FindAll(a, s => s != "--romfs-image");
         g_allow = Array.IndexOf(a, "--allow-damaged") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged");
         string prog = Array.Find(a, s => s.StartsWith("--program=")); a = Array.FindAll(a, s => !s.StartsWith("--program="));
@@ -66,7 +69,7 @@ static class P {
         if (ai >= 0 && ai + 1 < a.Length) { app = Convert.ToUInt64(a[ai + 1], 16); var rest = new List<string>(a); rest.RemoveRange(ai, 2); a = rest.ToArray(); }
         if (a.Length >= 3 && a[1] == "--contents") return Contents(ExternalKeyReader.ReadKeyFile(a[0]), a[2..]);
         if (a.Length >= 3 && a[1] == "--keys") return Keys(ExternalKeyReader.ReadKeyFile(a[0]), a[2..]);
-        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--app <title ID>] [--program=<title ID>] [--list] [--html] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [<DLC title ID>] [--romfs-image]\n       nx_extract <prod.keys> --contents <nsp|nsz|xci|xcz>...\n       nx_extract <prod.keys> --keys <nsp|nsz|xci|xcz>..."); return 2; }
+        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--app <title ID>] [--program=<title ID>] [--list] [--html] [--romfs-image|--manifest|--code-only] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [<DLC title ID>] [--romfs-image]\n       nx_extract <prod.keys> --contents <nsp|nsz|xci|xcz>...\n       nx_extract <prod.keys> --keys <nsp|nsz|xci|xcz>..."); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image, a.Length > 4 ? Convert.ToUInt64(a[4], 16) : null);
         // each by its own content meta: a merged package (base game + update + DLC in one NSP, a cartridge dump with its update) is given as both the base game and the update,
@@ -132,6 +135,7 @@ static class P {
             byte[] h = new byte[0x50]; using (var f = File.OpenRead(p)) f.ReadExactly(h);
             if (h[0] == 'N' && h[1] == 'S' && h[2] == 'O' && h[3] == '0') Console.WriteLine($"{Path.GetFileName(p)} build id {Convert.ToHexString(h, 0x40, 16).ToLowerInvariant()}");
         }
+        if (codeOnly) { Console.WriteLine("code only: the RomFS is not read"); return Damaged(); }
         // A program can embed all assets in its code modules (ANIMAL WELL 1.0.10).
         // Preserve the extraction layout without asking LibHac to open an absent section.
         if (!baseProg.SectionExists(1) && (updProg == null || !updProg.SectionExists(1))) {

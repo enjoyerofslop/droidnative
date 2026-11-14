@@ -131,6 +131,13 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
                       'dump prod.keys again, and pick the new file.', 'keys', 'Choose prod.keys…')
     if 'no title key for rights id' in low or 'has no common ticket' in low:
         return Help("This game file can't be opened with your keys", 'The file has no ticket for it. Dump the game again from your Switch, with its ticket.')
+    # a game that draws with OpenGL or Vulkan (build_android_from_nsp.py unsupported_graphics): nothing the player can change, and not a bug to report. It showed as "The build
+    # stopped at Reading the game files" for Football Manager 2024 Touch (droidplay-core#476)
+    m = re.search(r'(?:\[RED\] )?([^\n]*?) draws with (OpenGL|Vulkan), not NVN', t)
+    if m:
+        name = g if game else (esc(m[1]) or 'This game')
+        return Help("This game isn't supported on Android yet", f"{name} draws with {m[2]}, and DroidPlay on Android runs only games that draw with NVN, the Switch's own "
+                    'graphics API, so far: on the phone it would stop at its first graphics call, so it isn\'t built. Nothing on this PC or in the game files needs fixing.')
     # the game reader (nx_extract, built with .NET the first time a game is read) couldn't get its NuGet packages: NU1100 "Unable to resolve 'LibHac'" with
     # nuget.org missing or turned off in .NET's sources, NU1301 when the source can't be reached. It showed as "The build stopped" on a Windows PC (2026-11-13)
     if re.search(r'\bNU1(100|101|301)\b', t) or "unable to resolve 'libhac" in low or 'unable to load the service index' in low:
