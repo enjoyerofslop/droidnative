@@ -1621,12 +1621,14 @@ static int rp_prepare_(int layered) {
     return 1;
 }
 static int rp_prepare(void) { return rp_prepare_(0); }
+static void copied_depth_pass(VkCommandBuffer c);   // gfx_vk_dscopy.inc
 static int rp_start(void) {
     if (P.active) return 1;
     VkCommandBuffer c = cb(); if (!c) return 0;
     VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = P.rp, .framebuffer = P.fb, .renderArea = {{0, 0}, {P.w, P.h}}};
     if (prof_on()) prof_pass_begin();
     vkCmdBeginRenderPass(c, &bi, VK_SUBPASS_CONTENTS_INLINE); bf_reset(); crumb('p', NULL, NULL, P.w, P.h);
+    copied_depth_pass(c);   // a depth target a copy wrote: a draw Qualcomm's driver needs first (gfx_vk_dscopy.inc)
     P.active = 1; g_passes++;
     return 1;
 }

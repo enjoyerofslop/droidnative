@@ -126,3 +126,60 @@ static int ds_copy_draw(vtex *s, vtex *d, unsigned sl, unsigned sz, unsigned dl,
                                         (unsigned long long)d->serial, c->dr.width, c->dr.height, (int)d->fmt, bits ? ", stencil a bit at a time" : "");
     return 1;
 }
+
+// ---------------- Render passes on a depth image a copy wrote (Qualcomm's driver) ----------------
+// Qualcomm's Adreno driver keeps a low-resolution depth (LRZ) beside a depth image and carries what it knows of it from one render pass to the next. A copy into the
+// image (vkCmdCopyImage, a blit, a resolve, or the drawn copy above) does not make the driver forget it, so the next passes on the image test their draws against
+// depth the image no longer holds. Skyrim copies its depth pre-pass (s26) into another image (s35) every frame and draws its first-person model's colour depth-EQUAL
+// against the copy: on an Ayn Odin 2 (Adreno 740, driver 0x802a4000) after loading a save the whole model failed the test and drew as the clear colour, though the
+// copy was bit-exact and its own depth matched the fragments' (EQUAL and LEQUAL failed, GEQUAL and ALWAYS drew; the same draws against s26 drew; droidplay-core#444).
+// Nothing done to the image in passes of its own before or after the copy changed it (a clear in a pass, loadOp CLEAR / DONT_CARE, an empty pass, clearing it at
+// creation in a pass, drawing the copy), but anything the driver cannot keep a low-resolution depth through, in the first pass on the image after the copy, did: a
+// depth clear of one pixel with vkCmdClearAttachments, or a draw with depth writes on and compare ALWAYS, even one that writes no pixel. So that first pass begins
+// with such a draw, of no pixels (a scissor of none), which leaves the image as it was. On Qualcomm's driver only (its driver ID, g_qcom_driver; not Turnip);
+// DM_VK_COPIED_DEPTH=0 (env.txt): off, =1: on any driver
+static VkShaderModule g_cdz_vs; static VkPipelineLayout g_cdz_pl; static nvn_hmap g_cdz_pipes = {.klen = sizeof(VkRenderPass)}; static uint64_t g_cdz_n;
+static int cdz_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_COPIED_DEPTH"); v = e && *e ? *e != '0' : g_qcom_driver;
+                 if (e && *e) LOG("[vk] DM_VK_COPIED_DEPTH=%s: the first render pass on a depth image after a copy into it %s", e, v ? "begins with a depth-writing draw of no pixels" : "is left as it is"); }
+    return v;
+}
+static VkPipeline cdz_pipe(void) {   // the draw's pipeline for the bound targets' pass: the copies' vertex shader, no fragment shader, no colour written, depth written with ALWAYS
+    VkPipeline p = nvn_hm_get(&g_cdz_pipes, &P.rp); if (p) return p;
+    static int failed; if (failed) return VK_NULL_HANDLE;
+    if (!g_cdz_pl) {
+        VkPipelineLayoutCreateInfo pl = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        if (!(g_cdz_vs = dsc_module(k_dsc_vs, sizeof k_dsc_vs)) || vkCreatePipelineLayout(g_vk.dev, &pl, NULL, &g_cdz_pl) != VK_SUCCESS) {
+            failed = 1; RED_ONCE(188, "a render pass on a depth image a copy wrote: its draw's shader or layout could not be made, so the pass is drawn as before"); return VK_NULL_HANDLE; }
+    }
+    VkPipelineShaderStageCreateInfo st = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = g_cdz_vs, .pName = "main"};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vp = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = (VkSampleCountFlagBits)(P.key.samples ? P.key.samples : 1)};
+    VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = VK_TRUE, .depthWriteEnable = VK_TRUE, .depthCompareOp = VK_COMPARE_OP_ALWAYS};
+    VkPipelineColorBlendAttachmentState cba[8]; memset(cba, 0, sizeof cba);   // write mask 0: no colour slot is written
+    VkPipelineColorBlendStateCreateInfo cbs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = P.key.ncolor, .pAttachments = cba};
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkGraphicsPipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 1, .pStages = &st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+                                       .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &cbs,
+                                       .pDynamicState = &dy, .layout = g_cdz_pl, .renderPass = P.rp};
+    if (vkCreateGraphicsPipelines(g_vk.dev, pcache(), 1, &ci, NULL, &p) != VK_SUCCESS) { RED_ONCE(189, "a render pass on a depth image a copy wrote: its draw's pipeline could not be made, so the pass is drawn as before"); return VK_NULL_HANDLE; }
+    nvn_hm_put(&g_cdz_pipes, &P.rp, p);
+    return p;
+}
+// rp_start, in the pass just begun: the draw, when the pass's depth target was written by a copy since its last pass
+static void copied_depth_pass(VkCommandBuffer c) {
+    if (!P.dv || !P.dv->ds_copied) return;
+    P.dv->ds_copied = 0;   // one such pass is enough: the passes after it on the image draw right without the draw
+    if (!cdz_on()) return;
+    VkPipeline p = cdz_pipe(); if (!p) return;
+    VkViewport v = {0, 0, (float)P.w, (float)P.h, 0, 1}; VkRect2D none = {{0, 0}, {0, 0}};
+    vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, p); vkCmdSetViewport(c, 0, 1, &v); vkCmdSetScissor(c, 0, 1, &none); vkCmdDraw(c, 3, 1, 0, 0);
+    bf_reset();   // the game's next draw binds its pipeline and sets its viewport and scissor again (bf_*)
+    if (!g_cdz_n++) LOG("[vk] the first render pass on a depth image after a copy into it begins with a depth-writing draw of no pixels, so Qualcomm's driver forgets the image's "
+                        "low-resolution depth (first: s%llu %ux%u; DM_VK_COPIED_DEPTH=0: off)", (unsigned long long)P.dv->serial, P.w, P.h);
+}

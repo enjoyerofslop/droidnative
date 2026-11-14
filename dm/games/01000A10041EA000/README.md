@@ -43,6 +43,14 @@ The NPDM declares 8 MB of system resource and `main` never sets a heap: the game
 - **Cut (current):** `main+0xbf7d5c` `mov w3, wzr` → `neg w3, w21`: w21 is 1 in mode 7 and 0 in mode 1, so mode 7's depth clear also clears the stencil to 0 (mask 0xffffffff) and mode 1 stays depth-only. On the Mac the pass dump shows it: mode 7's clear was `stencil_mask=0` with the stencil plane left unwritten before the dispatch, and is `stencil_mask=0xffffffff` with the plane cleared and stored with the cut. Mode 7 runs every frame outdoors too (the execution yard, the tower); the shadow mask is not drawn there, and screenshots of the same outdoor stretch show the same lighting and shadows with and without the cut.
 - **Not confirmed:** the keep's flicker itself. Reaching it means following Hadvar through Helgen under the dragon, which was not driven here, so the flicker was not seen before or after the cut on any device. PR #444's user confirmed the same cut on 1.0.12 on an iPhone.
 
+## The first-person model drawn in one flat colour (resolved)
+
+- **The report (droidplay-core#444):** first-person hands and weapons drawn as flat grey-teal shapes, (63, 77, 74), on an AYN Thor Pro (Adreno 740, Qualcomm's driver 0x802a4035), with `DM_VK_ASYNC_PIPE=0` and with `DM_VK_POS_ROWS=1` too.
+- **Repro:** on an Ayn Odin 2 (Adreno 740, driver 0x802a4000), the tester's quicksave with the axe drawn, loaded and looking down at the first room's gate: flat every time. The axe equipped in the session draws, and so do the Mac and Turnip (PurpleVK T30) on the same phone.
+- **The draws:** a depth-only draw (vertex `6326d1201b3be710`) into the scene depth s26 (`D32_SFLOAT_S8_UINT` 1600×900), a copy of its 1280×720 region into s35, and the colour draw (`f7057c92d3b43ddb` / `4cc831b81dfc0b2a`) depth-`EQUAL` against s35, without depth writes. s35 gets its depth from that copy alone, every frame.
+- **Cause and fix:** Qualcomm's driver kept a stale low-resolution depth for s35 that the copy didn't reset; the first pass on s35 after the copy now begins with a depth-writing draw of no pixels ([A depth image a copy wrote keeps a stale low-resolution depth on Qualcomm's Adreno driver](../../../docs/reference/rendering.md#a-depth-image-a-copy-wrote-keeps-a-stale-low-resolution-depth-on-qualcomms-adreno-driver-android), `DM_VK_COPIED_DEPTH`).
+- **Not checked:** the Thor Pro's driver itself.
+
 ## Unlocks before SignalLightEvent (open)
 
 - **What:** 552 inlined unlocks in 1.1.404's main are a plain `str wzr`, then `bl nn::os::SignalLightEvent`, then `dmb ish` (1.0.12 has 517; PR #444 cut them to release stores there).
@@ -69,7 +77,8 @@ On an M5 Max, a new game from the title through the cart ride, Helgen, character
 
 - **Galaxy S25 Edge (Adreno 830, Qualcomm's driver):** over adb from a new game, in a private save folder: the title, the main menu, the cart ride into Helgen, character creation (named in DroidPlay's text box), the dragon attack and the first steps with the left stick. 30 fps: the frame time's median is 33.0–33.5 ms in 64 of the 69 300-frame windows, the others 33.8–39.6 ms (the first at boot, and loads). 3.2 GB PSS. Both audio renderers produce output (renderer 0: 142,944 of 144,000 frames not silent); not listened to. The game wrote its character-creation save and an autosave; neither was loaded back.
 - **All 23,133 shaders translate** for Vulkan. One `[RED]` line, 8 times when the opening loads: `[vk] shader e8910903259b956c reads uniform slot 11, which has no buffer bound: it reads 0`, the Mac's cb11 line.
-- **Not tried:** the other devices; a stretch played by hand (real-time action: its Playable evidence needs a person); loading a save.
+- **Ayn Odin 2 (Adreno 740, Qualcomm's driver):** the tester's saves in Helgen Keep, loaded in a private save folder: the first room with the axe drawn ([The first-person model drawn in one flat colour](#the-first-person-model-drawn-in-one-flat-colour-resolved)).
+- **Not tried:** the other devices; a stretch played by hand (real-time action: its Playable evidence needs a person).
 
 ## Mac test controls
 
@@ -80,6 +89,7 @@ On an M5 Max, a new game from the title through the cart ride, Helgen, character
 - [FXP shader records in Bethesda BSA archives and in main](../../../docs/reference/shaders.md#fxp-shader-records-in-bethesda-bsa-archives-and-in-main).
 - [A linear texture whose stride is shorter than its rows](../../../docs/reference/nvn-objects.md#a-linear-texture-whose-stride-is-shorter-than-its-rows).
 - [Raw depth/stencil storage written as a buffer](../../../docs/reference/rendering.md#raw-depthstencil-storage-written-as-a-buffer).
+- [A depth image a copy wrote keeps a stale low-resolution depth on Qualcomm's Adreno driver](../../../docs/reference/rendering.md#a-depth-image-a-copy-wrote-keeps-a-stale-low-resolution-depth-on-qualcomms-adreno-driver-android).
 
 ## Open
 
